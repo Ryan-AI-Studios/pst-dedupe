@@ -3,9 +3,10 @@
 use std::io::Write;
 use std::path::Path;
 
-use crate::index::{DedupResult, DedupTier, MessageRef};
+use crate::index::{DedupResult, MessageRef};
 
 /// A single row in the dedup report.
+#[derive(Debug, Clone)]
 pub struct ReportRow {
     /// The message being reported.
     pub message: MessageRef,
@@ -17,10 +18,7 @@ pub struct ReportRow {
 ///
 /// Columns: Status, Tier, PST File, Folder, Subject, Date, Sender, Size,
 /// Original PST, Original Folder, Original Subject
-pub fn write_csv_report(
-    path: &Path,
-    rows: &[ReportRow],
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn write_csv_report(path: &Path, rows: &[ReportRow]) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::create(path)?;
     let mut wtr = csv::Writer::from_writer(file);
 

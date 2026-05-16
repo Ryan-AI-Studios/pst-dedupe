@@ -4,8 +4,8 @@ use eframe::egui;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::worker::{self, ScanProgress, ScanResult};
 use crate::views;
+use crate::worker::{self, ScanProgress, ScanResult};
 
 /// Application states.
 #[derive(Debug, Clone, PartialEq)]
@@ -101,9 +101,7 @@ impl PstDedupApp {
         self.state = AppState::Scanning;
         self.error_msg = None;
 
-        let handle = std::thread::spawn(move || {
-            worker::run_scan(files, config, progress)
-        });
+        let handle = std::thread::spawn(move || worker::run_scan(files, config, progress));
 
         self.worker_handle = Some(handle);
     }
@@ -139,7 +137,9 @@ impl PstDedupApp {
 }
 
 impl eframe::App for PstDedupApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
         // Check worker completion
         if self.state == AppState::Scanning {
             self.check_worker();
@@ -148,7 +148,7 @@ impl eframe::App for PstDedupApp {
         }
 
         // Top panel with title
-        egui::TopBottomPanel::top("header").show(ctx, |ui| {
+        egui::Panel::top("header").show_inside(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading("PST-Dedup");
@@ -165,31 +165,45 @@ impl eframe::App for PstDedupApp {
 
         // Error banner
         if let Some(err) = &self.error_msg {
-            egui::TopBottomPanel::top("error").show(ctx, |ui| {
+            egui::Panel::top("error").show_inside(ui, |ui| {
                 ui.colored_label(egui::Color32::RED, format!("Error: {}", err));
             });
         }
 
         // Main content
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.state {
-                AppState::FileSelect => views::file_select::show(ui, self),
-                AppState::Settings => views::settings::show(ui, self),
-                AppState::Scanning => views::progress::show(ui, self),
-                AppState::Results => views::results::show(ui, self),
-            }
+        egui::CentralPanel::default().show_inside(ui, |ui| match self.state {
+            AppState::FileSelect => views::file_select::show(ui, self),
+            AppState::Settings => views::settings::show(ui, self),
+            AppState::Scanning => views::progress::show(ui, self),
+            AppState::Results => views::results::show(ui, self),
         });
     }
 }
 
 // Make fields accessible to view modules within the crate.
 impl PstDedupApp {
-    pub fn state(&self) -> &AppState { &self.state }
-    pub fn set_state(&mut self, s: AppState) { self.state = s; }
-    pub fn pst_files(&self) -> &[PathBuf] { &self.pst_files }
-    pub fn pst_files_mut(&mut self) -> &mut Vec<PathBuf> { &mut self.pst_files }
-    pub fn config(&self) -> &DedupConfig { &self.config }
-    pub fn config_mut(&mut self) -> &mut DedupConfig { &mut self.config }
-    pub fn progress(&self) -> &Arc<Mutex<ScanProgress>> { &self.progress }
-    pub fn results(&self) -> Option<&ScanResult> { self.results.as_ref() }
+    pub fn state(&self) -> &AppState {
+        &self.state
+    }
+    pub fn set_state(&mut self, s: AppState) {
+        self.state = s;
+    }
+    pub fn pst_files(&self) -> &[PathBuf] {
+        &self.pst_files
+    }
+    pub fn pst_files_mut(&mut self) -> &mut Vec<PathBuf> {
+        &mut self.pst_files
+    }
+    pub fn config(&self) -> &DedupConfig {
+        &self.config
+    }
+    pub fn config_mut(&mut self) -> &mut DedupConfig {
+        &mut self.config
+    }
+    pub fn progress(&self) -> &Arc<Mutex<ScanProgress>> {
+        &self.progress
+    }
+    pub fn results(&self) -> Option<&ScanResult> {
+        self.results.as_ref()
+    }
 }
