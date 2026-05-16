@@ -11,6 +11,7 @@ pub struct DedupKeys {
 }
 
 /// Attachment metadata for hashing (name + size).
+#[derive(Debug, Clone)]
 pub struct AttachmentInfo {
     pub filename: String,
     pub size: u32,
@@ -190,5 +191,49 @@ mod tests {
         let h1 = compute_content_hash(Some("A"), None, None, None, &[]);
         let h2 = compute_content_hash(Some("B"), None, None, None, &[]);
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_content_hash_missing_fields_stable() {
+        // All-None should produce a deterministic hash (delimiters only)
+        let h1 = compute_content_hash(None, None, None, None, &[]);
+        let h2 = compute_content_hash(None, None, None, None, &[]);
+        assert_eq!(h1, h2, "Missing fields must produce stable hash");
+    }
+
+    #[test]
+    fn test_content_hash_attachment_ordering() {
+        let att_a = AttachmentInfo {
+            filename: "A.txt".into(),
+            size: 100,
+        };
+        let att_b = AttachmentInfo {
+            filename: "B.txt".into(),
+            size: 200,
+        };
+        let h1 = compute_content_hash(None, None, None, None, &[att_a.clone(), att_b.clone()]);
+        let h2 = compute_content_hash(None, None, None, None, &[att_b, att_a]);
+        assert_eq!(
+            h1, h2,
+            "Attachment order must not affect hash (sorted internally)"
+        );
+    }
+
+    #[test]
+    fn test_content_hash_unicode_subject() {
+        let h1 = compute_content_hash(Some("Re: Réunion"), None, None, None, &[]);
+        let h2 = compute_content_hash(Some("Réunion"), None, None, None, &[]);
+        assert_eq!(h1, h2, "Unicode subject normalization with prefix strip");
+    }
+
+    #[test]
+    fn test_content_hash_none_vs_empty_subject() {
+        let h_none = compute_content_hash(None, None, None, None, &[]);
+        let h_empty = compute_content_hash(Some(""), None, None, None, &[]);
+        // Both should update the hasher with separator only, producing same hash
+        assert_eq!(
+            h_none, h_empty,
+            "None and empty subject should hash identically"
+        );
     }
 }

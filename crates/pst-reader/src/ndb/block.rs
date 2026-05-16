@@ -32,6 +32,54 @@ impl BlockId {
 /// Block trailer size (Unicode): 16 bytes.
 const BLOCK_TRAILER_SIZE: usize = 16;
 
+/// Parse and validate a block trailer, returning the BID.
+/// The CRC covers the block data (everything before the trailer).
+fn validate_block_trailer(raw: &[u8], data_len: usize) -> Result<BlockId> {
+    let trailer_start = align64(data_len);
+    if raw.len() < trailer_start + BLOCK_TRAILER_SIZE {
+        return Err(PstError::DataTruncated {
+            needed: trailer_start + BLOCK_TRAILER_SIZE,
+            available: raw.len(),
+        });
+    }
+    let trailer = &raw[trailer_start..trailer_start + BLOCK_TRAILER_SIZE];
+    let stored_crc = LittleEndian::read_u32(&trailer[0..4]);
+    let bid = LittleEndian::read_u64(&trailer[4..12]);
+
+    let computed = crc32fast::hash(&raw[..data_len]);
+    if computed != stored_crc {
+        tracing::warn!(
+            "Block CRC mismatch at bid=0x{:016X}: computed={:08X}, stored={:08X}",
+            bid,
+            computed,
+            stored_crc
+        );
+    }
+
+    Ok(BlockId(bid))
+}
+
+/// Read a raw block from disk, validate its CRC and BID consistency.
+fn read_raw_block<R: Read + Seek>(reader: &mut R, bbt: &BbtIndex, bid: BlockId) -> Result<Vec<u8>> {
+    let bbt_entry = bbt.get(bid).ok_or(PstError::BlockNotFound(bid.0))?;
+    reader.seek(SeekFrom::Start(bbt_entry.bref.ib))?;
+    let raw_size = align64(bbt_entry.cb as usize) + BLOCK_TRAILER_SIZE;
+    let mut raw = vec![0u8; raw_size];
+    reader.read_exact(&mut raw)?;
+
+    let trailer_bid = validate_block_trailer(&raw, bbt_entry.cb as usize)?;
+    if trailer_bid != bid {
+        tracing::warn!(
+            "Block BID mismatch at ib=0x{:X}: BBT says 0x{:016X}, trailer says 0x{:016X}",
+            bbt_entry.bref.ib,
+            bid.0,
+            trailer_bid.0
+        );
+    }
+
+    Ok(raw)
+}
+
 /// Read all data for a BID, handling single blocks, XBLOCKs, and XXBLOCKs.
 ///
 /// For external (non-internal) BIDs, reads and decrypts a single data block.
@@ -47,17 +95,8 @@ pub fn read_block_data<R: Read + Seek>(
         return Ok(Vec::new());
     }
 
+    let raw = read_raw_block(reader, bbt, bid)?;
     let bbt_entry = bbt.get(bid).ok_or(PstError::BlockNotFound(bid.0))?;
-
-    // Read raw block from disk
-    reader.seek(SeekFrom::Start(bbt_entry.bref.ib))?;
-
-    // Block size on disk is cb rounded up to 64-byte alignment + trailer
-    let raw_size = align64(bbt_entry.cb as usize) + BLOCK_TRAILER_SIZE;
-    let mut raw = vec![0u8; raw_size];
-    reader.read_exact(&mut raw)?;
-
-    // Extract payload (first cb bytes)
     let payload = &raw[..bbt_entry.cb as usize];
 
     if !bid.is_internal() {
@@ -122,16 +161,11 @@ fn read_xblock_data<R: Read + Seek>(
             &xblock_data[bid_offset..bid_offset + 8],
         ));
 
-        // Each child is an external data block — read and decrypt
+        // Each child is an external data block — read, validate, and decrypt
+        let raw = read_raw_block(reader, bbt, child_bid)?;
         let bbt_entry = bbt
             .get(child_bid)
             .ok_or(PstError::BlockNotFound(child_bid.0))?;
-
-        reader.seek(SeekFrom::Start(bbt_entry.bref.ib))?;
-        let raw_size = align64(bbt_entry.cb as usize) + BLOCK_TRAILER_SIZE;
-        let mut raw = vec![0u8; raw_size];
-        reader.read_exact(&mut raw)?;
-
         let mut payload = raw[..bbt_entry.cb as usize].to_vec();
         crypto::decrypt_block(&mut payload, crypt, child_bid.0);
         result.extend_from_slice(&payload);
@@ -170,17 +204,11 @@ fn read_xxblock_data<R: Read + Seek>(
             &xxblock_data[bid_offset..bid_offset + 8],
         ));
 
-        // Read the child XBLOCK
+        // Read the child XBLOCK (internal — no decryption)
+        let raw = read_raw_block(reader, bbt, child_bid)?;
         let bbt_entry = bbt
             .get(child_bid)
             .ok_or(PstError::BlockNotFound(child_bid.0))?;
-
-        reader.seek(SeekFrom::Start(bbt_entry.bref.ib))?;
-        let raw_size = align64(bbt_entry.cb as usize) + BLOCK_TRAILER_SIZE;
-        let mut raw = vec![0u8; raw_size];
-        reader.read_exact(&mut raw)?;
-
-        // XBLOCK data is not encrypted (internal block)
         let xblock_payload = &raw[..bbt_entry.cb as usize];
         let chunk = read_xblock_data(reader, bbt, xblock_payload, crypt)?;
         result.extend_from_slice(&chunk);
@@ -204,13 +232,8 @@ pub fn read_subnode_data<R: Read + Seek>(
     }
 
     // Read the subnode block
+    let raw = read_raw_block(reader, bbt, sub_bid)?;
     let bbt_entry = bbt.get(sub_bid).ok_or(PstError::BlockNotFound(sub_bid.0))?;
-
-    reader.seek(SeekFrom::Start(bbt_entry.bref.ib))?;
-    let raw_size = align64(bbt_entry.cb as usize) + BLOCK_TRAILER_SIZE;
-    let mut raw = vec![0u8; raw_size];
-    reader.read_exact(&mut raw)?;
-
     let payload = &raw[..bbt_entry.cb as usize];
     if payload.len() < 8 {
         return Err(PstError::DataTruncated {
@@ -277,13 +300,8 @@ pub fn list_subnode_entries<R: Read + Seek>(
         return Ok(Vec::new());
     }
 
+    let raw = read_raw_block(reader, bbt, sub_bid)?;
     let bbt_entry = bbt.get(sub_bid).ok_or(PstError::BlockNotFound(sub_bid.0))?;
-
-    reader.seek(SeekFrom::Start(bbt_entry.bref.ib))?;
-    let raw_size = align64(bbt_entry.cb as usize) + BLOCK_TRAILER_SIZE;
-    let mut raw = vec![0u8; raw_size];
-    reader.read_exact(&mut raw)?;
-
     let payload = &raw[..bbt_entry.cb as usize];
     if payload.len() < 8 {
         return Ok(Vec::new());

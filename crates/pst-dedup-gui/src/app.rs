@@ -55,6 +55,8 @@ pub struct PstDedupApp {
     worker_handle: Option<std::thread::JoinHandle<ScanResult>>,
     /// Error message to display.
     error_msg: Option<String>,
+    /// Last export result: (exported_count, failed_count, error).
+    export_result: Option<(u64, u64, Option<String>)>,
 }
 
 impl PstDedupApp {
@@ -67,6 +69,7 @@ impl PstDedupApp {
             results: None,
             worker_handle: None,
             error_msg: None,
+            export_result: None,
         }
     }
 
@@ -94,7 +97,7 @@ impl PstDedupApp {
 
         // Reset progress
         {
-            let mut p = progress.lock().unwrap();
+            let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
             *p = ScanProgress::default();
         }
 
@@ -133,6 +136,12 @@ impl PstDedupApp {
         self.config = DedupConfig::default();
         self.results = None;
         self.error_msg = None;
+        self.export_result = None;
+    }
+
+    /// Record the result of an EML export operation.
+    pub fn set_export_result(&mut self, exported: u64, failed: u64, error: Option<String>) {
+        self.export_result = Some((exported, failed, error));
     }
 }
 
@@ -202,5 +211,8 @@ impl PstDedupApp {
     }
     pub fn results(&self) -> Option<&ScanResult> {
         self.results.as_ref()
+    }
+    pub fn export_result(&self) -> Option<(u64, u64, Option<String>)> {
+        self.export_result.clone()
     }
 }

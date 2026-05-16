@@ -4,8 +4,7 @@
 
 **Purpose:** Standalone Windows executable (Rust + egui) that deduplicates emails across
 multiple PST files. Produces a dedup report (CSV) and optionally exports unique emails as
-EML files in a flat directory. Designed for Florida Department of Commerce, handling 1M+
-emails across multi-gigabyte PSTs.
+EML files in a flat directory. Handles 1M+ emails across multi-gigabyte PSTs.
 
 **Key Constraints:**
 - Pure Rust, zero C dependencies — no libpff, no Outlook
@@ -84,7 +83,7 @@ with a clear error message.
 ```
 Offset  Size  Field
 ------  ----  -----
-0       4     dwMagic = 0x2142444E ("!BDN")
+0       4     dwMagic = 0x4E444221 ("!BDN" read as little-endian u32)
 4       4     dwCRCPartial
 8       2     wMagicClient = 0x4D53 ("SM")
 10      2     wVer (23 = Unicode, 14/15 = ANSI → reject)
@@ -613,16 +612,16 @@ FileSelect → Settings → Scanning → Results
 
 ```toml
 [workspace.dependencies]
-eframe = "0.31"           # egui framework (MIT/Apache-2.0)
-sha2 = "0.10"             # SHA-256 hashing (MIT/Apache-2.0)
-csv = "1.3"               # CSV report writing (MIT/Unlicense)
-rfd = "0.15"              # Native file dialogs (MIT)
+eframe = "0.34"           # egui framework (MIT/Apache-2.0)
+sha2 = "0.11"             # SHA-256 hashing (MIT/Apache-2.0)
+csv = "1.4"               # CSV report writing (MIT/Unlicense)
+rfd = "0.17"              # Native file dialogs (MIT)
 chrono = "0.4"            # Date formatting (MIT/Apache-2.0)
 byteorder = "1.5"         # Little-endian reads (MIT/Unlicense)
 thiserror = "2"           # Error types (MIT/Apache-2.0)
 tracing = "0.1"           # Logging (MIT)
 tracing-subscriber = "0.3"
-crc32fast = "1.4"         # CRC32 validation (MIT/Apache-2.0)
+crc32fast = "1.5"         # CRC32 validation (MIT/Apache-2.0)
 ```
 
 No LGPL, no GPL, no viral licenses. All compatible with government commercial use.

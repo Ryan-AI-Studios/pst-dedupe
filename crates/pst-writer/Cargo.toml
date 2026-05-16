@@ -1,0 +1,15 @@
+[package]
+name = "pst-writer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+byteorder = { workspace = true }
+crc32fast = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+base64 = "0.22"
+
+[dev-dependencies]
+pst-reader = { path = "../pst-reader" }

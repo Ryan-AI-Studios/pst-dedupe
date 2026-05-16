@@ -14,8 +14,10 @@ pub mod exporter;
 pub mod hasher;
 pub mod index;
 pub mod report;
+pub mod util;
 
 pub use exporter::export_eml;
 pub use hasher::compute_dedup_keys;
 pub use index::{DedupIndex, DedupResult, DedupTier, MessageRef};
 pub use report::write_csv_report;
+pub use util::{filetime_to_unix, format_bytes, truncate_utf8};

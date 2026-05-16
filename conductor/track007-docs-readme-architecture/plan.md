@@ -27,6 +27,17 @@ Provide accurate user/developer documentation for the current PST dedupe project
 - PST privacy and fixture handling must be explicit.
 - See [Track Guardrails](../TRACK-GUARDRAILS.md).
 
+## Verification Notes
+
+Verified on 2026-05-15:
+
+- **`README.md`** added with: purpose, build/test instructions, architecture table, current status matrix, verification gate, and license.
+- **`ARCHITECTURE.md`** fixes:
+  - Corrected `dwMagic` from `0x2142444E` to `0x4E444221` (little-endian u32).
+  - Updated dependency versions to match workspace: sha2=0.11, csv=1.4, eframe=0.34, rfd=0.17, crc32fast=1.5.
+  - Removed specific client reference.
+- Status matrix in README honestly documents what is implemented vs pending.
+
 ## Exit Criteria
 
 - New contributors can understand what works and what is pending.

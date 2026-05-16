@@ -30,6 +30,22 @@ Prove the reader can open real Unicode PST files and traverse folders/messages f
 - Large-file behavior must avoid reading whole PST files unless required by the format layer under test.
 - See [Track Guardrails](../TRACK-GUARDRAILS.md).
 
+## Verification Notes
+
+Verified on 2026-05-15:
+
+- **Fixture**: Aspose.Email-for-Java sample PST (271 KB) downloaded from GitHub raw and placed in `fixtures/` (gitignored).
+- **Magic fix**: `PST_MAGIC` in `header.rs` corrected from `0x2142444E` (big-endian reading of `!BDN`) to `0x4E444221` (little-endian u32 read). This bug would have prevented opening any real PST.
+- **Integration tests added** (`crates/pst-reader/tests/integration.rs`):
+  - `test_fixture_discovery` — confirms fixture present
+  - `test_open_real_pst` — opens the sample PST successfully
+  - `test_open_missing_file_is_error` — verifies typed error for missing files
+  - `test_folder_traversal` — walks folders, finds root (NID 0x122)
+  - `test_message_property_extraction` — reads message metadata (sample has 0 messages, test skips gracefully)
+  - `test_ansi_pst_rejected` — synthetic ANSI header rejected correctly
+- **Fixture helper** (`crates/pst-reader/tests/fixtures.rs`) — discovers `.pst` files in `fixtures/`, skips tests gracefully when absent.
+- All workspace gates pass: `cargo fmt`, `cargo clippy`, `cargo test --workspace`, `changeguard verify`.
+
 ## Exit Criteria
 
 - Real fixture tests can be run locally without committing PST data.

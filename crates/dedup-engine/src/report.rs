@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::index::{DedupResult, MessageRef};
+use crate::util::{filetime_to_unix, format_bytes};
 
 /// A single row in the dedup report.
 #[derive(Debug, Clone)]
@@ -100,30 +101,16 @@ pub fn write_summary_report(
     Ok(())
 }
 
-fn filetime_str(ft: Option<i64>) -> String {
+/// Convert FILETIME to a human-readable date string.
+pub fn filetime_str(ft: Option<i64>) -> String {
     match ft {
         Some(v) => {
-            // Convert FILETIME to rough ISO 8601
-            // FILETIME = 100ns intervals since 1601-01-01
-            // Unix epoch offset: 11644473600 seconds
-            let unix_secs = (v / 10_000_000) - 11_644_473_600;
+            let unix_secs = filetime_to_unix(v);
             match chrono::DateTime::from_timestamp(unix_secs, 0) {
                 Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
                 None => v.to_string(),
             }
         }
         None => String::new(),
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.2} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.2} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{} bytes", bytes)
     }
 }

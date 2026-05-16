@@ -30,6 +30,18 @@ Make the workspace consistently compile, test, and pass baseline repository gate
 - Treat a new warning as a regression unless it is explicitly accepted in the conductor.
 - See [Track Guardrails](../TRACK-GUARDRAILS.md).
 
+## Verification Notes
+
+Verified on 2026-05-15 (commit `b544a4e` area):
+
+- `cargo fmt --all --check` — pass (no diff).
+- `cargo clippy --workspace --all-targets -- -D warnings` — pass (no warnings).
+- `cargo test --workspace` — pass (13 unit tests + 1 doc test across dedup-engine, pst-reader, pst-dedup-gui).
+- `cargo check -p pst-dedup-gui` — pass.
+- `changeguard verify` — pass (exit 0). Prediction-history warnings are accepted debt (new repo, <10 commits).
+
+ChangeGuard `verify.steps` configuration alignment (currently commented out in `.changeguard/config.toml`) is scoped to Track 006.
+
 ## Exit Criteria
 
 - `cargo fmt --all --check` passes.

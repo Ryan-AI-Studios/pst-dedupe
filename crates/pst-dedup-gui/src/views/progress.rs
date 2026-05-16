@@ -4,7 +4,11 @@ use crate::app::PstDedupApp;
 use eframe::egui;
 
 pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
-    let progress = app.progress().lock().unwrap().clone();
+    let progress = app
+        .progress()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
     ui.add_space(12.0);
     ui.heading("Scanning...");
@@ -65,7 +69,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
 
     // Cancel button
     if ui.button("Cancel").clicked() {
-        let mut p = app.progress().lock().unwrap();
+        let mut p = app.progress().lock().unwrap_or_else(|e| e.into_inner());
         p.cancelled = true;
     }
 }

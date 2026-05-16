@@ -26,6 +26,20 @@ Make scan failures and partial results visible in the GUI so users can trust wha
 - Long scans must remain cancellable without leaving stale progress state.
 - See [Track Guardrails](../TRACK-GUARDRAILS.md).
 
+## Verification Notes
+
+Verified on 2026-05-15:
+
+- **`FileStats` expanded** with `error: Option<String>` and `skipped_messages: u64`.
+- **`ScanResult` expanded** with `failed_files: u64`.
+- **Worker now records** per-file errors (open failure, folder traversal failure) instead of just logging and continuing.
+- **Message read failures** increment `skipped_messages` and continue scanning the rest of the PST.
+- **Results view** shows:
+  - Yellow warning banner: "X file(s) could not be scanned. Results are partial."
+  - Per-file breakdown grid with "Skipped" and "Status" columns
+  - Red error text for failed files, yellow for files with skipped messages, green "OK" for clean files
+- **Progress view** already showed `progress.error`; unchanged.
+
 ## Exit Criteria
 
 - A failed PST does not silently disappear.

@@ -1,10 +1,12 @@
 //! Background worker thread for PST scanning and deduplication.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use dedup_engine::{
+    exporter::{export_eml, EmlMessage},
+    filetime_to_unix,
     hasher::{self, AttachmentInfo},
     report::ReportRow,
     DedupIndex, DedupResult, MessageRef,
@@ -41,7 +43,7 @@ pub struct ScanProgress {
 }
 
 /// Final scan results.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ScanResult {
     /// All report rows (one per message scanned).
     pub rows: Vec<ReportRow>,
@@ -57,13 +59,22 @@ pub struct ScanResult {
     pub duration_secs: f64,
     /// Per-PST stats.
     pub file_stats: Vec<FileStats>,
+    /// Number of files that could not be scanned.
+    pub failed_files: u64,
+    /// Source file paths (preserved for re-export).
+    pub source_files: Vec<PathBuf>,
 }
 
-#[derive(Debug)]
+/// Per-PST scan outcome.
+#[derive(Debug, Clone)]
 pub struct FileStats {
     pub name: String,
     pub messages: u64,
     pub duplicates: u64,
+    /// Error if the file could not be opened or traversed.
+    pub error: Option<String>,
+    /// Number of messages skipped due to read errors.
+    pub skipped_messages: u64,
 }
 
 /// Run the full scan pipeline. Called from a background thread.
@@ -73,14 +84,14 @@ pub fn run_scan(
     progress: Arc<Mutex<ScanProgress>>,
 ) -> ScanResult {
     let start = Instant::now();
-    let mut index = DedupIndex::with_capacity(100_000);
+    let mut index = DedupIndex::with_capacity_and_tier2(100_000, config.enable_tier2);
     let mut all_rows = Vec::new();
     let mut file_stats = Vec::new();
     let mut total_savings: u64 = 0;
 
     // Update total file count
     {
-        let mut p = progress.lock().unwrap();
+        let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
         p.total_files = files.len();
     }
 
@@ -92,7 +103,7 @@ pub fn run_scan(
 
         // Update progress
         {
-            let mut p = progress.lock().unwrap();
+            let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
             if p.cancelled {
                 break;
             }
@@ -102,14 +113,23 @@ pub fn run_scan(
 
         let mut file_messages: u64 = 0;
         let mut file_duplicates: u64 = 0;
+        let mut skipped_messages: u64 = 0;
 
         // Open PST
         let mut pst = match PstFile::open(file_path) {
             Ok(pst) => pst,
             Err(e) => {
-                tracing::error!("Failed to open {}: {}", file_name, e);
-                let mut p = progress.lock().unwrap();
-                p.error = Some(format!("Failed to open {}: {}", file_name, e));
+                let err_msg = format!("Failed to open {}: {}", file_name, e);
+                tracing::error!("{}", err_msg);
+                let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
+                p.error = Some(err_msg.clone());
+                file_stats.push(FileStats {
+                    name: file_name,
+                    messages: 0,
+                    duplicates: 0,
+                    error: Some(err_msg),
+                    skipped_messages: 0,
+                });
                 continue;
             }
         };
@@ -118,7 +138,17 @@ pub fn run_scan(
         let folders = match pst.folders() {
             Ok(f) => f,
             Err(e) => {
-                tracing::error!("Failed to read folders in {}: {}", file_name, e);
+                let err_msg = format!("Failed to read folders in {}: {}", file_name, e);
+                tracing::error!("{}", err_msg);
+                let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
+                p.error = Some(err_msg.clone());
+                file_stats.push(FileStats {
+                    name: file_name,
+                    messages: 0,
+                    duplicates: 0,
+                    error: Some(err_msg),
+                    skipped_messages: 0,
+                });
                 continue;
             }
         };
@@ -126,7 +156,7 @@ pub fn run_scan(
         // Update estimated total
         {
             let total_msgs: u64 = folders.iter().map(|f| f.message_count as u64).sum();
-            let mut p = progress.lock().unwrap();
+            let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
             p.messages_estimated += total_msgs;
         }
 
@@ -135,7 +165,7 @@ pub fn run_scan(
             for &msg_nid in &folder.message_nids {
                 // Check cancellation
                 {
-                    let p = progress.lock().unwrap();
+                    let p = progress.lock().unwrap_or_else(|e| e.into_inner());
                     if p.cancelled {
                         break;
                     }
@@ -146,6 +176,7 @@ pub fn run_scan(
                     Ok(p) => p,
                     Err(e) => {
                         tracing::warn!("Skipping message 0x{:X}: {}", msg_nid.0, e);
+                        skipped_messages += 1;
                         continue;
                     }
                 };
@@ -161,7 +192,15 @@ pub fn run_scan(
                                     size: a.size,
                                 })
                                 .collect(),
-                            Err(_) => Vec::new(),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Skipping message 0x{:X}: attachment metadata error: {}",
+                                    msg_nid.0,
+                                    e
+                                );
+                                skipped_messages += 1;
+                                continue;
+                            }
                         }
                     } else {
                         Vec::new()
@@ -190,20 +229,11 @@ pub fn run_scan(
                 };
 
                 // Check against index
-                let result = if config.enable_tier2 {
-                    index.check_and_insert(
-                        keys.message_id.as_deref(),
-                        keys.content_hash,
-                        msg_ref.clone(),
-                    )
-                } else {
-                    // Tier 1 only — skip content hash check
-                    index.check_and_insert(
-                        keys.message_id.as_deref(),
-                        [0; 32], // dummy hash, won't match
-                        msg_ref.clone(),
-                    )
-                };
+                let result = index.check_and_insert(
+                    keys.message_id.as_deref(),
+                    keys.content_hash,
+                    msg_ref.clone(),
+                );
 
                 // Track duplicates for savings estimate
                 if let DedupResult::DuplicateOf { .. } = &result {
@@ -222,7 +252,7 @@ pub fn run_scan(
                 if file_messages.is_multiple_of(100) {
                     let elapsed = start.elapsed().as_secs_f64();
                     let total_processed = index.total();
-                    let mut p = progress.lock().unwrap();
+                    let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
                     p.messages_processed = total_processed;
                     p.unique_count = index.unique_count;
                     p.duplicate_count = index.duplicate_count;
@@ -239,12 +269,14 @@ pub fn run_scan(
             name: file_name,
             messages: file_messages,
             duplicates: file_duplicates,
+            error: None,
+            skipped_messages,
         });
     }
 
     // Mark complete
     {
-        let mut p = progress.lock().unwrap();
+        let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
         p.complete = true;
         p.messages_processed = index.total();
         p.unique_count = index.unique_count;
@@ -252,6 +284,7 @@ pub fn run_scan(
     }
 
     let duration_secs = start.elapsed().as_secs_f64();
+    let failed_files = file_stats.iter().filter(|fs| fs.error.is_some()).count() as u64;
 
     ScanResult {
         rows: all_rows,
@@ -263,5 +296,156 @@ pub fn run_scan(
         savings_bytes: total_savings,
         duration_secs,
         file_stats,
+        failed_files,
+        source_files: files,
     }
+}
+
+/// Export unique messages from the scan result as EML files.
+///
+/// Re-opens source PSTs and writes one `.eml` per unique message.
+/// Returns `(exported_count, failed_count)`.
+pub fn export_unique_eml(
+    result: &ScanResult,
+    output_dir: &Path,
+    source_files: &[PathBuf],
+) -> (u64, u64, Option<String>) {
+    let mut exported: u64 = 0;
+    let mut failed: u64 = 0;
+    let mut last_error: Option<String> = None;
+
+    // Collect unique rows and group by source file for efficient re-opening
+    let unique_rows: Vec<&ReportRow> = result
+        .rows
+        .iter()
+        .filter(|r| matches!(r.result, DedupResult::Unique))
+        .collect();
+
+    // Group by pst_index to open each file once
+    let mut by_file: std::collections::HashMap<usize, Vec<&ReportRow>> =
+        std::collections::HashMap::new();
+    for row in &unique_rows {
+        by_file.entry(row.message.pst_index).or_default().push(row);
+    }
+
+    for (file_idx, rows) in by_file {
+        let path = match source_files.get(file_idx) {
+            Some(p) => p,
+            None => {
+                failed += rows.len() as u64;
+                last_error = Some(format!("Source file index {} not found", file_idx));
+                continue;
+            }
+        };
+
+        let mut pst = match PstFile::open(path) {
+            Ok(p) => p,
+            Err(e) => {
+                failed += rows.len() as u64;
+                last_error = Some(format!("Failed to open {}: {}", path.display(), e));
+                continue;
+            }
+        };
+
+        for row in rows {
+            let nid = pst_reader::ndb::nid::NodeId(row.message.nid);
+            let props = match pst.read_message_properties(nid) {
+                Ok(p) => p,
+                Err(e) => {
+                    failed += 1;
+                    last_error = Some(format!(
+                        "Failed to read message 0x{:X} from {}: {}",
+                        row.message.nid,
+                        path.display(),
+                        e
+                    ));
+                    continue;
+                }
+            };
+
+            let eml = EmlMessage {
+                message_id: props.message_id.clone(),
+                subject: props.subject.clone().unwrap_or_default(),
+                sender: props.sender_email.clone().unwrap_or_default(),
+                recipients: props.display_to.clone().unwrap_or_default(),
+                date: props
+                    .submit_time
+                    .map(|ft| format_rfc2822(filetime_to_unix(ft))),
+                body: props.body_preview.clone().unwrap_or_default(),
+                filename: dedup_engine::exporter::make_eml_filename(
+                    &props.subject.clone().unwrap_or("email".into()),
+                    exported + 1,
+                ),
+            };
+
+            if let Err(e) = export_eml(output_dir, &eml) {
+                failed += 1;
+                last_error = Some(format!(
+                    "Failed to write EML for message 0x{:X}: {}",
+                    row.message.nid, e
+                ));
+                continue;
+            }
+
+            exported += 1;
+        }
+    }
+
+    (exported, failed, last_error)
+}
+
+/// Simple RFC 2822 date formatter (Mon, 15 Jan 2026 14:30:00 +0000).
+fn format_rfc2822(unix_secs: i64) -> String {
+    // Naive formatting without chrono dependency.
+    const DAYS_IN_MONTH: [i32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    const MONTH_NAMES: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const DAY_NAMES: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+    let mut days = unix_secs / 86_400;
+    let rem_secs = unix_secs % 86_400;
+    let hour = (rem_secs / 3600) as i32;
+    let min = ((rem_secs % 3600) / 60) as i32;
+    let sec = (rem_secs % 60) as i32;
+
+    // 1970-01-01 is Thursday = day 4
+    let weekday = ((4 + days) % 7) as usize;
+
+    let mut year = 1970;
+    loop {
+        let leap = is_leap(year);
+        let year_days = if leap { 366 } else { 365 };
+        if days < year_days {
+            break;
+        }
+        days -= year_days;
+        year += 1;
+    }
+
+    let mut month = 0;
+    let mut day_of_year = days as i32;
+    while month < 12 {
+        let dim = DAYS_IN_MONTH[month] + if month == 1 && is_leap(year) { 1 } else { 0 };
+        if day_of_year < dim {
+            break;
+        }
+        day_of_year -= dim;
+        month += 1;
+    }
+
+    format!(
+        "{}, {:02} {} {} {:02}:{:02}:{:02} +0000",
+        DAY_NAMES[weekday],
+        day_of_year + 1,
+        MONTH_NAMES[month],
+        year,
+        hour,
+        min,
+        sec
+    )
+}
+
+fn is_leap(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }

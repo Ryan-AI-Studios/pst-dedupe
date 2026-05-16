@@ -25,6 +25,17 @@ Make local and ChangeGuard quality gates match the real project commands.
 - Pin-update gates must catch breaking APIs early without requiring network during every run.
 - See [Track Guardrails](../TRACK-GUARDRAILS.md).
 
+## Verification Notes
+
+Verified on 2026-05-15:
+
+- **`.changeguard/config.toml`**: Uncommented `[verify]` section with 3 steps:
+  1. `fmt` — `cargo fmt --all --check` (60s timeout)
+  2. `clippy` — `cargo clippy --workspace --all-targets -- -D warnings` (120s timeout)
+  3. `test` — `cargo test --workspace` (300s timeout)
+- **`.changeguard/rules.toml`**: Updated `required_verifications` from nonexistent `build`/`lint` to real step names `fmt`/`clippy`/`test`.
+- **`changeguard verify`** now runs all 3 steps sequentially and passes.
+
 ## Exit Criteria
 
 - ChangeGuard verify no longer fails because of missing commands.

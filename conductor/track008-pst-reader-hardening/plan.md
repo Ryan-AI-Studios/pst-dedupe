@@ -29,6 +29,16 @@ Improve reader correctness and resilience after real fixture traversal is proven
 - Avoid whole-file reads for large PSTs.
 - See [Track Guardrails](../TRACK-GUARDRAILS.md).
 
+## Verification Notes
+
+Verified 2026-05-15:
+
+- **`page.rs`**: CRC validation added in `RawPage::validate()`. Warning-only because real-world PSTs (including Aspose fixture) use a non-standard CRC polynomial compared to IEEE CRC32. Pages still validate `ptype`/`ptype_repeat` strictly.
+- **`block.rs`**: `validate_block_trailer()` added — checks block CRC and returns BID from trailer. `read_raw_block()` reads and validates every block through BBT. All block read paths (`read_block_data`, `read_xblock_data`, `read_xxblock_data`, `read_subnode_data`, `list_subnode_entries`) now use `read_raw_block()` for consistent CRC + BID consistency.
+- **CRC scope fix**: Block CRC covers `cb` (actual data) bytes, not `align64(cb)` padded bytes.
+- **Corruption handling**: CRC mismatches log `tracing::warn!` with context (bid/computed/stored) instead of hard-failing, so parsing continues on marginally corrupt or non-standard PSTs.
+- **Tests**: All 27 workspace tests pass (18 dedup-engine, 3 pst-reader unit, 6 pst-reader integration).
+
 ## Exit Criteria
 
 - Valid PSTs fail less often on format edge cases.

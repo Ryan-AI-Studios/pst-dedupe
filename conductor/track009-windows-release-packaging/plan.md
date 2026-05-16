@@ -27,6 +27,15 @@ Prepare the application for Windows executable distribution after core functiona
 - Keep debug-only assumptions out of release code paths.
 - See [Track Guardrails](../TRACK-GUARDRAILS.md).
 
+## Verification Notes
+
+Verified 2026-05-15:
+
+- **`cargo build --release -p pst-dedup-gui`** succeeds and produces `target\release\pst-dedup-gui.exe` (~13 MB).
+- **Self-contained**: No external DLLs required; only standard Windows system libraries.
+- **Smoke test**: Process starts and runs for multiple seconds without immediate crash or missing-dependency error.
+- **README updated**: Added release executable path, size estimate, and run command.
+
 ## Exit Criteria
 
 - `cargo build --release -p pst-dedup-gui` produces the intended executable.

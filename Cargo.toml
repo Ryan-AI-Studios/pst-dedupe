@@ -4,6 +4,7 @@ members = [
     "crates/pst-reader",
     "crates/dedup-engine",
     "crates/pst-dedup-gui",
+    "crates/pst-writer",
 ]
 
 [workspace.dependencies]

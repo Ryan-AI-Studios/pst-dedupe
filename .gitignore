@@ -6,3 +6,6 @@
 *.log
 review.md
 .changeguard/
+.claude/
+*.html
+

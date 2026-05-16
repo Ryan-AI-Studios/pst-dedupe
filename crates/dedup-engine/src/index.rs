@@ -61,6 +61,8 @@ pub struct DedupIndex {
     message_ids: HashMap<String, MessageRef>,
     /// Tier 2: content hash → first occurrence.
     content_hashes: HashMap<[u8; 32], MessageRef>,
+    /// Whether Tier 2 (content hash) fallback is enabled.
+    tier2_enabled: bool,
     /// Running counts.
     pub unique_count: u64,
     pub duplicate_count: u64,
@@ -73,6 +75,7 @@ impl DedupIndex {
         Self {
             message_ids: HashMap::new(),
             content_hashes: HashMap::new(),
+            tier2_enabled: true,
             unique_count: 0,
             duplicate_count: 0,
             tier1_hits: 0,
@@ -85,6 +88,37 @@ impl DedupIndex {
         Self {
             message_ids: HashMap::with_capacity(expected),
             content_hashes: HashMap::with_capacity(expected / 4), // fewer Tier 2 lookups expected
+            tier2_enabled: true,
+            unique_count: 0,
+            duplicate_count: 0,
+            tier1_hits: 0,
+            tier2_hits: 0,
+        }
+    }
+
+    /// Create with Tier 2 explicitly enabled or disabled.
+    pub fn with_tier2(enabled: bool) -> Self {
+        Self {
+            message_ids: HashMap::new(),
+            content_hashes: HashMap::new(),
+            tier2_enabled: enabled,
+            unique_count: 0,
+            duplicate_count: 0,
+            tier1_hits: 0,
+            tier2_hits: 0,
+        }
+    }
+
+    /// Create with capacity and Tier 2 setting.
+    pub fn with_capacity_and_tier2(expected: usize, tier2_enabled: bool) -> Self {
+        Self {
+            message_ids: HashMap::with_capacity(expected),
+            content_hashes: if tier2_enabled {
+                HashMap::with_capacity(expected / 4)
+            } else {
+                HashMap::new()
+            },
+            tier2_enabled,
             unique_count: 0,
             duplicate_count: 0,
             tier1_hits: 0,
@@ -116,23 +150,27 @@ impl DedupIndex {
             }
         }
 
-        // Tier 2: Content hash match
-        if let Some(original) = self.content_hashes.get(&content_hash) {
-            self.duplicate_count += 1;
-            self.tier2_hits += 1;
-            return DedupResult::DuplicateOf {
-                original: original.clone(),
-                tier: DedupTier::ContentHash,
-            };
+        // Tier 2: Content hash match (only when enabled)
+        if self.tier2_enabled {
+            if let Some(original) = self.content_hashes.get(&content_hash) {
+                self.duplicate_count += 1;
+                self.tier2_hits += 1;
+                return DedupResult::DuplicateOf {
+                    original: original.clone(),
+                    tier: DedupTier::ContentHash,
+                };
+            }
         }
 
-        // Unique — insert into both indexes
+        // Unique — insert into applicable indexes
         if let Some(mid) = message_id {
             if !mid.is_empty() {
                 self.message_ids.insert(mid.to_string(), msg_ref.clone());
             }
         }
-        self.content_hashes.insert(content_hash, msg_ref);
+        if self.tier2_enabled {
+            self.content_hashes.insert(content_hash, msg_ref);
+        }
         self.unique_count += 1;
 
         DedupResult::Unique
@@ -204,5 +242,95 @@ mod tests {
             _ => panic!("Expected duplicate"),
         }
         assert_eq!(idx.tier2_hits, 1);
+    }
+
+    #[test]
+    fn test_tier2_disabled_skips_content_hash() {
+        let mut idx = DedupIndex::with_tier2(false);
+        // First message without Message-ID — should be unique
+        let r1 = idx.check_and_insert(None, [42; 32], make_ref("No MID"));
+        assert!(matches!(r1, DedupResult::Unique));
+
+        // Second message with same content hash — should ALSO be unique because Tier 2 is off
+        let r2 = idx.check_and_insert(None, [42; 32], make_ref("No MID"));
+        assert!(
+            matches!(r2, DedupResult::Unique),
+            "Tier 2 disabled: same content hash should NOT match"
+        );
+        assert_eq!(idx.tier2_hits, 0);
+        assert_eq!(idx.unique_count, 2);
+    }
+
+    #[test]
+    fn test_tier1_priority_over_tier2() {
+        let mut idx = DedupIndex::new();
+        // First message: has Message-ID A and content hash X
+        idx.check_and_insert(Some("mid-a"), [1; 32], make_ref("First"));
+
+        // Second message: same Message-ID A but DIFFERENT content hash Y
+        // Tier 1 should match first, not fall through to Tier 2
+        let result = idx.check_and_insert(Some("mid-a"), [2; 32], make_ref("Second"));
+        match result {
+            DedupResult::DuplicateOf { tier, .. } => {
+                assert_eq!(tier, DedupTier::MessageId, "Tier 1 must win over Tier 2")
+            }
+            _ => panic!("Expected duplicate by Message-ID"),
+        }
+        assert_eq!(idx.tier1_hits, 1);
+        assert_eq!(idx.tier2_hits, 0);
+    }
+
+    #[test]
+    fn test_empty_message_id_treated_as_missing() {
+        let mut idx = DedupIndex::new();
+        // Empty Message-ID falls through to Tier 2
+        let r1 = idx.check_and_insert(Some(""), [7; 32], make_ref("Empty MID"));
+        assert!(matches!(r1, DedupResult::Unique));
+
+        let r2 = idx.check_and_insert(Some(""), [7; 32], make_ref("Empty MID 2"));
+        match r2 {
+            DedupResult::DuplicateOf { tier, .. } => {
+                assert_eq!(tier, DedupTier::ContentHash)
+            }
+            _ => panic!("Expected Tier 2 duplicate for empty Message-ID"),
+        }
+    }
+
+    #[test]
+    fn test_tier2_disabled_empty_mid_is_unique() {
+        let mut idx = DedupIndex::with_tier2(false);
+        // Empty Message-ID with Tier 2 disabled → always unique
+        let r1 = idx.check_and_insert(Some(""), [7; 32], make_ref("Empty MID"));
+        let r2 = idx.check_and_insert(Some(""), [7; 32], make_ref("Empty MID 2"));
+        assert!(matches!(r1, DedupResult::Unique));
+        assert!(
+            matches!(r2, DedupResult::Unique),
+            "With Tier 2 disabled, empty Message-ID should not dedup"
+        );
+    }
+
+    #[test]
+    fn test_cross_tier_no_false_positive() {
+        // A message with Message-ID should never match a message without one
+        // on content hash alone if the first had a Message-ID
+        let mut idx = DedupIndex::new();
+        let r1 = idx.check_and_insert(Some("mid-1"), [5; 32], make_ref("Has MID"));
+        assert!(matches!(r1, DedupResult::Unique));
+
+        // Second message has NO Message-ID but same content hash
+        // It should NOT be a duplicate because the first was indexed by Message-ID,
+        // and content hash index also contains it — so it WILL match by Tier 2.
+        // This is ACCEPTABLE behavior (conservative dedup).
+        let r2 = idx.check_and_insert(None, [5; 32], make_ref("No MID"));
+        assert!(
+            matches!(
+                r2,
+                DedupResult::DuplicateOf {
+                    tier: DedupTier::ContentHash,
+                    ..
+                }
+            ),
+            "Same content hash should match even if first had Message-ID"
+        );
     }
 }

@@ -4,6 +4,7 @@
 //! RFC 5322 message from available properties. This won't be a perfect round-trip
 //! of the original MIME, but it preserves the content needed for archival.
 
+use crate::util::truncate_utf8;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -49,11 +50,15 @@ pub fn export_eml(
 }
 
 /// Generate a safe filename from a subject line and counter.
+///
+/// Spaces are replaced with underscores, path separators are stripped,
+/// and the result is truncated to 80 characters to avoid filesystem limits.
 pub fn make_eml_filename(subject: &str, counter: u64) -> String {
     let safe: String = subject
         .chars()
+        .filter(|c| *c != '/' && *c != '\\')
         .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
                 c
             } else {
                 '_'
@@ -61,7 +66,7 @@ pub fn make_eml_filename(subject: &str, counter: u64) -> String {
         })
         .collect();
 
-    let truncated = if safe.len() > 80 { &safe[..80] } else { &safe };
+    let truncated = truncate_utf8(&safe, 80);
     format!("{:06}_{}.eml", counter, truncated.trim())
 }
 

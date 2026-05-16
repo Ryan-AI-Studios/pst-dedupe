@@ -1,13 +1,13 @@
 //! Results view — scan summary, duplicate table, and export options.
 
 use crate::app::PstDedupApp;
-use dedup_engine::DedupResult;
+use dedup_engine::{format_bytes, truncate_utf8, DedupResult};
 use eframe::egui;
 use std::path::Path;
 
 pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
     let results = match app.results() {
-        Some(r) => r,
+        Some(r) => r.clone(),
         None => {
             ui.label("No results available.");
             return;
@@ -47,7 +47,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
             ui.end_row();
 
             ui.strong("Est. savings:");
-            ui.label(format_size(results.savings_bytes));
+            ui.label(format_bytes(results.savings_bytes));
             ui.end_row();
 
             ui.strong("Duration:");
@@ -66,23 +66,48 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
 
     ui.add_space(8.0);
 
+    // Warning banner for partial results
+    if results.failed_files > 0 {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            format!(
+                "Warning: {} file(s) could not be scanned. Results are partial.",
+                results.failed_files
+            ),
+        );
+        ui.add_space(4.0);
+    }
+
     // Per-file breakdown
     if !results.file_stats.is_empty() {
         ui.collapsing("Per-file breakdown", |ui| {
             egui::Grid::new("file_breakdown")
-                .num_columns(3)
+                .num_columns(5)
                 .spacing([20.0, 2.0])
                 .striped(true)
                 .show(ui, |ui| {
                     ui.strong("File");
                     ui.strong("Messages");
                     ui.strong("Duplicates");
+                    ui.strong("Skipped");
+                    ui.strong("Status");
                     ui.end_row();
 
                     for fs in &results.file_stats {
                         ui.label(&fs.name);
                         ui.label(format!("{}", fs.messages));
                         ui.label(format!("{}", fs.duplicates));
+                        ui.label(format!("{}", fs.skipped_messages));
+                        if let Some(err) = &fs.error {
+                            ui.colored_label(egui::Color32::RED, truncate_utf8(err, 40));
+                        } else if fs.skipped_messages > 0 {
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                format!("{} skipped", fs.skipped_messages),
+                            );
+                        } else {
+                            ui.colored_label(egui::Color32::GREEN, "OK");
+                        }
                         ui.end_row();
                     }
                 });
@@ -122,9 +147,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
 
                             for row in &duplicates {
                                 if let DedupResult::DuplicateOf { original, tier } = &row.result {
-                                    let subj = truncate(&row.message.subject, 40);
+                                    let subj = truncate_utf8(&row.message.subject, 40);
                                     ui.label(subj);
-                                    ui.label(truncate(&row.message.sender, 25));
+                                    ui.label(truncate_utf8(&row.message.sender, 25));
                                     ui.label(&row.message.pst_name);
                                     ui.label(tier.to_string());
                                     ui.label(&original.pst_name);
@@ -160,9 +185,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
                 .set_title("Select output folder for EML files")
                 .pick_folder()
             {
-                // EML export would require re-reading PSTs for full body data.
-                // For now, show a note that this requires implementation.
-                tracing::info!("EML export to: {}", dir.display());
+                let (exported, failed, err) =
+                    crate::worker::export_unique_eml(&results, &dir, &results.source_files);
+                app.set_export_result(exported, failed, err);
             }
         }
 
@@ -172,6 +197,29 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
             app.reset();
         }
     });
+
+    // Export result feedback
+    if let Some((exported, failed, err)) = app.export_result() {
+        ui.add_space(8.0);
+        if failed > 0 || err.is_some() {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!(
+                    "Export finished: {} written, {} failed.{}",
+                    exported,
+                    failed,
+                    err.as_ref()
+                        .map(|e| format!(" Last error: {}", truncate_utf8(e, 80)))
+                        .unwrap_or_default()
+                ),
+            );
+        } else {
+            ui.colored_label(
+                egui::Color32::GREEN,
+                format!("Export complete: {} EML files written.", exported),
+            );
+        }
+    }
 }
 
 fn export_csv(app: &PstDedupApp, path: &Path) {
@@ -194,25 +242,5 @@ fn export_csv(app: &PstDedupApp, path: &Path) {
                 tracing::error!("Failed to write report: {}", e);
             }
         }
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max - 3])
-    } else {
-        s.to_string()
-    }
-}
-
-fn format_size(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.2} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{} bytes", bytes)
     }
 }

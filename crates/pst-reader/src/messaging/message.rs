@@ -46,8 +46,8 @@ impl PstFile {
 
         let body_full = prop_ctx.get_string(nid::PID_TAG_BODY)?;
         let body_preview = body_full.map(|b| {
-            if b.len() > 4096 {
-                b[..4096].to_string()
+            if b.chars().count() > 4096 {
+                b.chars().take(4096).collect()
             } else {
                 b
             }

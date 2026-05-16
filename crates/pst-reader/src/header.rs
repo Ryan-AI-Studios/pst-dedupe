@@ -10,8 +10,8 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::crypto::CryptMethod;
 use crate::error::{PstError, Result};
 
-/// Magic bytes: "!BDN" = 0x2142444E
-const PST_MAGIC: u32 = 0x2142444E;
+/// Magic bytes: "!BDN" read as little-endian u32.
+const PST_MAGIC: u32 = 0x4E444221;
 
 /// Client magic: "SM" = 0x4D53
 const CLIENT_MAGIC: u16 = 0x4D53;
