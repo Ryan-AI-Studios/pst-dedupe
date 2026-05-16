@@ -4,8 +4,8 @@
 //! as a heap with fixed-size allocation pages. Each allocation is addressed by
 //! a Heap ID (HID).
 
-use byteorder::{LittleEndian, ByteOrder};
 use crate::error::{PstError, Result};
+use byteorder::{ByteOrder, LittleEndian};
 
 /// Heap ID — 4 bytes addressing an allocation within the HN.
 ///
@@ -70,7 +70,10 @@ impl Heap {
     /// for single-block nodes).
     pub fn parse(data: Vec<u8>, block_size: usize) -> Result<Self> {
         if data.len() < 12 {
-            return Err(PstError::DataTruncated { needed: 12, available: data.len() });
+            return Err(PstError::DataTruncated {
+                needed: 12,
+                available: data.len(),
+            });
         }
 
         let ib_hnpm = LittleEndian::read_u16(&data[0..2]);
@@ -91,7 +94,11 @@ impl Heap {
             rgb_fill_level,
         };
 
-        Ok(Self { data, block_size, header })
+        Ok(Self {
+            data,
+            block_size,
+            header,
+        })
     }
 
     /// Resolve an HID to a byte slice within the heap.
@@ -128,7 +135,10 @@ impl Heap {
             // Subsequent blocks: HNPAGEMAP is at offset 0..2 of the block
             // (HNPAGEHDR: ibHnpm at offset 0)
             if block_data.len() < 2 {
-                return Err(PstError::DataTruncated { needed: 2, available: block_data.len() });
+                return Err(PstError::DataTruncated {
+                    needed: 2,
+                    available: block_data.len(),
+                });
             }
             LittleEndian::read_u16(&block_data[0..2]) as usize
         };
@@ -163,7 +173,10 @@ impl Heap {
         let end = LittleEndian::read_u16(&block_data[offset_b..offset_b + 2]) as usize;
 
         if start > end || end > block_data.len() {
-            return Err(PstError::DataTruncated { needed: end, available: block_data.len() });
+            return Err(PstError::DataTruncated {
+                needed: end,
+                available: block_data.len(),
+            });
         }
 
         Ok(&block_data[start..end])

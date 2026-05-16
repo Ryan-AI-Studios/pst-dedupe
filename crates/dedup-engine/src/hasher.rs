@@ -1,6 +1,6 @@
 //! Tiered hashing strategy for email deduplication.
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 /// Dedup keys computed for a single message.
 pub struct DedupKeys {
@@ -156,10 +156,7 @@ mod tests {
             normalize_message_id("  <ABC123@example.com>  "),
             "abc123@example.com"
         );
-        assert_eq!(
-            normalize_message_id("abc@example.com"),
-            "abc@example.com"
-        );
+        assert_eq!(normalize_message_id("abc@example.com"), "abc@example.com");
     }
 
     #[test]

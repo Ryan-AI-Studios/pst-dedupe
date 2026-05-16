@@ -4,8 +4,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
-mod worker;
 mod views;
+mod worker;
 
 fn main() -> eframe::Result<()> {
     // Initialize tracing for debug builds

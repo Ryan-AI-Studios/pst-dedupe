@@ -182,9 +182,6 @@ impl eframe::App for PstDedupApp {
 
 // Make fields accessible to view modules within the crate.
 impl PstDedupApp {
-    pub fn state(&self) -> &AppState {
-        &self.state
-    }
     pub fn set_state(&mut self, s: AppState) {
         self.state = s;
     }

@@ -49,7 +49,7 @@ mod error;
 pub use error::{PstError, Result};
 
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::BufReader;
 use std::path::Path;
 
 use header::PstHeader;
@@ -155,15 +155,5 @@ impl PstFile {
     /// Access the BBT index for direct lookups.
     pub fn bbt(&self) -> &BbtIndex {
         &self.bbt
-    }
-
-    /// Get mutable reader access (used internally by LTP/Messaging layers).
-    pub(crate) fn reader_mut(&mut self) -> &mut BufReader<File> {
-        &mut self.reader
-    }
-
-    /// Get the header reference.
-    pub(crate) fn header(&self) -> &PstHeader {
-        &self.header
     }
 }

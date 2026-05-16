@@ -1,7 +1,7 @@
 //! File selection view — add/remove PST files.
 
-use eframe::egui;
 use crate::app::{AppState, PstDedupApp};
+use eframe::egui;
 
 pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
     ui.add_space(12.0);

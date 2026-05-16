@@ -1,7 +1,7 @@
 //! Settings view — configure dedup parameters before scanning.
 
-use eframe::egui;
 use crate::app::{AppState, PstDedupApp};
+use eframe::egui;
 
 pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
     ui.add_space(12.0);
@@ -31,10 +31,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
 
             // Attachment metadata
             let mut include_att = app.config().include_attachments;
-            ui.checkbox(
-                &mut include_att,
-                "Include attachment names/sizes in hash",
-            );
+            ui.checkbox(&mut include_att, "Include attachment names/sizes in hash");
             app.config_mut().include_attachments = include_att;
         });
     }

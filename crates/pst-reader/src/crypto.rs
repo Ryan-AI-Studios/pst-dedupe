@@ -63,6 +63,7 @@ fn decrypt_cyclic(data: &mut [u8], bid: u64) {
 }
 
 /// Encode table from MS-PST section 5.1 (`mpbbR`, `mpbbCrypt[0..256]`).
+#[cfg(test)]
 #[rustfmt::skip]
 const MPBB_ENCODE: [u8; 256] = [
      65,  54,  19,  98, 168,  33, 110, 187,

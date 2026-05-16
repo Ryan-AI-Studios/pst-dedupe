@@ -4,8 +4,8 @@
 //! display name and entry to the root folder hierarchy.
 
 use crate::error::Result;
-use crate::ndb::nid::{self, NodeId};
 use crate::ltp::pc;
+use crate::ndb::nid;
 use crate::PstFile;
 
 impl PstFile {
@@ -20,8 +20,8 @@ impl PstFile {
             crypt,
         )?;
 
-        prop_ctx
-            .get_string(nid::PID_TAG_DISPLAY_NAME)?
-            .ok_or_else(|| crate::error::PstError::PropertyNotFound(nid::PID_TAG_DISPLAY_NAME))
+        prop_ctx.get_string(nid::PID_TAG_DISPLAY_NAME)?.ok_or(
+            crate::error::PstError::PropertyNotFound(nid::PID_TAG_DISPLAY_NAME),
+        )
     }
 }

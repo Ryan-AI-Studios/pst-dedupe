@@ -3,14 +3,14 @@
 //! A PC is a BTH-based key-value store mapping MAPI property tags to typed values.
 //! The BTH uses 2-byte keys (property ID) and 6-byte data (type + value/HID).
 
-use byteorder::{LittleEndian, ByteOrder};
-use crate::error::{PstError, Result};
-use crate::ndb::NodeId;
-use crate::ndb::block;
-use crate::ndb::btree::{NbtIndex, BbtIndex};
-use crate::crypto::CryptMethod;
+use super::bth::{self, BthRecord};
 use super::hn::{Heap, Hid};
-use super::bth::{self, BthHeader, BthRecord};
+use crate::crypto::CryptMethod;
+use crate::error::{PstError, Result};
+use crate::ndb::block;
+use crate::ndb::btree::{BbtIndex, NbtIndex};
+use crate::ndb::NodeId;
+use byteorder::{ByteOrder, LittleEndian};
 
 use std::io::{Read, Seek};
 
@@ -81,7 +81,6 @@ impl PropertyValue {
 /// A loaded Property Context — provides typed property access.
 pub struct PropContext {
     heap: Heap,
-    bth_header: BthHeader,
     records: Vec<BthRecord>,
 }
 
@@ -100,7 +99,7 @@ impl PropContext {
         let bth_header = bth::read_bth_header(&heap, heap.header.hid_user_root)?;
         let records = bth::collect_records(&heap, &bth_header)?;
 
-        Ok(Self { heap, bth_header, records })
+        Ok(Self { heap, records })
     }
 
     /// Look up a property by tag (property ID, u16).
@@ -162,18 +161,22 @@ impl PropContext {
     fn resolve_value(&self, prop_type: u16, value_hnid: u32) -> Result<Option<PropertyValue>> {
         match prop_type {
             // Fixed-size types — value is inline in dwValueHnid
-            0x0002 => { // PtypInteger16
+            0x0002 => {
+                // PtypInteger16
                 Ok(Some(PropertyValue::I16(value_hnid as i16)))
             }
-            0x0003 => { // PtypInteger32
+            0x0003 => {
+                // PtypInteger32
                 Ok(Some(PropertyValue::I32(value_hnid as i32)))
             }
-            0x000B => { // PtypBoolean
+            0x000B => {
+                // PtypBoolean
                 Ok(Some(PropertyValue::Bool(value_hnid != 0)))
             }
 
             // Variable-size: dwValueHnid is an HID into the heap
-            0x001F => { // PtypString (UTF-16LE)
+            0x001F => {
+                // PtypString (UTF-16LE)
                 let hid = Hid(value_hnid);
                 if hid.is_null() {
                     return Ok(Some(PropertyValue::String(String::new())));
@@ -183,7 +186,8 @@ impl PropContext {
                 Ok(Some(PropertyValue::String(s)))
             }
 
-            0x0014 => { // PtypInteger64
+            0x0014 => {
+                // PtypInteger64
                 // 8 bytes — stored in heap
                 let hid = Hid(value_hnid);
                 let bytes = self.heap.get(hid)?;
@@ -195,7 +199,8 @@ impl PropContext {
                 }
             }
 
-            0x0040 => { // PtypTime (FILETIME, 8 bytes)
+            0x0040 => {
+                // PtypTime (FILETIME, 8 bytes)
                 let hid = Hid(value_hnid);
                 let bytes = self.heap.get(hid)?;
                 if bytes.len() >= 8 {
@@ -205,7 +210,8 @@ impl PropContext {
                 }
             }
 
-            0x0102 => { // PtypBinary
+            0x0102 => {
+                // PtypBinary
                 let hid = Hid(value_hnid);
                 if hid.is_null() {
                     return Ok(Some(PropertyValue::Binary(Vec::new())));
@@ -243,7 +249,7 @@ pub fn load_pc<R: Read + Seek>(
 
 /// Decode a UTF-16LE byte slice to a Rust String.
 pub fn decode_utf16le(bytes: &[u8]) -> Result<String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         // Odd byte count — truncate last byte
         let adjusted = &bytes[..bytes.len() - 1];
         return decode_utf16le(adjusted);
@@ -253,6 +259,5 @@ pub fn decode_utf16le(bytes: &[u8]) -> Result<String> {
         .chunks_exact(2)
         .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
 
-    String::from_utf16(&u16_iter.collect::<Vec<_>>())
-        .map_err(|_| PstError::InvalidUtf16)
+    String::from_utf16(&u16_iter.collect::<Vec<_>>()).map_err(|_| PstError::InvalidUtf16)
 }

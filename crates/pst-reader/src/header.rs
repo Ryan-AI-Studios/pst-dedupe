@@ -4,8 +4,8 @@
 //! It contains magic bytes, format version, encryption method, and the ROOT structure
 //! which provides entry points to the NDB B-trees.
 
-use std::io::{Read, Seek, SeekFrom};
 use byteorder::{LittleEndian, ReadBytesExt};
+use std::io::{Read, Seek, SeekFrom};
 
 use crate::crypto::CryptMethod;
 use crate::error::{PstError, Result};

@@ -4,13 +4,13 @@
 //! (8176 payload + 16 trailer for Unicode). Larger data is split across XBLOCK or
 //! XXBLOCK chains.
 
+use byteorder::{ByteOrder, LittleEndian};
 use std::io::{Read, Seek, SeekFrom};
-use byteorder::{LittleEndian, ByteOrder, ReadBytesExt};
 
-use crate::crypto::{self, CryptMethod};
-use crate::error::{PstError, Result};
 use super::btree::BbtIndex;
 use super::nid::NodeId;
+use crate::crypto::{self, CryptMethod};
+use crate::error::{PstError, Result};
 
 /// A Block ID — references a data or internal block in the BBT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,9 +28,6 @@ impl BlockId {
         self.0 == 0
     }
 }
-
-/// Maximum data payload per block (Unicode): 8192 - 16 (trailer) = 8176 bytes.
-const MAX_BLOCK_DATA: usize = 8176;
 
 /// Block trailer size (Unicode): 16 bytes.
 const BLOCK_TRAILER_SIZE: usize = 16;
@@ -50,8 +47,7 @@ pub fn read_block_data<R: Read + Seek>(
         return Ok(Vec::new());
     }
 
-    let bbt_entry = bbt.get(bid)
-        .ok_or(PstError::BlockNotFound(bid.0))?;
+    let bbt_entry = bbt.get(bid).ok_or(PstError::BlockNotFound(bid.0))?;
 
     // Read raw block from disk
     reader.seek(SeekFrom::Start(bbt_entry.bref.ib))?;
@@ -88,9 +84,10 @@ pub fn read_block_data<R: Read + Seek>(
                 // XXBLOCK — references XBLOCKs
                 read_xxblock_data(reader, bbt, payload, crypt)
             }
-            _ => {
-                Err(PstError::InvalidBlockType { expected: 0x01, actual: btype })
-            }
+            _ => Err(PstError::InvalidBlockType {
+                expected: 0x01,
+                actual: btype,
+            }),
         }
     }
 }
@@ -105,7 +102,10 @@ fn read_xblock_data<R: Read + Seek>(
     crypt: CryptMethod,
 ) -> Result<Vec<u8>> {
     if xblock_data.len() < 8 {
-        return Err(PstError::DataTruncated { needed: 8, available: xblock_data.len() });
+        return Err(PstError::DataTruncated {
+            needed: 8,
+            available: xblock_data.len(),
+        });
     }
 
     let c_entries = LittleEndian::read_u16(&xblock_data[2..4]) as usize;
@@ -118,10 +118,13 @@ fn read_xblock_data<R: Read + Seek>(
         if bid_offset + 8 > xblock_data.len() {
             break;
         }
-        let child_bid = BlockId(LittleEndian::read_u64(&xblock_data[bid_offset..bid_offset + 8]));
+        let child_bid = BlockId(LittleEndian::read_u64(
+            &xblock_data[bid_offset..bid_offset + 8],
+        ));
 
         // Each child is an external data block — read and decrypt
-        let bbt_entry = bbt.get(child_bid)
+        let bbt_entry = bbt
+            .get(child_bid)
             .ok_or(PstError::BlockNotFound(child_bid.0))?;
 
         reader.seek(SeekFrom::Start(bbt_entry.bref.ib))?;
@@ -147,7 +150,10 @@ fn read_xxblock_data<R: Read + Seek>(
     crypt: CryptMethod,
 ) -> Result<Vec<u8>> {
     if xxblock_data.len() < 8 {
-        return Err(PstError::DataTruncated { needed: 8, available: xxblock_data.len() });
+        return Err(PstError::DataTruncated {
+            needed: 8,
+            available: xxblock_data.len(),
+        });
     }
 
     let c_entries = LittleEndian::read_u16(&xxblock_data[2..4]) as usize;
@@ -160,10 +166,13 @@ fn read_xxblock_data<R: Read + Seek>(
         if bid_offset + 8 > xxblock_data.len() {
             break;
         }
-        let child_bid = BlockId(LittleEndian::read_u64(&xxblock_data[bid_offset..bid_offset + 8]));
+        let child_bid = BlockId(LittleEndian::read_u64(
+            &xxblock_data[bid_offset..bid_offset + 8],
+        ));
 
         // Read the child XBLOCK
-        let bbt_entry = bbt.get(child_bid)
+        let bbt_entry = bbt
+            .get(child_bid)
             .ok_or(PstError::BlockNotFound(child_bid.0))?;
 
         reader.seek(SeekFrom::Start(bbt_entry.bref.ib))?;
@@ -195,8 +204,7 @@ pub fn read_subnode_data<R: Read + Seek>(
     }
 
     // Read the subnode block
-    let bbt_entry = bbt.get(sub_bid)
-        .ok_or(PstError::BlockNotFound(sub_bid.0))?;
+    let bbt_entry = bbt.get(sub_bid).ok_or(PstError::BlockNotFound(sub_bid.0))?;
 
     reader.seek(SeekFrom::Start(bbt_entry.bref.ib))?;
     let raw_size = align64(bbt_entry.cb as usize) + BLOCK_TRAILER_SIZE;
@@ -205,7 +213,10 @@ pub fn read_subnode_data<R: Read + Seek>(
 
     let payload = &raw[..bbt_entry.cb as usize];
     if payload.len() < 8 {
-        return Err(PstError::DataTruncated { needed: 8, available: payload.len() });
+        return Err(PstError::DataTruncated {
+            needed: 8,
+            available: payload.len(),
+        });
     }
 
     let btype = payload[0];
@@ -221,7 +232,8 @@ pub fn read_subnode_data<R: Read + Seek>(
                     break;
                 }
                 let entry_nid = LittleEndian::read_u64(&payload[offset..offset + 8]);
-                let entry_bid_data = BlockId(LittleEndian::read_u64(&payload[offset + 8..offset + 16]));
+                let entry_bid_data =
+                    BlockId(LittleEndian::read_u64(&payload[offset + 8..offset + 16]));
 
                 if entry_nid == target_nid.0 {
                     return read_block_data(reader, bbt, entry_bid_data, crypt);
@@ -248,9 +260,10 @@ pub fn read_subnode_data<R: Read + Seek>(
             }
             Err(PstError::SubnodeNotFound(target_nid.0))
         }
-        _ => {
-            Err(PstError::InvalidBlockType { expected: 0x02, actual: btype })
-        }
+        _ => Err(PstError::InvalidBlockType {
+            expected: 0x02,
+            actual: btype,
+        }),
     }
 }
 
@@ -264,8 +277,7 @@ pub fn list_subnode_entries<R: Read + Seek>(
         return Ok(Vec::new());
     }
 
-    let bbt_entry = bbt.get(sub_bid)
-        .ok_or(PstError::BlockNotFound(sub_bid.0))?;
+    let bbt_entry = bbt.get(sub_bid).ok_or(PstError::BlockNotFound(sub_bid.0))?;
 
     reader.seek(SeekFrom::Start(bbt_entry.bref.ib))?;
     let raw_size = align64(bbt_entry.cb as usize) + BLOCK_TRAILER_SIZE;

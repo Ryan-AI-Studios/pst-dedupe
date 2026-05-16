@@ -10,12 +10,12 @@
 //! **Tier 2 — Content Hash:** For emails missing a Message-ID, we compute a SHA-256
 //! hash of: normalized subject + submit time + sender + body preview + attachment metadata.
 
+pub mod exporter;
 pub mod hasher;
 pub mod index;
 pub mod report;
-pub mod exporter;
 
-pub use index::{DedupIndex, DedupResult, DedupTier, MessageRef};
-pub use hasher::compute_dedup_keys;
-pub use report::write_csv_report;
 pub use exporter::export_eml;
+pub use hasher::compute_dedup_keys;
+pub use index::{DedupIndex, DedupResult, DedupTier, MessageRef};
+pub use report::write_csv_report;

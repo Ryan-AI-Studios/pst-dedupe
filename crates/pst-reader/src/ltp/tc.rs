@@ -3,15 +3,14 @@
 //! A TC is a table (rows × columns) built on an HN + subnode BTree.
 //! Used for folder hierarchy tables, contents tables, and attachment tables.
 
-use byteorder::{LittleEndian, ByteOrder};
-use crate::error::{PstError, Result};
-use crate::ndb::NodeId;
-use crate::ndb::block::{self, BlockId};
-use crate::ndb::btree::{NbtIndex, BbtIndex};
-use crate::crypto::CryptMethod;
 use super::hn::{Heap, Hid};
-use super::bth;
 use super::pc::decode_utf16le;
+use crate::crypto::CryptMethod;
+use crate::error::{PstError, Result};
+use crate::ndb::block;
+use crate::ndb::btree::{BbtIndex, NbtIndex};
+use crate::ndb::NodeId;
+use byteorder::{ByteOrder, LittleEndian};
 
 use std::io::{Read, Seek};
 
@@ -45,12 +44,6 @@ pub struct TcInfo {
     pub hnid_rows: u32,
     /// Column descriptors.
     pub columns: Vec<TcColumnDesc>,
-}
-
-/// A single row from a TC.
-pub struct TcRow<'a> {
-    data: &'a [u8],
-    columns: &'a [TcColumnDesc],
 }
 
 /// A loaded Table Context.
@@ -87,14 +80,14 @@ impl TableContext {
 
         // Get row data
         let (row_data, row_count) = if let Some(sub_data) = subnode_rows {
-            let count = if row_size > 0 { sub_data.len() / row_size } else { 0 };
+            let count = sub_data.len().checked_div(row_size).unwrap_or(0);
             (sub_data, count)
         } else if info.hnid_rows != 0 {
             // Rows might be inline in the HN
             let hid = Hid(info.hnid_rows);
             if !hid.is_null() && hid.hid_type() == 0 {
                 let inline_data = heap.get(hid)?.to_vec();
-                let count = if row_size > 0 { inline_data.len() / row_size } else { 0 };
+                let count = inline_data.len().checked_div(row_size).unwrap_or(0);
                 (inline_data, count)
             } else {
                 (Vec::new(), 0)
@@ -103,14 +96,23 @@ impl TableContext {
             (Vec::new(), 0)
         };
 
-        Ok(Self { heap, info, row_data, row_size, row_count })
+        Ok(Self {
+            heap,
+            info,
+            row_data,
+            row_size,
+            row_count,
+        })
     }
 
     fn parse_tc_info(data: &[u8]) -> Result<TcInfo> {
         // TCINFO: bType(1) + cCols(1) + rgib[4](8) + hidRowIndex(4) + hnidRows(4) = 18 bytes
         // Then cCols × TCOLDESC (8 bytes each)
         if data.len() < 18 {
-            return Err(PstError::DataTruncated { needed: 18, available: data.len() });
+            return Err(PstError::DataTruncated {
+                needed: 18,
+                available: data.len(),
+            });
         }
 
         let _b_type = data[0]; // 0x7C for TC
@@ -140,7 +142,13 @@ impl TableContext {
             });
         }
 
-        Ok(TcInfo { c_cols, rgib, hid_row_index, hnid_rows, columns })
+        Ok(TcInfo {
+            c_cols,
+            rgib,
+            hid_row_index,
+            hnid_rows,
+            columns,
+        })
     }
 
     /// Number of rows in the table.
@@ -165,7 +173,9 @@ impl TableContext {
         }
 
         match col.cb_data {
-            4 => Some(LittleEndian::read_u32(&self.row_data[data_offset..data_end])),
+            4 => Some(LittleEndian::read_u32(
+                &self.row_data[data_offset..data_end],
+            )),
             2 => Some(LittleEndian::read_u16(&self.row_data[data_offset..data_end]) as u32),
             1 => Some(self.row_data[data_offset] as u32),
             _ => None,
@@ -182,7 +192,9 @@ impl TableContext {
             return None;
         }
 
-        Some(LittleEndian::read_u64(&self.row_data[data_offset..data_offset + 8]))
+        Some(LittleEndian::read_u64(
+            &self.row_data[data_offset..data_offset + 8],
+        ))
     }
 
     /// Read a variable-length value (string or binary) from a row.
@@ -233,8 +245,7 @@ pub fn load_tc<R: Read + Seek>(
     nid: NodeId,
     crypt: CryptMethod,
 ) -> Result<TableContext> {
-    let nbt_entry = nbt.get(nid)
-        .ok_or(PstError::NodeNotFound(nid.0))?;
+    let nbt_entry = nbt.get(nid).ok_or(PstError::NodeNotFound(nid.0))?;
 
     // Read main node data
     let data = block::read_block_data(reader, bbt, nbt_entry.bid_data, crypt)?;

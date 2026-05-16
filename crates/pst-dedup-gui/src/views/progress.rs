@@ -1,7 +1,7 @@
 //! Progress view — shows live scan statistics during processing.
 
-use eframe::egui;
 use crate::app::PstDedupApp;
+use eframe::egui;
 
 pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
     let progress = app.progress().lock().unwrap().clone();

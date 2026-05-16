@@ -3,9 +3,9 @@
 //! A B-tree stored inside a Heap-on-Node. Used by Property Context (PC) and
 //! Table Context (TC) for indexed lookups.
 
-use byteorder::{LittleEndian, ByteOrder};
-use crate::error::{PstError, Result};
 use super::hn::{Heap, Hid};
+use crate::error::{PstError, Result};
+use byteorder::{ByteOrder, LittleEndian};
 
 /// BTH header (BTHHEADER).
 #[derive(Debug)]
@@ -33,7 +33,10 @@ pub struct BthRecord {
 pub fn read_bth_header(heap: &Heap, hid: Hid) -> Result<BthHeader> {
     let data = heap.get(hid)?;
     if data.len() < 8 {
-        return Err(PstError::DataTruncated { needed: 8, available: data.len() });
+        return Err(PstError::DataTruncated {
+            needed: 8,
+            available: data.len(),
+        });
     }
 
     let b_type = data[0];
@@ -59,7 +62,13 @@ pub fn collect_records(heap: &Heap, header: &BthHeader) -> Result<Vec<BthRecord>
     }
 
     let mut records = Vec::new();
-    collect_level(heap, header, header.hid_root, header.b_idx_levels, &mut records)?;
+    collect_level(
+        heap,
+        header,
+        header.hid_root,
+        header.b_idx_levels,
+        &mut records,
+    )?;
     Ok(records)
 }
 
@@ -106,7 +115,9 @@ fn collect_level(
             }
 
             let hid_child_offset = offset + header.cb_key as usize;
-            let hid_child = Hid(LittleEndian::read_u32(&data[hid_child_offset..hid_child_offset + 4]));
+            let hid_child = Hid(LittleEndian::read_u32(
+                &data[hid_child_offset..hid_child_offset + 4],
+            ));
 
             collect_level(heap, header, hid_child, level - 1, records)?;
         }
@@ -121,7 +132,13 @@ pub fn lookup(heap: &Heap, header: &BthHeader, search_key: &[u8]) -> Result<Opti
         return Ok(None);
     }
 
-    lookup_level(heap, header, header.hid_root, header.b_idx_levels, search_key)
+    lookup_level(
+        heap,
+        header,
+        header.hid_root,
+        header.b_idx_levels,
+        search_key,
+    )
 }
 
 fn lookup_level(
@@ -146,7 +163,9 @@ fn lookup_level(
             let key = &data[offset..offset + header.cb_key as usize];
             if key == search_key {
                 let value_start = offset + header.cb_key as usize;
-                return Ok(Some(data[value_start..value_start + header.cb_ent as usize].to_vec()));
+                return Ok(Some(
+                    data[value_start..value_start + header.cb_ent as usize].to_vec(),
+                ));
             }
         }
         Ok(None)
@@ -164,7 +183,9 @@ fn lookup_level(
             let offset = i * record_size;
             let key = &data[offset..offset + header.cb_key as usize];
             let hid_child_offset = offset + header.cb_key as usize;
-            let child_hid = Hid(LittleEndian::read_u32(&data[hid_child_offset..hid_child_offset + 4]));
+            let child_hid = Hid(LittleEndian::read_u32(
+                &data[hid_child_offset..hid_child_offset + 4],
+            ));
 
             if key <= search_key {
                 best_hid = Some(child_hid);

@@ -177,11 +177,7 @@ mod tests {
     #[test]
     fn test_unique_message() {
         let mut idx = DedupIndex::new();
-        let result = idx.check_and_insert(
-            Some("abc@example.com"),
-            [0; 32],
-            make_ref("Hello"),
-        );
+        let result = idx.check_and_insert(Some("abc@example.com"), [0; 32], make_ref("Hello"));
         assert!(matches!(result, DedupResult::Unique));
         assert_eq!(idx.unique_count, 1);
     }

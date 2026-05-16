@@ -30,6 +30,11 @@ Build a pure Rust PST deduper that:
 | `crates/pst-dedup-gui` | egui app and background scan worker. |
 | `conductor/conductor.md` | Track board and implementation state. |
 | `.agents/rules` | Repo-specific AI workflow constraints. |
+| `.agents/skills/coding-core/skill.md` | Core coding standards and patterns. |
+| `.agents/skills/changeguard/SKILL.md` | ChangeGuard usage guidelines. |
+| `.agents/skills/ai-brains/SKILL.md` | ai-brains usage guidelines. |
+| `.agents/skills/orchestrator-workflow/SKILL.md` | Orchestrator workflow guidelines. |
+| `.agents/skills/tooling/SKILL.md` | Tooling usage guidelines. |
 
 ## Current Reality Check
 

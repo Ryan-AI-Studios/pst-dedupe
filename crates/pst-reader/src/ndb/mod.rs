@@ -6,10 +6,10 @@
 //!
 //! All higher layers (LTP, Messaging) read data through NDB.
 
-pub mod btree;
 pub mod block;
+pub mod btree;
 pub mod nid;
 pub mod page;
 
-pub use nid::NodeId;
 pub use block::BlockId;
+pub use nid::NodeId;

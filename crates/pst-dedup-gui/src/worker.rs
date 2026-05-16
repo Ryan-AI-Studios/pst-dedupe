@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use pst_reader::PstFile;
 use dedup_engine::{
-    DedupIndex, DedupResult, MessageRef,
     hasher::{self, AttachmentInfo},
-    report::{self, ReportRow},
+    report::ReportRow,
+    DedupIndex, DedupResult, MessageRef,
 };
+use pst_reader::PstFile;
 
 use crate::app::DedupConfig;
 
@@ -151,22 +151,21 @@ pub fn run_scan(
                 };
 
                 // Read attachment metadata if configured
-                let attachments = if config.include_attachments
-                    && props.has_attachments.unwrap_or(false)
-                {
-                    match pst.read_attachment_metadata(msg_nid) {
-                        Ok(atts) => atts
-                            .into_iter()
-                            .map(|a| AttachmentInfo {
-                                filename: a.filename,
-                                size: a.size,
-                            })
-                            .collect(),
-                        Err(_) => Vec::new(),
-                    }
-                } else {
-                    Vec::new()
-                };
+                let attachments =
+                    if config.include_attachments && props.has_attachments.unwrap_or(false) {
+                        match pst.read_attachment_metadata(msg_nid) {
+                            Ok(atts) => atts
+                                .into_iter()
+                                .map(|a| AttachmentInfo {
+                                    filename: a.filename,
+                                    size: a.size,
+                                })
+                                .collect(),
+                            Err(_) => Vec::new(),
+                        }
+                    } else {
+                        Vec::new()
+                    };
 
                 // Compute dedup keys
                 let keys = hasher::compute_dedup_keys(
@@ -220,7 +219,7 @@ pub fn run_scan(
                 file_messages += 1;
 
                 // Update progress periodically (every 100 messages)
-                if file_messages % 100 == 0 {
+                if file_messages.is_multiple_of(100) {
                     let elapsed = start.elapsed().as_secs_f64();
                     let total_processed = index.total();
                     let mut p = progress.lock().unwrap();

@@ -4,9 +4,9 @@
 //! Attachments are stored in a subnode of the message node.
 
 use crate::error::Result;
-use crate::ndb::nid::{self, NodeId, NidType};
-use crate::ndb::block;
 use crate::ltp::pc::PropContext;
+use crate::ndb::block;
+use crate::ndb::nid::{self, NidType, NodeId};
 use crate::PstFile;
 
 /// Lightweight attachment metadata for dedup hashing.
@@ -34,11 +34,8 @@ impl PstFile {
         }
 
         // List subnode entries to find attachment objects
-        let sub_entries = block::list_subnode_entries(
-            &mut self.reader,
-            &self.bbt,
-            nbt_entry.bid_sub,
-        )?;
+        let sub_entries =
+            block::list_subnode_entries(&mut self.reader, &self.bbt, nbt_entry.bid_sub)?;
 
         let crypt = self.header.crypt_method;
         let mut attachments = Vec::new();
@@ -50,12 +47,8 @@ impl PstFile {
             }
 
             // Read the attachment's Property Context
-            let att_data = block::read_block_data(
-                &mut self.reader,
-                &self.bbt,
-                entry.bid_data,
-                crypt,
-            )?;
+            let att_data =
+                block::read_block_data(&mut self.reader, &self.bbt, entry.bid_data, crypt)?;
 
             if let Ok(pc) = PropContext::load(att_data) {
                 let filename = pc

@@ -4,15 +4,15 @@
 //! We traverse them fully on file open and build in-memory indexes
 //! (HashMap-based) for O(1) lookups during message processing.
 
+use byteorder::{ByteOrder, LittleEndian};
 use std::collections::HashMap;
 use std::io::{Read, Seek};
-use byteorder::{LittleEndian, ByteOrder};
 
-use crate::error::{PstError, Result};
-use crate::header::{Bref, PstHeader};
-use super::page::{self, RawPage};
 use super::nid::NodeId;
+use super::page::{self, RawPage};
 use super::BlockId;
+use crate::error::Result;
+use crate::header::{Bref, PstHeader};
 
 /// NBT leaf entry (NBTENTRY, §2.2.2.7.7.4) — 32 bytes for Unicode.
 #[derive(Debug, Clone)]
@@ -87,12 +87,15 @@ impl NbtIndex {
                 let bid_sub = LittleEndian::read_u64(&entry_data[16..24]);
                 let nid_parent = LittleEndian::read_u32(&entry_data[24..28]);
 
-                entries.insert(nid, NbtEntry {
-                    nid: NodeId(nid),
-                    bid_data: BlockId(bid_data),
-                    bid_sub: BlockId(bid_sub),
-                    nid_parent,
-                });
+                entries.insert(
+                    nid,
+                    NbtEntry {
+                        nid: NodeId(nid),
+                        bid_data: BlockId(bid_data),
+                        bid_sub: BlockId(bid_sub),
+                        nid_parent,
+                    },
+                );
             }
         } else {
             // Intermediate level — entries are key(8) + BREF(16) = 24 bytes
@@ -175,11 +178,14 @@ impl BbtIndex {
                 let cb = LittleEndian::read_u16(&entry_data[16..18]);
                 let c_ref = LittleEndian::read_u16(&entry_data[18..20]);
 
-                entries.insert(bid, BbtEntry {
-                    bref: Bref { bid, ib },
-                    cb,
-                    c_ref,
-                });
+                entries.insert(
+                    bid,
+                    BbtEntry {
+                        bref: Bref { bid, ib },
+                        cb,
+                        c_ref,
+                    },
+                );
             }
         } else {
             // Intermediate level — entries are key(8) + BREF(16) = 24 bytes

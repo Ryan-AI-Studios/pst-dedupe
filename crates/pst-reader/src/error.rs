@@ -50,7 +50,11 @@ pub enum PstError {
     PropertyNotFound(u16),
 
     #[error("Property type mismatch: tag=0x{tag:04X}, expected {expected}, got {actual}")]
-    PropertyTypeMismatch { tag: u16, expected: &'static str, actual: u16 },
+    PropertyTypeMismatch {
+        tag: u16,
+        expected: &'static str,
+        actual: u16,
+    },
 
     #[error("Data truncated: needed {needed} bytes, got {available}")]
     DataTruncated { needed: usize, available: usize },

@@ -4,7 +4,6 @@
 //! Pages are used for B-tree nodes (NBT, BBT) and allocation maps.
 
 use std::io::{Read, Seek, SeekFrom};
-use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::error::{PstError, Result};
 

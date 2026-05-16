@@ -3,8 +3,8 @@
 //! Extracts the properties needed for deduplication from a message node.
 
 use crate::error::Result;
-use crate::ndb::nid::{self, NodeId};
 use crate::ltp::pc;
+use crate::ndb::nid::{self, NodeId};
 use crate::PstFile;
 
 /// Extracted message properties for dedup processing.
@@ -34,13 +34,7 @@ impl PstFile {
     /// Extract dedup-relevant properties from a single message node.
     pub fn read_message_properties(&mut self, message_nid: NodeId) -> Result<MessageProperties> {
         let crypt = self.header.crypt_method;
-        let prop_ctx = pc::load_pc(
-            &mut self.reader,
-            &self.nbt,
-            &self.bbt,
-            message_nid,
-            crypt,
-        )?;
+        let prop_ctx = pc::load_pc(&mut self.reader, &self.nbt, &self.bbt, message_nid, crypt)?;
 
         let message_id = prop_ctx.get_string(nid::PID_TAG_INTERNET_MESSAGE_ID)?;
         let subject = prop_ctx.get_string(nid::PID_TAG_SUBJECT)?;
@@ -52,7 +46,11 @@ impl PstFile {
 
         let body_full = prop_ctx.get_string(nid::PID_TAG_BODY)?;
         let body_preview = body_full.map(|b| {
-            if b.len() > 4096 { b[..4096].to_string() } else { b }
+            if b.len() > 4096 {
+                b[..4096].to_string()
+            } else {
+                b
+            }
         });
 
         let display_to = prop_ctx.get_string(nid::PID_TAG_DISPLAY_TO)?;

@@ -3,9 +3,9 @@
 //! Folders are accessed via their hierarchy and contents Table Contexts.
 //! The root folder (NID 0x122) is the entry point.
 
-use crate::error::{PstError, Result};
-use crate::ndb::nid::{self, NodeId};
+use crate::error::Result;
 use crate::ltp::{pc, tc};
+use crate::ndb::nid::{self, NodeId};
 use crate::PstFile;
 
 /// A folder descriptor with enough info for traversal and dedup.
@@ -43,11 +43,9 @@ impl PstFile {
         let name = {
             let crypt = self.header.crypt_method;
             match pc::load_pc(&mut self.reader, &self.nbt, &self.bbt, folder_nid, crypt) {
-                Ok(prop_ctx) => {
-                    prop_ctx
-                        .get_string(nid::PID_TAG_DISPLAY_NAME)?
-                        .unwrap_or_else(|| format!("[Folder 0x{:X}]", folder_nid.0))
-                }
+                Ok(prop_ctx) => prop_ctx
+                    .get_string(nid::PID_TAG_DISPLAY_NAME)?
+                    .unwrap_or_else(|| format!("[Folder 0x{:X}]", folder_nid.0)),
                 Err(_) => format!("[Folder 0x{:X}]", folder_nid.0),
             }
         };

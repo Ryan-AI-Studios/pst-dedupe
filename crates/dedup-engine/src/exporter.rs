@@ -52,7 +52,13 @@ pub fn export_eml(
 pub fn make_eml_filename(subject: &str, counter: u64) -> String {
     let safe: String = subject
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     let truncated = if safe.len() > 80 { &safe[..80] } else { &safe };
@@ -65,7 +71,6 @@ fn encode_header_value(value: &str) -> String {
         value.to_string()
     } else {
         // UTF-8 B-encoding: =?UTF-8?B?<base64>?=
-        use std::io::Read;
         let encoded = base64_encode(value.as_bytes());
         format!("=?UTF-8?B?{}?=", encoded)
     }
@@ -74,7 +79,7 @@ fn encode_header_value(value: &str) -> String {
 /// Minimal base64 encoder (no external dependency needed).
 fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
 
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;

@@ -1,9 +1,9 @@
 //! Results view — scan summary, duplicate table, and export options.
 
-use eframe::egui;
-use std::path::PathBuf;
 use crate::app::PstDedupApp;
 use dedup_engine::DedupResult;
+use eframe::egui;
+use std::path::Path;
 
 pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
     let results = match app.results() {
@@ -101,36 +101,38 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
 
     if !duplicates.is_empty() {
         ui.collapsing(
-            format!("Duplicate details (showing {} of {})", duplicates.len(), results.duplicate_count),
+            format!(
+                "Duplicate details (showing {} of {})",
+                duplicates.len(),
+                results.duplicate_count
+            ),
             |ui| {
-                egui::ScrollArea::both()
-                    .max_height(300.0)
-                    .show(ui, |ui| {
-                        egui::Grid::new("dup_table")
-                            .num_columns(5)
-                            .spacing([12.0, 2.0])
-                            .striped(true)
-                            .show(ui, |ui| {
-                                ui.strong("Subject");
-                                ui.strong("Sender");
-                                ui.strong("PST");
-                                ui.strong("Tier");
-                                ui.strong("Original PST");
-                                ui.end_row();
+                egui::ScrollArea::both().max_height(300.0).show(ui, |ui| {
+                    egui::Grid::new("dup_table")
+                        .num_columns(5)
+                        .spacing([12.0, 2.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.strong("Subject");
+                            ui.strong("Sender");
+                            ui.strong("PST");
+                            ui.strong("Tier");
+                            ui.strong("Original PST");
+                            ui.end_row();
 
-                                for row in &duplicates {
-                                    if let DedupResult::DuplicateOf { original, tier } = &row.result {
-                                        let subj = truncate(&row.message.subject, 40);
-                                        ui.label(subj);
-                                        ui.label(truncate(&row.message.sender, 25));
-                                        ui.label(&row.message.pst_name);
-                                        ui.label(tier.to_string());
-                                        ui.label(&original.pst_name);
-                                        ui.end_row();
-                                    }
+                            for row in &duplicates {
+                                if let DedupResult::DuplicateOf { original, tier } = &row.result {
+                                    let subj = truncate(&row.message.subject, 40);
+                                    ui.label(subj);
+                                    ui.label(truncate(&row.message.sender, 25));
+                                    ui.label(&row.message.pst_name);
+                                    ui.label(tier.to_string());
+                                    ui.label(&original.pst_name);
+                                    ui.end_row();
                                 }
-                            });
-                    });
+                            }
+                        });
+                });
             },
         );
     }
@@ -172,7 +174,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
     });
 }
 
-fn export_csv(app: &PstDedupApp, path: &PathBuf) {
+fn export_csv(app: &PstDedupApp, path: &Path) {
     if let Some(results) = app.results() {
         match dedup_engine::write_csv_report(path, &results.rows) {
             Ok(()) => {

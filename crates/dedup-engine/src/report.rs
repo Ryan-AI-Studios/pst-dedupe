@@ -23,7 +23,7 @@ pub fn write_csv_report(path: &Path, rows: &[ReportRow]) -> Result<(), Box<dyn s
     let mut wtr = csv::Writer::from_writer(file);
 
     // Header
-    wtr.write_record(&[
+    wtr.write_record([
         "Status",
         "Match Tier",
         "PST File",
@@ -40,7 +40,7 @@ pub fn write_csv_report(path: &Path, rows: &[ReportRow]) -> Result<(), Box<dyn s
     for row in rows {
         match &row.result {
             DedupResult::Unique => {
-                wtr.write_record(&[
+                wtr.write_record([
                     "Unique",
                     "",
                     &row.message.pst_name,
@@ -55,7 +55,7 @@ pub fn write_csv_report(path: &Path, rows: &[ReportRow]) -> Result<(), Box<dyn s
                 ])?;
             }
             DedupResult::DuplicateOf { original, tier } => {
-                wtr.write_record(&[
+                wtr.write_record([
                     "Duplicate",
                     &tier.to_string(),
                     &row.message.pst_name,
