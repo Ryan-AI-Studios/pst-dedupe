@@ -1,0 +1,216 @@
+//! Results view — scan summary, duplicate table, and export options.
+
+use eframe::egui;
+use std::path::PathBuf;
+use crate::app::PstDedupApp;
+use dedup_engine::DedupResult;
+
+pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
+    let results = match app.results() {
+        Some(r) => r,
+        None => {
+            ui.label("No results available.");
+            return;
+        }
+    };
+
+    ui.add_space(12.0);
+    ui.heading("Scan Complete");
+    ui.add_space(8.0);
+
+    // Summary stats
+    egui::Grid::new("summary_stats")
+        .num_columns(2)
+        .spacing([40.0, 4.0])
+        .show(ui, |ui| {
+            ui.strong("Total messages:");
+            ui.label(format!("{}", results.total_messages));
+            ui.end_row();
+
+            ui.strong("Unique:");
+            ui.label(format!("{}", results.unique_count));
+            ui.end_row();
+
+            ui.strong("Duplicates:");
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 120, 50),
+                format!("{}", results.duplicate_count),
+            );
+            ui.end_row();
+
+            ui.label("  Tier 1 (Message-ID):");
+            ui.label(format!("{}", results.tier1_hits));
+            ui.end_row();
+
+            ui.label("  Tier 2 (Content Hash):");
+            ui.label(format!("{}", results.tier2_hits));
+            ui.end_row();
+
+            ui.strong("Est. savings:");
+            ui.label(format_size(results.savings_bytes));
+            ui.end_row();
+
+            ui.strong("Duration:");
+            ui.label(format!("{:.1}s", results.duration_secs));
+            ui.end_row();
+
+            ui.strong("Throughput:");
+            let mps = if results.duration_secs > 0.0 {
+                results.total_messages as f64 / results.duration_secs
+            } else {
+                0.0
+            };
+            ui.label(format!("{:.0} msgs/sec", mps));
+            ui.end_row();
+        });
+
+    ui.add_space(8.0);
+
+    // Per-file breakdown
+    if !results.file_stats.is_empty() {
+        ui.collapsing("Per-file breakdown", |ui| {
+            egui::Grid::new("file_breakdown")
+                .num_columns(3)
+                .spacing([20.0, 2.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("File");
+                    ui.strong("Messages");
+                    ui.strong("Duplicates");
+                    ui.end_row();
+
+                    for fs in &results.file_stats {
+                        ui.label(&fs.name);
+                        ui.label(format!("{}", fs.messages));
+                        ui.label(format!("{}", fs.duplicates));
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+
+    ui.add_space(8.0);
+
+    // Duplicate table (scrollable, showing first N)
+    let duplicates: Vec<_> = results
+        .rows
+        .iter()
+        .filter(|r| matches!(r.result, DedupResult::DuplicateOf { .. }))
+        .take(500) // Show first 500 for performance
+        .collect();
+
+    if !duplicates.is_empty() {
+        ui.collapsing(
+            format!("Duplicate details (showing {} of {})", duplicates.len(), results.duplicate_count),
+            |ui| {
+                egui::ScrollArea::both()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("dup_table")
+                            .num_columns(5)
+                            .spacing([12.0, 2.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.strong("Subject");
+                                ui.strong("Sender");
+                                ui.strong("PST");
+                                ui.strong("Tier");
+                                ui.strong("Original PST");
+                                ui.end_row();
+
+                                for row in &duplicates {
+                                    if let DedupResult::DuplicateOf { original, tier } = &row.result {
+                                        let subj = truncate(&row.message.subject, 40);
+                                        ui.label(subj);
+                                        ui.label(truncate(&row.message.sender, 25));
+                                        ui.label(&row.message.pst_name);
+                                        ui.label(tier.to_string());
+                                        ui.label(&original.pst_name);
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                    });
+            },
+        );
+    }
+
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
+
+    // Export controls
+    ui.horizontal(|ui| {
+        if ui.button("📄  Export CSV Report").clicked() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("CSV", &["csv"])
+                .set_file_name("dedup_report.csv")
+                .save_file()
+            {
+                export_csv(app, &path);
+            }
+        }
+
+        ui.add_space(12.0);
+
+        if ui.button("📧  Export Unique Emails (EML)").clicked() {
+            if let Some(dir) = rfd::FileDialog::new()
+                .set_title("Select output folder for EML files")
+                .pick_folder()
+            {
+                // EML export would require re-reading PSTs for full body data.
+                // For now, show a note that this requires implementation.
+                tracing::info!("EML export to: {}", dir.display());
+            }
+        }
+
+        ui.add_space(24.0);
+
+        if ui.button("Start Over").clicked() {
+            app.reset();
+        }
+    });
+}
+
+fn export_csv(app: &PstDedupApp, path: &PathBuf) {
+    if let Some(results) = app.results() {
+        match dedup_engine::write_csv_report(path, &results.rows) {
+            Ok(()) => {
+                tracing::info!("Report written to {}", path.display());
+                // Append summary
+                let _ = dedup_engine::report::write_summary_report(
+                    path,
+                    results.total_messages,
+                    results.unique_count,
+                    results.duplicate_count,
+                    results.tier1_hits,
+                    results.tier2_hits,
+                    results.savings_bytes,
+                );
+            }
+            Err(e) => {
+                tracing::error!("Failed to write report: {}", e);
+            }
+        }
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() > max {
+        format!("{}...", &s[..max - 3])
+    } else {
+        s.to_string()
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.2} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} bytes", bytes)
+    }
+}

@@ -1,0 +1,12 @@
+[package]
+name = "pst-reader"
+version = "0.1.0"
+edition = "2021"
+description = "Pure Rust PST (Personal Storage Table) reader — MS-PST spec implementation"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+byteorder = { workspace = true }
+thiserror = { workspace = true }
+crc32fast = { workspace = true }
+tracing = { workspace = true }

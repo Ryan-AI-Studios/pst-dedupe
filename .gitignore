@@ -1,0 +1,8 @@
+/target/
+/.changeguard/cache/
+/.changeguard/index/
+/.changeguard/tmp/
+/.env
+*.log
+review.md
+.changeguard/

@@ -1,0 +1,11 @@
+[package]
+name = "dedup-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Email deduplication engine — tiered hashing, indexing, and reporting"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+sha2 = { workspace = true }
+csv = { workspace = true }
+chrono = { workspace = true }
