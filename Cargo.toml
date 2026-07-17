@@ -8,6 +8,7 @@ members = [
     "crates/pst-dedup-cli",
     "crates/matter-core",
     "crates/ingest-purview",
+    "crates/extract-pst",
 ]
 
 [workspace.dependencies]

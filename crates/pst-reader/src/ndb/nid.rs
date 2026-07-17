@@ -161,11 +161,32 @@ pub const PID_TAG_BODY: u16 = 0x1000;
 /// PidTagDisplayTo (PtypString) — formatted To recipients
 pub const PID_TAG_DISPLAY_TO: u16 = 0x0E04;
 
+/// PidTagDisplayCc (PtypString) — formatted Cc recipients
+pub const PID_TAG_DISPLAY_CC: u16 = 0x0E03;
+
+/// PidTagDisplayBcc (PtypString) — formatted Bcc recipients
+pub const PID_TAG_DISPLAY_BCC: u16 = 0x0E02;
+
+/// PidTagMessageDeliveryTime (PtypTime / FILETIME) — received time
+pub const PID_TAG_MESSAGE_DELIVERY_TIME: u16 = 0x0E06;
+
 /// PidTagMessageSize (PtypInteger32)
 pub const PID_TAG_MESSAGE_SIZE: u16 = 0x0E08;
 
 /// PidTagHasAttachments (PtypBoolean)
 pub const PID_TAG_HAS_ATTACHMENTS: u16 = 0x0E1B;
+
+/// PidTagBodyHtml (PtypString or PtypBinary depending on store)
+pub const PID_TAG_BODY_HTML: u16 = 0x1013;
+
+/// PidTagAttachDataBinary (PtypBinary) — attachment payload bytes
+pub const PID_TAG_ATTACH_DATA_BINARY: u16 = 0x3701;
+
+/// PidTagAttachMethod (PtypInteger32) — how attachment is stored
+pub const PID_TAG_ATTACH_METHOD: u16 = 0x3705;
+
+/// PidTagAttachMimeTag (PtypString)
+pub const PID_TAG_ATTACH_MIME_TAG: u16 = 0x370E;
 
 /// PidTagAttachFilename (PtypString)
 pub const PID_TAG_ATTACH_FILENAME: u16 = 0x3704;
@@ -178,3 +199,10 @@ pub const PID_TAG_ATTACH_SIZE: u16 = 0x0E20;
 
 /// PidTagNid — used in TC rows to reference child folder/message NIDs
 pub const PID_TAG_LTP_ROW_ID: u16 = 0x67F2;
+
+// ── Attach method constants (PidTagAttachMethod) ────────────────────────────
+
+/// Attachment data is in PidTagAttachDataBinary.
+pub const ATTACH_BY_VALUE: i32 = 0x0000_0001;
+/// Embedded message object.
+pub const ATTACH_EMBEDDED_MSG: i32 = 0x0000_0005;

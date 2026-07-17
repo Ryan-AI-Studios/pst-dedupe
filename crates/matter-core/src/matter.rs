@@ -24,6 +24,10 @@ pub const INDEX_DIR: &str = "index";
 pub const EXPORTS_DIR: &str = "exports";
 /// Optional directory for file logs.
 pub const LOGS_DIR: &str = "logs";
+/// Matter-local workspace for extractor spill (never OS `%TEMP%` for evidence).
+pub const WORKSPACE_DIR: &str = "workspace";
+/// Temporary materialization under the matter root (`workspace/temp/`).
+pub const WORKSPACE_TEMP_DIR: &str = "temp";
 
 /// Default family kind for email parent + attachment children.
 pub const FAMILY_KIND_EMAIL_ATTACHMENTS: &str = "email_attachments";
@@ -224,8 +228,10 @@ impl Matter {
     /// index/
     /// exports/
     /// logs/
+    /// workspace/temp/
     /// ```
-    /// and applies schema migrations.
+    /// and applies schema migrations. Cleans any leftover `workspace/temp/`
+    /// contents (idempotent empty wipe).
     pub fn create(root: impl AsRef<Utf8Path>, name: &str) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         if root.as_std_path().exists() {
@@ -261,6 +267,7 @@ impl Matter {
             cas,
             matter_id: matter_id.clone(),
         };
+        matter.cleanup_workspace_temp()?;
 
         // First audit event: matter created.
         let _ = matter.append_audit(AuditEventInput {
@@ -276,7 +283,8 @@ impl Matter {
 
     /// Open an existing matter at `root`.
     ///
-    /// Applies any pending migrations.
+    /// Applies any pending migrations and removes leftover files under
+    /// `workspace/temp/` (crash residue from prior extract materializations).
     pub fn open(root: impl AsRef<Utf8Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         if !root.as_std_path().exists() {
@@ -303,12 +311,39 @@ impl Matter {
         let cas = Cas::new(&root);
         cas.ensure_layout()?;
 
-        Ok(Self {
+        let matter = Self {
             root,
             conn,
             cas,
             matter_id,
-        })
+        };
+        matter.cleanup_workspace_temp()?;
+        Ok(matter)
+    }
+
+    /// Path to `workspace/temp/` under this matter root.
+    pub fn workspace_temp_dir(&self) -> Utf8PathBuf {
+        self.root.join(WORKSPACE_DIR).join(WORKSPACE_TEMP_DIR)
+    }
+
+    /// Recursively delete **contents** of `workspace/temp/` (keeps the directory).
+    ///
+    /// Used on create/open so crash residue (e.g. CAS-materialized PSTs) cannot
+    /// accumulate under the matter. Best-effort: I/O errors surface as
+    /// [`Error::Io`].
+    pub fn cleanup_workspace_temp(&self) -> Result<()> {
+        let temp = self.workspace_temp_dir();
+        fs::create_dir_all(temp.as_std_path())?;
+        for entry in fs::read_dir(temp.as_std_path())? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                fs::remove_dir_all(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
+        }
+        Ok(())
     }
 
     /// Matter root directory.
@@ -360,6 +395,11 @@ impl Matter {
     /// Put raw physical bytes into CAS; returns lowercase SHA-256 hex.
     pub fn put_bytes(&self, data: &[u8]) -> Result<String> {
         self.cas.put_bytes(data)
+    }
+
+    /// Stream raw physical bytes into CAS (bounded buffer; no full `Vec` required).
+    pub fn put_reader<R: std::io::Read>(&self, reader: &mut R) -> Result<String> {
+        self.cas.put_reader(reader)
     }
 
     /// Get raw bytes by SHA-256 hex digest.
@@ -986,9 +1026,14 @@ impl Matter {
 }
 
 fn create_layout_dirs(root: &Utf8Path) -> Result<()> {
-    for dir in [INDEX_DIR, EXPORTS_DIR, LOGS_DIR] {
+    for dir in [INDEX_DIR, EXPORTS_DIR, LOGS_DIR, WORKSPACE_DIR] {
         fs::create_dir_all(root.join(dir).as_std_path())?;
     }
+    fs::create_dir_all(
+        root.join(WORKSPACE_DIR)
+            .join(WORKSPACE_TEMP_DIR)
+            .as_std_path(),
+    )?;
     // blobs/ created via Cas::ensure_layout
     Ok(())
 }

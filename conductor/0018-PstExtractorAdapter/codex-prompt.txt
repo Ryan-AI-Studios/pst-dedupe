@@ -1,0 +1,41 @@
+You are the independent completion reviewer for Ledgerful track 0018-PstExtractorAdapter.
+
+Track directory: C:\dev\Dedupe\conductor\0018-PstExtractorAdapter
+Execution repos: C:\dev\Dedupe
+Scope: branch feat/0018-pst-extractor vs main
+  - 6f9c58c docs
+  - e717eee feat extract-pst + streaming CAS + pst-reader extract APIs
+  - 34ef59d fix resume skip, stream path put, max_messages pause, tests
+
+Implemented:
+- crates/extract-pst: extract_pst_item/path, resume_extract, list_discovered_psts
+- pst-native-message-v1 (not EML) for parent native_sha256
+- Streaming attach → Cas::put_reader; workspace/temp materialize; cleanup on Matter open
+- Mid-folder batch checkpoints; skip existing message paths on re-extract
+- max_messages → Paused not Succeeded
+- BCC Display* parse never fabricated; compute_email_logical_hash from 0017
+- Internal R1 NEEDS_FIXES → fix → R2 CLEAN
+
+Known gates (orchestrator):
+- cargo fmt --all --check PASS
+- cargo clippy --workspace --all-targets -- -D warnings PASS
+- cargo test -p extract-pst: 8 unit + 13 integration PASS
+- cargo test --workspace + ledgerful verify: running / expect PASS
+
+READ-ONLY. Read full spec.md and plan.md. Audit every DoD. Evidence-based findings only.
+
+Output:
+# Track Completion Audit — 0018-PstExtractorAdapter
+## Verdict: PASS | PASS WITH DEFERRED P3 | FAIL
+## Scope Reviewed
+## Requirement and DoD Matrix
+## Findings
+## Completeness Sweep
+## Wiring and Regression Review
+## Verification Evidence
+## Deferred Candidates
+## Completion Decision
+
+P0-P2 block. Only difficult non-blocking P3 may be deferred.
+Note: DoD-11 governance (review.md, conductor Completed) may still be in-progress for orchestrator finalize — focus engineering DoD-1..10 correctness; if only governance missing mark as process note not FAIL for engineering if code DoD met.
+Actually: if code DoD incomplete FAIL. If only governance/finalize missing, PASS WITH DEFERRED process or note Completion Decision that engineering is ready for finalize.

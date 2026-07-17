@@ -79,22 +79,33 @@ pst-dedup/                      (Cargo workspace)
 │   │   ├── matter.rs           Layout create/open + items/family high-level API
 │   │   ├── schema.rs           Versioned SQLite migrations (schema v2)
 │   │   ├── logical_hash.rs     Desk logical_hash v1 (length-prefixed; BCC-aware)
-│   │   ├── cas.rs              SHA-256 content-addressable blob store
+│   │   ├── cas.rs              SHA-256 CAS (put_bytes + streaming put_reader)
 │   │   ├── audit.rs            Append-only audit log + hash chain verify
 │   │   ├── jobs.rs             Jobs + checkpoint resume primitives
 │   │   ├── item_errors.rs      Item-level error accumulator
 │   │   └── error.rs            Typed thiserror errors
 │   │
-│   └── ingest-purview/         Purview/package/ZIP detect + safe expand (0016)
+│   ├── ingest-purview/         Purview/package/ZIP detect + safe expand (0016)
+│   │   src/
+│   │   ├── lib.rs              Public API: detect, ingest_path, resume_ingest
+│   │   ├── detect.rs           Package kind heuristics
+│   │   ├── path_safety.rs      Path sanitize + property tests
+│   │   ├── encoding.rs         ZIP name UTF-8/CP437/Win-1252 fallbacks
+│   │   ├── expand.rs           Nested ZIP expand, leaf checkpoints, CAS
+│   │   ├── ingest.rs           Matter source/job/audit wiring
+│   │   ├── limits.rs           ExpandLimits defaults
+│   │   └── error.rs            Typed thiserror errors
+│   │
+│   └── extract-pst/            PST → Normalized Items (0018; blocking)
 │       src/
-│       ├── lib.rs              Public API: detect, ingest_path, resume_ingest
-│       ├── detect.rs           Package kind heuristics
-│       ├── path_safety.rs      Path sanitize + property tests
-│       ├── encoding.rs         ZIP name UTF-8/CP437/Win-1252 fallbacks
-│       ├── expand.rs           Nested ZIP expand, leaf checkpoints, CAS
-│       ├── ingest.rs           Matter source/job/audit wiring
-│       ├── limits.rs           ExpandLimits defaults
-│       └── error.rs            Typed thiserror errors
+│       ├── lib.rs              Public API: extract_pst_item, resume_extract
+│       ├── open.rs             FS vs CAS → workspace/temp (never %TEMP%)
+│       ├── extract.rs          Walk + batch checkpoints + families
+│       ├── native_message.rs   pst-native-message-v1 (not EML)
+│       ├── recipients.rs       Display* parse; BCC never invented
+│       ├── checkpoint.rs       Mid-folder cursor
+│       ├── limits.rs           ExtractLimits / ExtractSummary
+│       └── error.rs            Structured extract codes
 ```
 
 ### Matter on-disk layout (`matter-core`)
@@ -103,14 +114,16 @@ Caller-chosen root (e.g. `Matters/<id>/`):
 
 ```text
 matter.db                 # SQLite metadata (WAL)
-blobs/sha256/<aa>/<hex>   # CAS: raw physical bytes only
+blobs/sha256/<aa>/<hex>   # CAS: raw physical bytes only (streaming put_reader)
 index/                    # reserved (Tantivy FTS)
 exports/                  # reserved (production sets)
 logs/                     # optional file logs
+workspace/temp/           # extractor spill; cleaned on Matter open/create
 ```
 
 See `crates/matter-core/README.md` for CAS, audit, Normalized Item (schema v2),
-family graph, and logical_hash v1 contracts.
+family graph, and logical_hash v1 contracts. See `crates/extract-pst/README.md`
+for PST extract (blocking thread, native v1, mid-folder resume).
 
 ---
 

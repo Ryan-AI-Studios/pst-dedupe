@@ -27,17 +27,31 @@
 //!     println!("Folder: {} ({} messages)", folder.path, folder.message_count);
 //!
 //!     for message_nid in folder.message_nids {
+//!         // CLI dedup path (body truncated to 4KB preview):
 //!         let message = pst.read_message_properties(message_nid)?;
 //!         println!(
 //!             "  {} - {}",
 //!             message.subject.unwrap_or_default(),
 //!             message.sender_email.unwrap_or_default()
 //!         );
+//!         // Desk extract path: `read_message_extract` (full body, DisplayCc/Bcc,
+//!         // delivery time, optional HTML). Attachments: `list_attachments` +
+//!         // `open_attachment_data` → `Read` stream into CAS.
 //!     }
 //! }
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Desk extract surfaces (track 0018)
+//!
+//! | API | Role |
+//! |---|---|
+//! | `read_message_properties` | CLI Tier-2: body preview truncated to 4KB |
+//! | `read_message_extract` / `ExtractedMessage` | Full body, DisplayTo/Cc/Bcc, submit + delivery time, optional HTML |
+//! | `list_attachments` / `AttachmentInfo` | NID, filename, size, mime, method |
+//! | `open_attachment_data` / `AttachmentDataReader` | `Read` over attach binary (leaf-block stream; no multi-GB `Vec` production path) |
+//! | `filetime_to_rfc3339` | FILETIME → RFC3339 UTC helper |
 
 pub mod crypto;
 pub mod header;
@@ -47,20 +61,27 @@ pub mod ndb;
 
 mod error;
 pub use error::{PstError, Result};
+pub use messaging::attachment::{AttachmentDataReader, AttachmentInfo, AttachmentMeta};
+pub use messaging::folder::FolderInfo;
+pub use messaging::message::{
+    filetime_to_rfc3339, filetime_to_unix, ExtractedMessage, MessageProperties,
+};
+pub use ndb::NodeId;
 
 use std::fs::File;
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use header::PstHeader;
 use ndb::btree::{BbtIndex, NbtIndex};
-use ndb::NodeId;
 
 /// A read-only handle to a PST file.
 ///
 /// Holds the parsed header, in-memory NBT/BBT indexes, and a file handle
 /// for on-demand block reads.
 pub struct PstFile {
+    /// Original path (used to open independent handles for attachment streaming).
+    pub(crate) path: Option<PathBuf>,
     pub(crate) reader: BufReader<File>,
     pub(crate) header: PstHeader,
     pub(crate) nbt: NbtIndex,
@@ -74,7 +95,8 @@ impl PstFile {
     /// For a typical PST this takes milliseconds; for very large files (~50GB) it may
     /// take a few seconds.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = File::open(path.as_ref())?;
+        let path_buf = path.as_ref().to_path_buf();
+        let file = File::open(&path_buf)?;
         let mut reader = BufReader::with_capacity(64 * 1024, file);
 
         // Phase 1: Parse and validate header
@@ -95,11 +117,17 @@ impl PstFile {
         tracing::info!("BBT loaded: {} blocks", bbt.len());
 
         Ok(Self {
+            path: Some(path_buf),
             reader,
             header,
             nbt,
             bbt,
         })
+    }
+
+    /// Filesystem path this PST was opened from, when known.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     /// File size in bytes as recorded in the PST header.

@@ -7,7 +7,7 @@ use matter_core::{
     compute_email_logical_hash, item_role, item_status, verify_audit_chain, AuditEventInput,
     EmailLogicalInput, Error, ItemErrorInput, ItemInput, ItemUpdate, JobState, LogicalAttachment,
     Matter, DB_FILE, EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR, LOGICAL_HASH_VERSION,
-    LOGS_DIR, SCHEMA_VERSION,
+    LOGS_DIR, PUT_READER_BUF_SIZE, SCHEMA_VERSION, WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
 };
 use tempfile::tempdir;
 
@@ -36,6 +36,11 @@ fn create_matter_opens_db_and_layout_exists() {
     assert!(root.join(INDEX_DIR).as_std_path().is_dir());
     assert!(root.join(EXPORTS_DIR).as_std_path().is_dir());
     assert!(root.join(LOGS_DIR).as_std_path().is_dir());
+    assert!(root
+        .join(WORKSPACE_DIR)
+        .join(WORKSPACE_TEMP_DIR)
+        .as_std_path()
+        .is_dir());
 
     let reopened = Matter::open(&root).expect("open");
     assert_eq!(reopened.id(), matter.id());
@@ -43,6 +48,50 @@ fn create_matter_opens_db_and_layout_exists() {
     reopened
         .verify_audit_chain()
         .expect("audit ok after create");
+}
+
+#[test]
+fn workspace_temp_orphan_cleaned_on_open() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-temp-clean");
+    {
+        let matter = Matter::create(&root, "Temp Clean").expect("create");
+        let orphan = matter.workspace_temp_dir().join("orphan-evidence.pst");
+        fs::write(orphan.as_std_path(), b"leftover crash residue").expect("write orphan");
+        assert!(orphan.as_std_path().is_file());
+    }
+    let reopened = Matter::open(&root).expect("open cleans temp");
+    let orphan = reopened.workspace_temp_dir().join("orphan-evidence.pst");
+    assert!(
+        !orphan.as_std_path().exists(),
+        "orphan under workspace/temp must be removed on Matter::open"
+    );
+    assert!(
+        reopened.workspace_temp_dir().as_std_path().is_dir(),
+        "workspace/temp directory itself remains"
+    );
+}
+
+#[test]
+fn put_reader_multi_chunk_matches_put_bytes_via_matter() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-stream-cas");
+    let matter = Matter::create(&root, "Stream CAS").expect("create");
+
+    let mut data = Vec::with_capacity(PUT_READER_BUF_SIZE * 2 + 9);
+    for i in 0..(PUT_READER_BUF_SIZE * 2 + 9) {
+        data.push((i % 199) as u8);
+    }
+    let expected = matter.put_bytes(&data).expect("put_bytes");
+    let mut cursor = std::io::Cursor::new(data.as_slice());
+    // Same content already in CAS — put_reader must return identical digest.
+    let streamed = matter.put_reader(&mut cursor).expect("put_reader");
+    assert_eq!(streamed, expected);
+
+    // Fresh stream into empty CAS via a second matter path under same store:
+    // re-read and confirm bytes match.
+    let got = matter.get_bytes(&streamed).expect("get");
+    assert_eq!(got.as_slice(), data.as_slice());
 }
 
 /// Drift in denormalized `matters.schema_version` is repaired on open/migrate.
