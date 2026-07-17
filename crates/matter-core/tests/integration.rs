@@ -217,6 +217,54 @@ fn item_error_does_not_delete_parent_item() {
 }
 
 #[test]
+fn update_source_and_item_by_source_path() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-source-lookup");
+    let matter = Matter::create(&root, "Lookup").expect("create");
+
+    let source = matter
+        .insert_source(r"C:\exports\pkg", "raw_dump", "importing", None)
+        .expect("source");
+
+    let updated = matter
+        .update_source(&source.id, "ready", Some(r#"{"n":1}"#))
+        .expect("update");
+    assert_eq!(updated.status, "ready");
+    assert_eq!(updated.cursor_json.as_deref(), Some(r#"{"n":1}"#));
+
+    let item = matter
+        .insert_item(ItemInput {
+            id: None,
+            source_id: Some(source.id.clone()),
+            family_id: None,
+            path: Some("files.zip!/a.txt".into()),
+            native_sha256: Some("ab".to_string() + &"cd".repeat(31)),
+            logical_hash: None,
+            message_id: None,
+            status: "expanded".into(),
+            size_bytes: Some(3),
+            created_at: None,
+            modified_at: None,
+        })
+        .expect("item");
+
+    let found = matter
+        .item_by_source_path(&source.id, "files.zip!/a.txt")
+        .expect("lookup")
+        .expect("present");
+    assert_eq!(found.id, item.id);
+    assert!(found.native_sha256.is_some());
+
+    let missing = matter
+        .item_by_source_path(&source.id, "nope")
+        .expect("lookup missing");
+    assert!(missing.is_none());
+
+    let listed = matter.list_items_for_source(&source.id).expect("list");
+    assert_eq!(listed.len(), 1);
+}
+
+#[test]
 fn audit_append_verify_and_detect_broken_chain() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-audit");

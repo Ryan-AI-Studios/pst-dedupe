@@ -14,6 +14,8 @@ description: Use when writing, modifying, or reviewing Rust code in pst-dedupe, 
 | `pst-dedup-cli` | CLI orchestration: inspect, scan, dups; JSON/CSV output. Composes reader + engine. No GUI. |
 | `pst-dedup-gui` | User workflow, background worker, progress/results UI. No low-level PST parsing. |
 | `pst-writer` | Experimental PST writing and fixture/EML import helpers. Keep separate from read-only product path. |
+| `matter-core` | Matter layout, SQLite metadata, physical CAS, audit chain, jobs/checkpoints. No ZIP/PST I/O. |
+| `ingest-purview` | Package detect + safe ZIP expand into matter. Blocking-worker API only; no PST message extract. |
 
 ## Rust Standards
 

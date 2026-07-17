@@ -1,0 +1,19 @@
+[package]
+name = "ingest-purview"
+version = "0.1.0"
+edition = "2021"
+description = "Purview/package/ZIP ingest: detect, safe expand, matter inventory, resumable checkpoints"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+matter-core = { path = "../matter-core" }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+camino = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+encoding_rs = "0.8"
+tempfile = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
