@@ -87,25 +87,33 @@ pst-dedup/                      (Cargo workspace)
 │   │
 │   ├── ingest-purview/         Purview/package/ZIP detect + safe expand (0016)
 │   │   src/
-│   │   ├── lib.rs              Public API: detect, ingest_path, resume_ingest
+│   │   ├── lib.rs              Public API: detect, ingest_path, ingest_path_on_job, resume_ingest
 │   │   ├── detect.rs           Package kind heuristics
 │   │   ├── path_safety.rs      Path sanitize + property tests
 │   │   ├── encoding.rs         ZIP name UTF-8/CP437/Win-1252 fallbacks
 │   │   ├── expand.rs           Nested ZIP expand, leaf checkpoints, CAS
-│   │   ├── ingest.rs           Matter source/job/audit wiring
+│   │   ├── ingest.rs           Matter source/job/audit wiring (Option C on_job)
 │   │   ├── limits.rs           ExpandLimits defaults
 │   │   └── error.rs            Typed thiserror errors
 │   │
-│   └── extract-pst/            PST → Normalized Items (0018; blocking)
+│   ├── extract-pst/            PST → Normalized Items (0018; blocking)
+│   │   src/
+│   │   ├── lib.rs              Public API: extract_pst_* , *_on_job, resume_extract
+│   │   ├── open.rs             FS vs CAS → workspace/temp (never %TEMP%)
+│   │   ├── extract.rs          Walk + batch checkpoints + families
+│   │   ├── native_message.rs   pst-native-message-v1 (not EML)
+│   │   ├── recipients.rs       Display* parse; BCC never invented
+│   │   ├── checkpoint.rs       Mid-folder cursor
+│   │   ├── limits.rs           ExtractLimits / ExtractSummary
+│   │   └── error.rs            Structured extract codes
+│   │
+│   └── process-runner/         In-process job runner (0019)
 │       src/
-│       ├── lib.rs              Public API: extract_pst_item, resume_extract
-│       ├── open.rs             FS vs CAS → workspace/temp (never %TEMP%)
-│       ├── extract.rs          Walk + batch checkpoints + families
-│       ├── native_message.rs   pst-native-message-v1 (not EML)
-│       ├── recipients.rs       Display* parse; BCC never invented
-│       ├── checkpoint.rs       Mid-folder cursor
-│       ├── limits.rs           ExtractLimits / ExtractSummary
-│       └── error.rs            Structured extract codes
+│       ├── lib.rs              ProcessRunner, CancelToken, watch progress
+│       ├── runner.rs           Single matter worker + Drop join
+│       ├── progress.rs         tokio::sync::watch (+ optional broadcast)
+│       ├── handler.rs          JobHandler trait / JobContext
+│       └── handlers/           IngestHandler, ExtractPstHandler (features)
 ```
 
 ### Matter on-disk layout (`matter-core`)
@@ -123,7 +131,9 @@ workspace/temp/           # extractor spill; cleaned on Matter open/create
 
 See `crates/matter-core/README.md` for CAS, audit, Normalized Item (schema v2),
 family graph, and logical_hash v1 contracts. See `crates/extract-pst/README.md`
-for PST extract (blocking thread, native v1, mid-folder resume).
+for PST extract (blocking thread, native v1, mid-folder resume). See
+`crates/process-runner/README.md` for the single matter-worker runner, watch
+progress, Option C job-id injection, and cancel/Drop join.
 
 ---
 

@@ -73,6 +73,26 @@ fn workspace_temp_orphan_cleaned_on_open() {
 }
 
 #[test]
+fn open_for_read_preserves_workspace_temp() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-temp-read");
+    {
+        let matter = Matter::create(&root, "Temp Read").expect("create");
+        let live = matter.workspace_temp_dir().join("live-materialized.pst");
+        fs::write(live.as_std_path(), b"in-use by extract").expect("write");
+    }
+    let reader = Matter::open_for_read(&root).expect("open_for_read");
+    let live = reader.workspace_temp_dir().join("live-materialized.pst");
+    assert!(
+        live.as_std_path().is_file(),
+        "open_for_read must not delete workspace/temp contents"
+    );
+    // Full open still cleans.
+    let _ = Matter::open(&root).expect("open");
+    assert!(!live.as_std_path().exists());
+}
+
+#[test]
 fn put_reader_multi_chunk_matches_put_bytes_via_matter() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-stream-cas");

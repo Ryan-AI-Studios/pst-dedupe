@@ -6,11 +6,19 @@
 //!
 //! ## ⚠️ BLOCKING THREAD WARNING
 //!
-//! [`extract_pst_item`], [`resume_extract`], and [`extract_pst_path`] are
-//! **CPU- and IO-bound** and block for the duration of the walk. Callers
-//! **must** run them on a dedicated blocking worker (`std::thread`, rayon, or
-//! `tokio::task::spawn_blocking` in 0019+). Calling them on the GUI thread or a
-//! Tokio async worker will freeze the Desk.
+//! [`extract_pst_item`], [`extract_pst_item_on_job`], [`extract_pst_path`],
+//! [`extract_pst_path_on_job`], and [`resume_extract`] are **CPU- and IO-bound**
+//! and block for the duration of the walk. Callers **must** run them on a
+//! dedicated blocking worker (`std::thread` or the **0019** `process-runner`
+//! matter worker). Calling them on the GUI thread or a Tokio async worker will
+//! freeze the Desk.
+//!
+//! ## Job-id authority (Option C)
+//!
+//! Orchestrated runs use [`extract_pst_item_on_job`] /
+//! [`extract_pst_path_on_job`] with a job id created by `process-runner`. The
+//! public wrappers create a job then call the on-job path. Resume already takes
+//! an existing `job_id`.
 //!
 //! ## Native identity
 //!
@@ -36,7 +44,6 @@
 //!
 //! - EML as native identity
 //! - Mutating source PST evidence
-//! - Job runner / progress channels (0019)
 //! - Matter-wide dedupe (0021)
 
 #![forbid(unsafe_code)]
@@ -51,7 +58,10 @@ pub mod recipients;
 
 pub use checkpoint::ExtractCursor;
 pub use error::{Error, Result};
-pub use extract::{extract_pst_item, extract_pst_path, list_discovered_psts, resume_extract};
+pub use extract::{
+    extract_pst_item, extract_pst_item_on_job, extract_pst_path, extract_pst_path_on_job,
+    list_discovered_psts, resume_extract,
+};
 pub use limits::{ExtractLimits, ExtractSummary, JOB_KIND_EXTRACT_PST, STAGE_PST_EXTRACT};
 pub use native_message::{
     encode_native_message_v1, native_message_v1_digest, NativeAttachment, NativeMessageV1,

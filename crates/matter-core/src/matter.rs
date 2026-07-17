@@ -285,7 +285,24 @@ impl Matter {
     ///
     /// Applies any pending migrations and removes leftover files under
     /// `workspace/temp/` (crash residue from prior extract materializations).
+    ///
+    /// **Do not** call this from a concurrent progress/status poller while
+    /// another handle is extracting: temp cleanup would race CAS materialization.
+    /// Use [`Matter::open_for_read`] for concurrent readers.
     pub fn open(root: impl AsRef<Utf8Path>) -> Result<Self> {
+        Self::open_inner(root, true)
+    }
+
+    /// Open an existing matter **without** cleaning `workspace/temp/`.
+    ///
+    /// Intended for concurrent read-only use (progress pollers, status queries)
+    /// while a primary worker holds an open matter that may materialize PSTs
+    /// under `workspace/temp/`. Still opens a separate SQLite connection (WAL).
+    pub fn open_for_read(root: impl AsRef<Utf8Path>) -> Result<Self> {
+        Self::open_inner(root, false)
+    }
+
+    fn open_inner(root: impl AsRef<Utf8Path>, cleanup_temp: bool) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         if !root.as_std_path().exists() {
             return Err(Error::MatterNotFound(root.to_string()));
@@ -317,7 +334,9 @@ impl Matter {
             cas,
             matter_id,
         };
-        matter.cleanup_workspace_temp()?;
+        if cleanup_temp {
+            matter.cleanup_workspace_temp()?;
+        }
         Ok(matter)
     }
 
@@ -432,6 +451,11 @@ impl Matter {
     /// Load a job by id.
     pub fn get_job(&self, job_id: &str) -> Result<Job> {
         jobs::get_job(&self.conn, job_id)
+    }
+
+    /// List all jobs for this matter (newest first).
+    pub fn list_jobs(&self) -> Result<Vec<Job>> {
+        jobs::list_jobs(&self.conn, &self.matter_id)
     }
 
     /// Transition a job to a new state.

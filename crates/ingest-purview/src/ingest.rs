@@ -29,6 +29,9 @@ pub struct IngestSummary {
 
 /// Blocking package ingest into an open matter.
 ///
+/// Creates a new `ingest` job, then expands on that job. Prefer
+/// [`ingest_path_on_job`] when a process runner already owns job creation.
+///
 /// **Caller contract:** invoke from a dedicated blocking worker thread
 /// (`std::thread`, rayon, or `spawn_blocking`). Do not call on the GUI or
 /// Tokio worker threads.
@@ -43,19 +46,50 @@ pub fn ingest_path(
     }
 
     let detected = detect(path)?;
-    let is_7z = path
-        .file_name()
-        .map(|n| n.to_ascii_lowercase().ends_with(".7z"))
-        .unwrap_or(false)
-        || detected
-            .notes
-            .iter()
-            .any(|n| n.to_ascii_lowercase().contains("7z"));
+    let is_7z = is_7z_package(path, &detected.notes);
 
-    // Spec §3.3: `.7z` is out of scope for expand — register source/job + structured
-    // unsupported error (do not silently early-return without evidence in the matter).
+    // Unsupported non-7z: no job row (legacy behaviour).
+    if !is_7z && detected.kind == PackageKind::Unsupported {
+        return Err(Error::UnsupportedPackage(format!(
+            "{} ({})",
+            path,
+            detected.notes.join("; ")
+        )));
+    }
+
+    let job = matter.create_job("ingest")?;
+    matter.set_job_state(&job.id, JobState::Running, None)?;
+    ingest_path_on_job(matter, path, limits, &job.id, cancel)
+}
+
+/// Ingest on a **pre-created** job id (Option C — process-runner owns `create_job`).
+///
+/// Does **not** call `create_job`. Still creates the source row, expands, and
+/// finishes job state. Callers must create the job (and typically set Running)
+/// before invoking this.
+///
+/// **Caller contract:** same blocking-thread rules as [`ingest_path`].
+pub fn ingest_path_on_job(
+    matter: &Matter,
+    path: &Utf8Path,
+    limits: &ExpandLimits,
+    job_id: &str,
+    cancel: Option<&dyn Fn() -> bool>,
+) -> Result<IngestSummary> {
+    if !path.as_std_path().exists() {
+        return Err(Error::PackageNotFound(path.to_string()));
+    }
+
+    // Ensure the provided job exists and is Running.
+    ensure_job_running(matter, job_id)?;
+
+    let detected = detect(path)?;
+    let is_7z = is_7z_package(path, &detected.notes);
+
+    // Spec §3.3: `.7z` is out of scope for expand — register source + structured
+    // unsupported error on the provided job.
     if is_7z {
-        return ingest_unsupported_7z(matter, path, &detected.notes);
+        return ingest_unsupported_7z_on_job(matter, path, &detected.notes, job_id);
     }
 
     if detected.kind == PackageKind::Unsupported {
@@ -69,9 +103,6 @@ pub fn ingest_path(
     let package_root = path.as_str().to_string();
     let source = matter.insert_source(&package_root, detected.kind.as_str(), "importing", None)?;
 
-    let job = matter.create_job("ingest")?;
-    matter.set_job_state(&job.id, JobState::Running, None)?;
-
     let _ = matter.append_audit(AuditEventInput {
         actor: "system".into(),
         action: "ingest.start".into(),
@@ -79,7 +110,7 @@ pub fn ingest_path(
         params_json: json!({
             "path": package_root,
             "kind": detected.kind.as_str(),
-            "job_id": job.id,
+            "job_id": job_id,
             "limits": {
                 "max_uncompressed_bytes": limits.max_uncompressed_bytes,
                 "max_compression_ratio": limits.max_compression_ratio,
@@ -109,7 +140,7 @@ pub fn ingest_path(
     let mut session = ExpandSession {
         matter,
         source_id: &source.id,
-        job_id: &job.id,
+        job_id,
         limits,
         cancel,
         cursor: ExpandCursor::new(&source.id, &package_root),
@@ -122,25 +153,53 @@ pub fn ingest_path(
     finish_run(
         matter,
         &source.id,
-        &job.id,
+        job_id,
         detected.kind,
         session.cursor,
         run,
     )
 }
 
+fn is_7z_package(path: &Utf8Path, notes: &[String]) -> bool {
+    path.file_name()
+        .map(|n| n.to_ascii_lowercase().ends_with(".7z"))
+        .unwrap_or(false)
+        || notes.iter().any(|n| n.to_ascii_lowercase().contains("7z"))
+}
+
+/// Ensure `job_id` exists and is in (or transitioned to) Running.
+fn ensure_job_running(matter: &Matter, job_id: &str) -> Result<()> {
+    let job = matter
+        .get_job(job_id)
+        .map_err(|_| Error::JobNotFound(job_id.to_string()))?;
+    match job.state {
+        JobState::Running => Ok(()),
+        JobState::Pending | JobState::Paused | JobState::Failed => {
+            matter.set_job_state(job_id, JobState::Running, None)?;
+            Ok(())
+        }
+        JobState::Cancelled => {
+            matter.set_job_state(job_id, JobState::Pending, None)?;
+            matter.set_job_state(job_id, JobState::Running, None)?;
+            Ok(())
+        }
+        JobState::Succeeded => Err(Error::Other(format!(
+            "{job_id}: cannot run ingest on succeeded job"
+        ))),
+    }
+}
+
 /// Register a single-file `.7z` (or similar) as an unsupported container with full audit.
-fn ingest_unsupported_7z(
+fn ingest_unsupported_7z_on_job(
     matter: &Matter,
     path: &Utf8Path,
     notes: &[String],
+    job_id: &str,
 ) -> Result<IngestSummary> {
     use matter_core::ItemErrorInput;
 
     let package_root = path.as_str().to_string();
     let source = matter.insert_source(&package_root, "unsupported", "failed", None)?;
-    let job = matter.create_job("ingest")?;
-    matter.set_job_state(&job.id, JobState::Running, None)?;
 
     let _ = matter.append_audit(AuditEventInput {
         actor: "system".into(),
@@ -149,7 +208,7 @@ fn ingest_unsupported_7z(
         params_json: json!({
             "path": package_root,
             "kind": "unsupported",
-            "job_id": job.id,
+            "job_id": job_id,
             "notes": notes,
             "unsupported_container": "7z",
         })
@@ -173,7 +232,7 @@ fn ingest_unsupported_7z(
     let _ = matter.record_item_error(ItemErrorInput {
         item_id: None,
         source_id: Some(source.id.clone()),
-        job_id: Some(job.id.clone()),
+        job_id: Some(job_id.to_string()),
         stage: "expand".into(),
         code: crate::error::codes::UNSUPPORTED_7Z.into(),
         message: format!("7z container not expanded in 0016: {name}"),
@@ -181,13 +240,13 @@ fn ingest_unsupported_7z(
     })?;
 
     let msg = format!("unsupported_7z: {package_root}");
-    matter.set_job_state(&job.id, JobState::Failed, Some(&msg))?;
+    matter.set_job_state(job_id, JobState::Failed, Some(&msg))?;
     let _ = matter.append_audit(AuditEventInput {
         actor: "system".into(),
         action: "ingest.fail".into(),
         entity: format!("source:{}", source.id),
         params_json: json!({
-            "job_id": job.id,
+            "job_id": job_id,
             "code": crate::error::codes::UNSUPPORTED_7Z,
             "message": msg,
         })
@@ -197,7 +256,7 @@ fn ingest_unsupported_7z(
 
     Ok(IngestSummary {
         source_id: source.id,
-        job_id: job.id,
+        job_id: job_id.to_string(),
         kind: PackageKind::Unsupported,
         entries_ok: 0,
         entries_err: 1,

@@ -33,6 +33,9 @@ pub fn list_discovered_psts(matter: &Matter, source_id: &str) -> Result<Vec<Item
 
 /// Blocking extract of one inventory PST item.
 ///
+/// Creates a new `extract_pst` job, then extracts on that job. Prefer
+/// [`extract_pst_item_on_job`] when a process runner already owns job creation.
+///
 /// **Caller contract:** invoke from a dedicated blocking worker only.
 pub fn extract_pst_item(
     matter: &Matter,
@@ -41,6 +44,7 @@ pub fn extract_pst_item(
     limits: &ExtractLimits,
     cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<ExtractSummary> {
+    // Validate before creating a job so bad input does not leave orphan rows.
     let _ = matter
         .get_source(source_id)
         .map_err(|_| Error::SourceNotFound(source_id.to_string()))?;
@@ -57,6 +61,38 @@ pub fn extract_pst_item(
 
     let job = matter.create_job(JOB_KIND_EXTRACT_PST)?;
     matter.set_job_state(&job.id, JobState::Running, None)?;
+    extract_pst_item_on_job(matter, source_id, pst_item_id, limits, &job.id, cancel)
+}
+
+/// Extract one inventory PST item on a **pre-created** job id (Option C).
+///
+/// Does **not** call `create_job`. Callers (e.g. `process-runner`) must create
+/// the job before invoking this.
+///
+/// **Caller contract:** same blocking-thread rules as [`extract_pst_item`].
+pub fn extract_pst_item_on_job(
+    matter: &Matter,
+    source_id: &str,
+    pst_item_id: &str,
+    limits: &ExtractLimits,
+    job_id: &str,
+    cancel: Option<&dyn Fn() -> bool>,
+) -> Result<ExtractSummary> {
+    let _ = matter
+        .get_source(source_id)
+        .map_err(|_| Error::SourceNotFound(source_id.to_string()))?;
+    let inv = matter
+        .get_item(pst_item_id)
+        .map_err(|_| Error::InventoryItemNotFound(pst_item_id.to_string()))?;
+    let pst_path = inv
+        .path
+        .clone()
+        .ok_or_else(|| Error::NotAPstItem(format!("{pst_item_id}: missing path")))?;
+    if !pst_path.to_ascii_lowercase().ends_with(".pst") {
+        return Err(Error::NotAPstItem(pst_path));
+    }
+
+    ensure_extract_job_running(matter, job_id)?;
 
     let cursor = ExtractCursor::new(
         source_id,
@@ -67,7 +103,7 @@ pub fn extract_pst_item(
     );
 
     run_extract(
-        matter, source_id, &inv, &job.id, cursor, limits, cancel, false, None,
+        matter, source_id, &inv, job_id, cursor, limits, cancel, false, None,
     )
 }
 
@@ -119,6 +155,9 @@ pub fn resume_extract(
 
 /// Optional path-based entry: register a minimal inventory row then extract.
 ///
+/// Creates a new `extract_pst` job, then extracts on that job. Prefer
+/// [`extract_pst_path_on_job`] when a process runner already owns job creation.
+///
 /// Streams the PST into CAS via [`Matter::put_reader`] (no full-file `Vec`).
 /// Open uses the **exact** caller-supplied filesystem path for this run (CAS
 /// put is only for inventory digest); inventory `path` stays the stable leaf
@@ -128,6 +167,33 @@ pub fn extract_pst_path(
     source_id: &str,
     pst_fs_path: &str,
     limits: &ExtractLimits,
+    cancel: Option<&dyn Fn() -> bool>,
+) -> Result<ExtractSummary> {
+    let _ = matter
+        .get_source(source_id)
+        .map_err(|_| Error::SourceNotFound(source_id.to_string()))?;
+    let path = camino::Utf8Path::new(pst_fs_path);
+    if !path.as_std_path().is_file() {
+        return Err(Error::PstOpenFailed(format!("not a file: {pst_fs_path}")));
+    }
+
+    let job = matter.create_job(JOB_KIND_EXTRACT_PST)?;
+    matter.set_job_state(&job.id, JobState::Running, None)?;
+    extract_pst_path_on_job(matter, source_id, pst_fs_path, limits, &job.id, cancel)
+}
+
+/// Path-based extract on a **pre-created** job id (Option C).
+///
+/// Does **not** call `create_job`. Still registers inventory and CAS-puts the
+/// PST. Callers must create the job before invoking this.
+///
+/// **Caller contract:** same blocking-thread rules as [`extract_pst_path`].
+pub fn extract_pst_path_on_job(
+    matter: &Matter,
+    source_id: &str,
+    pst_fs_path: &str,
+    limits: &ExtractLimits,
+    job_id: &str,
     cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<ExtractSummary> {
     use std::fs;
@@ -140,6 +206,9 @@ pub fn extract_pst_path(
     if !path.as_std_path().is_file() {
         return Err(Error::PstOpenFailed(format!("not a file: {pst_fs_path}")));
     }
+
+    ensure_extract_job_running(matter, job_id)?;
+
     // Canonicalize when possible so open targets the same bytes just hashed.
     let exact_fs = path
         .canonicalize_utf8()
@@ -161,9 +230,6 @@ pub fn extract_pst_path(
         ..Default::default()
     })?;
 
-    let job = matter.create_job(JOB_KIND_EXTRACT_PST)?;
-    matter.set_job_state(&job.id, JobState::Running, None)?;
-
     let mut cursor = ExtractCursor::new(
         source_id,
         &logical,
@@ -178,13 +244,40 @@ pub fn extract_pst_path(
         matter,
         source_id,
         &item,
-        &job.id,
+        job_id,
         cursor,
         limits,
         cancel,
         false,
         Some(exact_fs),
     )
+}
+
+/// Ensure `job_id` exists, is kind `extract_pst`, and is (or becomes) Running.
+fn ensure_extract_job_running(matter: &Matter, job_id: &str) -> Result<()> {
+    let job = matter.get_job(job_id)?;
+    if job.kind != JOB_KIND_EXTRACT_PST {
+        return Err(Error::InvalidJob(format!(
+            "{job_id}: kind {} != {JOB_KIND_EXTRACT_PST}",
+            job.kind
+        )));
+    }
+    match job.state {
+        JobState::Running => Ok(()),
+        JobState::Pending | JobState::Paused | JobState::Failed => {
+            matter.set_job_state(job_id, JobState::Running, None)?;
+            Ok(())
+        }
+        JobState::Cancelled => {
+            // Cancelled → Pending → Running is the allowed retry path.
+            matter.set_job_state(job_id, JobState::Pending, None)?;
+            matter.set_job_state(job_id, JobState::Running, None)?;
+            Ok(())
+        }
+        JobState::Succeeded => Err(Error::InvalidJob(format!(
+            "{job_id}: cannot run extract on succeeded job"
+        ))),
+    }
 }
 
 /// Ensure resume continues against the same PST identity the checkpoint recorded.

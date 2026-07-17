@@ -9,6 +9,7 @@ members = [
     "crates/matter-core",
     "crates/ingest-purview",
     "crates/extract-pst",
+    "crates/process-runner",
 ]
 
 [workspace.dependencies]
