@@ -14,31 +14,41 @@ Depends on [`matter-core`](../matter-core). Does **not** open PSTs with `pst-rea
 
 ## ⚠ Blocking-thread caller contract
 
-`ingest_path` and `resume_ingest` are **CPU- and IO-bound** and block for the full expand.
+`ingest_path`, `ingest_path_on_job`, and `resume_ingest` are **CPU- and IO-bound**
+and block for the full expand.
 
 **Callers must run them on a dedicated blocking worker:**
 
-- `std::thread::spawn`
-- rayon thread pool
-- `tokio::task::spawn_blocking` (when 0019+ introduces async orchestration)
+- the **0019** `process-runner` matter worker (preferred for Desk)
+- `std::thread::spawn` / `spawn_blocking` for ad-hoc tools
 
 **Do not** call them on:
 
 - the egui / GUI thread
 - a Tokio multi-thread worker (async executor thread)
 
-This crate does not enforce the contract; track **0019** owns the process/job pool.
+This crate does not enforce the contract; **`process-runner`** owns orchestration.
+
+---
+
+## Job-id authority (Option C)
+
+Orchestrated runs: **`process-runner` creates the job**, then calls
+`ingest_path_on_job` (does **not** call `create_job`). The legacy
+`ingest_path` wrapper creates a job then delegates to the on-job path.
 
 ---
 
 ## Public API
 
 ```rust
-use ingest_purview::{detect, ingest_path, resume_ingest, ExpandLimits, PackageKind};
+use ingest_purview::{detect, ingest_path, ingest_path_on_job, resume_ingest, ExpandLimits, PackageKind};
 use matter_core::Matter;
 
 let kind = detect(path)?;
 let summary = ingest_path(&matter, path, &ExpandLimits::default(), None)?;
+// runner path (pre-created job_id):
+let summary = ingest_path_on_job(&matter, path, &limits, &job_id, None)?;
 // after cancel / crash:
 let summary = resume_ingest(&matter, &source_id, &job_id, &limits, Some(&|| cancel_flag.load()))?;
 ```
@@ -48,7 +58,8 @@ let summary = resume_ingest(&matter, &source_id, &job_id, &limits, Some(&|| canc
 | `PackageKind` | `single_pst` / `single_zip` / `purview_package` / `raw_dump` / `unsupported` |
 | `ExpandLimits` | Bomb limits + checkpoint cadence |
 | `detect` | Best-effort classification (prefer `raw_dump` over false Purview) |
-| `ingest_path` | Register source + ingest job + expand |
+| `ingest_path` | Create job + register source + expand (wrapper) |
+| `ingest_path_on_job` | Expand on **pre-created** job_id (no `create_job`) |
 | `resume_ingest` | Continue from stage `expand` checkpoint + inventory skip |
 
 ---

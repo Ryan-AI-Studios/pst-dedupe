@@ -117,11 +117,12 @@ Small Aspose/sample fixtures live under `fixtures/`. Real multi-mailbox PSTs are
 | `pst-dedup-gui` | egui app and background scan worker |
 | `pst-writer` | Experimental/fixture PST writing and EML import helpers |
 | `matter-core` | Matter layout + SQLite (schema v2) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + Normalized Item/family + logical_hash v1 + `workspace/temp/` |
-| `ingest-purview` | Purview/package/ZIP detect + safe expand + resumable inventory (blocking worker API) |
-| `extract-pst` | PST → Normalized Items + families + logical_hash; `pst-native-message-v1` native (not EML); mid-folder resume (blocking worker API) |
+| `ingest-purview` | Purview/package/ZIP detect + safe expand + resumable inventory (blocking worker API; `*_on_job` for runner) |
+| `extract-pst` | PST → Normalized Items + families + logical_hash; `pst-native-message-v1` native (not EML); mid-folder resume (blocking; `*_on_job` for runner) |
+| `process-runner` | In-process job runner: single matter worker, cancel, watch progress, Option C job-id authority |
 
 **Matter layout** (Desk foundation): `matter.db`, `blobs/sha256/<aa>/<hex>`, reserved `index/` / `exports/` / `logs/`, `workspace/temp/`.  
-See [`crates/matter-core/README.md`](crates/matter-core/README.md), [`crates/ingest-purview/README.md`](crates/ingest-purview/README.md), [`crates/extract-pst/README.md`](crates/extract-pst/README.md), and [`ARCHITECTURE.md`](ARCHITECTURE.md).
+See [`crates/matter-core/README.md`](crates/matter-core/README.md), [`crates/ingest-purview/README.md`](crates/ingest-purview/README.md), [`crates/extract-pst/README.md`](crates/extract-pst/README.md), [`crates/process-runner/README.md`](crates/process-runner/README.md), and [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Current Status
 

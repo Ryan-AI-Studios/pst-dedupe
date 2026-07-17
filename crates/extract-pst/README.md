@@ -6,20 +6,29 @@ CAS), walks folders/messages/attachments via **`pst-reader`**, and writes
 
 ## ⚠️ BLOCKING THREAD WARNING
 
-`extract_pst_item`, `resume_extract`, and `extract_pst_path` are **CPU- and
-IO-bound** and block for the duration of the walk. Callers **must** run them on
-a dedicated blocking worker (`std::thread`, rayon, or
-`tokio::task::spawn_blocking` in track 0019+). Calling them on the GUI thread or
-a Tokio async worker will freeze the Desk.
+`extract_pst_item`, `extract_pst_item_on_job`, `extract_pst_path`,
+`extract_pst_path_on_job`, and `resume_extract` are **CPU- and IO-bound** and
+block for the duration of the walk. Callers **must** run them on a dedicated
+blocking worker — preferably the **0019** `process-runner` matter worker.
+Calling them on the GUI thread or a Tokio async worker will freeze the Desk.
 
 This crate does not enforce that contract.
+
+## Job-id authority (Option C)
+
+Orchestrated runs: **`process-runner` creates the job**, then calls
+`extract_pst_item_on_job` / `extract_pst_path_on_job` (no internal
+`create_job`). Public wrappers create a job then call the on-job path.
+`resume_extract` already takes an existing `job_id`.
 
 ## Public API
 
 | Function | Purpose |
 |---|---|
-| `extract_pst_item(matter, source_id, pst_item_id, limits, cancel)` | Extract using a 0016 inventory row |
-| `extract_pst_path(matter, source_id, path, limits, cancel)` | Register FS PST + extract |
+| `extract_pst_item(...)` | Create job + extract inventory PST (wrapper) |
+| `extract_pst_item_on_job(..., job_id, ...)` | Extract on **pre-created** job_id |
+| `extract_pst_path(...)` | Create job + register FS PST + extract (wrapper) |
+| `extract_pst_path_on_job(..., job_id, ...)` | Path extract on **pre-created** job_id |
 | `resume_extract(matter, source_id, job_id, limits, cancel)` | Resume mid-folder checkpoint |
 | `list_discovered_psts(matter, source_id)` | Inventory rows whose path ends in `.pst` |
 
