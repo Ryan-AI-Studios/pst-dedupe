@@ -8,12 +8,12 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
 /// Each migration brings the DB from `target_version - 1` to `target_version`.
-const MIGRATIONS: &[(u32, &str)] = &[(1, MIGRATION_V1)];
+const MIGRATIONS: &[(u32, &str)] = &[(1, MIGRATION_V1), (2, MIGRATION_V2)];
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE schema_meta (
@@ -117,6 +117,35 @@ CREATE INDEX idx_jobs_state ON jobs(state);
 CREATE INDEX idx_audit_entry_hash ON audit_events(entry_hash);
 "#;
 
+/// Schema v2: Normalized Item P0 fields + logical_hash / message_id indexes.
+///
+/// Uses nullable `ADD COLUMN` only (SQLite ALTER cannot attach FKs cleanly).
+/// `parent_item_id` is plain TEXT; parent existence is enforced in the Matter API.
+const MIGRATION_V2: &str = r#"
+ALTER TABLE items ADD COLUMN role TEXT;
+ALTER TABLE items ADD COLUMN parent_item_id TEXT;
+ALTER TABLE items ADD COLUMN mime_type TEXT;
+ALTER TABLE items ADD COLUMN file_category TEXT;
+ALTER TABLE items ADD COLUMN custodian TEXT;
+ALTER TABLE items ADD COLUMN subject TEXT;
+ALTER TABLE items ADD COLUMN title TEXT;
+ALTER TABLE items ADD COLUMN from_addr TEXT;
+ALTER TABLE items ADD COLUMN to_addrs_json TEXT;
+ALTER TABLE items ADD COLUMN cc_addrs_json TEXT;
+ALTER TABLE items ADD COLUMN bcc_addrs_json TEXT;
+ALTER TABLE items ADD COLUMN author TEXT;
+ALTER TABLE items ADD COLUMN sent_at TEXT;
+ALTER TABLE items ADD COLUMN received_at TEXT;
+ALTER TABLE items ADD COLUMN attachment_count INTEGER;
+ALTER TABLE items ADD COLUMN text_sha256 TEXT;
+ALTER TABLE items ADD COLUMN html_sha256 TEXT;
+ALTER TABLE items ADD COLUMN logical_hash_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE items ADD COLUMN extra_json TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_items_logical_hash ON items(logical_hash);
+CREATE INDEX IF NOT EXISTS idx_items_message_id ON items(message_id);
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 pub(crate) fn migrate(conn: &Connection) -> Result<u32> {
     let current = read_schema_version(conn)?;
@@ -195,7 +224,26 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 2);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
+
+        // v2 columns present
+        let has_role: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'role'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_role);
+        let has_lhash_ver: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'logical_hash_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_lhash_ver);
     }
 
     #[test]
@@ -233,5 +281,113 @@ mod tests {
             )
             .expect("read synced");
         assert_eq!(synced, SCHEMA_VERSION);
+    }
+
+    /// v1 fixture (0016-style inventory) → migrate to v2 → data intact + new columns.
+    #[test]
+    fn migrate_v1_inventory_to_v2_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        // Stop at schema v1 only (no v2 columns).
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (1)", [])
+            .expect("meta v1");
+        assert_eq!(read_schema_version(&conn).expect("read"), 1);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v1', 'V1 Matter', '2020-01-01T00:00:00Z', 1, '/tmp/v1')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO sources (id, matter_id, path, kind, status, cursor_json, created_at, updated_at) \
+             VALUES ('src_v1', 'mat_v1', 'C:\\exports\\pkg.zip', 'purview_package', 'ready', NULL, \
+                     '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("source");
+        // 0016-style inventory rows: path + native_sha256 + status; logical_hash/message_id null.
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at) \
+             VALUES ('itm_a', 'mat_v1', 'src_v1', NULL, 'files.zip!/a.txt', \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             NULL, NULL, 'expanded', 12, NULL, NULL, '2020-01-01T00:00:01Z')",
+            [],
+        )
+        .expect("item a");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at) \
+             VALUES ('itm_b', 'mat_v1', 'src_v1', NULL, 'mail.pst', \
+             'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', \
+             NULL, NULL, 'discovered', 100, NULL, NULL, '2020-01-01T00:00:02Z')",
+            [],
+        )
+        .expect("item b");
+
+        // v1 has no role column yet.
+        let role_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'role'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(!role_exists);
+
+        let v = migrate(&conn).expect("migrate v1→v2");
+        assert_eq!(v, 2);
+
+        // Inventory data intact.
+        let (path, status, native, lhv): (String, String, String, i64) = conn
+            .query_row(
+                "SELECT path, status, native_sha256, logical_hash_version FROM items WHERE id = 'itm_a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("itm_a");
+        assert_eq!(path, "files.zip!/a.txt");
+        assert_eq!(status, "expanded");
+        assert_eq!(
+            native,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(lhv, 0, "default logical_hash_version");
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(count, 2);
+
+        // New nullable columns readable as NULL.
+        let role: Option<String> = conn
+            .query_row("SELECT role FROM items WHERE id = 'itm_a'", [], |row| {
+                row.get(0)
+            })
+            .expect("role");
+        assert!(role.is_none());
+
+        // Existing FKs still work: source_id / family_id.
+        let src: String = conn
+            .query_row(
+                "SELECT source_id FROM items WHERE id = 'itm_b'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("src");
+        assert_eq!(src, "src_v1");
+
+        // denormalized matters.schema_version synced.
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, 2);
     }
 }

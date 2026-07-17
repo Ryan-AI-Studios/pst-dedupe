@@ -25,6 +25,30 @@ pub const EXPORTS_DIR: &str = "exports";
 /// Optional directory for file logs.
 pub const LOGS_DIR: &str = "logs";
 
+/// Default family kind for email parent + attachment children.
+pub const FAMILY_KIND_EMAIL_ATTACHMENTS: &str = "email_attachments";
+
+/// Stable item lifecycle / processing status strings.
+///
+/// 0016 inventory uses `discovered` / `expanded` / `error`. Later extractors
+/// may set `normalized`, `extracted`, or `partial`. APIs accept any string;
+/// these constants document the recommended vocabulary.
+pub mod item_status {
+    pub const DISCOVERED: &str = "discovered";
+    pub const EXPANDED: &str = "expanded";
+    pub const ERROR: &str = "error";
+    pub const NORMALIZED: &str = "normalized";
+    pub const EXTRACTED: &str = "extracted";
+    pub const PARTIAL: &str = "partial";
+}
+
+/// Item role within a family (or standalone).
+pub mod item_role {
+    pub const STANDALONE: &str = "standalone";
+    pub const PARENT: &str = "parent";
+    pub const ATTACHMENT: &str = "attachment";
+}
+
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Metadata row for the matter itself.
@@ -50,7 +74,16 @@ pub struct Source {
     pub updated_at: String,
 }
 
-/// Normalized item row (logical_hash reserved for later tracks).
+/// An item family (e.g. email + attachments).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemFamily {
+    pub id: String,
+    pub matter_id: String,
+    pub kind: String,
+    pub created_at: String,
+}
+
+/// Normalized item row (schema v2 P0 fields).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     pub id: String,
@@ -66,10 +99,34 @@ pub struct Item {
     pub created_at: Option<String>,
     pub modified_at: Option<String>,
     pub imported_at: String,
+    // --- schema v2 ---
+    pub role: Option<String>,
+    pub parent_item_id: Option<String>,
+    pub mime_type: Option<String>,
+    pub file_category: Option<String>,
+    pub custodian: Option<String>,
+    pub subject: Option<String>,
+    pub title: Option<String>,
+    pub from_addr: Option<String>,
+    pub to_addrs_json: Option<String>,
+    pub cc_addrs_json: Option<String>,
+    pub bcc_addrs_json: Option<String>,
+    pub author: Option<String>,
+    pub sent_at: Option<String>,
+    pub received_at: Option<String>,
+    pub attachment_count: Option<i64>,
+    pub text_sha256: Option<String>,
+    pub html_sha256: Option<String>,
+    /// Algorithm version used for `logical_hash` (0 = not computed).
+    pub logical_hash_version: u32,
+    pub extra_json: Option<String>,
 }
 
-/// Input for inserting a minimal item row (foundation for later extractors).
-#[derive(Debug, Clone)]
+/// Input for inserting an item row. New P0 fields are optional (null-safe).
+///
+/// When `role` is `None`, insert stores [`item_role::STANDALONE`].
+/// When `logical_hash_version` is `None`, insert stores `0`.
+#[derive(Debug, Clone, Default)]
 pub struct ItemInput {
     pub id: Option<String>,
     pub source_id: Option<String>,
@@ -82,6 +139,65 @@ pub struct ItemInput {
     pub size_bytes: Option<i64>,
     pub created_at: Option<String>,
     pub modified_at: Option<String>,
+    // --- schema v2 ---
+    pub role: Option<String>,
+    pub parent_item_id: Option<String>,
+    pub mime_type: Option<String>,
+    pub file_category: Option<String>,
+    pub custodian: Option<String>,
+    pub subject: Option<String>,
+    pub title: Option<String>,
+    pub from_addr: Option<String>,
+    pub to_addrs_json: Option<String>,
+    pub cc_addrs_json: Option<String>,
+    pub bcc_addrs_json: Option<String>,
+    pub author: Option<String>,
+    pub sent_at: Option<String>,
+    pub received_at: Option<String>,
+    pub attachment_count: Option<i64>,
+    pub text_sha256: Option<String>,
+    pub html_sha256: Option<String>,
+    pub logical_hash_version: Option<u32>,
+    pub extra_json: Option<String>,
+}
+
+/// Partial update for an existing item.
+///
+/// Semantics: each `Option` field is **set when `Some`**; `None` leaves the
+/// column unchanged. There is no nested `Option` for “set to NULL” in this
+/// track — callers that need to clear a column can pass empty string / re-insert
+/// later; 0018 extractors typically only set fields they know.
+#[derive(Debug, Clone, Default)]
+pub struct ItemUpdate {
+    pub source_id: Option<Option<String>>,
+    pub family_id: Option<Option<String>>,
+    pub path: Option<Option<String>>,
+    pub native_sha256: Option<Option<String>>,
+    pub logical_hash: Option<Option<String>>,
+    pub message_id: Option<Option<String>>,
+    pub status: Option<String>,
+    pub size_bytes: Option<Option<i64>>,
+    pub created_at: Option<Option<String>>,
+    pub modified_at: Option<Option<String>>,
+    pub role: Option<Option<String>>,
+    pub parent_item_id: Option<Option<String>>,
+    pub mime_type: Option<Option<String>>,
+    pub file_category: Option<Option<String>>,
+    pub custodian: Option<Option<String>>,
+    pub subject: Option<Option<String>>,
+    pub title: Option<Option<String>>,
+    pub from_addr: Option<Option<String>>,
+    pub to_addrs_json: Option<Option<String>>,
+    pub cc_addrs_json: Option<Option<String>>,
+    pub bcc_addrs_json: Option<Option<String>>,
+    pub author: Option<Option<String>>,
+    pub sent_at: Option<Option<String>>,
+    pub received_at: Option<Option<String>>,
+    pub attachment_count: Option<Option<i64>>,
+    pub text_sha256: Option<Option<String>>,
+    pub html_sha256: Option<Option<String>>,
+    pub logical_hash_version: Option<u32>,
+    pub extra_json: Option<Option<String>>,
 }
 
 /// An open matter: directory layout + SQLite connection + CAS handle.
@@ -321,7 +437,7 @@ impl Matter {
         jobs::get_checkpoint(&self.conn, job_id, stage)
     }
 
-    // --- Sources / items (minimal foundation) ---
+    // --- Sources / items ---
 
     /// Register a source path.
     pub fn insert_source(
@@ -386,15 +502,45 @@ impl Matter {
         self.get_source(source_id)
     }
 
-    /// Insert a normalized item row.
+    /// Insert a normalized item row (schema v2 fields null-safe).
     pub fn insert_item(&self, input: ItemInput) -> Result<Item> {
         let id = input.id.clone().unwrap_or_else(|| new_id("itm"));
         let now = now_rfc3339();
+        let role = input
+            .role
+            .clone()
+            .unwrap_or_else(|| item_role::STANDALONE.to_string());
+        let logical_hash_version = input.logical_hash_version.unwrap_or(0);
+
+        // App-level parent existence when set.
+        if let Some(ref parent_id) = input.parent_item_id {
+            let _ = self
+                .get_item(parent_id)
+                .map_err(|_| Error::ParentItemNotFound(parent_id.clone()))?;
+        }
+        if let Some(ref family_id) = input.family_id {
+            let fam = self.get_family(family_id)?;
+            if fam.matter_id != self.matter_id {
+                return Err(Error::CrossMatterFamily(format!(
+                    "family {family_id} belongs to matter {}",
+                    fam.matter_id
+                )));
+            }
+        }
+
         self.conn.execute(
             "INSERT INTO items (\
                 id, matter_id, source_id, family_id, path, native_sha256, logical_hash, \
-                message_id, status, size_bytes, created_at, modified_at, imported_at\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                message_id, status, size_bytes, created_at, modified_at, imported_at, \
+                role, parent_item_id, mime_type, file_category, custodian, subject, title, \
+                from_addr, to_addrs_json, cc_addrs_json, bcc_addrs_json, author, \
+                sent_at, received_at, attachment_count, text_sha256, html_sha256, \
+                logical_hash_version, extra_json\
+             ) VALUES (\
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
+                ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, \
+                ?26, ?27, ?28, ?29, ?30, ?31, ?32\
+             )",
             params![
                 id,
                 self.matter_id,
@@ -409,18 +555,137 @@ impl Matter {
                 input.created_at,
                 input.modified_at,
                 now,
+                role,
+                input.parent_item_id,
+                input.mime_type,
+                input.file_category,
+                input.custodian,
+                input.subject,
+                input.title,
+                input.from_addr,
+                input.to_addrs_json,
+                input.cc_addrs_json,
+                input.bcc_addrs_json,
+                input.author,
+                input.sent_at,
+                input.received_at,
+                input.attachment_count,
+                input.text_sha256,
+                input.html_sha256,
+                logical_hash_version,
+                input.extra_json,
             ],
         )?;
         self.get_item(&id)
+    }
+
+    /// Partially update an item. See [`ItemUpdate`] for Option semantics.
+    ///
+    /// Silent on audit by default (high-volume extractors may batch audit themselves).
+    pub fn update_item(&self, item_id: &str, update: ItemUpdate) -> Result<Item> {
+        let current = self.get_item(item_id)?;
+
+        let source_id = apply_opt2(update.source_id, current.source_id);
+        let family_id = apply_opt2(update.family_id, current.family_id);
+        let path = apply_opt2(update.path, current.path);
+        let native_sha256 = apply_opt2(update.native_sha256, current.native_sha256);
+        let logical_hash = apply_opt2(update.logical_hash, current.logical_hash);
+        let message_id = apply_opt2(update.message_id, current.message_id);
+        let status = update.status.unwrap_or(current.status);
+        let size_bytes = apply_opt2(update.size_bytes, current.size_bytes);
+        let created_at = apply_opt2(update.created_at, current.created_at);
+        let modified_at = apply_opt2(update.modified_at, current.modified_at);
+        let role = apply_opt2(update.role, current.role);
+        let parent_item_id = apply_opt2(update.parent_item_id, current.parent_item_id);
+        let mime_type = apply_opt2(update.mime_type, current.mime_type);
+        let file_category = apply_opt2(update.file_category, current.file_category);
+        let custodian = apply_opt2(update.custodian, current.custodian);
+        let subject = apply_opt2(update.subject, current.subject);
+        let title = apply_opt2(update.title, current.title);
+        let from_addr = apply_opt2(update.from_addr, current.from_addr);
+        let to_addrs_json = apply_opt2(update.to_addrs_json, current.to_addrs_json);
+        let cc_addrs_json = apply_opt2(update.cc_addrs_json, current.cc_addrs_json);
+        let bcc_addrs_json = apply_opt2(update.bcc_addrs_json, current.bcc_addrs_json);
+        let author = apply_opt2(update.author, current.author);
+        let sent_at = apply_opt2(update.sent_at, current.sent_at);
+        let received_at = apply_opt2(update.received_at, current.received_at);
+        let attachment_count = apply_opt2(update.attachment_count, current.attachment_count);
+        let text_sha256 = apply_opt2(update.text_sha256, current.text_sha256);
+        let html_sha256 = apply_opt2(update.html_sha256, current.html_sha256);
+        let logical_hash_version = update
+            .logical_hash_version
+            .unwrap_or(current.logical_hash_version);
+        let extra_json = apply_opt2(update.extra_json, current.extra_json);
+
+        if let Some(ref parent_id) = parent_item_id {
+            if parent_id != item_id {
+                let _ = self
+                    .get_item(parent_id)
+                    .map_err(|_| Error::ParentItemNotFound(parent_id.clone()))?;
+            }
+        }
+        if let Some(ref fid) = family_id {
+            let fam = self.get_family(fid)?;
+            if fam.matter_id != self.matter_id {
+                return Err(Error::CrossMatterFamily(format!(
+                    "family {fid} belongs to matter {}",
+                    fam.matter_id
+                )));
+            }
+        }
+
+        self.conn.execute(
+            "UPDATE items SET \
+                source_id = ?1, family_id = ?2, path = ?3, native_sha256 = ?4, \
+                logical_hash = ?5, message_id = ?6, status = ?7, size_bytes = ?8, \
+                created_at = ?9, modified_at = ?10, role = ?11, parent_item_id = ?12, \
+                mime_type = ?13, file_category = ?14, custodian = ?15, subject = ?16, \
+                title = ?17, from_addr = ?18, to_addrs_json = ?19, cc_addrs_json = ?20, \
+                bcc_addrs_json = ?21, author = ?22, sent_at = ?23, received_at = ?24, \
+                attachment_count = ?25, text_sha256 = ?26, html_sha256 = ?27, \
+                logical_hash_version = ?28, extra_json = ?29 \
+             WHERE id = ?30",
+            params![
+                source_id,
+                family_id,
+                path,
+                native_sha256,
+                logical_hash,
+                message_id,
+                status,
+                size_bytes,
+                created_at,
+                modified_at,
+                role,
+                parent_item_id,
+                mime_type,
+                file_category,
+                custodian,
+                subject,
+                title,
+                from_addr,
+                to_addrs_json,
+                cc_addrs_json,
+                bcc_addrs_json,
+                author,
+                sent_at,
+                received_at,
+                attachment_count,
+                text_sha256,
+                html_sha256,
+                logical_hash_version,
+                extra_json,
+                item_id,
+            ],
+        )?;
+        self.get_item(item_id)
     }
 
     /// Load an item by id.
     pub fn get_item(&self, item_id: &str) -> Result<Item> {
         self.conn
             .query_row(
-                "SELECT id, matter_id, source_id, family_id, path, native_sha256, logical_hash, \
-                        message_id, status, size_bytes, created_at, modified_at, imported_at \
-                 FROM items WHERE id = ?1",
+                &item_select_sql("WHERE id = ?1"),
                 params![item_id],
                 map_item_row,
             )
@@ -432,15 +697,14 @@ impl Matter {
 
     /// Lookup the first inventory item for `(source_id, path)`.
     ///
-    /// Used by ingest resume to skip already-CAS'd logical paths. Schema v1 has
-    /// no unique index; callers must still avoid double-inserts.
+    /// Used by ingest resume to skip already-CAS'd logical paths. No unique
+    /// index yet; callers must still avoid double-inserts.
     pub fn item_by_source_path(&self, source_id: &str, path: &str) -> Result<Option<Item>> {
         self.conn
             .query_row(
-                "SELECT id, matter_id, source_id, family_id, path, native_sha256, logical_hash, \
-                        message_id, status, size_bytes, created_at, modified_at, imported_at \
-                 FROM items WHERE source_id = ?1 AND path = ?2 \
-                 ORDER BY imported_at ASC LIMIT 1",
+                &item_select_sql(
+                    "WHERE source_id = ?1 AND path = ?2 ORDER BY imported_at ASC LIMIT 1",
+                ),
                 params![source_id, path],
                 map_item_row,
             )
@@ -450,17 +714,182 @@ impl Matter {
 
     /// List all items registered under a source (inventory / resume helpers).
     pub fn list_items_for_source(&self, source_id: &str) -> Result<Vec<Item>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, matter_id, source_id, family_id, path, native_sha256, logical_hash, \
-                    message_id, status, size_bytes, created_at, modified_at, imported_at \
-             FROM items WHERE source_id = ?1 ORDER BY imported_at ASC, id ASC",
-        )?;
+        let mut stmt = self.conn.prepare(&item_select_sql(
+            "WHERE source_id = ?1 ORDER BY imported_at ASC, id ASC",
+        ))?;
         let rows = stmt.query_map(params![source_id], map_item_row)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Items sharing a logical hash (prep for 0021 dedupe).
+    pub fn items_by_logical_hash(&self, logical_hash: &str) -> Result<Vec<Item>> {
+        let mut stmt = self.conn.prepare(&item_select_sql(
+            "WHERE logical_hash = ?1 ORDER BY imported_at ASC, id ASC",
+        ))?;
+        let rows = stmt.query_map(params![logical_hash], map_item_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Items sharing a message_id (prep for 0021 dedupe).
+    pub fn items_by_message_id(&self, message_id: &str) -> Result<Vec<Item>> {
+        let mut stmt = self.conn.prepare(&item_select_sql(
+            "WHERE message_id = ?1 ORDER BY imported_at ASC, id ASC",
+        ))?;
+        let rows = stmt.query_map(params![message_id], map_item_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    // --- Family graph ---
+
+    /// Create an item family. Empty `kind` defaults to [`FAMILY_KIND_EMAIL_ATTACHMENTS`].
+    pub fn insert_family(&self, kind: &str) -> Result<ItemFamily> {
+        let kind = if kind.is_empty() {
+            FAMILY_KIND_EMAIL_ATTACHMENTS
+        } else {
+            kind
+        };
+        let id = new_id("fam");
+        let now = now_rfc3339();
+        self.conn.execute(
+            "INSERT INTO item_families (id, matter_id, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![id, self.matter_id, kind, now],
+        )?;
+
+        let _ = self.append_audit(AuditEventInput {
+            actor: "system".into(),
+            action: "family.create".into(),
+            entity: format!("family:{id}"),
+            params_json: serde_json::json!({ "kind": kind }).to_string(),
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+        })?;
+
+        self.get_family(&id)
+    }
+
+    /// Load a family by id.
+    pub fn get_family(&self, family_id: &str) -> Result<ItemFamily> {
+        self.conn
+            .query_row(
+                "SELECT id, matter_id, kind, created_at FROM item_families WHERE id = ?1",
+                params![family_id],
+                map_family_row,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::FamilyNotFound(family_id.to_string())
+                }
+                other => Error::Sqlite(other),
+            })
+    }
+
+    /// List all items that belong to a family.
+    pub fn list_family_members(&self, family_id: &str) -> Result<Vec<Item>> {
+        // Ensure family exists.
+        let _ = self.get_family(family_id)?;
+        let mut stmt = self.conn.prepare(&item_select_sql(
+            "WHERE family_id = ?1 ORDER BY imported_at ASC, id ASC",
+        ))?;
+        let rows = stmt.query_map(params![family_id], map_item_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Set `family_id`, `role`, and `parent_item_id` together.
+    ///
+    /// When `parent_item_id` is set, the parent must exist and share this matter.
+    /// When role is attachment and a parent is set, the parent's `attachment_count`
+    /// is recomputed from children.
+    pub fn set_item_family_role(
+        &self,
+        item_id: &str,
+        family_id: Option<&str>,
+        role: &str,
+        parent_item_id: Option<&str>,
+    ) -> Result<Item> {
+        let _ = self.get_item(item_id)?;
+
+        if let Some(fid) = family_id {
+            let fam = self.get_family(fid)?;
+            if fam.matter_id != self.matter_id {
+                return Err(Error::CrossMatterFamily(format!(
+                    "family {fid} belongs to matter {}",
+                    fam.matter_id
+                )));
+            }
+        }
+
+        if let Some(pid) = parent_item_id {
+            let parent = self
+                .get_item(pid)
+                .map_err(|_| Error::ParentItemNotFound(pid.to_string()))?;
+            if parent.matter_id != self.matter_id {
+                return Err(Error::CrossMatterFamily(format!(
+                    "parent {pid} belongs to matter {}",
+                    parent.matter_id
+                )));
+            }
+        }
+
+        self.conn.execute(
+            "UPDATE items SET family_id = ?1, role = ?2, parent_item_id = ?3 WHERE id = ?4",
+            params![family_id, role, parent_item_id, item_id],
+        )?;
+
+        if let Some(pid) = parent_item_id {
+            self.recompute_attachment_count(pid)?;
+        }
+
+        self.get_item(item_id)
+    }
+
+    /// List direct attachment children of a parent item.
+    pub fn list_attachments(&self, parent_item_id: &str) -> Result<Vec<Item>> {
+        let mut stmt = self.conn.prepare(&item_select_sql(
+            "WHERE parent_item_id = ?1 ORDER BY imported_at ASC, id ASC",
+        ))?;
+        let rows = stmt.query_map(params![parent_item_id], map_item_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Resolve the parent item for a child (via `parent_item_id`).
+    pub fn get_parent(&self, child_id: &str) -> Result<Option<Item>> {
+        let child = self.get_item(child_id)?;
+        match child.parent_item_id {
+            Some(ref pid) => self.get_item(pid).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn recompute_attachment_count(&self, parent_id: &str) -> Result<()> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM items WHERE parent_item_id = ?1",
+            params![parent_id],
+            |row| row.get(0),
+        )?;
+        self.conn.execute(
+            "UPDATE items SET attachment_count = ?1 WHERE id = ?2",
+            params![count, parent_id],
+        )?;
+        Ok(())
     }
 
     // --- Item errors ---
@@ -521,6 +950,27 @@ fn map_source_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Source> {
     })
 }
 
+fn map_family_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemFamily> {
+    Ok(ItemFamily {
+        id: row.get(0)?,
+        matter_id: row.get(1)?,
+        kind: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        created_at: row.get(3)?,
+    })
+}
+
+const ITEM_COLUMNS: &str =
+    "id, matter_id, source_id, family_id, path, native_sha256, logical_hash, \
+    message_id, status, size_bytes, created_at, modified_at, imported_at, \
+    role, parent_item_id, mime_type, file_category, custodian, subject, title, \
+    from_addr, to_addrs_json, cc_addrs_json, bcc_addrs_json, author, \
+    sent_at, received_at, attachment_count, text_sha256, html_sha256, \
+    logical_hash_version, extra_json";
+
+fn item_select_sql(suffix: &str) -> String {
+    format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
+}
+
 fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
     Ok(Item {
         id: row.get(0)?,
@@ -536,7 +986,34 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         created_at: row.get(10)?,
         modified_at: row.get(11)?,
         imported_at: row.get(12)?,
+        role: row.get(13)?,
+        parent_item_id: row.get(14)?,
+        mime_type: row.get(15)?,
+        file_category: row.get(16)?,
+        custodian: row.get(17)?,
+        subject: row.get(18)?,
+        title: row.get(19)?,
+        from_addr: row.get(20)?,
+        to_addrs_json: row.get(21)?,
+        cc_addrs_json: row.get(22)?,
+        bcc_addrs_json: row.get(23)?,
+        author: row.get(24)?,
+        sent_at: row.get(25)?,
+        received_at: row.get(26)?,
+        attachment_count: row.get(27)?,
+        text_sha256: row.get(28)?,
+        html_sha256: row.get(29)?,
+        logical_hash_version: row.get::<_, i64>(30)? as u32,
+        extra_json: row.get(31)?,
     })
+}
+
+/// Apply nested Option update: outer None = leave, Some(v) = set to v (including None = SQL NULL).
+fn apply_opt2<T>(update: Option<Option<T>>, current: Option<T>) -> Option<T> {
+    match update {
+        None => current,
+        Some(v) => v,
+    }
 }
 
 fn now_rfc3339() -> String {
