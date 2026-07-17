@@ -38,7 +38,11 @@ Desk (**0020**) must only call `start` / `resume` / `cancel` / `watch_progress` 
 2. Send `Shutdown` to the worker
 3. **Join** the worker thread
 
-Do not detach the worker on app close — in-flight SQLite batches need a clean pause or finish.
+**Join timeout policy:** there is **no wall-clock join timeout**. `Drop`/`shutdown` wait until the matter worker exits. Stages **must** poll `CancelToken` so cancel leads to a cooperative **Paused** exit; a non-cooperative hang in a handler will block process exit. Do not detach the worker on app close — in-flight SQLite batches need a clean pause or finish.
+
+## Mid-run progress
+
+While a handler is blocked, a companion **progress-poller** thread opens a second Matter connection (SQLite WAL) and mirrors checkpoint `completed_count` for stages `expand` / `pst_extract` into the watch sink. Terminal snapshots are published when the handler returns.
 
 ## Public API (sketch)
 

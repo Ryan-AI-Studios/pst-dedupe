@@ -255,6 +255,104 @@ fn unknown_kind_errors() {
 }
 
 #[test]
+fn resume_missing_job_is_job_not_found_not_worker_gone() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-missing");
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(SucceedHandler));
+
+    let err = runner
+        .resume(&root, "job_does_not_exist")
+        .expect_err("missing job");
+    match err {
+        RunnerError::JobNotFound(id) => assert_eq!(id, "job_does_not_exist"),
+        other => panic!("expected JobNotFound, got {other:?} (must not be WorkerGone)"),
+    }
+}
+
+/// Mock that writes expanding checkpoints while sleeping so the mid-run poller
+/// can surface `completed_count` before terminal.
+struct CheckpointingSlowHandler {
+    ticks: Arc<AtomicUsize>,
+}
+
+impl JobHandler for CheckpointingSlowHandler {
+    fn kind(&self) -> &'static str {
+        "mock_cp"
+    }
+
+    fn run(&self, ctx: &JobContext<'_>) -> Result<JobOutcome, RunnerError> {
+        for i in 1..=5u64 {
+            if ctx.cancel.is_cancelled() {
+                ctx.matter
+                    .set_job_state(ctx.job_id, JobState::Paused, Some("cancelled"))
+                    .map_err(RunnerError::from)?;
+                return Ok(JobOutcome::Paused {
+                    message: Some("cancelled".into()),
+                    completed_count: i,
+                });
+            }
+            let cursor = serde_json::json!({ "source_id": "src-cp", "step": i });
+            ctx.matter
+                .put_checkpoint(ctx.job_id, "expand", &cursor.to_string(), i as i64)
+                .map_err(RunnerError::from)?;
+            self.ticks.fetch_add(1, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(80));
+        }
+        ctx.matter
+            .set_job_state(ctx.job_id, JobState::Succeeded, None)
+            .map_err(RunnerError::from)?;
+        Ok(JobOutcome::Succeeded {
+            message: Some("done".into()),
+            completed_count: 5,
+        })
+    }
+}
+
+#[test]
+fn mid_run_watch_reflects_checkpoint_progress() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-mid-progress");
+    let ticks = Arc::new(AtomicUsize::new(0));
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(CheckpointingSlowHandler {
+        ticks: Arc::clone(&ticks),
+    }));
+    let mut rx = runner.watch_progress();
+
+    let job_id = runner
+        .start(&root, "mock_cp", JobParams::empty())
+        .expect("start");
+
+    // Wait until at least one checkpoint is visible via watch (mid-run).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_mid = false;
+    while std::time::Instant::now() < deadline {
+        let snap = rx.borrow_and_update().clone();
+        if snap.job_id == job_id
+            && snap.state == "running"
+            && snap.completed_count >= 1
+            && snap.stage.as_deref() == Some("expand")
+        {
+            saw_mid = true;
+            break;
+        }
+        let _ = rx.has_changed();
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        saw_mid,
+        "expected mid-run checkpoint progress on watch, last={:?}",
+        rx.borrow().clone()
+    );
+
+    assert!(runner.wait_until_idle(Duration::from_secs(5)));
+    assert!(ticks.load(Ordering::SeqCst) >= 1);
+}
+
+#[test]
 fn drop_joins_without_hang() {
     let (_tmp, base) = utf8_tempdir();
     let root = make_matter(&base, "m-drop");
@@ -379,10 +477,10 @@ fn extract_pst_fixture_via_runner() {
         root_ws.join("fixtures/aspose_sub.pst"),
         root_ws.join("fixtures/sample.pst"),
     ];
-    let Some(pst) = candidates.into_iter().find(|p| p.is_file()) else {
-        eprintln!("skip: no fixture PST");
-        return;
-    };
+    let pst = candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .expect("repo fixtures required for extract_pst_fixture_via_runner");
 
     let (_tmp, base) = utf8_tempdir();
     let matter_root = make_matter(&base, "m-extract");
@@ -391,12 +489,14 @@ fn extract_pst_fixture_via_runner() {
         let source = matter
             .insert_source(pst.to_str().unwrap(), "pst", "importing", None)
             .expect("source");
+        // Stream into CAS without holding full file if large — fixtures are small.
         let bytes = fs::read(&pst).expect("read");
         let digest = matter.put_bytes(&bytes).expect("cas");
         let name = pst
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("mail.pst");
+        // Inventory path is leaf name; open uses CAS digest (extract-pst open resolve).
         let inv = matter
             .insert_item(ItemInput {
                 source_id: Some(source.id.clone()),
@@ -431,18 +531,21 @@ fn extract_pst_fixture_via_runner() {
     let jobs = matter.list_jobs().expect("list");
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].id, job_id);
-    // max_messages may pause or succeed depending on fixture size.
+    // max_messages may Pause; success is also fine. Failure is not acceptable for known fixtures.
     assert!(
-        matches!(
-            jobs[0].state,
-            JobState::Succeeded | JobState::Paused | JobState::Failed
-        ),
-        "unexpected state {:?}",
-        jobs[0].state
+        matches!(jobs[0].state, JobState::Succeeded | JobState::Paused),
+        "extract must not Fail on known fixture; state={:?} err={:?}",
+        jobs[0].state,
+        jobs[0].error_summary
     );
-    if jobs[0].state == JobState::Failed {
-        // Open failures on empty/broken fixtures are acceptable for smoke.
-        eprintln!("extract failed (fixture?): {:?}", jobs[0].error_summary);
+    // Prefer path form for open identity if CAS-only fails on some fixtures:
+    // also assert we wrote at least a checkpoint or messages when Succeeded.
+    if jobs[0].state == JobState::Paused {
+        let cp = matter
+            .get_checkpoint(&job_id, "pst_extract")
+            .expect("cp")
+            .expect("paused extract must have checkpoint");
+        assert!(cp.completed_count >= 0);
     }
 }
 
@@ -491,4 +594,100 @@ fn ingest_zip_via_runner_one_job() {
     let snap = runner.watch_progress().borrow().clone();
     assert_eq!(snap.state, "succeeded");
     assert_eq!(snap.job_id, job_id);
+}
+
+/// Real ingest handler: cancel → Paused + checkpoint → resume same job_id → Succeeded.
+#[cfg(feature = "ingest")]
+#[test]
+fn ingest_cancel_then_resume_same_job() {
+    use process_runner::IngestHandler;
+    use std::fs::File;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
+
+    let (_tmp, base) = utf8_tempdir();
+    let zip_path = base.join("big.zip");
+    {
+        let file = File::create(zip_path.as_std_path()).expect("zip");
+        let mut zip = ZipWriter::new(file);
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        // Many entries so cancel can land mid-expand.
+        for i in 0..200 {
+            zip.start_file(format!("f{i:03}.txt"), opts).expect("start");
+            zip.write_all(b"x").expect("write");
+        }
+        zip.finish().expect("finish");
+    }
+
+    let matter_root = make_matter(&base, "m-ingest-resume");
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(IngestHandler::new()));
+
+    let params = JobParams::new(
+        serde_json::json!({
+            "path": zip_path.as_str(),
+            "limits": {
+                "checkpoint_every_n_entries": 1,
+                "max_entries": 10_000
+            }
+        })
+        .to_string(),
+    );
+
+    let job_id = runner
+        .start(&matter_root, "ingest", params)
+        .expect("start ingest");
+
+    // Cancel promptly while still running (or immediately after accept).
+    let mut cancelled = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if runner.is_busy() {
+            runner.cancel(&job_id).expect("cancel");
+            cancelled = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    // If the job finished before cancel (tiny machine race), still assert one job + Succeeded.
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&matter_root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(matter.list_jobs().expect("list").len(), 1);
+
+    if job.state == JobState::Succeeded {
+        // Finished before cancel — acceptable on fast hosts; still one job.
+        let _ = cancelled;
+        return;
+    }
+
+    assert_eq!(
+        job.state,
+        JobState::Paused,
+        "expected Paused after cancel, got {:?} err={:?}",
+        job.state,
+        job.error_summary
+    );
+    let cp = matter
+        .get_checkpoint(&job_id, "expand")
+        .expect("cp")
+        .expect("paused ingest must have expand checkpoint");
+    assert!(cp.completed_count >= 0);
+
+    drop(matter);
+    runner.resume(&matter_root, &job_id).expect("resume");
+    assert!(runner.wait_until_idle(Duration::from_secs(60)));
+
+    let matter = Matter::open(&matter_root).expect("open");
+    let jobs = matter.list_jobs().expect("list");
+    assert_eq!(jobs.len(), 1, "resume must not create a second job");
+    assert_eq!(jobs[0].id, job_id);
+    assert_eq!(
+        jobs[0].state,
+        JobState::Succeeded,
+        "resume should finish: {:?}",
+        jobs[0].error_summary
+    );
 }

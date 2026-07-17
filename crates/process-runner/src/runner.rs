@@ -1,6 +1,7 @@
 //! Single matter-worker-thread process runner.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -15,6 +16,42 @@ use crate::config::RunnerConfig;
 use crate::error::{Result, RunnerError};
 use crate::handler::{JobContext, JobHandler, JobOutcome, JobParams};
 use crate::progress::{now_rfc3339_approx, JobProgressSnapshot, ProgressEvent, ProgressSink};
+
+/// Stages the runner polls for mid-run `completed_count` (DoD-4).
+const PROGRESS_STAGES: &[&str] = &["expand", "pst_extract"];
+
+/// Clone an error for channel delivery (Matter errors become `Other` text).
+fn clone_for_reply(err: &RunnerError) -> RunnerError {
+    match err {
+        RunnerError::Busy { job_id } => RunnerError::Busy {
+            job_id: job_id.clone(),
+        },
+        RunnerError::UnknownKind(k) => RunnerError::UnknownKind(k.clone()),
+        RunnerError::HandlerFailed(m) => RunnerError::HandlerFailed(m.clone()),
+        RunnerError::MatterOpen { path, message } => RunnerError::MatterOpen {
+            path: path.clone(),
+            message: message.clone(),
+        },
+        RunnerError::JobNotFound(id) => RunnerError::JobNotFound(id.clone()),
+        RunnerError::InvalidJob(m) => RunnerError::InvalidJob(m.clone()),
+        RunnerError::InvalidParams(m) => RunnerError::InvalidParams(m.clone()),
+        RunnerError::CancelFailed(m) => RunnerError::CancelFailed(m.clone()),
+        RunnerError::ShutDown => RunnerError::ShutDown,
+        RunnerError::WorkerGone => RunnerError::WorkerGone,
+        RunnerError::Matter(e) => RunnerError::Other(e.to_string()),
+        RunnerError::Other(m) => RunnerError::Other(m.clone()),
+    }
+}
+
+fn reply_err_string(reply: &Sender<Result<String>>, err: RunnerError) -> RunnerError {
+    let _ = reply.send(Err(clone_for_reply(&err)));
+    err
+}
+
+fn reply_err_unit(reply: &Sender<Result<()>>, err: RunnerError) -> RunnerError {
+    let _ = reply.send(Err(clone_for_reply(&err)));
+    err
+}
 
 /// Lightweight view of the currently active job (if any).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,7 +267,8 @@ impl ProcessRunner {
             drop(tx);
         }
         if let Some(handle) = self.join.lock().expect("join lock").take() {
-            // Join without a hard timeout; stages pause cooperatively.
+            // Join without a wall-clock timeout (documented in README). Stages
+            // must poll cancel so Drop does not hang indefinitely.
             let _ = handle.join();
         }
     }
@@ -306,7 +344,8 @@ fn worker_loop(
 
                 match open_matter(&matter_root) {
                     Ok(matter) => {
-                        match run_start(
+                        // run_start always replies (success with job_id, or typed Err).
+                        let _ = run_start(
                             &matter,
                             handler.as_ref(),
                             &kind,
@@ -315,13 +354,7 @@ fn worker_loop(
                             &active,
                             &sink,
                             &reply,
-                        ) {
-                            Ok(()) => {}
-                            Err(e) => {
-                                // reply may already have been sent with job_id
-                                let _ = e;
-                            }
-                        }
+                        );
                         // Matter drops here — exclusive ownership ends.
                     }
                     Err(e) => {
@@ -343,7 +376,8 @@ fn worker_loop(
 
                 match open_matter(&matter_root) {
                     Ok(matter) => {
-                        match run_resume(
+                        // run_resume always replies (Ok(()) or typed Err).
+                        let _ = run_resume(
                             &matter,
                             &job_id,
                             &matter_root,
@@ -351,12 +385,7 @@ fn worker_loop(
                             &active,
                             &sink,
                             &reply,
-                        ) {
-                            Ok(()) => {}
-                            Err(e) => {
-                                let _ = e;
-                            }
-                        }
+                        );
                     }
                     Err(e) => {
                         let _ = reply.send(Err(e));
@@ -403,8 +432,16 @@ fn run_start(
     sink: &ProgressSink,
     reply: &Sender<Result<String>>,
 ) -> Result<()> {
-    let job = matter.create_job(kind)?;
-    matter.set_job_state(&job.id, JobState::Running, None)?;
+    // --- Accept phase: always reply with job_id or a typed error (never drop). ---
+    let job = match matter.create_job(kind) {
+        Ok(j) => j,
+        Err(e) => {
+            return Err(reply_err_string(reply, RunnerError::Matter(e)));
+        }
+    };
+    if let Err(e) = matter.set_job_state(&job.id, JobState::Running, None) {
+        return Err(reply_err_string(reply, RunnerError::Matter(e)));
+    }
 
     let cancel = CancelToken::new();
     {
@@ -419,9 +456,11 @@ fn run_start(
     }
 
     publish_started(sink, &job, kind, matter.id());
-
     // Hand job_id back before long work so callers can cancel / watch.
     let _ = reply.send(Ok(job.id.clone()));
+
+    // Mid-run progress: second SQLite connection (WAL) polls checkpoints.
+    let poller = start_checkpoint_poller(matter_root, &job.id, kind, matter.id(), sink.clone());
 
     let ctx = JobContext {
         matter,
@@ -434,6 +473,7 @@ fn run_start(
     };
 
     let outcome = handler.run(&ctx);
+    stop_checkpoint_poller(poller);
     finalize_job(matter, &job.id, kind, matter.id(), sink, outcome);
 
     *active.lock().expect("active") = None;
@@ -450,28 +490,35 @@ fn run_resume(
     sink: &ProgressSink,
     reply: &Sender<Result<()>>,
 ) -> Result<()> {
-    let job = matter
-        .get_job(job_id)
-        .map_err(|_| RunnerError::JobNotFound(job_id.to_string()))?;
+    // --- Accept phase: always reply Ok or typed Err (never drop → WorkerGone). ---
+    let job = match matter.get_job(job_id) {
+        Ok(j) => j,
+        Err(_) => {
+            return Err(reply_err_unit(
+                reply,
+                RunnerError::JobNotFound(job_id.to_string()),
+            ));
+        }
+    };
 
     let handler = {
         let map = handlers.lock().expect("handlers");
         map.get(&job.kind).cloned()
     };
     let Some(handler) = handler else {
-        let _ = reply.send(Err(RunnerError::UnknownKind(job.kind.clone())));
-        return Err(RunnerError::UnknownKind(job.kind));
+        return Err(reply_err_unit(
+            reply,
+            RunnerError::UnknownKind(job.kind.clone()),
+        ));
     };
 
     match job.state {
         JobState::Paused | JobState::Failed | JobState::Pending | JobState::Running => {}
         JobState::Succeeded => {
-            let _ = reply.send(Err(RunnerError::InvalidJob(format!(
-                "{job_id}: already succeeded"
-            ))));
-            return Err(RunnerError::InvalidJob(format!(
-                "{job_id}: already succeeded"
-            )));
+            return Err(reply_err_unit(
+                reply,
+                RunnerError::InvalidJob(format!("{job_id}: already succeeded")),
+            ));
         }
         JobState::Cancelled => {
             // Allowed: stages transition Cancelled → Pending → Running.
@@ -501,13 +548,22 @@ fn run_resume(
         JobState::Paused | JobState::Failed | JobState::Pending | JobState::Cancelled
     ) {
         if job.state == JobState::Cancelled {
-            let _ = matter.set_job_state(&job.id, JobState::Pending, None);
+            if let Err(e) = matter.set_job_state(&job.id, JobState::Pending, None) {
+                *active.lock().expect("active") = None;
+                return Err(reply_err_unit(reply, RunnerError::Matter(e)));
+            }
         }
-        let _ = matter.set_job_state(&job.id, JobState::Running, None);
+        if let Err(e) = matter.set_job_state(&job.id, JobState::Running, None) {
+            *active.lock().expect("active") = None;
+            return Err(reply_err_unit(reply, RunnerError::Matter(e)));
+        }
     }
 
     publish_started(sink, &job, &job.kind, matter.id());
     let _ = reply.send(Ok(()));
+
+    let poller =
+        start_checkpoint_poller(matter_root, &job.id, &job.kind, matter.id(), sink.clone());
 
     let source_id = extract_source_id(&params_json);
     let source_ref = source_id.as_deref();
@@ -523,10 +579,68 @@ fn run_resume(
     };
 
     let outcome = handler.run(&ctx);
+    stop_checkpoint_poller(poller);
     finalize_job(matter, &job.id, &job.kind, matter.id(), sink, outcome);
 
     *active.lock().expect("active") = None;
     Ok(())
+}
+
+/// Companion thread: opens a **second** Matter connection (WAL) and mirrors
+/// checkpoint `completed_count` into the watch sink while the handler blocks.
+struct CheckpointPoller {
+    stop: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
+fn start_checkpoint_poller(
+    matter_root: &Utf8Path,
+    job_id: &str,
+    kind: &str,
+    matter_id: &str,
+    sink: ProgressSink,
+) -> CheckpointPoller {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_flag = Arc::clone(&stop);
+    let root = matter_root.to_path_buf();
+    let job_id = job_id.to_string();
+    let kind = kind.to_string();
+    let matter_id = matter_id.to_string();
+
+    let handle = thread::Builder::new()
+        .name("progress-poller".into())
+        .spawn(move || {
+            // Brief settle so the worker's first writes are visible.
+            thread::sleep(Duration::from_millis(20));
+            while !stop_flag.load(Ordering::SeqCst) {
+                if let Ok(m) = Matter::open(&root) {
+                    for stage in PROGRESS_STAGES {
+                        if let Ok(Some(cp)) = m.get_checkpoint(&job_id, stage) {
+                            let count = cp.completed_count.max(0) as u64;
+                            sink.patch(|s| {
+                                // Only update if this is still the same job.
+                                if s.job_id == job_id && s.state == "running" {
+                                    s.completed_count = count;
+                                    s.stage = Some((*stage).to_string());
+                                    s.message = Some(format!("checkpoint:{stage}"));
+                                    s.kind = kind.clone();
+                                    s.matter_id = matter_id.clone();
+                                }
+                            });
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        })
+        .expect("spawn progress poller");
+
+    CheckpointPoller { stop, handle }
+}
+
+fn stop_checkpoint_poller(poller: CheckpointPoller) {
+    poller.stop.store(true, Ordering::SeqCst);
+    let _ = poller.handle.join();
 }
 
 fn load_resume_params(matter: &Matter, job: &Job) -> String {
