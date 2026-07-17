@@ -1,0 +1,25 @@
+[package]
+name = "process-runner"
+version = "0.1.0"
+edition = "2021"
+description = "In-process matter job runner: single worker thread, cancel, watch progress"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["ingest", "extract_pst"]
+ingest = ["dep:ingest-purview"]
+extract_pst = ["dep:extract-pst"]
+
+[dependencies]
+matter-core = { path = "../matter-core" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+camino = { workspace = true }
+tokio = { version = "1", default-features = false, features = ["sync"] }
+ingest-purview = { path = "../ingest-purview", optional = true }
+extract-pst = { path = "../extract-pst", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }

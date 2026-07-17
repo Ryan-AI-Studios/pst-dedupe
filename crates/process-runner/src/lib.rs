@@ -1,0 +1,41 @@
+//! # process-runner
+//!
+//! In-process **matter job runner** for Dedupe Desk:
+//!
+//! - **Single matter worker thread** owns `Matter` for the active job
+//! - **Cancel** via [`CancelToken`] (`Arc<AtomicBool>`, cooperative)
+//! - **Progress** via `tokio::sync::watch` (latest snapshot) + optional broadcast
+//! - **Option C:** runner is sole creator of job rows for orchestrated runs
+//!
+//! ## Never call extract/ingest on the UI thread
+//!
+//! Handlers run only on the matter worker. GUI/CLI code should call
+//! [`ProcessRunner::start`] / [`cancel`] / [`watch_progress`] only.
+//!
+//! ## Drop / shutdown
+//!
+//! [`ProcessRunner::shutdown`] and [`Drop`] set cancel and **join** the worker
+//! so in-flight SQLite batches can finish or cleanly pause.
+
+#![forbid(unsafe_code)]
+
+pub mod cancel;
+pub mod config;
+pub mod error;
+pub mod handler;
+pub mod handlers;
+pub mod progress;
+pub mod runner;
+
+pub use cancel::CancelToken;
+pub use config::RunnerConfig;
+pub use error::{Result, RunnerError};
+pub use handler::{JobContext, JobHandler, JobOutcome, JobParams};
+pub use progress::{JobProgressSnapshot, ProgressEvent, ProgressSink};
+pub use runner::{JobSnapshot, ProcessRunner};
+
+#[cfg(feature = "ingest")]
+pub use handlers::IngestHandler;
+
+#[cfg(feature = "extract_pst")]
+pub use handlers::ExtractPstHandler;
