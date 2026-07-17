@@ -8,5 +8,5 @@
 6. **Dedup semantics must be conservative**: Message-ID matches are definitive. Content hash is a fallback for missing Message-ID unless a track explicitly changes that policy and tests prove the behavior.
 7. **Large-file awareness**: Avoid loading whole PST files into memory. Loading individual node data is acceptable only when bounded or justified by the PST layer.
 8. **Cargo gate**: Before commit, run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`, unless a blocker is explicitly recorded.
-9. **Provenance via ChangeGuard**: Major changes and architectural decisions should be recorded in `changeguard ledger`.
+9. **Provenance via Ledgerful**: Major changes and architectural decisions should be recorded in `ledgerful ledger`.
 10. **Project memory via ai-brains**: Durable decisions, user corrections, and important constraints should be pinned with `ai-brains`.

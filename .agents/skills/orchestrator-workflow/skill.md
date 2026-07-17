@@ -1,6 +1,6 @@
 ---
 name: orchestrator-workflow
-description: Defines the standard operating procedure for planning tracks, using ChangeGuard, using ai-brains, running verification, and coordinating reviews for pst-dedupe.
+description: Defines the standard operating procedure for planning tracks, using Ledgerful, using ai-brains, running verification, and coordinating reviews for pst-dedupe.
 ---
 
 # Orchestrator Workflow
@@ -36,12 +36,12 @@ Run:
 ai-brains context --show
 ai-brains safety sync
 ai-brains preflight --max-words 1000
-changeguard ledger status
-changeguard hotspots --limit 5
+ledgerful ledger status
+ledgerful hotspots --limit 5
 git status --short --branch
 ```
 
-If ChangeGuard or ai-brains is unavailable, continue with local inspection and report that tool signal as unavailable.
+If Ledgerful or ai-brains is unavailable, continue with local inspection and report that tool signal as unavailable.
 
 ## Planning
 
@@ -49,11 +49,11 @@ For meaningful work:
 
 1. Read `ARCHITECTURE.md` and relevant crate files.
 2. Check `conductor/conductor.md`.
-3. Run `changeguard scan --impact`.
+3. Run `ledgerful scan --impact`.
 4. Start a ledger transaction:
 
 ```powershell
-changeguard ledger start <entity> --category <CAT> --message "Intent"
+ledgerful ledger start <entity> --category <CAT> --message "Intent"
 ```
 
 5. Record durable constraints or decisions:
@@ -84,8 +84,8 @@ Run targeted checks first, then the full gate:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-changeguard impact
-changeguard verify
+ledgerful impact
+ledgerful verify
 ```
 
 For PST-reader changes, add or run fixture/integration tests. For dedup semantics, add unit tests that distinguish Message-ID and content-hash behavior.
@@ -105,12 +105,12 @@ Critical/high review findings must be fixed or explicitly tracked before complet
 Before commit:
 
 1. Update `conductor/conductor.md`.
-2. Run `changeguard impact`.
+2. Run `ledgerful impact`.
 3. Run verification.
 4. Close the ledger transaction:
 
 ```powershell
-changeguard ledger commit <tx-id> --summary "What changed" --reason "Why"
+ledgerful ledger commit <tx-id> --summary "What changed" --reason "Why"
 ```
 
 Then commit normally.

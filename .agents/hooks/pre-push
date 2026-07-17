@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # pst-dedupe pre-push gate.
-# Runs ChangeGuard plus the Rust workspace checks expected for this repository.
+# Runs Ledgerful plus the Rust workspace checks expected for this repository.
 
 set -eu
 
@@ -15,18 +15,18 @@ if git rev-parse --verify HEAD >/dev/null 2>&1; then
   fi
 fi
 
-if command -v changeguard >/dev/null 2>&1; then
-  changeguard scan >/dev/null 2>&1 || true
+if command -v ledgerful >/dev/null 2>&1; then
+  ledgerful scan >/dev/null 2>&1 || true
 
-  STATUS=$(changeguard ledger status --compact 2>/dev/null || true)
+  STATUS=$(ledgerful ledger status --compact 2>/dev/null || true)
   PENDING=$(echo "$STATUS" | grep -o "[0-9]* pending" | cut -d' ' -f1 | head -n 1)
   DRIFT=$(echo "$STATUS" | grep -o "[0-9]* unaudited drift" | cut -d' ' -f1 | head -n 1)
   PENDING=${PENDING:-0}
   DRIFT=${DRIFT:-0}
 
   if [ "$PENDING" -gt 0 ] || [ "$DRIFT" -gt 0 ]; then
-    echo "PUSH REJECTED: ChangeGuard reports $PENDING pending transactions and $DRIFT unaudited drift entries."
-    echo "Run 'changeguard ledger status' and reconcile or commit the ledger state."
+    echo "PUSH REJECTED: Ledgerful reports $PENDING pending transactions and $DRIFT unaudited drift entries."
+    echo "Run 'ledgerful ledger status' and reconcile or commit the ledger state."
     exit 1
   fi
 fi
@@ -35,8 +35,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
-if command -v changeguard >/dev/null 2>&1; then
-  changeguard verify
+if command -v ledgerful >/dev/null 2>&1; then
+  ledgerful verify
 fi
 
 echo "pst-dedupe pre-push gate passed."

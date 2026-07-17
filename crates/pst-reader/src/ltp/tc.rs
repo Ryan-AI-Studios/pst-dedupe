@@ -3,6 +3,7 @@
 //! A TC is a table (rows × columns) built on an HN + subnode BTree.
 //! Used for folder hierarchy tables, contents tables, and attachment tables.
 
+use super::bth;
 use super::hn::{Heap, Hid};
 use super::pc::decode_utf16le;
 use crate::crypto::CryptMethod;
@@ -56,6 +57,11 @@ pub struct TableContext {
     row_size: usize,
     /// Row count.
     row_count: usize,
+    /// RowID for each matrix index (from the RowIndex BTH). 0 if unknown.
+    ///
+    /// For hierarchy/contents tables the RowID is the child folder/message NID
+    /// (MS-PST §2.3.4.3 / §2.4.4).
+    row_ids: Vec<u32>,
 }
 
 impl TableContext {
@@ -96,13 +102,58 @@ impl TableContext {
             (Vec::new(), 0)
         };
 
+        let row_ids = Self::load_row_ids(&heap, &info, row_count)?;
+
         Ok(Self {
             heap,
             info,
             row_data,
             row_size,
             row_count,
+            row_ids,
         })
+    }
+
+    /// Build matrix-index → RowID map from the TC RowIndex BTH.
+    fn load_row_ids(heap: &Heap, info: &TcInfo, row_count: usize) -> Result<Vec<u32>> {
+        let mut row_ids = vec![0u32; row_count];
+        if info.hid_row_index.is_null() || row_count == 0 {
+            return Ok(row_ids);
+        }
+
+        let bth_header = match bth::read_bth_header(heap, info.hid_row_index) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!("TC RowIndex BTH header unreadable: {e}");
+                return Ok(row_ids);
+            }
+        };
+
+        let records = match bth::collect_records(heap, &bth_header) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("TC RowIndex BTH traversal failed: {e}");
+                return Ok(row_ids);
+            }
+        };
+
+        for rec in records {
+            if rec.key.len() < 4 {
+                continue;
+            }
+            let row_id = LittleEndian::read_u32(&rec.key[0..4]);
+            let row_index = match rec.data.len() {
+                n if n >= 4 => LittleEndian::read_u32(&rec.data[0..4]) as usize,
+                2 => LittleEndian::read_u16(&rec.data[0..2]) as usize,
+                1 => rec.data[0] as usize,
+                _ => continue,
+            };
+            if row_index < row_ids.len() {
+                row_ids[row_index] = row_id;
+            }
+        }
+
+        Ok(row_ids)
     }
 
     fn parse_tc_info(data: &[u8]) -> Result<TcInfo> {
@@ -159,6 +210,19 @@ impl TableContext {
     /// Get column descriptors.
     pub fn columns(&self) -> &[TcColumnDesc] {
         &self.info.columns
+    }
+
+    /// RowID for a matrix index (from the RowIndex BTH).
+    ///
+    /// For folder hierarchy and contents tables this is the NID of the child
+    /// object. Returns `None` when the RowIndex entry is missing or zero.
+    pub fn get_row_id(&self, row_index: usize) -> Option<u32> {
+        let id = *self.row_ids.get(row_index)?;
+        if id == 0 {
+            None
+        } else {
+            Some(id)
+        }
     }
 
     /// Read a 4-byte value from a specific row and column.

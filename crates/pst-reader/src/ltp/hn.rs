@@ -150,15 +150,22 @@ impl Heap {
             });
         }
 
-        // Read HNPAGEMAP: cAlloc(2) + rgibAlloc[(cAlloc+1) × 2]
+        // HNPAGEMAP (MS-PST §2.3.1.5): cAlloc(2) + cFree(2) + rgibAlloc[(cAlloc+1)×2]
+        if hnpm_offset + 4 > block_data.len() {
+            return Err(PstError::DataTruncated {
+                needed: hnpm_offset + 4,
+                available: block_data.len(),
+            });
+        }
         let c_alloc = LittleEndian::read_u16(&block_data[hnpm_offset..hnpm_offset + 2]) as usize;
+        let _c_free = LittleEndian::read_u16(&block_data[hnpm_offset + 2..hnpm_offset + 4]) as usize;
 
         if alloc_index > c_alloc {
             return Err(PstError::InvalidHid(hid.0));
         }
 
-        // rgibAlloc starts at hnpm_offset + 2
-        let rgib_start = hnpm_offset + 2;
+        // rgibAlloc starts after cAlloc + cFree
+        let rgib_start = hnpm_offset + 4;
         let offset_a = rgib_start + (alloc_index - 1) * 2;
         let offset_b = rgib_start + alloc_index * 2;
 

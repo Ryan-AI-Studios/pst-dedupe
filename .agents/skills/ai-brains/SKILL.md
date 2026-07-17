@@ -22,7 +22,7 @@ This skill requires the `ai-brains` CLI tool.
 ### Phase 1: Orient (What do I already know?)
 Trigger when starting a new session or entering a new repository.
 1. **Sync Safety**: Run `ai-brains safety sync`.
-   - **Goal**: Ingest recent ChangeGuard hotspots to identify brittle files.
+   - **Goal**: Ingest recent Ledgerful hotspots to identify brittle files.
 2. **Get Orientation**: Run `ai-brains preflight --max-words 1000`.
    - **Goal**: Identify the most recent project state and safety constraints.
 - **Heuristic**: Keep any additional manual research notes under ~150 words to ensure the memory index remains dominant in your context.

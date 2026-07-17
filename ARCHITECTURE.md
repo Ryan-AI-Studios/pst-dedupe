@@ -2,14 +2,15 @@
 
 ## Project Overview
 
-**Purpose:** Standalone Windows executable (Rust + egui) that deduplicates emails across
-multiple PST files. Produces a dedup report (CSV) and optionally exports unique emails as
-EML files in a flat directory. Handles 1M+ emails across multi-gigabyte PSTs.
+**Purpose:** Standalone Windows tools (Rust) that deduplicate emails across multiple PST
+files. Surfaces: **CLI** (`pst-dedup`) for scripts/agents and **egui GUI** for interactive
+use. Produces a dedup report (CSV) and optionally exports unique emails as EML files.
+Target scale: 1M+ emails across multi-gigabyte PSTs.
 
 **Key Constraints:**
 - Pure Rust, zero C dependencies — no libpff, no Outlook
 - PST reading implemented from [MS-PST] specification v20240820
-- Single statically-linked `.exe` for Windows deployment
+- Statically-linked Windows `.exe` deployment (CLI and/or GUI)
 - Must handle PST files >10GB and aggregate >1M messages
 - Commercial/government use — all dependencies must be permissively licensed
 
@@ -52,16 +53,25 @@ pst-dedup/                      (Cargo workspace)
 │   │   ├── report.rs           CSV report generation
 │   │   └── exporter.rs         EML export (RFC 5322 serialization)
 │   │
-│   └── pst-dedup-gui/          egui application
-│       src/
-│       ├── main.rs             Entry point, eframe setup
-│       ├── app.rs              Top-level App struct, state machine
-│       ├── views/
-│       │   ├── file_select.rs  PST file picker panel
-│       │   ├── settings.rs     Dedup config panel
-│       │   ├── progress.rs     Scan progress with throughput stats
-│       │   └── results.rs      Report viewer + export controls
-│       └── worker.rs           Background thread for PST processing
+│   ├── pst-dedup-cli/          Agent/human CLI (`pst-dedup` binary)
+│   │   src/
+│   │   ├── main.rs             clap: inspect / scan / dups
+│   │   ├── scan.rs             Scan orchestration + CSV/JSON summary
+│   │   ├── inspect.rs          Folder tree / counts
+│   │   └── error.rs            Typed CLI errors
+│   │
+│   ├── pst-dedup-gui/          egui application
+│   │   src/
+│   │   ├── main.rs             Entry point, eframe setup
+│   │   ├── app.rs              Top-level App struct, state machine
+│   │   ├── views/
+│   │   │   ├── file_select.rs  PST file picker panel
+│   │   │   ├── settings.rs     Dedup config panel
+│   │   │   ├── progress.rs     Scan progress with throughput stats
+│   │   │   └── results.rs      Report viewer + export controls
+│   │   └── worker.rs           Background thread for PST processing
+│   │
+│   └── pst-writer/             Experimental write path / fixture helpers
 ```
 
 ---
@@ -97,21 +107,24 @@ Offset  Size  Field
 36      4     dwUnique
 40     128    rgnid[32] — NID counters per type
 168     8     qwUnused
-176    40     root — ROOT structure (see below)
-216    4      dwAlign
-220    380    rgbFM — initial FMap (deprecated)
-600    128    rgbFP — initial FPMap (deprecated)
-728    1      bSentinel = 0x80
-729    1      bCryptMethod — 0=None, 1=Permute, 2=Cyclic
-730    2      rgbReserved
-732    8      bidNextB
-740    4      dwCRCFull
-744    3      rgbReserved2
-747    1      bReserved
-748    4      rgbReserved3 (Unicode only, pad to 4K)
+180    72     root — ROOT structure (see below)  [Unicode offset 0xB4]
+252    4      dwAlign
+256    128    rgbFM — initial FMap (deprecated)  [Unicode 0x100]
+384    128    rgbFP — initial FPMap (deprecated) [Unicode 0x180]
+512    1      bSentinel = 0x80                  [Unicode 0x200]
+513    1      bCryptMethod — 0=None, 1=Permute, 2=Cyclic  [Unicode 0x201]
+514    2      rgbReserved
+516    8      bidNextB
+524    4      dwCRCFull
+…             reserved / pad toward 4K page
 ```
 
-**ROOT Structure** (§2.2.2.6, at header offset 176, 72 bytes for Unicode):
+> **Implementation note (2026-07):** Older drafts mis-aligned Unicode `rgbFM`/`rgbFP`
+> (508-byte skip) and over-read ROOT padding (7 bytes after `fAMapValid`). That shifted
+> `bCryptMethod` and caused encrypted PSTs to be treated as unencrypted. Correct layout
+> is above; code lives in `pst-reader` `header.rs`.
+
+**ROOT Structure** (§2.2.2.5 / §2.2.2.6, at header offset 180 / `0xB4`, 72 bytes for Unicode):
 ```
 Offset  Size  Field
 ------  ----  -----
@@ -120,10 +133,11 @@ Offset  Size  Field
 8       8     ibAMapLast — offset of last AMap page
 16      8     cbAMapFree — total free space in AMaps
 24      8     cbPMapFree — (deprecated)
-32      8     BREFNBT — BREF to root page of Node BTree
-48      8     BREFBBT — BREF to root page of Block BTree
+32      16    BREFNBT — BREF to root page of Node BTree
+48      16    BREFBBT — BREF to root page of Block BTree
 64      1     fAMapValid — 1 if AMap is valid
-65      7     padding
+65      1     bReserved
+66      2     wReserved
 ```
 
 **BREF** (§2.2.2.4, 16 bytes for Unicode):
@@ -306,13 +320,15 @@ rgbFillLevel 4 bytes
 - hidBlockIndex: 0-based index of data block within the node
 - hidIndex: 1-based index into the HN page map of that block
 
-**HN Page Map** (at offset ibHnpm within each data block):
+**HN Page Map / HNPAGEMAP** (at offset ibHnpm within each data block, §2.3.1.5):
 ```
 cAlloc      2 bytes — number of allocations
+cFree       2 bytes — free entries (must be skipped when indexing)
 rgibAlloc   (cAlloc+1) × 2 bytes — offsets within the block
 ```
 Item `i` occupies bytes `rgibAlloc[i-1]` to `rgibAlloc[i]` (1-indexed; rgibAlloc[0]
-is the start of allocatable space).
+is the start of allocatable space). Omitting `cFree` misaligns all HID resolutions
+and truncates TCINFO / BTH structures.
 
 #### BTree-on-Heap (BTH, §2.3.2)
 
@@ -357,7 +373,7 @@ A PC is a BTH where:
 
 A TC is a table (rows × columns) built on an HN + subnode BTree.
 
-**TCINFO** (at hidUserRoot, bClientSig=0xBC):
+**TCINFO** (at hidUserRoot; HN `bClientSig` is typically `0x7C` for TC):
 ```
 bType       1 byte  = 0x7C
 cCols       1 byte  — column count
@@ -376,7 +392,10 @@ cbData      1 byte  — size of data in row
 iBit        1 byte  — bit index for cell existence bitmap
 ```
 
-Row data is stored inline in the HN or in subnode BTree entries, indexed by dwRowID.
+Row data is stored inline in the HN or in subnode BTree entries. The **RowIndex BTH**
+(`hidRowIndex`) maps `dwRowID` → matrix row index. For folder hierarchy and contents
+tables, **dwRowID is the child folder/message NID** — do not rely solely on a
+`PidTagLtpRowId` (0x67F2) column; many real PSTs omit that column.
 
 ---
 
@@ -400,9 +419,11 @@ NID composition: `nid = (nidIndex << 5) | nidType`
 
 #### Folder Traversal
 
-1. Look up NID_ROOT_FOLDER (0x122) in NBT → get its PC
-2. Read hierarchy table NID = `(0x122 & 0xFFFFFFE0) | 0x0D` = 0x12D (but this is wrong,
-   the root folder's hierarchy table NID uses the root folder's nidIndex)
+1. Look up NID_ROOT_FOLDER (0x122) in NBT → load folder PC (display name)
+2. Hierarchy table NID = `(folder_nid & !0x1F) | 0x0D` (for root: `0x12D`)
+3. Contents table NID = `(folder_nid & !0x1F) | 0x0E` (for root: `0x12E`)
+4. Load each TC; resolve child NIDs from the **RowIndex BTH** (RowID per row)
+5. Recurse hierarchy; for each contents NID, read message properties from the PC
    
    **Correct approach:** For any folder with `nid`:
    - `nidHierarchy = (nid & 0xFFFFFFE0) | 0x0D`
@@ -592,7 +613,7 @@ FileSelect → Settings → Scanning → Results
 5. **Validation:** dedup two PSTs with known overlapping emails
 
 ### Phase 5: GUI
-**Goal:** Ship the exe.
+**Goal:** Ship the interactive surface.
 
 1. `pst-dedup-gui/app.rs` — state machine, channel-based worker communication
 2. `pst-dedup-gui/worker.rs` — background thread running the pipeline
@@ -600,8 +621,15 @@ FileSelect → Settings → Scanning → Results
 4. Windows-specific: set icon, metadata, `#![windows_subsystem = "windows"]`
 5. **Validation:** end-to-end on real DOC PST files
 
+### Phase 5b: CLI
+**Goal:** Agent- and script-friendly surface (done for core commands).
+
+1. `pst-dedup-cli` binary `pst-dedup` — `inspect` / `scan` / `dups`
+2. `--json` and `--csv` outputs; logs on stderr
+3. **Validation:** real multi-mailbox Permute PST scan matches engine counts
+
 ### Phase 6: Hardening
-- CRC32 validation on pages and blocks (currently skipped for speed)
+- CRC32 validation on pages and blocks (warning-only today; algorithm still under review)
 - Graceful handling of corrupted PSTs (skip bad nodes, log warnings)
 - Large file testing (>10GB PSTs)
 - Progress estimation improvement (pre-scan contents table counts)

@@ -1,11 +1,11 @@
 /target/
-/.changeguard/cache/
-/.changeguard/index/
-/.changeguard/tmp/
-/.env
+.ledgerful/
+.env
 *.log
 review.md
-.changeguard/
 .claude/
 *.html
+
+# Local scratch / generated
+output/
 

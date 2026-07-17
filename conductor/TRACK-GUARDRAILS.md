@@ -2,6 +2,30 @@
 
 Apply these guardrails to every conductor track before marking it complete.
 
+## Conductor template (required for new tracks)
+
+- New tracks use the coordinated-style layout: `####-PascalDescription/` with `spec.md` + `plan.md`.
+- Copy from `templates/0000-Description/`; do not hand-roll structure.
+- Register every track in `conductor.md`; sequence in `sequencing.md`.
+- Plan-of-record for Desk product work: `C:\dev\Dedupe-plan.md`.
+- On completion: write `review.md`, set registry status to **Completed**, commit a ledger transaction.
+
+## Desktop / product invariants (Dedupe Desk)
+
+- Single-exe launch path for Desk edition — no user-managed servers or daemons.
+- AI / OCR / transcription plugins are **opt-in** and off by default.
+- Never mutate source Purview export or source PST files.
+- Prefer honest partial results + item-level errors over silent drops.
+- CPU-heavy parse/hash/OCR runs on a **blocking pool**, not the UI/async executor (`Dedupe-plan.md` §4.6).
+- Store both **native** and **logical** hashes; dedupe decisions use logical/Message-ID identity (`Dedupe-plan.md` §2.3).
+- Ingest/process jobs must be **checkpointed/resumable** for multi-GB packages.
+- Full-text search uses **Tantivy**; SQLite is for structured metadata (not primary FTS).
+
+## Supply chain / hostile inputs
+
+- Keep `cargo audit` (or `cargo deny` advisories) in the verification gate for production deps.
+- When adding a parser for untrusted formats (ZIP, PDF, Office, MSG, PST slices), add fuzz or strong property tests for that surface before calling the track complete.
+
 ## Compatibility And Pin Updates
 
 - Check `Cargo.toml` and `Cargo.lock` before and after the track.
@@ -30,5 +54,5 @@ Apply these guardrails to every conductor track before marking it complete.
 ## Verification
 
 - Run the smallest useful test first, then the workspace gate before completion.
-- If `changeguard verify` passes but warnings remain, document whether the warnings are accepted debt or part of the track.
+- If `ledgerful verify` passes but warnings remain, document whether the warnings are accepted debt or part of the track.
 - Do not mark a track complete until the final notes include commands run, fixture assumptions, and any intentionally deferred risk.

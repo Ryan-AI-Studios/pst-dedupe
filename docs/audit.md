@@ -2,8 +2,10 @@
 
 **Date:** 2026-05-16
 **Auditor:** Hermes Agent
-**Scope:** Full workspace (`pst-reader`, `dedup-engine`, `pst-dedup-gui`)
+**Scope:** Full workspace as of audit date (`pst-reader`, `dedup-engine`, `pst-dedup-gui`)
 **Commit:** HEAD (uncommitted changes in `track/022-unified-stealth` branch from external repo — audit covers `c:/dev/dedupe` in isolation)
+
+> **Historical note (2026-07):** This audit is a point-in-time snapshot. Since then the workspace gained `pst-dedup-cli` and `pst-writer`, migrated provenance tooling from ChangeGuard to **Ledgerful** (`.ledgerful/`), and fixed reader bugs (Unicode `bCryptMethod` alignment, HNPAGEMAP `cFree`, TC RowIndex NIDs) proven on a real Permute multi-mailbox PST. Re-audit before treating findings as current severity.
 
 ---
 

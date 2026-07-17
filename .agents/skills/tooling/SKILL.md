@@ -1,6 +1,6 @@
 ---
 name: tooling
-description: Use when searching the repo, running Cargo checks, using ChangeGuard, using ai-brains, GitHub CLI, or preparing verification.
+description: Use when searching the repo, running Cargo checks, using Ledgerful, using ai-brains, GitHub CLI, or preparing verification.
 ---
 
 # Tooling - pst-dedupe
@@ -22,25 +22,35 @@ Primary commands:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo check -p pst-dedup-cli
 cargo check -p pst-dedup-gui
 cargo test -p pst-reader
 cargo test -p dedup-engine
 ```
 
-## ChangeGuard
-
-Use ChangeGuard for repo intelligence and provenance:
+CLI smoke (agent-friendly):
 
 ```powershell
-changeguard doctor
-changeguard scan --impact
-changeguard hotspots --limit 10
-changeguard impact
-changeguard verify
-changeguard ledger status
+cargo run -p pst-dedup-cli --release -- inspect path\to\file.pst --json
+cargo run -p pst-dedup-cli --release -- scan path\to\file.pst --json
+# Binary after release build:
+# .\target\release\pst-dedup.exe scan path\to\file.pst --csv output\report.csv
 ```
 
-Do not edit `.changeguard/` state directly.
+## Ledgerful
+
+Use Ledgerful for repo intelligence and provenance:
+
+```powershell
+ledgerful doctor
+ledgerful scan --impact
+ledgerful hotspots --limit 10
+ledgerful impact
+ledgerful verify
+ledgerful ledger status
+```
+
+Do not edit `.ledgerful/` state directly.
 
 ## ai-brains
 
@@ -64,4 +74,4 @@ git branch -M main
 git push -u origin main
 ```
 
-Before pushing, make sure the Cargo gate and `changeguard verify` have been run or the reason they cannot run is documented.
+Before pushing, make sure the Cargo gate and `ledgerful verify` have been run or the reason they cannot run is documented.

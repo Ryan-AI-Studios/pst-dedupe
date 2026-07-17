@@ -8,18 +8,18 @@ onboarding{
   startup:"read .agents/skills/onboarding/SKILL.md at session start"
 }
 
-changeguard{
+ledgerful{
   before[3]:
-    "changeguard ledger status --compact"
-    "changeguard scan --impact for meaningful code/config/policy edits"
-    "read .changeguard/reports/latest-impact.json if present"
+    "ledgerful ledger status --compact"
+    "ledgerful scan --impact for meaningful code/config/policy edits"
+    "read .ledgerful/reports/latest-impact.json if present"
   edit[3]:
-    "do not edit .changeguard state files"
+    "do not edit .ledgerful state files"
     "inspect hotspots"
     "inspect temporal couplings >70%"
   after[3]:
-    "changeguard verify; if aliases fail, use verify.commands"
-    "cargo install --path . after ChangeGuard source edits"
+    "ledgerful verify; if aliases fail, use verify.commands"
+    "cargo install --path . after Ledgerful source edits"
     "report risk, verification, pending tx, drift"
   skip[5]:
     "format-only"
@@ -35,11 +35,11 @@ changeguard{
 }
 
 ledger{
-  start:"changeguard ledger start <entity> --category <CATEGORY> --message <intent>"
-  commit:"changeguard ledger commit <tx-id> --summary <what> --reason <why>"
+  start:"ledgerful ledger start <entity> --category <CATEGORY> --message <intent>"
+  commit:"ledgerful ledger commit <tx-id> --summary <what> --reason <why>"
   hooks[2]:
-    "pre-commit: changeguard ledger status --compact --exit-code"
-    "pre-push: changeguard ledger status --compact --exit-code"
+    "pre-commit: ledgerful ledger status --compact --exit-code"
+    "pre-push: ledgerful ledger status --compact --exit-code"
 }
 
 verify{
@@ -56,10 +56,12 @@ verify{
 rust{
   forbid[2]:".unwrap()","expect() in production"
   errors:"use miette + Result"
-  boundaries[3]:
+  boundaries[5]:
     "pst-reader owns PST parsing: header, NDB, LTP, messaging extraction"
     "dedup-engine owns dedup hashing, index, CSV report, EML serialization"
+    "pst-dedup-cli owns the CLI surface: inspect, scan, dups, JSON/CSV output"
     "pst-dedup-gui owns the egui app and background scan worker"
+    "pst-writer owns experimental PST writing and fixture/EML import helpers"
   invariants[2]:
     "features work offline with local model"
     "preserve Windows paths; prefer camino for UTF-8 paths"

@@ -109,27 +109,28 @@ impl PstHeader {
         // qwUnused (8 bytes)
         let _unused = reader.read_u64::<LittleEndian>()?;
 
-        // ROOT structure (offset 176, 72 bytes for Unicode)
+        // ROOT structure (Unicode offset 0xB4 / 180, 72 bytes)
         let root = Self::read_root(reader)?;
 
-        // dwAlign (4 bytes)
+        // dwAlign (4 bytes) — ends at 0x100
         let _align = reader.read_u32::<LittleEndian>()?;
 
-        // rgbFM (380 bytes) + rgbFP (128 bytes) = 508 bytes — skip
-        let mut fm_fp_buf = [0u8; 508];
+        // Unicode: rgbFM (128) + rgbFP (128) = 256 bytes — ends at 0x200.
+        // (Older code skipped 508 bytes and misaligned bCryptMethod.)
+        let mut fm_fp_buf = [0u8; 256];
         reader.read_exact(&mut fm_fp_buf)?;
 
-        // bSentinel (1 byte) — should be 0x80
+        // bSentinel (offset 0x200) — should be 0x80
         let _sentinel = reader.read_u8()?;
 
-        // bCryptMethod (offset 729, 1 byte)
+        // bCryptMethod (offset 0x201)
         let crypt_byte = reader.read_u8()?;
         let crypt_method = CryptMethod::from_byte(crypt_byte)?;
 
-        // rgbReserved (2 bytes)
+        // rgbReserved (2 bytes, offset 0x202)
         let _reserved = reader.read_u16::<LittleEndian>()?;
 
-        // bidNextB (8 bytes, Unicode)
+        // bidNextB (8 bytes, Unicode, offset 0x204)
         let bid_next_b = reader.read_u64::<LittleEndian>()?;
 
         Ok(Self {
@@ -156,11 +157,11 @@ impl PstHeader {
         let bref_nbt = Bref::read(reader)?;
         let bref_bbt = Bref::read(reader)?;
 
+        // MS-PST §2.2.2.5 ROOT (Unicode, 72 bytes total):
+        // fAMapValid (1) + bReserved (1) + wReserved (2)
         let f_amap_valid = reader.read_u8()? != 0;
-
-        // 7 bytes padding
-        let mut pad = [0u8; 7];
-        reader.read_exact(&mut pad)?;
+        let _b_reserved = reader.read_u8()?;
+        let _w_reserved = reader.read_u16::<LittleEndian>()?;
 
         Ok(RootStructure {
             ib_file_eof,
