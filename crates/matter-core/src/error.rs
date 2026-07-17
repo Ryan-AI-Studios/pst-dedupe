@@ -65,6 +65,9 @@ pub enum Error {
     #[error("cross-matter family assignment refused: {0}")]
     CrossMatterFamily(String),
 
+    #[error("family cohesion violation: {0}")]
+    FamilyCohesion(String),
+
     #[error("audit chain broken at seq {seq}: {reason}")]
     AuditChainBroken { seq: i64, reason: String },
 

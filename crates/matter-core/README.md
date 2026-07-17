@@ -75,6 +75,7 @@ P0 keeps `to_addrs_json` / `cc_addrs_json` / `bcc_addrs_json` on `items` as JSON
 - **0016 inventory rows** remain valid: `path` + `native_sha256` + status `discovered`/`expanded`/`error`; extended fields null; no re-ingest required.
 - **NULL `role` ≡ standalone** for pre-v2 inventory until an extractor classifies the row. New inserts default `role=standalone`.
 - `parent_item_id` is plain TEXT (no SQLite FK); `Matter` APIs reject missing parents and cross-matter family/parent links.
+- Parent/child **family cohesion**: when `parent_item_id` is set, parent and child must share the same `family_id` (`insert_item`, `update_item`, `set_item_family_role`). If the child omits `family_id` but the parent has one, the child inherits it; a parent link with no family on either side is rejected (`Error::FamilyCohesion`).
 - Parent `attachment_count` is recomputed whenever a child's `parent_item_id` is set, changed, or cleared (`insert_item`, `update_item`, `set_item_family_role`).
 - Each migration step runs in a single transaction (batch + `schema_meta` version bump).
 - `matters.schema_version` is re-synced on every `migrate()` (idempotent).
@@ -88,7 +89,7 @@ P0 keeps `to_addrs_json` / `cc_addrs_json` / `bcc_addrs_json` on `items` as JSON
 | `set_item_family_role(item, family, role, parent)` | Link parent/child + roles; recomputes old/new parent `attachment_count` |
 | `list_attachments(parent_id)` / `get_parent(child_id)` | Walk graph |
 
-**Semantics:** Parent `role=parent`; children `role=attachment` + `parent_item_id`; standalone items `family_id` null, `role=standalone` (or NULL on migrated inventory — treat as standalone). All members share `matter_id`. Light audit on `family.create` only (not per-field item updates).
+**Semantics:** Parent `role=parent`; children `role=attachment` + `parent_item_id`; standalone items `family_id` null, `role=standalone` (or NULL on migrated inventory — treat as standalone). All members share `matter_id`. Parent and children share the same `family_id` (enforced). Light audit on `family.create` only (not per-field item updates).
 
 ## Status vocabulary
 

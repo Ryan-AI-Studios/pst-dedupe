@@ -687,6 +687,159 @@ fn cross_matter_family_rejected() {
 }
 
 #[test]
+fn family_cohesion_parent_child_same_family_required() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-cohesion");
+    let matter = Matter::create(&root, "Cohesion").expect("create");
+
+    let family_a = matter.insert_family("").expect("family_a");
+    let family_b = matter.insert_family("").expect("family_b");
+
+    let parent_a = matter
+        .insert_item(ItemInput {
+            path: Some("parent_a".into()),
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::PARENT.into()),
+            family_id: Some(family_a.id.clone()),
+            attachment_count: Some(0),
+            ..Default::default()
+        })
+        .expect("parent in family A");
+
+    // 1) insert_item: child family B + parent in family A → FamilyCohesion.
+    let err = matter
+        .insert_item(ItemInput {
+            path: Some("child_insert_mismatch".into()),
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            family_id: Some(family_b.id.clone()),
+            parent_item_id: Some(parent_a.id.clone()),
+            ..Default::default()
+        })
+        .expect_err("insert cross-family parent/child");
+    match err {
+        Error::FamilyCohesion(msg) => {
+            assert!(
+                msg.contains("parent item must share family_id with child"),
+                "unexpected message: {msg}"
+            );
+        }
+        other => panic!("expected FamilyCohesion, got {other:?}"),
+    }
+
+    // 2) update_item: same mismatch after insert without parent.
+    let orphan = matter
+        .insert_item(ItemInput {
+            path: Some("orphan".into()),
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            family_id: Some(family_b.id.clone()),
+            ..Default::default()
+        })
+        .expect("orphan in B");
+    let err = matter
+        .update_item(
+            &orphan.id,
+            ItemUpdate {
+                parent_item_id: Some(Some(parent_a.id.clone())),
+                ..Default::default()
+            },
+        )
+        .expect_err("update cross-family parent/child");
+    match err {
+        Error::FamilyCohesion(_) => {}
+        other => panic!("expected FamilyCohesion, got {other:?}"),
+    }
+
+    // 3) set_item_family_role: same mismatch.
+    let err = matter
+        .set_item_family_role(
+            &orphan.id,
+            Some(&family_b.id),
+            item_role::ATTACHMENT,
+            Some(&parent_a.id),
+        )
+        .expect_err("set_role cross-family parent/child");
+    match err {
+        Error::FamilyCohesion(_) => {}
+        other => panic!("expected FamilyCohesion, got {other:?}"),
+    }
+
+    // Parent link with no family on either side → reject.
+    let bare_parent = matter
+        .insert_item(ItemInput {
+            path: Some("bare_parent".into()),
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::PARENT.into()),
+            ..Default::default()
+        })
+        .expect("bare parent");
+    let bare_child = matter
+        .insert_item(ItemInput {
+            path: Some("bare_child".into()),
+            status: item_status::EXTRACTED.into(),
+            ..Default::default()
+        })
+        .expect("bare child");
+    let err = matter
+        .set_item_family_role(
+            &bare_child.id,
+            None,
+            item_role::ATTACHMENT,
+            Some(&bare_parent.id),
+        )
+        .expect_err("parent link without family");
+    match err {
+        Error::FamilyCohesion(_) => {}
+        other => panic!("expected FamilyCohesion, got {other:?}"),
+    }
+
+    // 4) Happy path: parent + child same family (insert, set_role inherit, members).
+    let child = matter
+        .insert_item(ItemInput {
+            path: Some("child_ok".into()),
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            family_id: Some(family_a.id.clone()),
+            parent_item_id: Some(parent_a.id.clone()),
+            ..Default::default()
+        })
+        .expect("same-family child insert");
+    assert_eq!(child.family_id.as_deref(), Some(family_a.id.as_str()));
+    assert_eq!(child.parent_item_id.as_deref(), Some(parent_a.id.as_str()));
+
+    let sibling = matter
+        .insert_item(ItemInput {
+            path: Some("sibling".into()),
+            status: item_status::EXTRACTED.into(),
+            ..Default::default()
+        })
+        .expect("sibling bare");
+    // Omitting family_id inherits from parent.
+    let sibling = matter
+        .set_item_family_role(&sibling.id, None, item_role::ATTACHMENT, Some(&parent_a.id))
+        .expect("inherit family from parent");
+    assert_eq!(sibling.family_id.as_deref(), Some(family_a.id.as_str()));
+    assert_eq!(
+        sibling.parent_item_id.as_deref(),
+        Some(parent_a.id.as_str())
+    );
+
+    let members = matter.list_family_members(&family_a.id).expect("members");
+    let ids: Vec<_> = members.iter().map(|m| m.id.as_str()).collect();
+    assert!(ids.contains(&parent_a.id.as_str()));
+    assert!(ids.contains(&child.id.as_str()));
+    assert!(ids.contains(&sibling.id.as_str()));
+    assert_eq!(
+        matter
+            .get_item(&parent_a.id)
+            .expect("parent")
+            .attachment_count,
+        Some(2)
+    );
+}
+
+#[test]
 fn native_vs_logical_hash_independence() {
     // Same logical fields → same logical_hash even when attachment natives differ?
     // Spec: same logical fields, different *message* native_sha256 still same logical_hash.

@@ -518,7 +518,8 @@ impl Matter {
             .unwrap_or_else(|| item_role::STANDALONE.to_string());
         let logical_hash_version = input.logical_hash_version.unwrap_or(0);
 
-        // App-level parent existence + same-matter when set.
+        // App-level parent existence, same-matter, and family_id cohesion when set.
+        let mut family_id = input.family_id;
         if let Some(ref parent_id) = input.parent_item_id {
             let parent = self
                 .get_item(parent_id)
@@ -529,12 +530,13 @@ impl Matter {
                     parent.matter_id
                 )));
             }
+            family_id = resolve_family_with_parent(&parent, family_id)?;
         }
-        if let Some(ref family_id) = input.family_id {
-            let fam = self.get_family(family_id)?;
+        if let Some(ref fid) = family_id {
+            let fam = self.get_family(fid)?;
             if fam.matter_id != self.matter_id {
                 return Err(Error::CrossMatterFamily(format!(
-                    "family {family_id} belongs to matter {}",
+                    "family {fid} belongs to matter {}",
                     fam.matter_id
                 )));
             }
@@ -557,7 +559,7 @@ impl Matter {
                 id,
                 self.matter_id,
                 input.source_id,
-                input.family_id,
+                family_id,
                 input.path,
                 input.native_sha256,
                 input.logical_hash,
@@ -635,6 +637,7 @@ impl Matter {
             .unwrap_or(current.logical_hash_version);
         let extra_json = apply_opt2(update.extra_json, current.extra_json);
 
+        let mut family_id = family_id;
         if let Some(ref parent_id) = parent_item_id {
             if parent_id != item_id {
                 let parent = self
@@ -646,6 +649,7 @@ impl Matter {
                         parent.matter_id
                     )));
                 }
+                family_id = resolve_family_with_parent(&parent, family_id)?;
             }
         }
         if let Some(ref fid) = family_id {
@@ -847,7 +851,9 @@ impl Matter {
 
     /// Set `family_id`, `role`, and `parent_item_id` together.
     ///
-    /// When `parent_item_id` is set, the parent must exist and share this matter.
+    /// When `parent_item_id` is set, the parent must exist, share this matter,
+    /// and share (or supply) the child's `family_id`. If `family_id` is omitted
+    /// but the parent belongs to a family, the child inherits that family.
     /// On parent link / reparent / clear, both the previous and new parents have
     /// their denormalized `attachment_count` recomputed from children.
     pub fn set_item_family_role(
@@ -860,15 +866,7 @@ impl Matter {
         let current = self.get_item(item_id)?;
         let old_parent = current.parent_item_id.clone();
 
-        if let Some(fid) = family_id {
-            let fam = self.get_family(fid)?;
-            if fam.matter_id != self.matter_id {
-                return Err(Error::CrossMatterFamily(format!(
-                    "family {fid} belongs to matter {}",
-                    fam.matter_id
-                )));
-            }
-        }
+        let mut resolved_family = family_id.map(|s| s.to_string());
 
         if let Some(pid) = parent_item_id {
             let parent = self
@@ -880,11 +878,22 @@ impl Matter {
                     parent.matter_id
                 )));
             }
+            resolved_family = resolve_family_with_parent(&parent, resolved_family)?;
+        }
+
+        if let Some(ref fid) = resolved_family {
+            let fam = self.get_family(fid)?;
+            if fam.matter_id != self.matter_id {
+                return Err(Error::CrossMatterFamily(format!(
+                    "family {fid} belongs to matter {}",
+                    fam.matter_id
+                )));
+            }
         }
 
         self.conn.execute(
             "UPDATE items SET family_id = ?1, role = ?2, parent_item_id = ?3 WHERE id = ?4",
-            params![family_id, role, parent_item_id, item_id],
+            params![resolved_family, role, parent_item_id, item_id],
         )?;
 
         let old_as_str = old_parent.as_deref();
@@ -982,6 +991,31 @@ fn create_layout_dirs(root: &Utf8Path) -> Result<()> {
     }
     // blobs/ created via Cas::ensure_layout
     Ok(())
+}
+
+/// Parent and child must share `family_id` (spec §3.3).
+///
+/// When the child has no `family_id` but the parent does, inherit the parent's.
+/// Mismatches or a parent link with no family on either side are rejected.
+fn resolve_family_with_parent(
+    parent: &Item,
+    child_family_id: Option<String>,
+) -> Result<Option<String>> {
+    match (child_family_id, parent.family_id.as_deref()) {
+        (Some(fid), Some(p_fid)) if fid == p_fid => Ok(Some(fid)),
+        (Some(fid), Some(p_fid)) => Err(Error::FamilyCohesion(format!(
+            "parent item must share family_id with child (parent family {p_fid}, child family {fid})"
+        ))),
+        (Some(fid), None) => Err(Error::FamilyCohesion(format!(
+            "parent item must share family_id with child (parent has no family, child family {fid})"
+        ))),
+        (None, Some(p_fid)) => Ok(Some(p_fid.to_string())),
+        (None, None) => Err(Error::FamilyCohesion(
+            "parent item must share family_id with child \
+             (neither has family_id; set family_id when linking parent)"
+                .into(),
+        )),
+    }
 }
 
 fn map_source_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Source> {
