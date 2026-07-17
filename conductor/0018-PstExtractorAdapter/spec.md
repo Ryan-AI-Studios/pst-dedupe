@@ -462,17 +462,17 @@ Use **synthetic/small fixtures only** in git (existing Aspose/sample PSTs). No c
 
 Complete only when ALL hold:
 
-- [ ] **DoD-1 — Crate:** `crates/extract-pst` is a workspace member; `cargo test -p extract-pst` runs.
-- [ ] **DoD-2 — Extract:** Fixture PST → parent items + attachment children (when present), families linked, statuses `extracted`/`partial`.
-- [ ] **DoD-3 — Identity:** Parent has `message_id` when present, `logical_hash` + `logical_hash_version=1`; parent `native_sha256` is **`pst-native-message-v1`** (not EML); attachment `native_sha256` when stream readable; policies documented.
-- [ ] **DoD-4 — Recipients:** To/Cc/Bcc fields populated best-effort; **BCC never fabricated**; `EmailLogicalInput.bcc` always supplied (empty or real).
-- [ ] **DoD-5 — Resume mid-folder:** Checkpoint every `batch_size` **inside** large folders; interrupt + resume does not duplicate paths; cursor/`last_message_nid` (or index) respected.
-- [ ] **DoD-6 — CAS open + temp hygiene:** Extract from inventory digest without FS path; materialize only under `workspace/temp/`; leftover temp cleaned on matter open.
-- [ ] **DoD-7 — Streaming attach path:** Production attach→CAS path does not require full-payload `Vec<u8>`; streaming put exists and is tested.
-- [ ] **DoD-8 — Errors:** Per-message/attachment failures recorded; job can still succeed partially or fail honestly.
-- [ ] **DoD-9 — Audit + docs:** start/complete|fail audit; README (blocking, native v1, streaming, temp, mid-folder); ARCHITECTURE/README note.
-- [ ] **DoD-10 — Workspace gate:** fmt, clippy `-D warnings`, relevant tests, **`ledgerful verify`** (required).
-- [ ] **DoD-11 — Recorded:** `review.md`; `../conductor.md` → **Completed**; ledger TX (`FEATURE`).
+- [x] **DoD-1 — Crate:** `crates/extract-pst` is a workspace member; `cargo test -p extract-pst` runs.
+- [x] **DoD-2 — Extract:** Fixture PST → parent items + attachment children (when present), families linked, statuses `extracted`/`partial`.
+- [x] **DoD-3 — Identity:** Parent has `message_id` when present, `logical_hash` + `logical_hash_version=1`; parent `native_sha256` is **`pst-native-message-v1`** (not EML); attachment `native_sha256` when stream readable; policies documented.
+- [x] **DoD-4 — Recipients:** To/Cc/Bcc fields populated best-effort; **BCC never fabricated**; `EmailLogicalInput.bcc` always supplied (empty or real).
+- [x] **DoD-5 — Resume mid-folder:** Checkpoint every `batch_size` **inside** large folders; interrupt + resume does not duplicate paths; cursor/`last_message_nid` (or index) respected.
+- [x] **DoD-6 — CAS open + temp hygiene:** Extract from inventory digest without FS path; materialize only under `workspace/temp/`; leftover temp cleaned on matter open.
+- [x] **DoD-7 — Streaming attach path:** Production attach→CAS path does not require full-payload `Vec<u8>`; streaming put exists and is tested.
+- [x] **DoD-8 — Errors:** Per-message/attachment failures recorded; job can still succeed partially or fail honestly.
+- [x] **DoD-9 — Audit + docs:** start/complete|fail audit; README (blocking, native v1, streaming, temp, mid-folder); ARCHITECTURE/README note.
+- [x] **DoD-10 — Workspace gate:** fmt, clippy `-D warnings`, relevant tests, **`ledgerful verify`** (required).
+- [x] **DoD-11 — Recorded:** `review.md`; `../conductor.md` → **Completed**; ledger TX (`FEATURE`).
 
 ---
 

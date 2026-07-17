@@ -44,7 +44,7 @@
 | 2 | P0 Foundation | **0017** NormalizedItem | ✅ Completed | After 0015; unblocks **0018** with 0016 |
 | 3 | P0 Foundation | **0016** PurviewIngest | ✅ Completed | After 0015; parallel with 0017/0019 |
 | 4 | P0 Foundation | **0019** ProcessJobRunner | ⬜ Ready | After 0015; parallel with 0016/0017 |
-| 5 | P0 Foundation | **0018** PstExtractorAdapter | ⬜ Ready | After **0016 + 0017** |
+| 5 | P0 Foundation | **0018** PstExtractorAdapter | ✅ Completed | After **0016 + 0017**; unblocks **0021** (with 0019) |
 | 6 | P0 Foundation | **0020** DeskShellUx | ⬜ Ready | After **0019** (ideally after 0018 for real process demos) |
 | 7 | P0 Reduce | **0021** MatterDedupeJob | ⬜ Ready | After 0018 + 0019 |
 | 8 | P0 Reduce | **0025** PromoteToReview | ⬜ Ready | Soft-dep 0024; can start with exact-dup-only promote after 0021 |

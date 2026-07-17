@@ -1,0 +1,11 @@
+You are the independent completion reviewer for Ledgerful track 0018-PstExtractorAdapter (RE-REVIEW R3).
+
+Prior Codex R2 P2s — verify CLOSED:
+1. Exact FS path lost on extract_pst_path resume → ExtractCursor.open_fs_path persisted; resume uses it; when digest known without exact path prefer CAS not fuzzy FS.
+2. Relative inventory CWD shadow → candidate_fs_path only accepts absolute direct paths; relative under package root. Unit tests open::tests::relative_inventory_does_not_use_cwd.
+
+Latest commit includes these fixes after e091ce4.
+
+Known gates: cargo test -p extract-pst 10 unit + 15 integration PASS.
+
+READ-ONLY. Verdict PASS | PASS WITH DEFERRED P3 | FAIL. Engineering DoD focus; DoD-11 may be orchestrator finalize.

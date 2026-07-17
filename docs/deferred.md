@@ -12,7 +12,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0016-03 | P3 | No unique index on `items(source_id, path)` | App-level skip for resume; still optional after 0017 | see D-0017-01 |
 | D-0016-04 | — | Streaming multi-GB single entry without full buffer | Buffer cap only in 0016 | later performance |
 | D-0016-05 | — | 7z expand | Explicit `unsupported_7z` only | future track |
-| D-0016-06 | — | PST message extract | Discover/register only | **0018** |
+| D-0016-06 | — | PST message extract | **Done in 0018** (`extract-pst`) | — |
 | D-0016-07 | — | Full Normalized Item model | **Done in 0017** | — |
 | D-0016-08 | — | Blocking worker pool / process runner | Caller contract documented | **0019** |
 | D-0016-09 | — | CLI `ingest` smoke subcommand | Optional nice-to-have | future |
@@ -24,8 +24,18 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0017-01 | P3 | Unique index on `items(source_id, path)` | Optional in DoD; resume remains app-level | future polish |
 | D-0017-02 | P3 | Formal SQLite FK on `parent_item_id` | App-enforced; ALTER cannot add FK cleanly | later migration if needed |
 | D-0017-03 | — | Relational `item_participants` | JSON P0 by design; Tantivy/graph later | **0029 / 0038 / 0047** |
-| D-0017-04 | — | Body-to-CAS promote helper (`text_sha256`) | Optional in DoD | **0018** convenience |
-| D-0017-05 | — | Bulk rehash / fill from PST | Pure hash APIs only in 0017 | **0018 / 0019** |
+| D-0017-04 | — | Body-to-CAS promote helper (`text_sha256`) | **Done in 0018** (body → CAS + column) | — |
+| D-0017-05 | — | Bulk rehash / fill from PST | Extract fill in 0018; job runner still | **0019** |
+
+## From track 0018-PstExtractorAdapter
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0018-01 | P3 | Attach path may materialize large subnode `Vec` before stream switch | Primary path streams; residual fallback | future polish |
+| D-0018-02 | — | EML as native identity | Never; production EML export separate | **0040** |
+| D-0018-03 | — | MAPI recipient table (vs Display* only) | Best-effort DisplayTo/Cc/Bcc P0 | later |
+| D-0018-04 | — | Process runner / progress UI | Blocking contract documented | **0019** / **0020** |
+| D-0018-05 | — | CLI `extract` subcommand | Optional | future |
 
 ## Hygiene
 
