@@ -1,0 +1,19 @@
+[package]
+name = "matter-core"
+version = "0.1.0"
+edition = "2021"
+description = "Matter store: SQLite metadata, content-addressable blob CAS, audit hash chain, jobs/checkpoints"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+camino = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rusqlite = { workspace = true }

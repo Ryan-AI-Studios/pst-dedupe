@@ -158,7 +158,8 @@ impl Heap {
             });
         }
         let c_alloc = LittleEndian::read_u16(&block_data[hnpm_offset..hnpm_offset + 2]) as usize;
-        let _c_free = LittleEndian::read_u16(&block_data[hnpm_offset + 2..hnpm_offset + 4]) as usize;
+        let _c_free =
+            LittleEndian::read_u16(&block_data[hnpm_offset + 2..hnpm_offset + 4]) as usize;
 
         if alloc_index > c_alloc {
             return Err(PstError::InvalidHid(hid.0));

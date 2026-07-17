@@ -223,7 +223,11 @@ fn cmd_inspect(path: PathBuf, top: usize, json: bool) -> Result<()> {
     }
 
     println!("PST: {}", report.path);
-    println!("  size:     {} ({})", report.file_size, format_bytes(report.file_size));
+    println!(
+        "  size:     {} ({})",
+        report.file_size,
+        format_bytes(report.file_size)
+    );
     println!("  crypt:    {}", report.crypt);
     println!("  folders:  {}", report.folders);
     println!("  messages: {}", report.total_messages);
@@ -316,10 +320,7 @@ fn print_dups_text(dups: &[scan::DupRow]) {
             truncate(&d.sender, 40),
             d.size
         );
-        println!(
-            "       folder: {}",
-            truncate(&d.folder, 90)
-        );
+        println!("       folder: {}", truncate(&d.folder, 90));
         println!(
             "       original: {} @ {}",
             truncate(&d.original_subject, 50),

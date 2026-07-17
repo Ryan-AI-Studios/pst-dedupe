@@ -6,6 +6,7 @@ members = [
     "crates/pst-dedup-gui",
     "crates/pst-writer",
     "crates/pst-dedup-cli",
+    "crates/matter-core",
 ]
 
 [workspace.dependencies]
@@ -29,5 +30,10 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Matter store
+rusqlite = { version = "0.40", features = ["bundled"] }
+camino = "1"
+
 # Shared
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"

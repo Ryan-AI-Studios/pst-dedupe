@@ -162,29 +162,25 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                     }
                 };
 
-                let attachments = if opts.include_attachments
-                    && props.has_attachments.unwrap_or(false)
-                {
-                    match pst.read_attachment_metadata(msg_nid) {
-                        Ok(atts) => atts
-                            .into_iter()
-                            .map(|a| AttachmentInfo {
-                                filename: a.filename,
-                                size: a.size,
-                            })
-                            .collect(),
-                        Err(e) => {
-                            tracing::warn!(
-                                "skip message 0x{:X} attachments: {e}",
-                                msg_nid.0
-                            );
-                            file_skipped += 1;
-                            continue;
+                let attachments =
+                    if opts.include_attachments && props.has_attachments.unwrap_or(false) {
+                        match pst.read_attachment_metadata(msg_nid) {
+                            Ok(atts) => atts
+                                .into_iter()
+                                .map(|a| AttachmentInfo {
+                                    filename: a.filename,
+                                    size: a.size,
+                                })
+                                .collect(),
+                            Err(e) => {
+                                tracing::warn!("skip message 0x{:X} attachments: {e}", msg_nid.0);
+                                file_skipped += 1;
+                                continue;
+                            }
                         }
-                    }
-                } else {
-                    Vec::new()
-                };
+                    } else {
+                        Vec::new()
+                    };
 
                 let keys = hasher::compute_dedup_keys(
                     props.message_id.as_deref(),
