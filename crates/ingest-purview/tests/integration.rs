@@ -676,3 +676,33 @@ fn directory_symlink_rejected_windows() {
         }
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn package_root_symlink_rejected_windows() {
+    use std::os::windows::fs::symlink_file;
+    let (_tmp, base) = utf8_tempdir();
+    let real = base.join("real.txt");
+    fs::write(real.as_std_path(), b"secret-root").expect("write");
+    let link = base.join("link-root.txt");
+    if symlink_file(real.as_std_path(), link.as_std_path()).is_err() {
+        eprintln!("skip: could not create root symlink (privileges)");
+        return;
+    }
+    let det = detect(&link).expect("detect");
+    assert_eq!(det.kind, PackageKind::Unsupported);
+    assert!(
+        det.notes
+            .iter()
+            .any(|n| n.contains("symlink") || n.contains("reparse") || n.contains("rejected")),
+        "notes={:?}",
+        det.notes
+    );
+    let matter = Matter::create(base.join("matter"), "RootSym").expect("matter");
+    // Must not follow into CAS.
+    let res = ingest_path(&matter, &link, &ExpandLimits::for_tests(), None);
+    assert!(
+        res.is_err(),
+        "expected unsupported err for symlink root, got {res:?}"
+    );
+}

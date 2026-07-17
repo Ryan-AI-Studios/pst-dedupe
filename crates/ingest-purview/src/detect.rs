@@ -57,7 +57,15 @@ pub fn detect(path: &Utf8Path) -> Result<DetectResult> {
         });
     }
 
-    let meta = std::fs::metadata(path.as_std_path())?;
+    // Evidence boundary: do not follow symlink/reparse roots.
+    if let Err(e) = crate::path_safety::reject_symlink_or_reparse(path) {
+        return Ok(DetectResult {
+            kind: PackageKind::Unsupported,
+            notes: vec![format!("rejected: {e}")],
+        });
+    }
+
+    let meta = std::fs::symlink_metadata(path.as_std_path())?;
     if meta.is_file() {
         return detect_file(path);
     }

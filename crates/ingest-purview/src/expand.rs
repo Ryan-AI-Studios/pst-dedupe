@@ -13,7 +13,7 @@ use zip::ZipArchive;
 use crate::encoding::decode_zip_name;
 use crate::error::{codes, Error, Result};
 use crate::limits::ExpandLimits;
-use crate::path_safety::{join_logical_path, sanitize_logical_path};
+use crate::path_safety::{join_logical_path, reject_symlink_or_reparse, sanitize_logical_path};
 
 /// Opaque expand cursor (job checkpoint stage `expand`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,7 +201,9 @@ impl<'a> ExpandSession<'a> {
 
 /// Expand a top-level package path (file or directory) into the session.
 pub(crate) fn expand_package(session: &mut ExpandSession<'_>, package: &Utf8Path) -> Result<()> {
-    let meta = std::fs::metadata(package.as_std_path()).map_err(|e| {
+    reject_symlink_or_reparse(package)?;
+
+    let meta = std::fs::symlink_metadata(package.as_std_path()).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             Error::PackageNotFound(package.to_string())
         } else {
@@ -237,40 +239,48 @@ fn expand_directory(
         let path = entry.path();
         let name = entry.file_name();
         let _name_str = name.to_string_lossy();
+        let rel = path
+            .strip_prefix(package_root.as_std_path())
+            .unwrap_or(path.as_path());
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+
         // Never follow filesystem symlinks / reparse points (evidence boundary).
+        if let Ok(utf) = camino::Utf8PathBuf::from_path_buf(path.clone()) {
+            if let Err(e) = reject_symlink_or_reparse(&utf) {
+                session.record_entry_error(&rel_str, &e)?;
+                continue;
+            }
+        } else {
+            match std::fs::symlink_metadata(&path) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    let err = Error::PathRejected {
+                        code: codes::ZIP_UNSAFE_PATH,
+                        message: format!("symlink/reparse point rejected: {rel_str}"),
+                    };
+                    session.record_entry_error(&rel_str, &err)?;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    session.record_entry_error(&rel_str, &Error::Io(e))?;
+                    continue;
+                }
+            }
+        }
+
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(e) => {
-                let rel = path
-                    .strip_prefix(package_root.as_std_path())
-                    .unwrap_or(path.as_path());
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
                 session.record_entry_error(&rel_str, &Error::Io(e))?;
                 continue;
             }
         };
-        if meta.file_type().is_symlink() {
-            let rel = path
-                .strip_prefix(package_root.as_std_path())
-                .unwrap_or(path.as_path());
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
-            let err = Error::PathRejected {
-                code: codes::ZIP_UNSAFE_PATH,
-                message: format!("symlink/reparse point rejected: {rel_str}"),
-            };
-            session.record_entry_error(&rel_str, &err)?;
-            continue;
-        }
         if meta.is_dir() {
             if let Some(s) = path.to_str() {
                 expand_directory(session, package_root, Utf8Path::new(s))?;
             }
             continue;
         }
-        let rel = path
-            .strip_prefix(package_root.as_std_path())
-            .unwrap_or(path.as_path());
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
         let logical = match sanitize_logical_path(&rel_str) {
             Ok(p) => p,
             Err(e) => {
@@ -290,6 +300,7 @@ fn expand_top_level_file(
     file_path: &Utf8Path,
     logical_name: &str,
 ) -> Result<()> {
+    reject_symlink_or_reparse(file_path)?;
     let lower = logical_name.to_ascii_lowercase();
     if lower.ends_with(".7z") {
         let err = Error::UnsupportedContainer(logical_name.to_string());

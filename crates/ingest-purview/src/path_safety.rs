@@ -111,6 +111,41 @@ pub fn join_logical_path(archive_stack: &[String], entry_path: &str) -> String {
     out
 }
 
+/// Reject filesystem symlinks and Windows reparse points for evidence-boundary safety.
+///
+/// Uses `symlink_metadata` (does not follow links). On Windows, also rejects any
+/// path with the reparse-point attribute (junctions, mount points, etc.).
+pub fn reject_symlink_or_reparse(path: &camino::Utf8Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(path.as_std_path()).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Error::PackageNotFound(path.to_string())
+        } else {
+            Error::Io(e)
+        }
+    })?;
+
+    if meta.file_type().is_symlink() {
+        return Err(Error::PathRejected {
+            code: codes::ZIP_UNSAFE_PATH,
+            message: format!("symlink/reparse point rejected: {path}"),
+        });
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(Error::PathRejected {
+                code: codes::ZIP_UNSAFE_PATH,
+                message: format!("Windows reparse point rejected: {path}"),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn is_reserved_device_name(segment: &str) -> bool {
     // Strip trailing extension-like suffix: CON.txt still reserved on Windows.
     let base = segment.split('.').next().unwrap_or(segment);
