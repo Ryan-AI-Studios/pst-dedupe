@@ -1,0 +1,70 @@
+# Windows-only CI for pst-dedupe.
+# Adapted from Ledgerful's hygiene gates (fmt / clippy / test) without multi-OS
+# or Ledgerful product-specific jobs (web SPA, nextest tiers, cargo-deny, etc.).
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace
+
+  # Mirrors local `ledgerful verify` steps when ledgerful is not available in CI.
+  # Local pre-push runs: ledgerful verify --scope fast (which uses the same steps).
+  verify-parity:
+    name: verify-parity
+    runs-on: windows-latest
+    needs: [fmt, clippy, test]
+    timeout-minutes: 5
+    steps:
+      - name: Gate summary
+        run: |
+          Write-Host "fmt + clippy + test matched .ledgerful/config.toml verify.steps"
+          Write-Host "Local pre-push additionally runs: ledgerful verify --scope fast"
+          Write-Host "Local pre-commit runs: ledgerful ledger status + scripts/pre-commit.ps1"

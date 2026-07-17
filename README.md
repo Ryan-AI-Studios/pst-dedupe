@@ -69,9 +69,33 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
-# Or use Ledgerful:
+# Or use Ledgerful (same steps as .ledgerful/config.toml verify.steps):
 ledgerful verify
 ```
+
+## Git hooks + Ledgerful (Windows)
+
+After clone, install hooks (requires [`ledgerful`](https://github.com/Ryan-AI-Studios/Ledgerful) on `PATH`):
+
+```powershell
+# PowerShell 7+ or Windows PowerShell 5.1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-hooks.ps1
+# or: pwsh -File scripts\install-hooks.ps1
+```
+
+| Hook | What it runs |
+|---|---|
+| **pre-commit** | `ledgerful ledger status --compact --exit-code --verify-signatures` then `scripts\pre-commit.ps1` (fmt / clippy / test) |
+| **pre-push** | Ledger status gate + `ledgerful verify --scope fast` |
+| **commit-msg** / **post-commit** | Ledgerful intent sidecar + post-commit promotion |
+
+Manual hygiene (same as pre-commit cargo steps):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pre-commit.ps1
+```
+
+CI (GitHub Actions) runs **Windows-only** `fmt` / `clippy` / `test` on push and PRs (`.github/workflows/ci.yml`).
 
 ### PST Fixtures
 

@@ -37,9 +37,12 @@ ledgerful{
 ledger{
   start:"ledgerful ledger start <entity> --category <CATEGORY> --message <intent>"
   commit:"ledgerful ledger commit <tx-id> --summary <what> --reason <why>"
-  hooks[2]:
-    "pre-commit: ledgerful ledger status --compact --exit-code"
-    "pre-push: ledgerful ledger status --compact --exit-code"
+  hooks_install:"powershell -File scripts/install-hooks.ps1 (after clone; requires ledgerful on PATH)"
+  hooks[4]:
+    "pre-commit: ledgerful ledger status --compact --exit-code --verify-signatures; then scripts/pre-commit.ps1 (fmt/clippy/test)"
+    "pre-push: ledgerful ledger status --compact --exit-code --verify-signatures; then ledgerful verify --scope fast"
+    "commit-msg: ledgerful internal hook-commit-msg"
+    "post-commit: ledgerful internal hook-post-commit"
 }
 
 verify{
