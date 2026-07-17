@@ -6,12 +6,17 @@
 //!
 //! ## Blocking-thread caller contract
 //!
-//! [`ingest_path`] and [`resume_ingest`] are **CPU- and IO-bound** and block for
-//! the duration of expand. Callers **must** run them on a dedicated blocking
-//! worker (`std::thread`, rayon, or `tokio::task::spawn_blocking` in 0019+).
-//! Calling them on the GUI thread or a Tokio async worker will freeze the Desk.
+//! [`ingest_path`], [`ingest_path_on_job`], and [`resume_ingest`] are **CPU- and
+//! IO-bound** and block for the duration of expand. Callers **must** run them
+//! on a dedicated blocking worker (`std::thread` or the **0019** `process-runner`
+//! matter worker). Calling them on the GUI thread or a Tokio async worker will
+//! freeze the Desk.
 //!
-//! This crate does not enforce that contract.
+//! ## Job-id authority (Option C)
+//!
+//! Orchestrated runs use [`ingest_path_on_job`] with a job id created by
+//! `process-runner`. [`ingest_path`] remains a thin wrapper that creates a job
+//! then calls the on-job path. This crate does not enforce the blocking contract.
 //!
 //! ## Out of scope
 //!
@@ -33,6 +38,6 @@ pub mod path_safety;
 pub use detect::{detect, DetectResult, PackageKind};
 pub use error::{Error, Result};
 pub use expand::ExpandCursor;
-pub use ingest::{ingest_path, resume_ingest, IngestSummary};
+pub use ingest::{ingest_path, ingest_path_on_job, resume_ingest, IngestSummary};
 pub use limits::ExpandLimits;
 pub use path_safety::sanitize_logical_path;

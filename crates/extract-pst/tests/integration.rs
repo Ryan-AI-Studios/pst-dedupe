@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use camino::Utf8PathBuf;
 use extract_pst::{
-    encode_native_message_v1, extract_pst_item, extract_pst_path, list_discovered_psts,
-    native_message_v1_digest, parse_display_list, resume_extract, ExtractLimits, NativeAttachment,
-    NativeMessageV1, JOB_KIND_EXTRACT_PST, NATIVE_FORMAT_V1, STAGE_PST_EXTRACT,
+    encode_native_message_v1, extract_pst_item, extract_pst_item_on_job, extract_pst_path,
+    extract_pst_path_on_job, list_discovered_psts, native_message_v1_digest, parse_display_list,
+    resume_extract, ExtractLimits, NativeAttachment, NativeMessageV1, JOB_KIND_EXTRACT_PST,
+    NATIVE_FORMAT_V1, STAGE_PST_EXTRACT,
 };
 use matter_core::{
     compute_email_logical_hash, item_role, item_status, EmailLogicalInput, ItemInput, ItemUpdate,
@@ -778,4 +779,74 @@ fn any_fixture_available_smoke() {
     if let Some(p) = any_fixture_pst() {
         eprintln!("fixture available: {}", p.display());
     }
+}
+
+#[test]
+fn extract_pst_item_on_job_does_not_create_second_job() {
+    let Some(pst) = fixture_pst_with_messages() else {
+        eprintln!("skip: no fixture PST with messages");
+        return;
+    };
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-on-job");
+    let matter = Matter::create(&root, "OnJob").expect("create");
+    let source = matter
+        .insert_source(pst.to_str().unwrap(), "pst", "importing", None)
+        .expect("source");
+    let inv_id = register_pst_inventory(&matter, &source.id, &pst);
+
+    let job = matter.create_job(JOB_KIND_EXTRACT_PST).expect("create_job");
+    matter
+        .set_job_state(&job.id, JobState::Running, None)
+        .expect("running");
+    assert_eq!(matter.list_jobs().expect("list").len(), 1);
+
+    let limits = ExtractLimits {
+        max_messages: Some(3),
+        batch_size: 1,
+        ..ExtractLimits::for_tests()
+    };
+    let summary = extract_pst_item_on_job(&matter, &source.id, &inv_id, &limits, &job.id, None)
+        .expect("on_job");
+    assert_eq!(summary.job_id, job.id);
+
+    let jobs = matter.list_jobs().expect("list after");
+    assert_eq!(jobs.len(), 1, "on_job must not create a second job row");
+    assert_eq!(jobs[0].id, job.id);
+}
+
+#[test]
+fn extract_pst_path_on_job_reuses_job_id() {
+    let Some(pst) = fixture_pst_with_messages() else {
+        eprintln!("skip: no fixture PST with messages");
+        return;
+    };
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-path-on-job");
+    let matter = Matter::create(&root, "PathOnJob").expect("create");
+    let source = matter
+        .insert_source(pst.to_str().unwrap(), "pst", "importing", None)
+        .expect("source");
+
+    let job = matter.create_job(JOB_KIND_EXTRACT_PST).expect("create_job");
+    matter
+        .set_job_state(&job.id, JobState::Running, None)
+        .expect("running");
+
+    let limits = ExtractLimits {
+        max_messages: Some(2),
+        batch_size: 1,
+        ..ExtractLimits::for_tests()
+    };
+    let summary = extract_pst_path_on_job(
+        &matter,
+        &source.id,
+        pst.to_str().expect("utf8"),
+        &limits,
+        &job.id,
+        None,
+    )
+    .expect("path on_job");
+    assert_eq!(summary.job_id, job.id);
+    assert_eq!(matter.list_jobs().expect("list").len(), 1);
 }

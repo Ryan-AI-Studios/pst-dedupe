@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use camino::Utf8PathBuf;
 use ingest_purview::{
-    detect, ingest_path, resume_ingest, Error as IngestError, ExpandLimits, PackageKind,
+    detect, ingest_path, ingest_path_on_job, resume_ingest, Error as IngestError, ExpandLimits,
+    PackageKind,
 };
 use matter_core::{JobState, Matter};
 use tempfile::tempdir;
@@ -705,4 +706,55 @@ fn package_root_symlink_rejected_windows() {
         res.is_err(),
         "expected unsupported err for symlink root, got {res:?}"
     );
+}
+
+#[test]
+fn ingest_path_on_job_does_not_create_second_job() {
+    let (_tmp, base) = utf8_tempdir();
+    let zip_path = base.join("one.zip");
+    write_zip_file(zip_path.as_std_path(), &[("a.txt", b"hello")]);
+
+    let matter = Matter::create(base.join("matter"), "OnJob").expect("matter");
+    let job = matter.create_job("ingest").expect("create_job");
+    matter
+        .set_job_state(&job.id, JobState::Running, None)
+        .expect("running");
+
+    let before = matter.list_jobs().expect("list").len();
+    assert_eq!(before, 1, "precondition: single runner-created job");
+
+    let sum = ingest_path_on_job(
+        &matter,
+        &zip_path,
+        &ExpandLimits::for_tests(),
+        &job.id,
+        None,
+    )
+    .expect("on_job");
+    assert_eq!(sum.job_id, job.id, "must reuse provided job_id");
+    assert!(sum.completed);
+
+    let jobs = matter.list_jobs().expect("list after");
+    assert_eq!(
+        jobs.len(),
+        1,
+        "on_job must not insert a second job row: {:?}",
+        jobs.iter().map(|j| j.id.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(jobs[0].id, job.id);
+    assert_eq!(jobs[0].state, JobState::Succeeded);
+}
+
+#[test]
+fn ingest_path_wrapper_creates_exactly_one_job() {
+    let (_tmp, base) = utf8_tempdir();
+    let zip_path = base.join("wrap.zip");
+    write_zip_file(zip_path.as_std_path(), &[("b.txt", b"world")]);
+
+    let matter = Matter::create(base.join("matter"), "Wrap").expect("matter");
+    let sum = ingest_path(&matter, &zip_path, &ExpandLimits::for_tests(), None).expect("ingest");
+    let jobs = matter.list_jobs().expect("list");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].id, sum.job_id);
+    assert_eq!(jobs[0].state, JobState::Succeeded);
 }

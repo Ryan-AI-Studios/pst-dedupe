@@ -144,6 +144,38 @@ pub(crate) fn get_job(conn: &Connection, job_id: &str) -> Result<Job> {
     })
 }
 
+/// List all jobs for a matter, newest first by `created_at`.
+pub(crate) fn list_jobs(conn: &Connection, matter_id: &str) -> Result<Vec<Job>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, matter_id, kind, state, started_at, finished_at, error_summary, created_at, updated_at \
+         FROM jobs WHERE matter_id = ?1 ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map(params![matter_id], |row| {
+        let state_str: String = row.get(3)?;
+        Ok((
+            Job {
+                id: row.get(0)?,
+                matter_id: row.get(1)?,
+                kind: row.get(2)?,
+                state: JobState::Pending,
+                started_at: row.get(4)?,
+                finished_at: row.get(5)?,
+                error_summary: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            },
+            state_str,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (mut job, state_str) = row?;
+        job.state = JobState::parse(&state_str)?;
+        out.push(job);
+    }
+    Ok(out)
+}
+
 pub(crate) fn set_job_state(
     conn: &Connection,
     job_id: &str,

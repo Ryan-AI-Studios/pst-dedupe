@@ -434,6 +434,11 @@ impl Matter {
         jobs::get_job(&self.conn, job_id)
     }
 
+    /// List all jobs for this matter (newest first).
+    pub fn list_jobs(&self) -> Result<Vec<Job>> {
+        jobs::list_jobs(&self.conn, &self.matter_id)
+    }
+
     /// Transition a job to a new state.
     pub fn set_job_state(
         &self,
