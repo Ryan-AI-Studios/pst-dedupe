@@ -35,8 +35,8 @@ pub fn export_eml(
         writeln!(file, "Message-ID: <{}>", mid)?;
     }
     writeln!(file, "Subject: {}", encode_header_value(&message.subject))?;
-    writeln!(file, "From: {}", &message.sender)?;
-    writeln!(file, "To: {}", &message.recipients)?;
+    writeln!(file, "From: {}", message.sender)?;
+    writeln!(file, "To: {}", message.recipients)?;
     if let Some(date) = &message.date {
         writeln!(file, "Date: {}", date)?;
     }
@@ -44,7 +44,7 @@ pub fn export_eml(
     writeln!(file, "Content-Type: text/plain; charset=UTF-8")?;
     writeln!(file, "Content-Transfer-Encoding: 8bit")?;
     writeln!(file)?; // blank line separating headers from body
-    write!(file, "{}", &message.body)?;
+    write!(file, "{}", message.body)?;
 
     Ok(path)
 }
