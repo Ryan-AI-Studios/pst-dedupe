@@ -425,6 +425,14 @@ fn family_parent_two_attachments() {
         })
         .expect("att1");
 
+    // insert_item with parent_item_id must bump parent attachment_count immediately.
+    let parent_after_att1 = matter.get_item(&parent.id).expect("parent after att1");
+    assert_eq!(
+        parent_after_att1.attachment_count,
+        Some(1),
+        "insert path recomputes attachment_count"
+    );
+
     let att2 = matter
         .insert_item(ItemInput {
             path: Some("mail/msg/b.pdf".into()),
@@ -446,16 +454,6 @@ fn family_parent_two_attachments() {
     assert_eq!(att2.family_id.as_deref(), Some(family.id.as_str()));
     assert_eq!(att2.role.as_deref(), Some(item_role::ATTACHMENT));
     assert_eq!(att2.parent_item_id.as_deref(), Some(parent.id.as_str()));
-
-    // Also recompute after att1 (inserted with parent already set but count may be stale).
-    matter
-        .set_item_family_role(
-            &att1.id,
-            Some(&family.id),
-            item_role::ATTACHMENT,
-            Some(&parent.id),
-        )
-        .expect("relink att1");
 
     let members = matter.list_family_members(&family.id).expect("members");
     assert_eq!(members.len(), 3);
@@ -488,6 +486,204 @@ fn family_parent_two_attachments() {
 
     // Audit: family.create present.
     matter.verify_audit_chain().expect("audit");
+}
+
+#[test]
+fn attachment_count_reparent_and_clear() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-reparent");
+    let matter = Matter::create(&root, "Reparent").expect("create");
+    let family = matter.insert_family("").expect("family");
+
+    let parent_a = matter
+        .insert_item(ItemInput {
+            path: Some("a".into()),
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::PARENT.into()),
+            family_id: Some(family.id.clone()),
+            attachment_count: Some(0),
+            ..Default::default()
+        })
+        .expect("parent_a");
+    let parent_b = matter
+        .insert_item(ItemInput {
+            path: Some("b".into()),
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::PARENT.into()),
+            family_id: Some(family.id.clone()),
+            attachment_count: Some(0),
+            ..Default::default()
+        })
+        .expect("parent_b");
+
+    let child = matter
+        .insert_item(ItemInput {
+            path: Some("child".into()),
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            family_id: Some(family.id.clone()),
+            parent_item_id: Some(parent_a.id.clone()),
+            ..Default::default()
+        })
+        .expect("child");
+
+    assert_eq!(
+        matter.get_item(&parent_a.id).expect("a").attachment_count,
+        Some(1)
+    );
+
+    // Reparent A → B via set_item_family_role.
+    matter
+        .set_item_family_role(
+            &child.id,
+            Some(&family.id),
+            item_role::ATTACHMENT,
+            Some(&parent_b.id),
+        )
+        .expect("reparent");
+    assert_eq!(
+        matter.get_item(&parent_a.id).expect("a").attachment_count,
+        Some(0),
+        "old parent decremented"
+    );
+    assert_eq!(
+        matter.get_item(&parent_b.id).expect("b").attachment_count,
+        Some(1),
+        "new parent incremented"
+    );
+
+    // Clear parent via update_item Some(None).
+    matter
+        .update_item(
+            &child.id,
+            ItemUpdate {
+                parent_item_id: Some(None),
+                role: Some(Some(item_role::STANDALONE.into())),
+                ..Default::default()
+            },
+        )
+        .expect("clear parent");
+    assert_eq!(
+        matter.get_item(&parent_b.id).expect("b").attachment_count,
+        Some(0),
+        "clear parent zeros old count"
+    );
+    let cleared = matter.get_item(&child.id).expect("child");
+    assert!(cleared.parent_item_id.is_none());
+}
+
+#[test]
+fn item_update_some_none_clears_subject() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-clear");
+    let matter = Matter::create(&root, "Clear").expect("create");
+    let item = matter
+        .insert_item(ItemInput {
+            subject: Some("keep me".into()),
+            status: item_status::NORMALIZED.into(),
+            ..Default::default()
+        })
+        .expect("insert");
+    assert_eq!(item.subject.as_deref(), Some("keep me"));
+
+    let cleared = matter
+        .update_item(
+            &item.id,
+            ItemUpdate {
+                subject: Some(None),
+                ..Default::default()
+            },
+        )
+        .expect("clear subject");
+    assert!(cleared.subject.is_none());
+}
+
+#[test]
+fn cross_matter_family_rejected() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-xmatter");
+    let matter = Matter::create(&root, "Home").expect("create");
+
+    // Inject a foreign matter + family into the same DB (multi-matter edge case).
+    {
+        let db_path = root.join(DB_FILE);
+        let conn = rusqlite::Connection::open(db_path.as_std_path()).expect("open db");
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_foreign', 'Foreign', '2020-01-01T00:00:00Z', 2, '/tmp/foreign')",
+            [],
+        )
+        .expect("foreign matter");
+        conn.execute(
+            "INSERT INTO item_families (id, matter_id, kind, created_at) \
+             VALUES ('fam_foreign', 'mat_foreign', 'email_attachments', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("foreign family");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, parent_item_id, logical_hash_version) \
+             VALUES ('itm_foreign_parent', 'mat_foreign', NULL, 'fam_foreign', 'p', NULL, \
+             NULL, NULL, 'extracted', NULL, NULL, NULL, '2020-01-01T00:00:00Z', \
+             'parent', NULL, 0)",
+            [],
+        )
+        .expect("foreign parent item");
+    }
+
+    let err = matter
+        .insert_item(ItemInput {
+            family_id: Some("fam_foreign".into()),
+            status: item_status::EXTRACTED.into(),
+            ..Default::default()
+        })
+        .expect_err("cross-matter family on insert");
+    match err {
+        Error::CrossMatterFamily(_) => {}
+        other => panic!("expected CrossMatterFamily, got {other:?}"),
+    }
+
+    let local = matter
+        .insert_item(ItemInput {
+            path: Some("local".into()),
+            status: item_status::EXTRACTED.into(),
+            ..Default::default()
+        })
+        .expect("local item");
+
+    let err = matter
+        .set_item_family_role(&local.id, Some("fam_foreign"), item_role::ATTACHMENT, None)
+        .expect_err("cross-matter family on set_role");
+    match err {
+        Error::CrossMatterFamily(_) => {}
+        other => panic!("expected CrossMatterFamily, got {other:?}"),
+    }
+
+    let err = matter
+        .set_item_family_role(
+            &local.id,
+            None,
+            item_role::ATTACHMENT,
+            Some("itm_foreign_parent"),
+        )
+        .expect_err("cross-matter parent on set_role");
+    match err {
+        Error::CrossMatterFamily(_) => {}
+        other => panic!("expected CrossMatterFamily, got {other:?}"),
+    }
+
+    let err = matter
+        .insert_item(ItemInput {
+            parent_item_id: Some("itm_foreign_parent".into()),
+            status: item_status::EXTRACTED.into(),
+            ..Default::default()
+        })
+        .expect_err("cross-matter parent on insert");
+    match err {
+        Error::CrossMatterFamily(_) => {}
+        other => panic!("expected CrossMatterFamily, got {other:?}"),
+    }
 }
 
 #[test]

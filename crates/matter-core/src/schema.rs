@@ -147,6 +147,11 @@ CREATE INDEX IF NOT EXISTS idx_items_message_id ON items(message_id);
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
+///
+/// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
+/// single `BEGIN IMMEDIATE` transaction so a crash mid-batch cannot leave the
+/// DB at the old version with partial columns (re-open would re-run and fail
+/// with "duplicate column name").
 pub(crate) fn migrate(conn: &Connection) -> Result<u32> {
     let current = read_schema_version(conn)?;
     if current > SCHEMA_VERSION {
@@ -157,12 +162,21 @@ pub(crate) fn migrate(conn: &Connection) -> Result<u32> {
         if current >= target {
             continue;
         }
-        conn.execute_batch(sql)?;
-        if target == 1 {
-            conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])?;
-        } else {
-            conn.execute("UPDATE schema_meta SET version = ?1", [target])?;
+        conn.execute("BEGIN IMMEDIATE", [])?;
+        let step = (|| -> Result<()> {
+            conn.execute_batch(sql)?;
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])?;
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = step {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(e);
         }
+        conn.execute("COMMIT", [])?;
     }
 
     let after = read_schema_version(conn)?;
@@ -362,7 +376,8 @@ mod tests {
             .expect("count");
         assert_eq!(count, 2);
 
-        // New nullable columns readable as NULL.
+        // New nullable columns readable as NULL (pre-v2 inventory; NULL role ≡
+        // standalone for consumers until classified).
         let role: Option<String> = conn
             .query_row("SELECT role FROM items WHERE id = 'itm_a'", [], |row| {
                 row.get(0)
@@ -389,5 +404,43 @@ mod tests {
             )
             .expect("mat schema");
         assert_eq!(ms, 2);
+
+        // v2 indexes present.
+        for idx in ["idx_items_logical_hash", "idx_items_message_id"] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name = ?1",
+                    [idx],
+                    |row| row.get(0),
+                )
+                .expect("sqlite_master");
+            assert!(exists, "expected index {idx}");
+        }
+    }
+
+    /// Each migration step updates schema_meta only after the full batch commits
+    /// in the same transaction (smoke: completed migrate leaves version==2).
+    #[test]
+    fn migrate_steps_are_transactional() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        // Apply v1 only, then v2 via migrate — version and columns must agree.
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (1)", [])
+            .expect("meta v1");
+
+        let v = migrate(&conn).expect("migrate");
+        assert_eq!(v, 2);
+        assert_eq!(read_schema_version(&conn).expect("read"), 2);
+
+        let has_role: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'role'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_role);
     }
 }

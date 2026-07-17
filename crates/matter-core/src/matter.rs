@@ -163,10 +163,16 @@ pub struct ItemInput {
 
 /// Partial update for an existing item.
 ///
-/// Semantics: each `Option` field is **set when `Some`**; `None` leaves the
-/// column unchanged. There is no nested `Option` for “set to NULL” in this
-/// track — callers that need to clear a column can pass empty string / re-insert
-/// later; 0018 extractors typically only set fields they know.
+/// Nested-`Option` contract (matches README / `apply_opt2`):
+/// - **Outer `None`** — leave the column unchanged.
+/// - **`Some(None)`** — set the column to SQL NULL (clear the field).
+/// - **`Some(Some(v))`** — set the column to `v`.
+///
+/// Exceptions: `status` and `logical_hash_version` are plain `Option` (required /
+/// non-null columns) — `None` leaves unchanged, `Some(v)` sets `v`.
+///
+/// 0018 extractors typically only set fields they know (`Some(Some(...))`) and
+/// leave the rest as outer `None`.
 #[derive(Debug, Clone, Default)]
 pub struct ItemUpdate {
     pub source_id: Option<Option<String>>,
@@ -512,11 +518,17 @@ impl Matter {
             .unwrap_or_else(|| item_role::STANDALONE.to_string());
         let logical_hash_version = input.logical_hash_version.unwrap_or(0);
 
-        // App-level parent existence when set.
+        // App-level parent existence + same-matter when set.
         if let Some(ref parent_id) = input.parent_item_id {
-            let _ = self
+            let parent = self
                 .get_item(parent_id)
                 .map_err(|_| Error::ParentItemNotFound(parent_id.clone()))?;
+            if parent.matter_id != self.matter_id {
+                return Err(Error::CrossMatterFamily(format!(
+                    "parent {parent_id} belongs to matter {}",
+                    parent.matter_id
+                )));
+            }
         }
         if let Some(ref family_id) = input.family_id {
             let fam = self.get_family(family_id)?;
@@ -576,6 +588,11 @@ impl Matter {
                 input.extra_json,
             ],
         )?;
+
+        if let Some(ref parent_id) = input.parent_item_id {
+            self.recompute_attachment_count(parent_id)?;
+        }
+
         self.get_item(&id)
     }
 
@@ -584,6 +601,7 @@ impl Matter {
     /// Silent on audit by default (high-volume extractors may batch audit themselves).
     pub fn update_item(&self, item_id: &str, update: ItemUpdate) -> Result<Item> {
         let current = self.get_item(item_id)?;
+        let old_parent = current.parent_item_id.clone();
 
         let source_id = apply_opt2(update.source_id, current.source_id);
         let family_id = apply_opt2(update.family_id, current.family_id);
@@ -619,9 +637,15 @@ impl Matter {
 
         if let Some(ref parent_id) = parent_item_id {
             if parent_id != item_id {
-                let _ = self
+                let parent = self
                     .get_item(parent_id)
                     .map_err(|_| Error::ParentItemNotFound(parent_id.clone()))?;
+                if parent.matter_id != self.matter_id {
+                    return Err(Error::CrossMatterFamily(format!(
+                        "parent {parent_id} belongs to matter {}",
+                        parent.matter_id
+                    )));
+                }
             }
         }
         if let Some(ref fid) = family_id {
@@ -678,6 +702,18 @@ impl Matter {
                 item_id,
             ],
         )?;
+
+        if old_parent != parent_item_id {
+            if let Some(ref old) = old_parent {
+                self.recompute_attachment_count(old)?;
+            }
+            if let Some(ref new_parent) = parent_item_id {
+                if new_parent != item_id {
+                    self.recompute_attachment_count(new_parent)?;
+                }
+            }
+        }
+
         self.get_item(item_id)
     }
 
@@ -812,8 +848,8 @@ impl Matter {
     /// Set `family_id`, `role`, and `parent_item_id` together.
     ///
     /// When `parent_item_id` is set, the parent must exist and share this matter.
-    /// When role is attachment and a parent is set, the parent's `attachment_count`
-    /// is recomputed from children.
+    /// On parent link / reparent / clear, both the previous and new parents have
+    /// their denormalized `attachment_count` recomputed from children.
     pub fn set_item_family_role(
         &self,
         item_id: &str,
@@ -821,7 +857,8 @@ impl Matter {
         role: &str,
         parent_item_id: Option<&str>,
     ) -> Result<Item> {
-        let _ = self.get_item(item_id)?;
+        let current = self.get_item(item_id)?;
+        let old_parent = current.parent_item_id.clone();
 
         if let Some(fid) = family_id {
             let fam = self.get_family(fid)?;
@@ -850,7 +887,17 @@ impl Matter {
             params![family_id, role, parent_item_id, item_id],
         )?;
 
-        if let Some(pid) = parent_item_id {
+        let old_as_str = old_parent.as_deref();
+        if old_as_str != parent_item_id {
+            if let Some(old) = old_as_str {
+                self.recompute_attachment_count(old)?;
+            }
+            if let Some(pid) = parent_item_id {
+                self.recompute_attachment_count(pid)?;
+            }
+        } else if let Some(pid) = parent_item_id {
+            // Same parent reaffirmed (e.g. role-only update with parent still set):
+            // still recompute so callers can repair a stale count.
             self.recompute_attachment_count(pid)?;
         }
 

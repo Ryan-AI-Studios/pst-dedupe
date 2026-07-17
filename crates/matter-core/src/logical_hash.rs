@@ -561,17 +561,45 @@ mod tests {
 
     #[test]
     fn native_sha256_not_in_email_logical_fields() {
-        // Two "messages" with different physical natives but same logical fields
-        // produce the same logical_hash (native is only on attachments when listed).
-        // Parent message native_sha256 is intentionally NOT in EmailLogicalInput.
-        let a = sample_email();
-        let b = sample_email();
+        // §3.7.9 / §3.7.11: message-level native_sha256 and transport/MIME wrapper
+        // bytes are intentionally absent from EmailLogicalInput. Two messages that
+        // share all logical fields therefore hash identically even when their
+        // "would-be" natives / transport wrappers differ outside the input type.
+        let sample_a = sample_email();
+        let sample_b = sample_email();
+        // Distinct digests that extractors would store on the *item* row as
+        // native_sha256 — NOT fed into compute_email_logical_hash.
+        let _would_be_native_a = "msg_native_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let _would_be_native_b = "msg_native_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        // Transport/MIME wrapper notes also out of scope of EmailLogicalInput
+        // (no Received:/MIME-Version fields on the type).
+        let _mime_wrapper_a = "Received: from mx1.example\r\nMIME-Version: 1.0\r\n";
+        let _mime_wrapper_b = "Received: from mx2.other\r\nMIME-Version: 1.0\r\nX-Mailer: Foo\r\n";
+        assert_ne!(_would_be_native_a, _would_be_native_b);
+        assert_ne!(_mime_wrapper_a, _mime_wrapper_b);
+
+        let h_a = compute_email_logical_hash(&sample_a);
+        let h_b = compute_email_logical_hash(&sample_b);
         assert_eq!(
-            compute_email_logical_hash(&a),
-            compute_email_logical_hash(&b)
+            h_a, h_b,
+            "same logical fields → same hash regardless of message native/MIME"
         );
-        // Prove native of the message itself is out of scope: only attachment digests matter.
-        // Changing attachment native changes hash (covered in sensitivity); message wrapper notes don't exist in input.
+
+        // Preimage must not absorb transport headers that only exist outside the input.
+        let pre = email_logical_preimage(&sample_a);
+        let s = String::from_utf8_lossy(&pre);
+        assert!(
+            !s.contains("Received:"),
+            "transport Received: must not appear in logical preimage: {s}"
+        );
+        assert!(
+            !s.contains("MIME-Version"),
+            "MIME-Version must not appear in logical preimage: {s}"
+        );
+        // Attachment natives *are* in scope; message-level natives are not fields here.
+        assert!(s.contains("native_sha256"), "attachment digests framed");
+        assert!(!s.contains(_would_be_native_a));
+        assert!(!s.contains(_would_be_native_b));
     }
 
     #[test]
