@@ -82,7 +82,7 @@ Covers: BCC distinctness, family cohesion reject, attachment_count after insert.
 | Internal R2 | general-purpose | CLEAN | Prior P2 verified |
 | Codex R1 | gpt-5.6-luna high | FAIL | P2 family_id cohesion unenforced; DoD-8 not yet finalized |
 | Fix Codex | general-purpose | — | Family cohesion + tests + README |
-| Codex R2 | (pending / re-run after finalize) | — | |
+| Codex R2 | gpt-5.6-luna high | **PASS WITH DEFERRED P3** | Cohesion verified; only D-0017-01..05 intentional deferrals |
 
 ## Deferred (see `docs/deferred.md`)
 
