@@ -79,13 +79,19 @@ pub fn open_pst(matter: &Matter, job_id: &str, spec: &PstOpenSpec) -> Result<Ope
     let temp_path = temp_dir.join(&file_name);
 
     // Stream CAS → temp (bounded buffer via copy).
-    {
-        let mut src = matter.cas().open_read(digest)?;
-        let mut dst = File::create(temp_path.as_std_path())?;
-        copy(&mut src, &mut dst)?;
-        dst.flush()?;
-        dst.sync_all()?;
-    }
+    // Create the RAII guard immediately after File::create so every subsequent
+    // error path (copy/flush/sync/open) deletes the partial temp file.
+    let mut src = matter.cas().open_read(digest)?;
+    let mut dst = File::create(temp_path.as_std_path())?;
+    let guard = TempFileGuard {
+        path: temp_path.as_std_path().to_path_buf(),
+    };
+    copy(&mut src, &mut dst)?;
+    dst.flush()?;
+    dst.sync_all()?;
+    // Close the writer before re-opening for parse (Windows file locks).
+    drop(dst);
+    drop(src);
 
     // Assert we did not land in OS temp.
     let temp_str = temp_path.as_str().replace('\\', "/").to_ascii_lowercase();
@@ -95,16 +101,13 @@ pub fn open_pst(matter: &Matter, job_id: &str, spec: &PstOpenSpec) -> Result<Ope
             .replace('\\', "/")
             .to_ascii_lowercase();
         if temp_str.starts_with(&os_s) {
-            let _ = fs::remove_file(temp_path.as_std_path());
+            // Guard Drop deletes the file; explicit remove is redundant.
             return Err(Error::PstOpenFailed(
                 "refusing to materialize PST under OS temp_dir".into(),
             ));
         }
     }
 
-    let guard = TempFileGuard {
-        path: temp_path.as_std_path().to_path_buf(),
-    };
     open_from_path(&temp_path, true, Some(guard))
 }
 

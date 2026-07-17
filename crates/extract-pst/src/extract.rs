@@ -67,7 +67,7 @@ pub fn extract_pst_item(
     );
 
     run_extract(
-        matter, source_id, &inv, &job.id, cursor, limits, cancel, false,
+        matter, source_id, &inv, &job.id, cursor, limits, cancel, false, None,
     )
 }
 
@@ -97,6 +97,9 @@ pub fn resume_extract(
         .get_item(&cursor.pst_item_id)
         .map_err(|_| Error::InventoryItemNotFound(cursor.pst_item_id.clone()))?;
 
+    // Fail closed if inventory path/digest no longer matches the checkpoint PST.
+    verify_resume_pst_identity(&cursor, &inv)?;
+
     match job.state {
         JobState::Paused | JobState::Failed | JobState::Pending => {
             matter.set_job_state(job_id, JobState::Running, None)?;
@@ -110,14 +113,16 @@ pub fn resume_extract(
     }
 
     run_extract(
-        matter, source_id, &inv, job_id, cursor, limits, cancel, true,
+        matter, source_id, &inv, job_id, cursor, limits, cancel, true, None,
     )
 }
 
 /// Optional path-based entry: register a minimal inventory row then extract.
 ///
 /// Streams the PST into CAS via [`Matter::put_reader`] (no full-file `Vec`).
-/// Open still prefers the filesystem path when present.
+/// Open uses the **exact** caller-supplied filesystem path for this run (CAS
+/// put is only for inventory digest); inventory `path` stays the stable leaf
+/// name so message path keys remain stable.
 pub fn extract_pst_path(
     matter: &Matter,
     source_id: &str,
@@ -127,27 +132,83 @@ pub fn extract_pst_path(
 ) -> Result<ExtractSummary> {
     use std::fs;
 
+    let _ = matter
+        .get_source(source_id)
+        .map_err(|_| Error::SourceNotFound(source_id.to_string()))?;
+
     let path = camino::Utf8Path::new(pst_fs_path);
     if !path.as_std_path().is_file() {
         return Err(Error::PstOpenFailed(format!("not a file: {pst_fs_path}")));
     }
-    let meta = fs::metadata(path.as_std_path())?;
+    // Canonicalize when possible so open targets the same bytes just hashed.
+    let exact_fs = path
+        .canonicalize_utf8()
+        .unwrap_or_else(|_| path.to_path_buf());
+    let meta = fs::metadata(exact_fs.as_std_path())?;
     let size_bytes = meta.len() as i64;
-    let mut file = fs::File::open(path.as_std_path())?;
+    let mut file = fs::File::open(exact_fs.as_std_path())?;
     let digest = matter
         .put_reader(&mut file)
         .map_err(|e| Error::CasPutFailed(e.to_string()))?;
     let logical = path.file_name().unwrap_or(pst_fs_path).to_string();
     let item = matter.insert_item(ItemInput {
         source_id: Some(source_id.to_string()),
-        path: Some(logical),
-        native_sha256: Some(digest),
+        path: Some(logical.clone()),
+        native_sha256: Some(digest.clone()),
         status: item_status::DISCOVERED.to_string(),
         size_bytes: Some(size_bytes),
         file_category: Some("pst".into()),
         ..Default::default()
     })?;
-    extract_pst_item(matter, source_id, &item.id, limits, cancel)
+
+    let job = matter.create_job(JOB_KIND_EXTRACT_PST)?;
+    matter.set_job_state(&job.id, JobState::Running, None)?;
+
+    let cursor = ExtractCursor::new(
+        source_id,
+        &logical,
+        &item.id,
+        Some(digest.as_str()),
+        limits.batch_size.max(1),
+    );
+
+    run_extract(
+        matter,
+        source_id,
+        &item,
+        &job.id,
+        cursor,
+        limits,
+        cancel,
+        false,
+        Some(exact_fs),
+    )
+}
+
+/// Ensure resume continues against the same PST identity the checkpoint recorded.
+fn verify_resume_pst_identity(cursor: &ExtractCursor, inv: &Item) -> Result<()> {
+    let inv_path = inv.path.as_deref().unwrap_or("");
+    if cursor.pst_path != inv_path {
+        return Err(Error::ResumePstMismatch(format!(
+            "checkpoint pst_path {:?} != inventory path {:?}",
+            cursor.pst_path, inv.path
+        )));
+    }
+
+    match (
+        cursor.pst_native_sha256.as_deref(),
+        inv.native_sha256.as_deref(),
+    ) {
+        (Some(c), Some(i)) if c != i => Err(Error::ResumePstMismatch(format!(
+            "checkpoint pst_native_sha256 {c} != inventory {i}"
+        ))),
+        (Some(c), None) => Err(Error::ResumePstMismatch(format!(
+            "checkpoint has digest {c} but inventory native_sha256 is missing"
+        ))),
+        // Checkpoint lacked digest (legacy) — only path was checked above.
+        (None, _) => Ok(()),
+        (Some(_), Some(_)) => Ok(()),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -160,11 +221,14 @@ fn run_extract(
     limits: &ExtractLimits,
     cancel: Option<&dyn Fn() -> bool>,
     is_resume: bool,
+    // When set (path entry), open this exact filesystem path first.
+    open_fs_override: Option<camino::Utf8PathBuf>,
 ) -> Result<ExtractSummary> {
     let pst_path = inv.path.clone().unwrap_or_else(|| cursor.pst_path.clone());
     let source = matter.get_source(source_id)?;
 
-    let fs_candidate = candidate_fs_path(&source.path, &pst_path);
+    // Prefer explicit open path (extract_pst_path), else derive from source + inventory.
+    let fs_candidate = open_fs_override.or_else(|| candidate_fs_path(&source.path, &pst_path));
     let spec = PstOpenSpec {
         inventory_path: pst_path.clone(),
         native_sha256: inv
@@ -557,12 +621,32 @@ fn extract_one_message(
         ..Default::default()
     })?;
 
-    // Attachments
-    let att_list = pst.list_attachments(msg_nid).unwrap_or_default();
+    // Attachments — never swallow enumeration failures as "zero attachments".
     let mut logical_atts: Vec<LogicalAttachment> = Vec::new();
     let mut native_atts: Vec<NativeAttachment> = Vec::new();
     let mut attach_err = 0u64;
     let mut parent_partial = false;
+
+    let att_list = match pst.list_attachments(msg_nid) {
+        Ok(list) => list,
+        Err(e) => {
+            // Still extract email fields with empty attach list, but mark partial.
+            parent_partial = true;
+            attach_err += 1;
+            cursor.attachments_err = cursor.attachments_err.saturating_add(1);
+            let msg = format!("list_attachments nid={:x}: {e}", msg_nid.0);
+            let _ = matter.record_item_error(ItemErrorInput {
+                item_id: Some(parent.id.clone()),
+                source_id: Some(source_id.to_string()),
+                job_id: Some(job_id.to_string()),
+                stage: STAGE_PST_EXTRACT.into(),
+                code: "attach_list_failed".into(),
+                message: msg,
+                detail: Some(msg_path.clone()),
+            });
+            Vec::new()
+        }
+    };
 
     for (idx, att) in att_list.iter().enumerate() {
         let a_path = attach_path(&msg_path, idx, &att.filename);

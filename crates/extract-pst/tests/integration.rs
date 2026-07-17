@@ -12,8 +12,8 @@ use extract_pst::{
     NativeMessageV1, JOB_KIND_EXTRACT_PST, NATIVE_FORMAT_V1, STAGE_PST_EXTRACT,
 };
 use matter_core::{
-    compute_email_logical_hash, item_role, item_status, EmailLogicalInput, ItemInput, JobState,
-    Matter, WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
+    compute_email_logical_hash, item_role, item_status, EmailLogicalInput, ItemInput, ItemUpdate,
+    JobState, Matter, WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
 };
 use tempfile::tempdir;
 
@@ -346,6 +346,96 @@ fn resume_mid_folder_no_duplicates() {
         paths_after.len(),
         "re-extract must not create duplicate message paths"
     );
+}
+
+#[test]
+fn resume_rejects_pst_digest_mismatch() {
+    let Some(pst) = fixture_pst_with_messages() else {
+        eprintln!("skip: no fixture PST with messages");
+        return;
+    };
+    let total = fixture_message_count(&pst);
+    if total < 2 {
+        eprintln!("skip: need ≥2 messages to pause then mismatch resume");
+        return;
+    }
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-resume-mismatch");
+    let matter = Matter::create(&root, "ResumeMismatch").expect("create");
+    let source = matter
+        .insert_source(pst.to_str().unwrap(), "pst", "importing", None)
+        .expect("source");
+    let inv_id = register_pst_inventory(&matter, &source.id, &pst);
+
+    let lim = ExtractLimits {
+        batch_size: 1,
+        max_messages: Some(1),
+        ..ExtractLimits::default()
+    };
+    let first = extract_pst_item(&matter, &source.id, &inv_id, &lim, None).expect("capped");
+    assert!(!first.completed);
+    assert_eq!(
+        matter.get_job(&first.job_id).expect("job").state,
+        JobState::Paused
+    );
+
+    // Mutate inventory digest so resume must fail closed.
+    let fake = "0".repeat(64);
+    matter
+        .update_item(
+            &inv_id,
+            ItemUpdate {
+                native_sha256: Some(Some(fake)),
+                ..Default::default()
+            },
+        )
+        .expect("mutate digest");
+
+    let err = resume_extract(&matter, &source.id, &first.job_id, &lim, None)
+        .expect_err("resume must reject digest mismatch");
+    assert_eq!(err.code(), "resume_pst_mismatch", "got: {err}");
+}
+
+#[test]
+fn resume_rejects_pst_path_mismatch() {
+    let Some(pst) = fixture_pst_with_messages() else {
+        eprintln!("skip: no fixture PST with messages");
+        return;
+    };
+    let total = fixture_message_count(&pst);
+    if total < 2 {
+        eprintln!("skip: need ≥2 messages to pause then mismatch resume");
+        return;
+    }
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-resume-path-mismatch");
+    let matter = Matter::create(&root, "ResumePathMismatch").expect("create");
+    let source = matter
+        .insert_source(pst.to_str().unwrap(), "pst", "importing", None)
+        .expect("source");
+    let inv_id = register_pst_inventory(&matter, &source.id, &pst);
+
+    let lim = ExtractLimits {
+        batch_size: 1,
+        max_messages: Some(1),
+        ..ExtractLimits::default()
+    };
+    let first = extract_pst_item(&matter, &source.id, &inv_id, &lim, None).expect("capped");
+    assert!(!first.completed);
+
+    matter
+        .update_item(
+            &inv_id,
+            ItemUpdate {
+                path: Some(Some("other-mail.pst".into())),
+                ..Default::default()
+            },
+        )
+        .expect("mutate path");
+
+    let err = resume_extract(&matter, &source.id, &first.job_id, &lim, None)
+        .expect_err("resume must reject path mismatch");
+    assert_eq!(err.code(), "resume_pst_mismatch", "got: {err}");
 }
 
 #[test]

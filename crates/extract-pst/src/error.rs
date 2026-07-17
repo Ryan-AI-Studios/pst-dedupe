@@ -53,6 +53,13 @@ pub enum Error {
     #[error("source not found: {0}")]
     SourceNotFound(String),
 
+    /// Checkpoint PST path/digest does not match the current inventory item.
+    #[error("resume_pst_mismatch: {0}")]
+    ResumePstMismatch(String),
+
+    #[error("attach_list_failed: {0}")]
+    AttachListFailed(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -66,8 +73,10 @@ impl Error {
             Self::MessagePropsFailed(_) => "message_props_failed",
             Self::AttachDataMissing(_) => "attach_data_missing",
             Self::AttachTooLarge { .. } => "attach_too_large",
+            Self::AttachListFailed(_) => "attach_list_failed",
             Self::CasPutFailed(_) => "cas_put_failed",
             Self::Cancelled => "cancelled",
+            Self::ResumePstMismatch(_) => "resume_pst_mismatch",
             Self::Pst(pst_reader::PstError::AnsiPstNotSupported(_)) => "pst_ansi_rejected",
             Self::Pst(_) => "pst_error",
             Self::Matter(_) => "matter_error",

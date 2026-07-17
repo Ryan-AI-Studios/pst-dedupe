@@ -104,13 +104,23 @@ If the cap is hit mid-PST (more messages remain), the job is **`Paused`** with
 `completed: false` and a checkpoint — use `resume_extract` (or raise the cap)
 to continue. Only a full folder walk sets `Succeeded` / `completed: true`.
 
+When the cap pauses the run, audit emits **`extract.paused`** (reason
+`max_messages`) — not `extract.complete`. Cancel leaves the job `Paused` with a
+checkpoint and does **not** emit `extract.complete` either.
+
+Resume fails closed (`resume_pst_mismatch`) if the checkpoint `pst_path` or
+`pst_native_sha256` no longer matches the inventory item.
+
 ## Errors (structured codes)
 
 `pst_open_failed`, `pst_ansi_rejected`, `message_props_failed`,
-`attach_data_missing`, `attach_too_large`, `cas_put_failed`, `cancelled`.
+`attach_list_failed`, `attach_data_missing`, `attach_too_large`,
+`cas_put_failed`, `resume_pst_mismatch`, `cancelled`.
 
-Per-message continue; `item_errors` for partials. Audit:
-`extract.start` / `extract.complete` / `extract.fail` (not per-message).
+Per-message continue; `item_errors` for partials (including attachment-table
+enumeration failures → parent `partial` + `attach_list_failed`). Audit:
+`extract.start` / `extract.complete` / `extract.paused` / `extract.fail`
+(not per-message).
 
 ## Out of scope
 
