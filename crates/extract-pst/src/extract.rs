@@ -115,6 +115,9 @@ pub fn resume_extract(
 }
 
 /// Optional path-based entry: register a minimal inventory row then extract.
+///
+/// Streams the PST into CAS via [`Matter::put_reader`] (no full-file `Vec`).
+/// Open still prefers the filesystem path when present.
 pub fn extract_pst_path(
     matter: &Matter,
     source_id: &str,
@@ -123,23 +126,24 @@ pub fn extract_pst_path(
     cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<ExtractSummary> {
     use std::fs;
-    use std::io::Read;
 
     let path = camino::Utf8Path::new(pst_fs_path);
     if !path.as_std_path().is_file() {
         return Err(Error::PstOpenFailed(format!("not a file: {pst_fs_path}")));
     }
+    let meta = fs::metadata(path.as_std_path())?;
+    let size_bytes = meta.len() as i64;
     let mut file = fs::File::open(path.as_std_path())?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-    let digest = matter.put_bytes(&buf)?;
+    let digest = matter
+        .put_reader(&mut file)
+        .map_err(|e| Error::CasPutFailed(e.to_string()))?;
     let logical = path.file_name().unwrap_or(pst_fs_path).to_string();
     let item = matter.insert_item(ItemInput {
         source_id: Some(source_id.to_string()),
         path: Some(logical),
         native_sha256: Some(digest),
         status: item_status::DISCOVERED.to_string(),
-        size_bytes: Some(buf.len() as i64),
+        size_bytes: Some(size_bytes),
         file_category: Some("pst".into()),
         ..Default::default()
     })?;
@@ -231,6 +235,8 @@ fn run_extract(
     let mut since_batch: u64 = 0;
     let mut run_messages: u64 = 0;
     let mut cancelled = false;
+    // Safety cap hit mid-walk: job is incomplete and resumable (not Succeeded).
+    let mut hit_max_messages = false;
 
     // Resume position: find starting folder/message index.
     let mut start_folder_idx = 0usize;
@@ -267,21 +273,25 @@ fn run_extract(
 
             if let Some(max) = limits.max_messages {
                 if run_messages >= max {
+                    // More messages remain in the walk; do not claim full success.
+                    hit_max_messages = true;
                     break 'folders;
                 }
             }
 
             let msg_path = message_path(&pst_path, &folder.path, msg_nid.0);
 
-            // Skip already-extracted.
-            if let Some(existing) = matter.item_by_source_path(source_id, &msg_path)? {
-                if existing.status == item_status::EXTRACTED && existing.logical_hash.is_some() {
-                    cursor.last_folder_path = Some(folder.path.clone());
-                    cursor.last_message_nid = Some(nid_hex(msg_nid.0));
-                    cursor.folder_message_index = Some(mi as i64);
-                    cursor.completed_count = cursor.completed_count.saturating_add(1);
-                    continue;
-                }
+            // Never double-insert the same message path on re-extract / resume.
+            // Message paths contain "!/"; inventory PST rows do not.
+            // Skip if any prior row exists for (source_id, path): extracted,
+            // partial (with or without hash), error, or other. Retry-with-update
+            // is deferred — insert_item has no unique path key yet.
+            if matter.item_by_source_path(source_id, &msg_path)?.is_some() {
+                cursor.last_folder_path = Some(folder.path.clone());
+                cursor.last_message_nid = Some(nid_hex(msg_nid.0));
+                cursor.folder_message_index = Some(mi as i64);
+                cursor.completed_count = cursor.completed_count.saturating_add(1);
+                continue;
             }
 
             match extract_one_message(
@@ -329,10 +339,11 @@ fn run_extract(
         since_batch = 0;
     }
 
-    if since_batch > 0 {
+    if since_batch > 0 || cancelled || hit_max_messages {
         write_checkpoint(matter, job_id, &cursor)?;
     }
 
+    let completed = !cancelled && !hit_max_messages;
     let summary = ExtractSummary {
         source_id: source_id.to_string(),
         job_id: job_id.to_string(),
@@ -340,13 +351,33 @@ fn run_extract(
         messages_err: cursor.messages_err,
         attachments_ok: cursor.attachments_ok,
         attachments_err: cursor.attachments_err,
-        completed: !cancelled,
+        completed,
         cancelled,
     };
 
     if cancelled {
         matter.set_job_state(job_id, JobState::Paused, Some("cancelled"))?;
         // No extract.complete on cancel; resume continues.
+    } else if hit_max_messages {
+        // max_messages is a safety cap: mid-PST stop is incomplete + resumable.
+        matter.set_job_state(job_id, JobState::Paused, Some("max_messages"))?;
+        let _ = matter.append_audit(AuditEventInput {
+            actor: "system".into(),
+            action: "extract.paused".into(),
+            entity: format!("job:{job_id}"),
+            params_json: json!({
+                "source_id": source_id,
+                "reason": "max_messages",
+                "max_messages": limits.max_messages,
+                "messages_ok": summary.messages_ok,
+                "messages_err": summary.messages_err,
+                "attachments_ok": summary.attachments_ok,
+                "attachments_err": summary.attachments_err,
+                "completed_count": cursor.completed_count,
+            })
+            .to_string(),
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+        })?;
     } else {
         matter.set_job_state(job_id, JobState::Succeeded, None)?;
         let _ = matter.append_audit(AuditEventInput {

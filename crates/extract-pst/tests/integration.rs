@@ -7,13 +7,13 @@ use std::sync::Arc;
 
 use camino::Utf8PathBuf;
 use extract_pst::{
-    encode_native_message_v1, extract_pst_item, list_discovered_psts, native_message_v1_digest,
-    parse_display_list, resume_extract, ExtractLimits, NativeAttachment, NativeMessageV1,
-    JOB_KIND_EXTRACT_PST, NATIVE_FORMAT_V1,
+    encode_native_message_v1, extract_pst_item, extract_pst_path, list_discovered_psts,
+    native_message_v1_digest, parse_display_list, resume_extract, ExtractLimits, NativeAttachment,
+    NativeMessageV1, JOB_KIND_EXTRACT_PST, NATIVE_FORMAT_V1, STAGE_PST_EXTRACT,
 };
 use matter_core::{
-    compute_email_logical_hash, item_status, EmailLogicalInput, ItemInput, Matter, WORKSPACE_DIR,
-    WORKSPACE_TEMP_DIR,
+    compute_email_logical_hash, item_role, item_status, EmailLogicalInput, ItemInput, JobState,
+    Matter, WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
 };
 use tempfile::tempdir;
 
@@ -89,12 +89,24 @@ fn register_pst_inventory(matter: &Matter, source_id: &str, pst_path: &PathBuf) 
     item.id
 }
 
+/// Count total messages in a fixture PST.
+fn fixture_message_count(pst: &PathBuf) -> usize {
+    let Ok(mut f) = pst_reader::PstFile::open(pst) else {
+        return 0;
+    };
+    let Ok(folders) = f.folders() else {
+        return 0;
+    };
+    folders.iter().map(|folder| folder.message_nids.len()).sum()
+}
+
 #[test]
 fn happy_path_fixture_extract() {
     let Some(pst) = fixture_pst_with_messages() else {
         eprintln!("skip: no fixture PST with messages");
         return;
     };
+    let total_msgs = fixture_message_count(&pst);
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-happy");
     let matter = Matter::create(&root, "Happy").expect("create");
@@ -103,17 +115,22 @@ fn happy_path_fixture_extract() {
         .expect("source");
     let inv_id = register_pst_inventory(&matter, &source.id, &pst);
 
+    // No max_messages cap so full walk can claim completed when the fixture is small.
     let limits = ExtractLimits {
         batch_size: 50,
-        max_messages: Some(20),
+        max_messages: None,
         ..ExtractLimits::default()
     };
     let summary = extract_pst_item(&matter, &source.id, &inv_id, &limits, None).expect("extract");
-    assert!(summary.completed);
+    assert!(summary.completed, "full walk without cap must complete");
     assert!(!summary.cancelled);
     assert!(
         summary.messages_ok + summary.messages_err > 0,
         "expected at least one message attempt"
+    );
+    assert!(
+        summary.messages_ok + summary.messages_err >= total_msgs as u64 || total_msgs == 0,
+        "expected to attempt all {total_msgs} fixture messages"
     );
 
     let items = matter.list_items_for_source(&source.id).expect("list");
@@ -123,17 +140,59 @@ fn happy_path_fixture_extract() {
         .collect();
     assert!(!emails.is_empty(), "expected extracted email items");
 
+    for email in &emails {
+        assert!(
+            email.role.as_deref() == Some(item_role::PARENT)
+                || email.role.as_deref() == Some(item_role::STANDALONE),
+            "email item must have parent/standalone role, got {:?}",
+            email.role
+        );
+        assert!(
+            email.status == item_status::EXTRACTED || email.status == item_status::PARTIAL,
+            "email status: {}",
+            email.status
+        );
+        assert!(
+            email.logical_hash.is_some(),
+            "logical_hash set on {}",
+            email.path.as_deref().unwrap_or("?")
+        );
+        assert_eq!(email.logical_hash_version, 1);
+        assert!(email.native_sha256.is_some(), "native_sha256 set");
+    }
+
     let parent = emails
         .iter()
         .find(|i| i.status == item_status::EXTRACTED || i.status == item_status::PARTIAL)
         .expect("extracted parent");
-    assert!(parent.logical_hash.is_some(), "logical_hash set");
-    assert_eq!(parent.logical_hash_version, 1);
-    assert!(parent.native_sha256.is_some(), "native_sha256 set");
     if let Some(ref extra) = parent.extra_json {
         assert!(
             extra.contains(NATIVE_FORMAT_V1),
             "extra_json records native format: {extra}"
+        );
+    }
+
+    // Family / attachment children when the fixture has attaches.
+    let attaches: Vec<_> = items
+        .iter()
+        .filter(|i| i.role.as_deref() == Some(item_role::ATTACHMENT))
+        .collect();
+    if !attaches.is_empty() {
+        assert!(
+            parent.family_id.is_some(),
+            "parent with attachments must have family_id"
+        );
+        let family_id = parent.family_id.as_deref().unwrap();
+        let members = matter.list_family_members(family_id).expect("family");
+        assert!(
+            members.len() >= 2,
+            "family should include parent + attach(es)"
+        );
+        assert!(
+            attaches.iter().any(|a| a.native_sha256.is_some()
+                || a.status == item_status::ERROR
+                || a.status == item_status::PARTIAL),
+            "attachment children present"
         );
     }
 
@@ -195,12 +254,30 @@ fn happy_path_fixture_extract() {
     assert!(!psts.is_empty());
 }
 
+fn message_paths_unique(matter: &Matter, source_id: &str) -> std::collections::HashSet<String> {
+    let items = matter.list_items_for_source(source_id).expect("list");
+    let mut paths = std::collections::HashSet::new();
+    for it in &items {
+        if let Some(ref p) = it.path {
+            if p.contains("!/") && !p.contains("/attach/") {
+                assert!(paths.insert(p.clone()), "duplicate message path: {p}");
+            }
+        }
+    }
+    paths
+}
+
 #[test]
 fn resume_mid_folder_no_duplicates() {
     let Some(pst) = fixture_pst_with_messages() else {
         eprintln!("skip: no fixture PST with messages");
         return;
     };
+    let total = fixture_message_count(&pst);
+    if total < 2 {
+        eprintln!("skip: need ≥2 messages to force mid-walk cancel+resume");
+        return;
+    }
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-resume");
     let matter = Matter::create(&root, "Resume").expect("create");
@@ -224,32 +301,217 @@ fn resume_mid_folder_no_duplicates() {
     let first = extract_pst_item(&matter, &source.id, &inv_id, &lim, Some(&cancel_fn))
         .expect("partial extract");
     assert!(
-        first.cancelled || first.messages_ok + first.messages_err >= 1,
-        "expected cancel or at least one message"
+        first.cancelled,
+        "with ≥2 messages and cancel after 2 polls, first run must cancel"
+    );
+    assert!(!first.completed);
+    assert!(
+        first.messages_ok + first.messages_err >= 1,
+        "expected at least one message before cancel"
     );
 
-    if first.cancelled {
-        let resumed =
-            resume_extract(&matter, &source.id, &first.job_id, &lim, None).expect("resume");
-        assert!(resumed.completed || resumed.messages_ok > 0);
-    } else {
-        // If not cancelled (tiny folder), still verify no dups on second extract.
-        let _ = extract_pst_item(&matter, &source.id, &inv_id, &lim, None).expect("second");
+    let job = matter.get_job(&first.job_id).expect("job");
+    assert_eq!(job.state, JobState::Paused);
+
+    let cp = matter
+        .get_checkpoint(&first.job_id, STAGE_PST_EXTRACT)
+        .expect("cp")
+        .expect("checkpoint must exist after progress");
+    let cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor json");
+    assert!(
+        cursor.get("folder_message_index").is_some() || cursor.get("last_message_nid").is_some(),
+        "checkpoint must record mid-folder position: {}",
+        cp.cursor_json
+    );
+    let paths_before = message_paths_unique(&matter, &source.id);
+    assert!(!paths_before.is_empty());
+
+    let resumed = resume_extract(&matter, &source.id, &first.job_id, &lim, None).expect("resume");
+    assert!(
+        resumed.completed || resumed.messages_ok + resumed.messages_err > first.messages_ok,
+        "resume must complete or make progress"
+    );
+
+    let paths_after = message_paths_unique(&matter, &source.id);
+    assert!(
+        paths_after.len() >= paths_before.len(),
+        "resume must not drop paths"
+    );
+    // Re-extract same inventory must not duplicate paths either.
+    let second = extract_pst_item(&matter, &source.id, &inv_id, &lim, None).expect("re-extract");
+    assert!(second.completed || second.messages_ok + second.messages_err > 0);
+    let paths_re = message_paths_unique(&matter, &source.id);
+    assert_eq!(
+        paths_re.len(),
+        paths_after.len(),
+        "re-extract must not create duplicate message paths"
+    );
+}
+
+#[test]
+fn max_messages_pauses_incomplete_job() {
+    let Some(pst) = fixture_pst_with_messages() else {
+        eprintln!("skip: no fixture PST with messages");
+        return;
+    };
+    let total = fixture_message_count(&pst);
+    if total < 2 {
+        eprintln!("skip: need ≥2 messages for max_messages pause test");
+        return;
     }
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-maxmsg");
+    let matter = Matter::create(&root, "MaxMsg").expect("create");
+    let source = matter
+        .insert_source(pst.to_str().unwrap(), "pst", "importing", None)
+        .expect("source");
+    let inv_id = register_pst_inventory(&matter, &source.id, &pst);
+
+    let lim = ExtractLimits {
+        batch_size: 1,
+        max_messages: Some(1),
+        ..ExtractLimits::default()
+    };
+    let first = extract_pst_item(&matter, &source.id, &inv_id, &lim, None).expect("capped");
+    assert!(!first.completed, "max_messages mid-PST must not complete");
+    assert!(!first.cancelled);
+    assert_eq!(first.messages_ok + first.messages_err, 1);
+    let job = matter.get_job(&first.job_id).expect("job");
+    assert_eq!(job.state, JobState::Paused);
+    assert!(
+        matter
+            .get_checkpoint(&first.job_id, STAGE_PST_EXTRACT)
+            .expect("cp")
+            .is_some(),
+        "checkpoint required for resume after max_messages"
+    );
+
+    // Resume with a higher (or no) cap continues the same job.
+    let lim2 = ExtractLimits {
+        batch_size: 50,
+        max_messages: None,
+        ..ExtractLimits::default()
+    };
+    let resumed = resume_extract(&matter, &source.id, &first.job_id, &lim2, None).expect("resume");
+    assert!(resumed.completed, "resume without cap should finish walk");
+    let job2 = matter.get_job(&first.job_id).expect("job");
+    assert_eq!(job2.state, JobState::Succeeded);
+    let paths = message_paths_unique(&matter, &source.id);
+    assert!(paths.len() >= 2, "expected multiple unique message paths");
+}
+
+#[test]
+fn partial_attach_cap_records_errors() {
+    let Some(pst) = fixture_pst_with_messages() else {
+        eprintln!("skip: no fixture PST with messages");
+        return;
+    };
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-partial");
+    let matter = Matter::create(&root, "Partial").expect("create");
+    let source = matter
+        .insert_source(pst.to_str().unwrap(), "pst", "importing", None)
+        .expect("source");
+    let inv_id = register_pst_inventory(&matter, &source.id, &pst);
+
+    // Force every non-empty attachment over the cap → attach_too_large + parent partial.
+    let lim = ExtractLimits {
+        batch_size: 50,
+        max_messages: Some(30),
+        max_attachment_bytes: Some(0),
+        ..ExtractLimits::default()
+    };
+    let summary = extract_pst_item(&matter, &source.id, &inv_id, &lim, None).expect("extract");
+    assert!(summary.messages_ok + summary.messages_err > 0);
 
     let items = matter.list_items_for_source(&source.id).expect("list");
-    let mut paths = std::collections::HashSet::new();
-    for it in &items {
-        if let Some(ref p) = it.path {
-            if p.contains("!/") && !p.contains("/attach/") {
-                assert!(
-                    paths.insert(p.clone()),
-                    "duplicate message path on resume: {p}"
-                );
-            }
+    let emails: Vec<_> = items
+        .iter()
+        .filter(|i| i.file_category.as_deref() == Some("email"))
+        .collect();
+    assert!(!emails.is_empty(), "other messages / parents still present");
+
+    let errors = matter
+        .item_errors_for_source(&source.id)
+        .expect("item_errors");
+    let attach_errs: Vec<_> = errors
+        .iter()
+        .filter(|e| e.code == "attach_too_large")
+        .collect();
+    if summary.attachments_err == 0 && attach_errs.is_empty() {
+        // Fixture may have zero attachments; still require clean parents with hash.
+        for e in &emails {
+            assert!(e.logical_hash.is_some(), "message logical_hash set");
+            assert!(
+                e.status == item_status::EXTRACTED || e.status == item_status::PARTIAL,
+                "status {}",
+                e.status
+            );
         }
+        eprintln!("note: fixture has no attachments; partial-attach path not exercised");
+        return;
     }
-    assert!(!paths.is_empty(), "expected extracted message paths");
+    assert!(
+        !attach_errs.is_empty() || summary.attachments_err > 0,
+        "expected attach_too_large errors when attachments present"
+    );
+    let partial_parents: Vec<_> = emails
+        .iter()
+        .filter(|e| e.status == item_status::PARTIAL)
+        .collect();
+    assert!(
+        !partial_parents.is_empty(),
+        "parent should be partial when attach fails"
+    );
+    // Sibling success: at least one email with logical_hash.
+    assert!(
+        emails.iter().any(|e| e.logical_hash.is_some()),
+        "successful sibling messages keep logical_hash"
+    );
+}
+
+#[test]
+fn extract_pst_path_streams_without_full_buf() {
+    let Some(pst) = fixture_pst_with_messages() else {
+        eprintln!("skip: no fixture PST with messages");
+        return;
+    };
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-path");
+    let matter = Matter::create(&root, "Path").expect("create");
+    let source = matter
+        .insert_source(pst.to_str().unwrap(), "pst", "importing", None)
+        .expect("source");
+    let lim = ExtractLimits {
+        max_messages: Some(1),
+        batch_size: 1,
+        ..ExtractLimits::default()
+    };
+    let summary = extract_pst_path(
+        &matter,
+        &source.id,
+        pst.to_str().expect("utf8 path"),
+        &lim,
+        None,
+    )
+    .expect("extract_pst_path");
+    assert!(summary.messages_ok + summary.messages_err >= 1);
+    // Inventory digest present and matches put_reader of the same file.
+    let items = matter.list_items_for_source(&source.id).expect("list");
+    let inv = items
+        .iter()
+        .find(|i| {
+            i.file_category.as_deref() == Some("pst")
+                || i.path
+                    .as_deref()
+                    .map(|p| p.to_ascii_lowercase().ends_with(".pst") && !p.contains("!/"))
+                    .unwrap_or(false)
+        })
+        .expect("inventory pst item");
+    let digest = inv.native_sha256.as_deref().expect("digest");
+    let mut f = std::fs::File::open(&pst).expect("open");
+    let expected = matter.put_reader(&mut f).expect("stream digest");
+    assert_eq!(digest, expected, "path entry must stream-put same digest");
 }
 
 #[test]
@@ -268,6 +530,7 @@ fn open_from_cas_only_temp_under_workspace() {
     let inv_id = register_pst_inventory(&matter, &source.id, &pst);
 
     let os_temp = std::env::temp_dir();
+    // Cap may pause the job; this test only needs open-from-CAS to succeed.
     let limits = ExtractLimits {
         max_messages: Some(5),
         ..ExtractLimits::default()
@@ -275,6 +538,7 @@ fn open_from_cas_only_temp_under_workspace() {
     let summary =
         extract_pst_item(&matter, &source.id, &inv_id, &limits, None).expect("cas extract");
     assert!(summary.messages_ok + summary.messages_err > 0);
+    // completed may be false when fixture has >5 messages (max_messages pause).
 
     let ws_temp = root.join(WORKSPACE_DIR).join(WORKSPACE_TEMP_DIR);
     assert!(ws_temp.as_std_path().is_dir());

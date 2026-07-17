@@ -33,8 +33,10 @@ Job kind: `extract_pst`. Stage: `pst_extract`. Default `batch_size`: **500**
 {pst_inventory_path}!/{folder_path}/{message_nid_hex}/attach/{index}_{safe_filename}
 ```
 
-Resume skip key: `(source_id, path)` via `item_by_source_path` when status is
-`extracted` and `logical_hash` is set.
+Resume / re-extract skip key: `(source_id, path)` via `item_by_source_path`.
+If **any** item already exists for a message path (`…!/…`), extract **skips**
+that path and never double-inserts (covers `extracted`, `partial`, and prior
+error rows). Retry-with-update is deferred until unique path upsert exists.
 
 ## Native identity (`native_sha256`)
 
@@ -96,6 +98,11 @@ After every `batch_size` messages **including mid-folder**:
 ```
 
 Cancel → job `Paused` + durable checkpoint; `resume_extract` continues.
+
+`max_messages` is a **safety cap for this run**, not a claim of full extract.
+If the cap is hit mid-PST (more messages remain), the job is **`Paused`** with
+`completed: false` and a checkpoint — use `resume_extract` (or raise the cap)
+to continue. Only a full folder walk sets `Succeeded` / `completed: true`.
 
 ## Errors (structured codes)
 

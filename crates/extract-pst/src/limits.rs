@@ -5,7 +5,11 @@
 pub struct ExtractLimits {
     /// Commit + checkpoint every N messages (mid-folder). Default 500.
     pub batch_size: u64,
-    /// Optional safety cap on messages processed this run.
+    /// Optional safety cap on messages processed **this run**.
+    ///
+    /// When the cap is hit before the folder walk finishes, the job is
+    /// **Paused** (resumable) with `ExtractSummary.completed = false` — never
+    /// `Succeeded`. Raise the cap or call [`crate::resume_extract`] to continue.
     pub max_messages: Option<u64>,
     /// Fail closed when a single attachment exceeds this size.
     pub max_attachment_bytes: Option<u64>,
@@ -45,9 +49,11 @@ pub struct ExtractSummary {
     pub messages_err: u64,
     pub attachments_ok: u64,
     pub attachments_err: u64,
-    /// True when the run finished fully (job Succeeded).
+    /// True only when the folder walk finished fully (job `Succeeded`).
+    /// False on cancel or when `max_messages` stopped the run mid-PST.
     pub completed: bool,
     /// True when cancelled mid-run (job Paused; resume-capable).
+    /// Distinct from a `max_messages` pause (`cancelled == false`, `completed == false`).
     pub cancelled: bool,
 }
 
