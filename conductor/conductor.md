@@ -55,7 +55,7 @@ Legacy folders keep `plan.md`/`spec.md`/`tdd.md` as written. **New work uses `##
 | [0016-PurviewIngest](0016-PurviewIngest/spec.md) | **Completed** | `ingest-purview`: detect + safe ZIP expand + leaf checkpoints + encoding fallbacks |
 | [0017-NormalizedItem](0017-NormalizedItem/spec.md) | **Completed** | Schema v2 Normalized Item + family graph + logical_hash v1 (BCC-aware) |
 | [0018-PstExtractorAdapter](0018-PstExtractorAdapter/spec.md) | **Completed** | `extract-pst`: PST → Normalized Items + native v1 + mid-folder resume |
-| [0019-ProcessJobRunner](0019-ProcessJobRunner/spec.md) | **Ready** | In-app jobs; no external daemons |
+| [0019-ProcessJobRunner](0019-ProcessJobRunner/spec.md) | **Completed** | `process-runner`: single matter worker, watch progress, Option C `*_on_job`, Drop join |
 | [0020-DeskShellUx](0020-DeskShellUx/spec.md) | **Ready** | Single-exe matter/source/process UX |
 
 ## Series B — Reduce & promote

@@ -5,7 +5,7 @@
 - **Governance:** this directory in `C:\dev\dedupe\conductor\`
 - **Plan-of-record reference:** `C:\dev\Dedupe-plan.md` → §4.5–4.6 (lifecycle + Tokio trap + resumable jobs), Series A / **019**, §17 (`tokio` sync primitives; rayon only for future non-Matter CPU stages)
 - **Cross-repo contract:** n/a
-- **Status:** Ready — not started
+- **Status:** Completed
 - **Depends on:** **0015-MatterStore** (Completed — jobs/checkpoints). **Recommended wire-ups:** **0016** (`ingest-purview`), **0018** (`extract-pst`) — both Completed.
 
 ---

@@ -90,11 +90,11 @@ Phased checklist. Map phases to DoD items in `spec.md` §7. Execute in `C:\dev\d
 
 ## Phase 9 — Finalize → DoD-11
 
-- [ ] Write `review.md` (watch, Option C, worker model, Drop join, deferred multi-job)
-- [ ] Update `../conductor.md`: **0019** → **Completed**
-- [ ] Update `../sequencing.md`
-- [ ] Commit ledger TX
-- [ ] Handoff: **0020** consumes watch; **0021** registers handler later
+- [x] Write `review.md` (watch, Option C, worker model, Drop join, deferred multi-job)
+- [x] Update `../conductor.md`: **0019** → **Completed**
+- [x] Update `../sequencing.md`
+- [x] Commit ledger TX
+- [x] Handoff: **0020** consumes watch; **0021** registers handler later
 
 ---
 
