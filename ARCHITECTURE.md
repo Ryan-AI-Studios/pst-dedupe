@@ -71,8 +71,33 @@ pst-dedup/                      (Cargo workspace)
 │   │   │   └── results.rs      Report viewer + export controls
 │   │   └── worker.rs           Background thread for PST processing
 │   │
-│   └── pst-writer/             Experimental write path / fixture helpers
+│   ├── pst-writer/             Experimental write path / fixture helpers
+│   │
+│   └── matter-core/            Matter store foundation (Desk tracks 0015+)
+│       src/
+│       ├── lib.rs              Public API: Matter, CAS, audit, jobs
+│       ├── matter.rs           Layout create/open + high-level store API
+│       ├── schema.rs           Versioned SQLite migrations (schema v1)
+│       ├── cas.rs              SHA-256 content-addressable blob store
+│       ├── audit.rs            Append-only audit log + hash chain verify
+│       ├── jobs.rs             Jobs + checkpoint resume primitives
+│       ├── item_errors.rs      Item-level error accumulator
+│       └── error.rs            Typed thiserror errors
 ```
+
+### Matter on-disk layout (`matter-core`)
+
+Caller-chosen root (e.g. `Matters/<id>/`):
+
+```text
+matter.db                 # SQLite metadata (WAL)
+blobs/sha256/<aa>/<hex>   # CAS: raw physical bytes only
+index/                    # reserved (Tantivy FTS)
+exports/                  # reserved (production sets)
+logs/                     # optional file logs
+```
+
+See `crates/matter-core/README.md` for CAS and audit contracts.
 
 ---
 

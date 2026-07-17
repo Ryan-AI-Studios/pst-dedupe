@@ -141,9 +141,8 @@ mod diagnose_real_pst {
     #[test]
     #[ignore = "manual real-PST diagnosis; set PST_DIAG_PATH"]
     fn diagnose_desktop_pst() {
-        let path = std::env::var("PST_DIAG_PATH").unwrap_or_else(|_| {
-            r"C:\Users\RyanB\Desktop\INC0102784-2.pst".to_string()
-        });
+        let path = std::env::var("PST_DIAG_PATH")
+            .unwrap_or_else(|_| r"C:\Users\RyanB\Desktop\INC0102784-2.pst".to_string());
         assert!(
             Path::new(&path).exists(),
             "PST not found at {path}; set PST_DIAG_PATH"
@@ -274,7 +273,10 @@ mod diagnose_real_pst {
                             for col in table.columns() {
                                 if col.cb_data == 4 {
                                     if let Some(v) = table.get_row_u32(row, col.prop_id) {
-                                        println!("      u32 prop 0x{:04X} = 0x{v:08X} ({v})", col.prop_id);
+                                        println!(
+                                            "      u32 prop 0x{:04X} = 0x{v:08X} ({v})",
+                                            col.prop_id
+                                        );
                                     }
                                 }
                             }

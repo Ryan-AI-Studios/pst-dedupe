@@ -119,7 +119,10 @@ fn main() {
     }
 
     println!();
-    println!("=== Dedup summary ({:.2}s) ===", start.elapsed().as_secs_f64());
+    println!(
+        "=== Dedup summary ({:.2}s) ===",
+        start.elapsed().as_secs_f64()
+    );
     println!("  processed:   {total_msgs}");
     println!("  skipped:     {skipped}");
     println!("  unique:      {}", index.unique_count);

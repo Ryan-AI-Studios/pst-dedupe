@@ -40,7 +40,7 @@
 
 | # | Phase | Track | Status | Concurrent? |
 |---|---|---|---|---|
-| 1 | P0 Foundation | **0015** MatterStore | ⬜ Ready | Start first — everything blocks on this |
+| 1 | P0 Foundation | **0015** MatterStore | ✅ Completed | Unblocks 0016 / 0017 / 0019 |
 | 2 | P0 Foundation | **0017** NormalizedItem | ⬜ Ready | After 0015; can parallel **0016** + **0019** once 0015 lands |
 | 3 | P0 Foundation | **0016** PurviewIngest | ⬜ Ready | After 0015; parallel with 0017/0019 |
 | 4 | P0 Foundation | **0019** ProcessJobRunner | ⬜ Ready | After 0015; parallel with 0016/0017 |
