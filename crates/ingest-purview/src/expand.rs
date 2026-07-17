@@ -395,9 +395,19 @@ fn expand_zip_file(
         };
 
         let logical = join_logical_path(archive_stack, &sanitized);
+        let lower = sanitized.to_ascii_lowercase();
+        let is_nested_zip = lower.ends_with(".zip");
 
-        // Resume skip before reading body.
+        // Resume: inventoried non-container leaves are skipped; inventoried
+        // containers re-walk children (do not re-put / re-insert the container).
         if session.already_inventoried(&logical)? {
+            if is_nested_zip {
+                let data = load_inventoried_or_reread(session, &logical, &mut entry)?;
+                let mut child_stack = archive_stack.to_vec();
+                child_stack.push(sanitized.clone());
+                expand_zip_bytes(session, &data, &child_stack, depth + 1)?;
+                continue;
+            }
             session.cursor.entries_skipped += 1;
             continue;
         }
@@ -409,8 +419,7 @@ fn expand_zip_file(
         check_entry_bomb(session, compressed, uncompressed)?;
 
         // Nested zip: materialize to temp, recurse; inventory the zip blob too.
-        let lower = sanitized.to_ascii_lowercase();
-        if lower.ends_with(".zip") {
+        if is_nested_zip {
             let data = read_zip_entry(&mut entry, session.limits.max_entry_buffer_bytes)?;
             check_ratio(session, compressed, data.len() as u64)?;
             session.commit_leaf(&logical, &data, "expanded")?;
@@ -446,21 +455,38 @@ fn expand_zip_bytes(
     archive_stack: &[String],
     depth: u32,
 ) -> Result<()> {
-    if depth > session.limits.max_zip_depth {
-        return Err(Error::ZipDepth {
-            max: session.limits.max_zip_depth,
-        });
-    }
-    if depth > session.cursor.nested_depth_max_seen {
-        session.cursor.nested_depth_max_seen = depth;
-    }
-    session.cursor.nested_zips += 1;
-
+    // nested_zips is incremented once in expand_zip_file when depth > 1.
     // Write to a temp file so ZipArchive can seek.
     let mut tmp = tempfile::NamedTempFile::new().map_err(Error::Io)?;
     tmp.write_all(data).map_err(Error::Io)?;
     tmp.flush().map_err(Error::Io)?;
     expand_zip_file(session, tmp.path(), archive_stack, depth)
+}
+
+/// Load container bytes from CAS for an already-inventoried path; fall back to
+/// re-reading the ZIP entry body without re-inventorying.
+fn load_inventoried_or_reread<R: Read>(
+    session: &ExpandSession<'_>,
+    logical_path: &str,
+    entry: &mut ZipFile<'_, R>,
+) -> Result<Vec<u8>> {
+    if let Some(item) = session
+        .matter
+        .item_by_source_path(session.source_id, logical_path)?
+    {
+        if let Some(ref digest) = item.native_sha256 {
+            if let Ok(bytes) = session.matter.get_bytes(digest) {
+                return Ok(bytes);
+            }
+        }
+    }
+    // CAS miss or missing digest: re-read entry (still no re-put / re-insert).
+    let compressed = entry.compressed_size();
+    let uncompressed = entry.size();
+    check_entry_bomb(session, compressed, uncompressed)?;
+    let data = read_zip_entry(entry, session.limits.max_entry_buffer_bytes)?;
+    check_ratio(session, compressed, data.len() as u64)?;
+    Ok(data)
 }
 
 fn check_entry_bomb(session: &ExpandSession<'_>, compressed: u64, uncompressed: u64) -> Result<()> {

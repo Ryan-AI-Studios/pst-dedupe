@@ -79,7 +79,7 @@ After each successful **leaf** CAS put + inventory insert (or every N entries / 
 - `completed_count`, `bytes_extracted`
 - optional `archive_stack` / `completed_top_level`
 
-**Resume is inventory-authoritative:** if `(source_id, path)` already has `native_sha256` and status `expanded`/`discovered`, the leaf is **skipped** (no re-`put_bytes`).
+**Resume is inventory-authoritative:** if `(source_id, path)` already has `native_sha256` and status `expanded`/`discovered`, a **non-container leaf** is **skipped** (no re-`put_bytes`). Nested **`.zip` containers** that are already inventored still **re-walk children** (bytes loaded from CAS, or re-read from the parent entry on CAS miss) so mid-nested cancel does not drop remaining leaves.
 
 Cancel sets source `paused` + job `Paused` so resume can continue.
 
@@ -87,9 +87,15 @@ Cancel sets source `paused` + job `Paused` so resume can continue.
 
 ## ZIP name encoding
 
-1. UTF-8 bit set **or** valid UTF-8 bytes → UTF-8  
+1. UTF-8 flag / valid UTF-8 bytes → UTF-8  
 2. Else CP437 (ZIP historical default)  
 3. Else Windows-1252 / Latin-1-style single-byte map  
+
+**General-purpose bit 11 approximation:** the `zip` crate does not always expose
+the raw GP bit 11 (language encoding flag). We treat a name as UTF-8 when
+`name_raw` is valid UTF-8 **and** matches `ZipFile::name()`. Non-UTF-8 raw
+names still fall through CP437 → Windows-1252. This is an intentional
+approximation, not a full bit-11 parse.
 
 Result is always a **UTF-8** logical path in SQLite. Paths are never rejected solely for encoding.
 

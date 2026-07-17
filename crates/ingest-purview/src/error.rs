@@ -73,15 +73,13 @@ impl Error {
     }
 
     /// Whether this error is a per-entry soft failure (record + continue).
+    ///
+    /// Zip-bomb limits (`ZipBomb`, including ratio/size/entries) are **not**
+    /// entry-level: they fail the whole job (fail closed).
     pub fn is_entry_level(&self) -> bool {
         matches!(
             self,
-            Self::PathRejected { .. }
-                | Self::UnsupportedContainer(_)
-                | Self::ZipBomb {
-                    code: "zip_bomb_ratio",
-                    ..
-                }
+            Self::PathRejected { .. } | Self::UnsupportedContainer(_)
         )
     }
 }

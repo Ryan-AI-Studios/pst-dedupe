@@ -422,6 +422,134 @@ fn resume_mid_archive_skips_inventoried() {
 }
 
 #[test]
+fn resume_nested_zip_mid_archive() {
+    // Outer zip with pre/post leaves + nested zip of three leaves.
+    // Cancel after the first *inner* leaf is inventored; resume must finish
+    // remaining inner children (and outer post leaf) without duplicates.
+    let (_tmp, base) = utf8_tempdir();
+    let zip_path = base.join("nested_outer.zip");
+    let inner = write_zip_bytes(&[("a.txt", b"aaa"), ("b.txt", b"bbb"), ("c.txt", b"ccc")]);
+    write_zip_file(
+        zip_path.as_std_path(),
+        &[
+            ("pre.txt", b"before nested"),
+            ("inner.zip", &inner),
+            ("post.txt", b"after nested"),
+        ],
+    );
+
+    let matter_root = base.join("matter");
+    let matter = Matter::create(&matter_root, "NestedResume").expect("matter");
+    let mut limits = ExpandLimits::for_tests();
+    limits.checkpoint_every_n_entries = 1;
+
+    // Cancel once inventory contains a leaf under the nested zip marker.
+    let matter_root_c = matter_root.clone();
+    let cancel = move || match Matter::open(&matter_root_c) {
+        Ok(m) => m
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM items WHERE path LIKE '%inner.zip!/%' \
+                 AND native_sha256 IS NOT NULL",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n >= 1)
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+
+    let summary1 = ingest_path(&matter, &zip_path, &limits, Some(&cancel)).expect("partial");
+    assert!(
+        summary1.cancelled,
+        "expected cancelled after first inner leaf, completed={}",
+        summary1.completed
+    );
+
+    let items1 = matter
+        .list_items_for_source(&summary1.source_id)
+        .expect("items1");
+    let inner_paths: Vec<_> = items1
+        .iter()
+        .filter_map(|i| i.path.clone())
+        .filter(|p| p.contains("inner.zip!/"))
+        .collect();
+    assert!(
+        !inner_paths.is_empty(),
+        "expected at least one inner leaf before cancel: {:?}",
+        items1.iter().map(|i| i.path.clone()).collect::<Vec<_>>()
+    );
+    assert!(
+        inner_paths.len() < 3,
+        "cancel should leave inner work for resume, got {} inner leaves: {:?}",
+        inner_paths.len(),
+        inner_paths
+    );
+    let first_count = items1.len();
+    let first_paths: Vec<String> = items1.iter().filter_map(|i| i.path.clone()).collect();
+
+    let summary2 = resume_ingest(
+        &matter,
+        &summary1.source_id,
+        &summary1.job_id,
+        &limits,
+        None,
+    )
+    .expect("resume");
+    assert!(summary2.completed, "resume should complete");
+    assert!(
+        summary2.entries_skipped > 0,
+        "resume must skip already-inventoried leaves (skipped={})",
+        summary2.entries_skipped
+    );
+
+    let items2 = matter
+        .list_items_for_source(&summary1.source_id)
+        .expect("items2");
+    let paths2: Vec<String> = items2.iter().filter_map(|i| i.path.clone()).collect();
+
+    // Expected inventory: outer pre/post + container blob + three inner leaves.
+    let expected = [
+        "nested_outer.zip!/pre.txt",
+        "nested_outer.zip!/inner.zip",
+        "nested_outer.zip!/inner.zip!/a.txt",
+        "nested_outer.zip!/inner.zip!/b.txt",
+        "nested_outer.zip!/inner.zip!/c.txt",
+        "nested_outer.zip!/post.txt",
+    ];
+    for exp in &expected {
+        let count = paths2.iter().filter(|p| p.as_str() == *exp).count();
+        assert_eq!(
+            count, 1,
+            "expected path {exp} exactly once after resume; got {:?}",
+            paths2
+        );
+    }
+    assert_eq!(
+        items2.len(),
+        expected.len(),
+        "unexpected extra inventory rows: {:?}",
+        paths2
+    );
+    assert!(
+        items2.len() > first_count,
+        "resume should add remaining leaves (before={first_count}, after={})",
+        items2.len()
+    );
+
+    // Prior paths remain unique and present.
+    for p in &first_paths {
+        let count = items2
+            .iter()
+            .filter(|i| i.path.as_deref() == Some(p.as_str()))
+            .count();
+        assert_eq!(count, 1, "path {p} duplicated or missing after resume");
+    }
+
+    matter.verify_audit_chain().expect("audit chain");
+}
+
+#[test]
 fn corrupt_zip_structured_error() {
     let (_tmp, base) = utf8_tempdir();
     let zip_path = base.join("corrupt.zip");
