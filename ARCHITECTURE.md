@@ -75,9 +75,10 @@ pst-dedup/                      (Cargo workspace)
 │   │
 │   ├── matter-core/            Matter store foundation (Desk tracks 0015+)
 │   │   src/
-│   │   ├── lib.rs              Public API: Matter, CAS, audit, jobs
-│   │   ├── matter.rs           Layout create/open + high-level store API
-│   │   ├── schema.rs           Versioned SQLite migrations (schema v1)
+│   │   ├── lib.rs              Public API: Matter, CAS, audit, jobs, items, logical_hash
+│   │   ├── matter.rs           Layout create/open + items/family high-level API
+│   │   ├── schema.rs           Versioned SQLite migrations (schema v2)
+│   │   ├── logical_hash.rs     Desk logical_hash v1 (length-prefixed; BCC-aware)
 │   │   ├── cas.rs              SHA-256 content-addressable blob store
 │   │   ├── audit.rs            Append-only audit log + hash chain verify
 │   │   ├── jobs.rs             Jobs + checkpoint resume primitives
@@ -108,7 +109,8 @@ exports/                  # reserved (production sets)
 logs/                     # optional file logs
 ```
 
-See `crates/matter-core/README.md` for CAS and audit contracts.
+See `crates/matter-core/README.md` for CAS, audit, Normalized Item (schema v2),
+family graph, and logical_hash v1 contracts.
 
 ---
 

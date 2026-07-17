@@ -171,17 +171,13 @@ impl<'a> ExpandSession<'a> {
         self.cas_puts += 1;
 
         self.matter.insert_item(ItemInput {
-            id: None,
             source_id: Some(self.source_id.to_string()),
-            family_id: None,
             path: Some(logical_path.to_string()),
             native_sha256: Some(digest),
-            logical_hash: None,
-            message_id: None,
             status: status.into(),
             size_bytes: Some(data.len() as i64),
-            created_at: None,
-            modified_at: None,
+            // Inventory-only row (0016); Normalized Item fields filled by 0018+.
+            ..Default::default()
         })?;
 
         self.cursor.completed_count += 1;

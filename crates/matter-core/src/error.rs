@@ -56,6 +56,18 @@ pub enum Error {
     #[error("source not found: {0}")]
     SourceNotFound(String),
 
+    #[error("item family not found: {0}")]
+    FamilyNotFound(String),
+
+    #[error("parent item not found: {0}")]
+    ParentItemNotFound(String),
+
+    #[error("cross-matter family assignment refused: {0}")]
+    CrossMatterFamily(String),
+
+    #[error("family cohesion violation: {0}")]
+    FamilyCohesion(String),
+
     #[error("audit chain broken at seq {seq}: {reason}")]
     AuditChainBroken { seq: i64, reason: String },
 

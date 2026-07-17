@@ -116,7 +116,7 @@ Small Aspose/sample fixtures live under `fixtures/`. Real multi-mailbox PSTs are
 | `pst-dedup-cli` | CLI surface: inspect / scan / dups (JSON + CSV) |
 | `pst-dedup-gui` | egui app and background scan worker |
 | `pst-writer` | Experimental/fixture PST writing and EML import helpers |
-| `matter-core` | Matter layout + SQLite + CAS + audit hash chain + jobs/checkpoints |
+| `matter-core` | Matter layout + SQLite (schema v2) + CAS + audit + jobs + Normalized Item/family + logical_hash v1 |
 | `ingest-purview` | Purview/package/ZIP detect + safe expand + resumable inventory (blocking worker API) |
 
 **Matter layout** (Desk foundation): `matter.db`, `blobs/sha256/<aa>/<hex>`, reserved `index/` / `exports/` / `logs/`.  
