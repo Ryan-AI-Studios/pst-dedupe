@@ -612,10 +612,11 @@ fn ingest_cancel_then_resume_same_job() {
         let file = File::create(zip_path.as_std_path()).expect("zip");
         let mut zip = ZipWriter::new(file);
         let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-        // Many entries so cancel can land mid-expand.
-        for i in 0..200 {
+        // Many entries so cancel can land mid-expand (slow enough under debug).
+        for i in 0..400 {
             zip.start_file(format!("f{i:03}.txt"), opts).expect("start");
-            zip.write_all(b"x").expect("write");
+            // Slightly larger payload to stretch expand time.
+            zip.write_all(&[b'x'; 256]).expect("write");
         }
         zip.finish().expect("finish");
     }
@@ -639,46 +640,39 @@ fn ingest_cancel_then_resume_same_job() {
         .start(&matter_root, "ingest", params)
         .expect("start ingest");
 
-    // Cancel promptly while still running (or immediately after accept).
-    let mut cancelled = false;
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        if runner.is_busy() {
-            runner.cancel(&job_id).expect("cancel");
-            cancelled = true;
-            break;
-        }
+    // Wait until active, then cancel. Prefer durable Paused path over success race.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !runner.is_busy() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(2));
+    }
+    // Cancel repeatedly while busy so the token is set as soon as ActiveJob exists.
+    while runner.is_busy() && std::time::Instant::now() < deadline {
+        let _ = runner.cancel(&job_id);
         thread::sleep(Duration::from_millis(5));
     }
-    // If the job finished before cancel (tiny machine race), still assert one job + Succeeded.
-    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+    assert!(runner.wait_until_idle(Duration::from_secs(60)));
 
     let matter = Matter::open(&matter_root).expect("open");
     let job = matter.get_job(&job_id).expect("job");
     assert_eq!(matter.list_jobs().expect("list").len(), 1);
 
-    if job.state == JobState::Succeeded {
-        // Finished before cancel — acceptable on fast hosts; still one job.
-        let _ = cancelled;
-        return;
-    }
-
+    // If cancel lost the race entirely, re-run is still one Succeeded job — fail the
+    // test so we notice (DoD-8 requires cancel→Paused proof on a real handler).
     assert_eq!(
         job.state,
         JobState::Paused,
-        "expected Paused after cancel, got {:?} err={:?}",
+        "expected Paused after cancel, got {:?} err={:?}; enlarge fixture if flaky",
         job.state,
         job.error_summary
     );
-    let cp = matter
+    let _cp = matter
         .get_checkpoint(&job_id, "expand")
         .expect("cp")
         .expect("paused ingest must have expand checkpoint");
-    assert!(cp.completed_count >= 0);
 
     drop(matter);
     runner.resume(&matter_root, &job_id).expect("resume");
-    assert!(runner.wait_until_idle(Duration::from_secs(60)));
+    assert!(runner.wait_until_idle(Duration::from_secs(120)));
 
     let matter = Matter::open(&matter_root).expect("open");
     let jobs = matter.list_jobs().expect("list");
@@ -690,4 +684,29 @@ fn ingest_cancel_then_resume_same_job() {
         "resume should finish: {:?}",
         jobs[0].error_summary
     );
+}
+
+#[test]
+fn durable_running_job_blocks_second_start() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-durable-busy");
+
+    // Simulate a prior crash: job row left Running with no live worker.
+    {
+        let matter = Matter::open(&root).expect("open");
+        let job = matter.create_job("mock_ok").expect("create");
+        matter
+            .set_job_state(&job.id, JobState::Running, None)
+            .expect("running");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(SucceedHandler));
+    let err = runner
+        .start(&root, "mock_ok", JobParams::empty())
+        .expect_err("must reject durable Running");
+    match err {
+        RunnerError::Busy { .. } => {}
+        other => panic!("expected Busy, got {other}"),
+    }
 }

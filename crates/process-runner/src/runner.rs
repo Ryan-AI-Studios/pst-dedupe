@@ -237,14 +237,25 @@ impl ProcessRunner {
     }
 
     /// Snapshot of the currently active job, if any.
-    pub fn active_job(&self) -> Option<JobSnapshot> {
+    ///
+    /// When `matter_id` is `Some`, only returns the active job if it belongs
+    /// to that matter (P0 runner is single-flight globally; filter matches
+    /// the spec sketch `active_job(matter_id)`).
+    pub fn active_job(&self, matter_id: Option<&str>) -> Option<JobSnapshot> {
         let guard = self.active.lock().expect("active lock");
-        guard.as_ref().map(|a| JobSnapshot {
-            job_id: a.job_id.clone(),
-            kind: a.kind.clone(),
-            matter_id: a.matter_id.clone(),
-            matter_root: a.matter_root.clone(),
-            state: "running".into(),
+        guard.as_ref().and_then(|a| {
+            if let Some(want) = matter_id {
+                if a.matter_id != want {
+                    return None;
+                }
+            }
+            Some(JobSnapshot {
+                job_id: a.job_id.clone(),
+                kind: a.kind.clone(),
+                matter_id: a.matter_id.clone(),
+                matter_root: a.matter_root.clone(),
+                state: "running".into(),
+            })
         })
     }
 
@@ -433,6 +444,18 @@ fn run_start(
     reply: &Sender<Result<String>>,
 ) -> Result<()> {
     // --- Accept phase: always reply with job_id or a typed error (never drop). ---
+    // Durable single-flight: refuse if a prior process left a Running job row.
+    if let Ok(jobs) = matter.list_jobs() {
+        if let Some(running) = jobs.iter().find(|j| j.state == JobState::Running) {
+            return Err(reply_err_string(
+                reply,
+                RunnerError::Busy {
+                    job_id: running.id.clone(),
+                },
+            ));
+        }
+    }
+
     let job = match matter.create_job(kind) {
         Ok(j) => j,
         Err(e) => {
@@ -500,6 +523,21 @@ fn run_resume(
             ));
         }
     };
+
+    // Durable single-flight: another job row still Running blocks resume of a different job.
+    if let Ok(jobs) = matter.list_jobs() {
+        if let Some(running) = jobs
+            .iter()
+            .find(|j| j.state == JobState::Running && j.id != job_id)
+        {
+            return Err(reply_err_unit(
+                reply,
+                RunnerError::Busy {
+                    job_id: running.id.clone(),
+                },
+            ));
+        }
+    }
 
     let handler = {
         let map = handlers.lock().expect("handlers");
@@ -613,7 +651,8 @@ fn start_checkpoint_poller(
             // Brief settle so the worker's first writes are visible.
             thread::sleep(Duration::from_millis(20));
             while !stop_flag.load(Ordering::SeqCst) {
-                if let Ok(m) = Matter::open(&root) {
+                // open_for_read: never cleanup workspace/temp (CAS PST materialize race).
+                if let Ok(m) = Matter::open_for_read(&root) {
                     for stage in PROGRESS_STAGES {
                         if let Ok(Some(cp)) = m.get_checkpoint(&job_id, stage) {
                             let count = cp.completed_count.max(0) as u64;

@@ -42,7 +42,11 @@ Desk (**0020**) must only call `start` / `resume` / `cancel` / `watch_progress` 
 
 ## Mid-run progress
 
-While a handler is blocked, a companion **progress-poller** thread opens a second Matter connection (SQLite WAL) and mirrors checkpoint `completed_count` for stages `expand` / `pst_extract` into the watch sink. Terminal snapshots are published when the handler returns.
+While a handler is blocked, a companion **progress-poller** thread opens a second Matter connection via **`Matter::open_for_read`** (SQLite WAL, **no** `workspace/temp` cleanup) and mirrors checkpoint `completed_count` for stages `expand` / `pst_extract` into the watch sink. Using full `Matter::open` in the poller is forbidden — it would race CAS PST materialization under `workspace/temp/`. Terminal snapshots are published when the handler returns.
+
+## Durable single-flight
+
+Besides the in-memory `active` slot, `start` rejects with `Busy` if any job row is already **Running** in SQLite (e.g. prior process crash). Resume that job or mark it Failed/Paused before starting another.
 
 ## Public API (sketch)
 
