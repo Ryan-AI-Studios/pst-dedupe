@@ -5,7 +5,7 @@
 - **Governance:** this directory in `C:\dev\dedupe\conductor\`
 - **Plan-of-record reference:** `C:\dev\Dedupe-plan.md` → §2.1–2.2, §4.6, §5.1–5.2, §5.5, Series A / **016**, §17 (`zip` 8.6)
 - **Cross-repo contract:** n/a
-- **Status:** Ready — not started
+- **Status:** Completed
 - **Depends on:** **0015-MatterStore** (Completed — `matter-core` schema v1)
 
 ---

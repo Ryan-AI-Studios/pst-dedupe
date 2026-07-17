@@ -237,7 +237,31 @@ fn expand_directory(
         let path = entry.path();
         let name = entry.file_name();
         let _name_str = name.to_string_lossy();
-        if entry.file_type()?.is_dir() {
+        // Never follow filesystem symlinks / reparse points (evidence boundary).
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                let rel = path
+                    .strip_prefix(package_root.as_std_path())
+                    .unwrap_or(path.as_path());
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                session.record_entry_error(&rel_str, &Error::Io(e))?;
+                continue;
+            }
+        };
+        if meta.file_type().is_symlink() {
+            let rel = path
+                .strip_prefix(package_root.as_std_path())
+                .unwrap_or(path.as_path());
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let err = Error::PathRejected {
+                code: codes::ZIP_UNSAFE_PATH,
+                message: format!("symlink/reparse point rejected: {rel_str}"),
+            };
+            session.record_entry_error(&rel_str, &err)?;
+            continue;
+        }
+        if meta.is_dir() {
             if let Some(s) = path.to_str() {
                 expand_directory(session, package_root, Utf8Path::new(s))?;
             }

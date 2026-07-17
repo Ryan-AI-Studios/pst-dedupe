@@ -43,6 +43,21 @@ pub fn ingest_path(
     }
 
     let detected = detect(path)?;
+    let is_7z = path
+        .file_name()
+        .map(|n| n.to_ascii_lowercase().ends_with(".7z"))
+        .unwrap_or(false)
+        || detected
+            .notes
+            .iter()
+            .any(|n| n.to_ascii_lowercase().contains("7z"));
+
+    // Spec §3.3: `.7z` is out of scope for expand — register source/job + structured
+    // unsupported error (do not silently early-return without evidence in the matter).
+    if is_7z {
+        return ingest_unsupported_7z(matter, path, &detected.notes);
+    }
+
     if detected.kind == PackageKind::Unsupported {
         return Err(Error::UnsupportedPackage(format!(
             "{} ({})",
@@ -112,6 +127,87 @@ pub fn ingest_path(
         session.cursor,
         run,
     )
+}
+
+/// Register a single-file `.7z` (or similar) as an unsupported container with full audit.
+fn ingest_unsupported_7z(
+    matter: &Matter,
+    path: &Utf8Path,
+    notes: &[String],
+) -> Result<IngestSummary> {
+    use matter_core::ItemErrorInput;
+
+    let package_root = path.as_str().to_string();
+    let source = matter.insert_source(&package_root, "unsupported", "failed", None)?;
+    let job = matter.create_job("ingest")?;
+    matter.set_job_state(&job.id, JobState::Running, None)?;
+
+    let _ = matter.append_audit(AuditEventInput {
+        actor: "system".into(),
+        action: "ingest.start".into(),
+        entity: format!("source:{}", source.id),
+        params_json: json!({
+            "path": package_root,
+            "kind": "unsupported",
+            "job_id": job.id,
+            "notes": notes,
+            "unsupported_container": "7z",
+        })
+        .to_string(),
+        tool_version: env!("CARGO_PKG_VERSION").into(),
+    })?;
+
+    let _ = matter.append_audit(AuditEventInput {
+        actor: "system".into(),
+        action: "ingest.source".into(),
+        entity: format!("source:{}", source.id),
+        params_json: json!({
+            "path": package_root,
+            "kind": "unsupported",
+        })
+        .to_string(),
+        tool_version: env!("CARGO_PKG_VERSION").into(),
+    })?;
+
+    let name = path.file_name().unwrap_or(path.as_str());
+    let _ = matter.record_item_error(ItemErrorInput {
+        item_id: None,
+        source_id: Some(source.id.clone()),
+        job_id: Some(job.id.clone()),
+        stage: "expand".into(),
+        code: crate::error::codes::UNSUPPORTED_7Z.into(),
+        message: format!("7z container not expanded in 0016: {name}"),
+        detail: Some(notes.join("; ")),
+    })?;
+
+    let msg = format!("unsupported_7z: {package_root}");
+    matter.set_job_state(&job.id, JobState::Failed, Some(&msg))?;
+    let _ = matter.append_audit(AuditEventInput {
+        actor: "system".into(),
+        action: "ingest.fail".into(),
+        entity: format!("source:{}", source.id),
+        params_json: json!({
+            "job_id": job.id,
+            "code": crate::error::codes::UNSUPPORTED_7Z,
+            "message": msg,
+        })
+        .to_string(),
+        tool_version: env!("CARGO_PKG_VERSION").into(),
+    })?;
+
+    Ok(IngestSummary {
+        source_id: source.id,
+        job_id: job.id,
+        kind: PackageKind::Unsupported,
+        entries_ok: 0,
+        entries_err: 1,
+        entries_skipped: 0,
+        bytes_cas: 0,
+        psts_found: 0,
+        nested_zips: 0,
+        completed: false,
+        cancelled: false,
+    })
 }
 
 /// Resume a previously paused/failed ingest job from leaf checkpoints.

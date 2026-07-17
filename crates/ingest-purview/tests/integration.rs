@@ -581,3 +581,98 @@ fn source_package_not_mutated_on_failure() {
     let after = fs::read(zip_path.as_std_path()).expect("read after");
     assert_eq!(before, after, "source package must not be mutated");
 }
+
+#[test]
+fn single_file_7z_records_unsupported_error() {
+    let (_tmp, base) = utf8_tempdir();
+    let seven = base.join("archive.7z");
+    fs::write(seven.as_std_path(), b"7z fake payload").expect("write");
+
+    let matter = Matter::create(base.join("matter"), "SevenZ").expect("matter");
+    let sum = ingest_path(&matter, &seven, &ExpandLimits::for_tests(), None).expect("7z path");
+    assert!(!sum.completed);
+    assert_eq!(sum.entries_err, 1);
+    assert_eq!(sum.kind, PackageKind::Unsupported);
+
+    let src = matter.get_source(&sum.source_id).expect("source");
+    assert_eq!(src.status, "failed");
+    assert_eq!(src.kind, "unsupported");
+
+    let job = matter.get_job(&sum.job_id).expect("job");
+    assert_eq!(job.state, JobState::Failed);
+
+    let errs = matter.item_errors_for_source(&sum.source_id).expect("errs");
+    assert!(!errs.is_empty());
+    assert!(errs.iter().any(|e| e.code == "unsupported_7z"));
+    matter.verify_audit_chain().expect("audit");
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_symlink_rejected() {
+    use std::os::unix::fs::symlink;
+    let (_tmp, base) = utf8_tempdir();
+    let pkg = base.join("pkg");
+    fs::create_dir_all(pkg.as_std_path()).expect("pkg");
+    fs::write(pkg.join("ok.txt").as_std_path(), b"ok").expect("file");
+    let outside = base.join("outside.txt");
+    fs::write(outside.as_std_path(), b"secret").expect("outside");
+    symlink(outside.as_std_path(), pkg.join("link.txt").as_std_path()).expect("symlink");
+
+    let matter = Matter::create(base.join("matter"), "Sym").expect("matter");
+    let sum = ingest_path(&matter, &pkg, &ExpandLimits::for_tests(), None).expect("ingest");
+    // Symlink skipped with error; real file may still expand.
+    let errs = matter.item_errors_for_source(&sum.source_id).expect("errs");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("symlink") || e.code.contains("unsafe")),
+        "expected symlink rejection, got {errs:?}"
+    );
+    // Outside secret must not appear in CAS as only content unless via ok.txt
+    let items = matter.list_items_for_source(&sum.source_id).expect("items");
+    for it in &items {
+        if let Some(ref d) = it.native_sha256 {
+            let bytes = matter.get_bytes(d).expect("get");
+            assert_ne!(
+                bytes.as_slice(),
+                b"secret",
+                "must not ingest symlink target"
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn directory_symlink_rejected_windows() {
+    // Create a directory junction/symlink when privileges allow; otherwise skip softly.
+    use std::os::windows::fs::symlink_file;
+    let (_tmp, base) = utf8_tempdir();
+    let pkg = base.join("pkg");
+    fs::create_dir_all(pkg.as_std_path()).expect("pkg");
+    fs::write(pkg.join("ok.txt").as_std_path(), b"ok").expect("file");
+    let outside = base.join("outside.txt");
+    fs::write(outside.as_std_path(), b"secret").expect("outside");
+    let link = pkg.join("link.txt");
+    if symlink_file(outside.as_std_path(), link.as_std_path()).is_err() {
+        // Developer Mode / elevation may be required; unit path still covered by FS check.
+        eprintln!("skip: could not create symlink (privileges)");
+        return;
+    }
+
+    let matter = Matter::create(base.join("matter"), "SymWin").expect("matter");
+    let sum = ingest_path(&matter, &pkg, &ExpandLimits::for_tests(), None).expect("ingest");
+    let errs = matter.item_errors_for_source(&sum.source_id).expect("errs");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("symlink") || e.message.contains("reparse")),
+        "expected symlink rejection, got {errs:?}"
+    );
+    let items = matter.list_items_for_source(&sum.source_id).expect("items");
+    for it in &items {
+        if let Some(ref d) = it.native_sha256 {
+            let bytes = matter.get_bytes(d).expect("get");
+            assert_ne!(bytes.as_slice(), b"secret");
+        }
+    }
+}
