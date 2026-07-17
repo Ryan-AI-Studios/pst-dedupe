@@ -157,6 +157,32 @@ impl PropContext {
         }
     }
 
+    /// Get a binary property (heap-resident PtypBinary only).
+    ///
+    /// When the property's `dwValueHnid` is a subnode NID rather than an HID,
+    /// returns `None` — callers should resolve the subnode via NDB.
+    pub fn get_binary(&self, prop_id: u16) -> Result<Option<Vec<u8>>> {
+        match self.get(prop_id)? {
+            Some(PropertyValue::Binary(b)) => Ok(Some(b)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Raw `(prop_type, value_hnid)` for a property tag, if present.
+    ///
+    /// Used by attachment streaming to distinguish HID (heap) vs NID (subnode)
+    /// storage of large binary properties.
+    pub fn get_raw_hnid(&self, prop_id: u16) -> Option<(u16, u32)> {
+        let key = prop_id.to_le_bytes();
+        let record = self.records.iter().find(|r| r.key == key)?;
+        if record.data.len() < 6 {
+            return None;
+        }
+        let prop_type = LittleEndian::read_u16(&record.data[0..2]);
+        let value_hnid = LittleEndian::read_u32(&record.data[2..6]);
+        Some((prop_type, value_hnid))
+    }
+
     /// Resolve a property value from its type and HNID.
     fn resolve_value(&self, prop_type: u16, value_hnid: u32) -> Result<Option<PropertyValue>> {
         match prop_type {
@@ -211,13 +237,31 @@ impl PropContext {
             }
 
             0x0102 => {
-                // PtypBinary
+                // PtypBinary — HID into heap when hidType == 0; subnode NID otherwise.
                 let hid = Hid(value_hnid);
                 if hid.is_null() {
                     return Ok(Some(PropertyValue::Binary(Vec::new())));
                 }
+                // Subnode NIDs have non-zero type bits (low 5); heap HIDs have type 0.
+                if hid.hid_type() != 0 {
+                    return Ok(None);
+                }
                 let bytes = self.heap.get(hid)?;
                 Ok(Some(PropertyValue::Binary(bytes.to_vec())))
+            }
+
+            // PtypString8 (often used for HTML body in older stores) — treat as Latin-1-ish bytes → lossy UTF-8
+            0x001E => {
+                let hid = Hid(value_hnid);
+                if hid.is_null() {
+                    return Ok(Some(PropertyValue::String(String::new())));
+                }
+                if hid.hid_type() != 0 {
+                    return Ok(None);
+                }
+                let bytes = self.heap.get(hid)?;
+                let s = String::from_utf8_lossy(bytes).into_owned();
+                Ok(Some(PropertyValue::String(s)))
             }
 
             _ => {

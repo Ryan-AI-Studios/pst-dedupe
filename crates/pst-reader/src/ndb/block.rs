@@ -352,6 +352,97 @@ pub struct SubnodeEntry {
     pub bid_sub: BlockId,
 }
 
+/// Collect external (leaf) data-block BIDs for a top-level data BID.
+///
+/// Used by attachment streaming so callers can read/decrypt one leaf block at a
+/// time without assembling a multi-GB `Vec<u8>`.
+pub fn collect_leaf_data_bids<R: Read + Seek>(
+    reader: &mut R,
+    bbt: &BbtIndex,
+    bid: BlockId,
+) -> Result<Vec<BlockId>> {
+    if bid.is_null() {
+        return Ok(Vec::new());
+    }
+    if !bid.is_internal() {
+        return Ok(vec![bid]);
+    }
+
+    let raw = read_raw_block(reader, bbt, bid)?;
+    let bbt_entry = bbt.get(bid).ok_or(PstError::BlockNotFound(bid.0))?;
+    let payload = &raw[..bbt_entry.cb as usize];
+    if payload.len() < 8 {
+        return Ok(Vec::new());
+    }
+    let btype = payload[0];
+    let clevel = payload[1];
+    let c_entries = LittleEndian::read_u16(&payload[2..4]) as usize;
+
+    match (btype, clevel) {
+        (0x01, 0x01) => {
+            let mut leaves = Vec::with_capacity(c_entries);
+            for i in 0..c_entries {
+                let bid_offset = 8 + i * 8;
+                if bid_offset + 8 > payload.len() {
+                    break;
+                }
+                leaves.push(BlockId(LittleEndian::read_u64(
+                    &payload[bid_offset..bid_offset + 8],
+                )));
+            }
+            Ok(leaves)
+        }
+        (0x01, 0x02) => {
+            let mut leaves = Vec::new();
+            for i in 0..c_entries {
+                let bid_offset = 8 + i * 8;
+                if bid_offset + 8 > payload.len() {
+                    break;
+                }
+                let child = BlockId(LittleEndian::read_u64(&payload[bid_offset..bid_offset + 8]));
+                let mut child_leaves = collect_leaf_data_bids(reader, bbt, child)?;
+                leaves.append(&mut child_leaves);
+            }
+            Ok(leaves)
+        }
+        _ => Err(PstError::InvalidBlockType {
+            expected: 0x01,
+            actual: btype,
+        }),
+    }
+}
+
+/// Read and decrypt a single external data block by BID.
+pub fn read_leaf_block_data<R: Read + Seek>(
+    reader: &mut R,
+    bbt: &BbtIndex,
+    bid: BlockId,
+    crypt: CryptMethod,
+) -> Result<Vec<u8>> {
+    if bid.is_null() || bid.is_internal() {
+        return Err(PstError::InvalidBlockType {
+            expected: 0x00,
+            actual: if bid.is_internal() { 0x01 } else { 0x00 },
+        });
+    }
+    let raw = read_raw_block(reader, bbt, bid)?;
+    let bbt_entry = bbt.get(bid).ok_or(PstError::BlockNotFound(bid.0))?;
+    let mut data = raw[..bbt_entry.cb as usize].to_vec();
+    crypto::decrypt_block(&mut data, crypt, bid.0);
+    Ok(data)
+}
+
+/// Look up a subnode entry by NID under a subnode BTree root BID.
+pub fn find_subnode_entry<R: Read + Seek>(
+    reader: &mut R,
+    bbt: &BbtIndex,
+    sub_bid: BlockId,
+    target_nid: NodeId,
+) -> Result<Option<SubnodeEntry>> {
+    let entries = list_subnode_entries(reader, bbt, sub_bid)?;
+    Ok(entries.into_iter().find(|e| e.nid.0 == target_nid.0))
+}
+
 /// Round up to 64-byte alignment.
 fn align64(size: usize) -> usize {
     (size + 63) & !63

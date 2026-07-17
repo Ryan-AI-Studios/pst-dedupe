@@ -23,7 +23,23 @@ Under a caller-chosen root:
   index/                    # reserved for Tantivy (track 0029)
   exports/                  # reserved for production (track 0040)
   logs/                     # optional file logs
+  workspace/temp/           # extractor spill (cleaned on open/create)
 ```
+
+### Workspace temp
+
+Evidence materialization (e.g. CAS → temp PST for extract) must use
+`workspace/temp/` under the matter root — **never** OS `%TEMP%` /
+`std::env::temp_dir()`.
+
+| API | Behavior |
+|---|---|
+| `WORKSPACE_DIR` / `WORKSPACE_TEMP_DIR` | Layout constants |
+| `Matter::workspace_temp_dir()` | Path to `workspace/temp/` |
+| `Matter::cleanup_workspace_temp()` | Recursive delete of **contents** (keeps dir) |
+| `Matter::create` / `Matter::open` | Ensure layout + call cleanup |
+
+Crash residue cannot accumulate across sessions.
 
 ## CAS contract
 
@@ -34,6 +50,18 @@ Under a caller-chosen root:
 | Path | `blobs/sha256/<aa>/<fullhex>` where `<aa>` is the first two hex chars |
 | Collision | Existing path with different content → hard error (no overwrite) |
 | Logical preimage | **Never** stored in CAS as “native”; only digests of body text may be stored as ordinary CAS blobs referenced by `text_sha256` / `html_sha256` |
+
+### Streaming put
+
+| API | Behavior |
+|---|---|
+| `Cas::put_bytes(&[u8])` | Buffer-in-memory put (small objects) |
+| `Cas::put_reader(&mut impl Read)` | Hash while writing temp under `blobs/`, atomic rename; 64 KiB buffer |
+| `Matter::put_reader` | Convenience wrapper |
+| `Cas::open_read` | Streaming get (`File` handle) |
+
+Use `put_reader` for multi-GB attachments so callers never hold a full payload
+`Vec<u8>`. Same digest path ⇒ success (idempotent).
 
 ## Schema v2 — Normalized Item (P0)
 

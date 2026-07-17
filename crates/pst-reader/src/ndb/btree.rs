@@ -39,11 +39,13 @@ pub struct BbtEntry {
 }
 
 /// In-memory Node BTree index.
+#[derive(Debug, Clone)]
 pub struct NbtIndex {
     entries: HashMap<u64, NbtEntry>,
 }
 
 /// In-memory Block BTree index.
+#[derive(Debug, Clone)]
 pub struct BbtIndex {
     entries: HashMap<u64, BbtEntry>,
 }

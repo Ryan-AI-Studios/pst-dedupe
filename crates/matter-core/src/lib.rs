@@ -19,6 +19,7 @@
 //!   index/                        # reserved (Tantivy)
 //!   exports/                      # reserved (production)
 //!   logs/                         # optional file logs
+//!   workspace/temp/               # extractor spill (cleaned on open/create)
 //! ```
 //!
 //! ## Logical hash
@@ -44,7 +45,7 @@ pub use audit::{
     canonical_audit_preimage, compute_entry_hash, verify_audit_chain, AuditEvent, AuditEventInput,
     AuditHashFields, GENESIS_PREV_HASH,
 };
-pub use cas::{sha256_hex, Cas};
+pub use cas::{sha256_hex, Cas, PUT_READER_BUF_SIZE};
 pub use error::{Error, Result};
 pub use item_errors::{ItemError, ItemErrorInput};
 pub use jobs::{Job, JobCheckpoint, JobState};
@@ -56,6 +57,7 @@ pub use logical_hash::{
 };
 pub use matter::{
     item_role, item_status, Item, ItemFamily, ItemInput, ItemUpdate, Matter, MatterInfo, Source,
-    DB_FILE, EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR, LOGS_DIR,
+    DB_FILE, EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR, LOGS_DIR, WORKSPACE_DIR,
+    WORKSPACE_TEMP_DIR,
 };
 pub use schema::SCHEMA_VERSION;
