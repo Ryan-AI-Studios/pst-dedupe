@@ -12,8 +12,9 @@ A pure Rust Windows tool for deduplicating emails across Outlook PST files.
 - Produces a **CSV report** showing unique vs. duplicate messages.
 - Optionally **exports unique messages as `.eml` files** (GUI path).
 - Surfaces:
+  - **`dedupe-desk`** — primary product shell: create/open matter, add sources, ingest/extract with live progress (track 0020)
   - **`pst-dedup` CLI** — agent- and script-friendly (`inspect`, `scan`, `dups`, `--json`, `--csv`)
-  - **egui desktop app** — interactive file pick / progress / results
+  - **`pst-dedup-gui`** — legacy egui scan/dedup wizard (still builds for regression)
 
 ## Build
 
@@ -23,7 +24,10 @@ Requires [Rust](https://rustup.rs/) 1.80+ on Windows.
 # CLI (recommended for scripts and agents)
 cargo build --release -p pst-dedup-cli
 
-# GUI
+# Dedupe Desk (primary GUI)
+cargo build --release -p dedupe-desk
+
+# Legacy scan GUI
 cargo build --release -p pst-dedup-gui
 ```
 
@@ -31,10 +35,12 @@ cargo build --release -p pst-dedup-gui
 
 | Binary | Path |
 |---|---|
+| Desk | `target\release\dedupe-desk.exe` |
 | CLI | `target\release\pst-dedup.exe` |
-| GUI | `target\release\pst-dedup-gui.exe` |
+| Legacy GUI | `target\release\pst-dedup-gui.exe` |
 
 ```powershell
+.\target\release\dedupe-desk.exe
 .\target\release\pst-dedup.exe --help
 .\target\release\pst-dedup-gui.exe
 ```

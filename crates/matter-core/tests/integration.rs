@@ -966,3 +966,54 @@ fn native_vs_logical_hash_independence() {
     let group = matter.items_by_logical_hash(&h1).expect("group");
     assert_eq!(group.len(), 2);
 }
+
+#[test]
+fn list_sources_and_item_counts() {
+    use matter_core::{item_status, ItemInput, Matter};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-list");
+    let matter = Matter::create(&root, "List").expect("create");
+    assert!(matter.list_sources().expect("empty").is_empty());
+    assert_eq!(matter.count_items().expect("count"), 0);
+
+    let s = matter
+        .insert_source(r"C:\exports\a", "folder", "importing", None)
+        .expect("src");
+    let sources = matter.list_sources().expect("list");
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].id, s.id);
+
+    matter
+        .insert_item(ItemInput {
+            source_id: Some(s.id.clone()),
+            path: Some("mail.pst".into()),
+            status: item_status::DISCOVERED.into(),
+            file_category: Some("pst".into()),
+            ..Default::default()
+        })
+        .expect("pst");
+    matter
+        .insert_item(ItemInput {
+            source_id: Some(s.id),
+            path: Some("note.txt".into()),
+            status: item_status::DISCOVERED.into(),
+            file_category: Some("other".into()),
+            ..Default::default()
+        })
+        .expect("txt");
+
+    assert_eq!(matter.count_items().expect("count"), 2);
+    let psts = matter.list_items_by_file_category("pst").expect("psts");
+    assert_eq!(psts.len(), 1);
+    assert_eq!(psts[0].path.as_deref(), Some("mail.pst"));
+
+    // open_for_read sees the same rows
+    drop(matter);
+    let reader = Matter::open_for_read(&root).expect("read");
+    assert_eq!(reader.list_sources().expect("s").len(), 1);
+    assert_eq!(
+        reader.list_items_by_file_category("pst").expect("p").len(),
+        1
+    );
+}

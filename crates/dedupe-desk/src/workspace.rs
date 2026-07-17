@@ -1,0 +1,233 @@
+//! Workspace panels: sources, PST inventory, jobs, stats, process actions.
+
+use eframe::egui;
+
+use crate::app::DeskApp;
+use crate::matter_ui::MatterSnapshot;
+use crate::progress_ui;
+
+pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
+    let Some(root) = app.matter_root.clone() else {
+        ui.label("Create or open a matter to begin.");
+        return;
+    };
+
+    ui.heading(format!(
+        "Matter: {}",
+        app.matter_name.as_deref().unwrap_or(root.as_str())
+    ));
+    ui.label(format!("Path: {root}"));
+    if !app.snapshot.matter_id.is_empty() {
+        ui.monospace(format!("id: {}", short(&app.snapshot.matter_id)));
+    }
+    ui.add_space(6.0);
+
+    // Live progress from watch (polled each frame).
+    let snap = app.progress_rx.borrow().clone();
+    progress_ui::show_progress_panel(ui, &snap);
+    ui.add_space(6.0);
+
+    // Actions row
+    ui.horizontal(|ui| {
+        let busy = app.runner_busy();
+        let dialog = app.dialog.is_open();
+        let pickers_enabled = !dialog;
+
+        if ui
+            .add_enabled(pickers_enabled && !busy, egui::Button::new("Add folder…"))
+            .on_hover_text("Ingest a Purview export folder or directory tree")
+            .clicked()
+        {
+            app.spawn_add_folder();
+        }
+        if ui
+            .add_enabled(pickers_enabled && !busy, egui::Button::new("Add ZIP…"))
+            .clicked()
+        {
+            app.spawn_add_zip();
+        }
+        if ui
+            .add_enabled(pickers_enabled && !busy, egui::Button::new("Add PST…"))
+            .clicked()
+        {
+            app.spawn_add_pst();
+        }
+
+        ui.separator();
+
+        if ui
+            .add_enabled(
+                !busy && app.selected_pst.is_some(),
+                egui::Button::new("Extract selected"),
+            )
+            .clicked()
+        {
+            app.start_extract_selected();
+        }
+        if ui
+            .add_enabled(
+                !busy && !app.snapshot.psts.is_empty(),
+                egui::Button::new("Extract all"),
+            )
+            .on_hover_text("Queue sequential extract jobs (single-flight runner)")
+            .clicked()
+        {
+            app.start_extract_all();
+        }
+
+        ui.separator();
+
+        let job_id = snap.job_id.clone();
+        let can_cancel = snap.state == "running" && !job_id.is_empty();
+        if ui
+            .add_enabled(can_cancel, egui::Button::new("Cancel"))
+            .clicked()
+        {
+            app.cancel_active();
+        }
+        let can_resume = app.can_resume();
+        if ui
+            .add_enabled(can_resume, egui::Button::new("Resume"))
+            .on_hover_text("Resume paused/failed job, or leftover Running after crash")
+            .clicked()
+        {
+            app.resume_active();
+        }
+
+        if ui.button("Refresh").clicked() {
+            app.refresh_matter_lists();
+        }
+    });
+
+    if app.dialog.is_open() {
+        ui.label("File dialog open… (buttons disabled until it returns)");
+    }
+
+    ui.add_space(8.0);
+    show_stats(ui, &app.snapshot);
+    ui.add_space(6.0);
+    show_sources(ui, &app.snapshot);
+    ui.add_space(6.0);
+    show_psts(ui, app);
+    ui.add_space(6.0);
+    show_jobs(ui, &app.snapshot);
+}
+
+fn show_stats(ui: &mut egui::Ui, snap: &MatterSnapshot) {
+    ui.group(|ui| {
+        ui.heading("Counts");
+        ui.label(format!("Sources: {}", snap.sources.len()));
+        ui.label(format!("Discovered PSTs: {}", snap.psts.len()));
+        ui.label(format!("Items (all): {}", snap.item_count));
+        ui.label(format!("Jobs: {}", snap.jobs.len()));
+        ui.label(format!("SQLite journal_mode: {}", snap.journal_mode));
+    });
+}
+
+fn show_sources(ui: &mut egui::Ui, snap: &MatterSnapshot) {
+    ui.group(|ui| {
+        ui.heading("Sources");
+        if snap.sources.is_empty() {
+            ui.label("No sources yet. Add a folder, ZIP, or PST.");
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("sources_scroll")
+            .max_height(140.0)
+            .show(ui, |ui| {
+                egui::Grid::new("sources_grid")
+                    .num_columns(4)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("Kind");
+                        ui.strong("Status");
+                        ui.strong("Path");
+                        ui.strong("Id");
+                        ui.end_row();
+                        for s in &snap.sources {
+                            ui.label(&s.kind);
+                            ui.label(&s.status);
+                            ui.label(&s.path);
+                            ui.monospace(short(&s.id));
+                            ui.end_row();
+                        }
+                    });
+            });
+    });
+}
+
+fn show_psts(ui: &mut egui::Ui, app: &mut DeskApp) {
+    ui.group(|ui| {
+        ui.heading("Discovered PSTs");
+        if app.snapshot.psts.is_empty() {
+            ui.label("No PST inventory rows yet (run ingest first).");
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("psts_scroll")
+            .max_height(160.0)
+            .show(ui, |ui| {
+                for pst in &app.snapshot.psts {
+                    let selected = app.selected_pst.as_deref() == Some(pst.item_id.as_str());
+                    let size = pst
+                        .size_bytes
+                        .map(|b| format!("{b} B"))
+                        .unwrap_or_else(|| "—".into());
+                    let label = format!(
+                        "{}  [{}]  {}  {}",
+                        pst.path,
+                        pst.status,
+                        size,
+                        short(&pst.item_id)
+                    );
+                    if ui.selectable_label(selected, label).clicked() {
+                        app.selected_pst = Some(pst.item_id.clone());
+                    }
+                }
+            });
+    });
+}
+
+fn show_jobs(ui: &mut egui::Ui, snap: &MatterSnapshot) {
+    ui.group(|ui| {
+        ui.heading("Jobs");
+        if snap.jobs.is_empty() {
+            ui.label("No jobs yet.");
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("jobs_scroll")
+            .max_height(160.0)
+            .show(ui, |ui| {
+                egui::Grid::new("jobs_grid")
+                    .num_columns(6)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("Kind");
+                        ui.strong("State");
+                        ui.strong("Id");
+                        ui.strong("Started");
+                        ui.strong("Finished");
+                        ui.strong("Error");
+                        ui.end_row();
+                        for j in snap.jobs.iter().rev() {
+                            ui.label(&j.kind);
+                            ui.label(&j.state);
+                            ui.monospace(short(&j.id));
+                            ui.label(j.started_at.as_deref().unwrap_or("—"));
+                            ui.label(j.finished_at.as_deref().unwrap_or("—"));
+                            ui.label(j.error_summary.as_deref().unwrap_or("—"));
+                            ui.end_row();
+                        }
+                    });
+            });
+    });
+}
+
+fn short(id: &str) -> &str {
+    if id.len() > 10 {
+        &id[..10]
+    } else {
+        id
+    }
+}
