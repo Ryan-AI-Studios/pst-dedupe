@@ -10,94 +10,94 @@ Phased checklist. Map phases to DoD items in `spec.md` §7. Execute in `C:\dev\d
 
 ## Phase 0 — Preconditions → DoD-7 baseline
 
-- [ ] Confirm **0015** Completed: read `../0015-MatterStore/review.md`, `crates/matter-core/README.md`
-- [ ] Confirm **0016** Completed (recommended): read `../0016-PurviewIngest/review.md` — inventory path/status conventions
-- [ ] Read plan-of-record: `C:\dev\Dedupe-plan.md` §§2.2, **2.3**
-- [ ] `cargo test -p matter-core` green
-- [ ] `cargo test -p ingest-purview` green (compatibility baseline)
-- [ ] Note: no `item_families` API yet; `logical_hash` column unused; schema **v1**
+- [x] Confirm **0015** Completed: read `../0015-MatterStore/review.md`, `crates/matter-core/README.md`
+- [x] Confirm **0016** Completed (recommended): read `../0016-PurviewIngest/review.md` — inventory path/status conventions
+- [x] Read plan-of-record: `C:\dev\Dedupe-plan.md` §§2.2, **2.3**
+- [x] `cargo test -p matter-core` green
+- [x] `cargo test -p ingest-purview` green (compatibility baseline)
+- [x] Note: no `item_families` API yet; `logical_hash` column unused; schema **v1**
 
 ## Phase 1 — Design lock → DoD-1/2/4 prep
 
-- [ ] Freeze P0 column list from `spec.md` §3.2 (no privilege/OCR/tags in v2)
-- [ ] Freeze status string constants
-- [ ] Freeze `LOGICAL_HASH_VERSION = 1` **length-prefixed** preimage bytes (exact tags/order — document; **include bcc**)
-- [ ] Confirm BCC policy: BCC-present ≠ BCC-absent for `logical_hash` (defensibility)
-- [ ] Confirm address storage decision: JSON on `items` P0; Tantivy for search; relational participants deferred (`spec.md` §3.2.3)
-- [ ] Decide address case-folding rules (document) for To/Cc/**Bcc**
-- [ ] Decide HTML→text minimal strategy for body used in hash (document limits)
-- [ ] Map `dedup-engine` Message-ID normalize: share helper vs duplicate + parity test
-- [ ] Sketch migration SQL v1→v2 per `spec.md` §3.2.4:
-  - [ ] Prefer nullable `ADD COLUMN` + `CREATE INDEX`
-  - [ ] No assumption that ALTER can add FKs; `parent_item_id` app-enforced if needed
-  - [ ] Table-rebuild plan only if a hard constraint forces it
-- [ ] API names: `insert_family`, `update_item`, `set_item_family_role`, `list_family_members`, logical hash fns
-- [ ] Audit policy: which mutations append events (avoid per-field spam)
+- [x] Freeze P0 column list from `spec.md` §3.2 (no privilege/OCR/tags in v2)
+- [x] Freeze status string constants
+- [x] Freeze `LOGICAL_HASH_VERSION = 1` **length-prefixed** preimage bytes (exact tags/order — document; **include bcc**)
+- [x] Confirm BCC policy: BCC-present ≠ BCC-absent for `logical_hash` (defensibility)
+- [x] Confirm address storage decision: JSON on `items` P0; Tantivy for search; relational participants deferred (`spec.md` §3.2.3)
+- [x] Decide address case-folding rules (document) for To/Cc/**Bcc**
+- [x] Decide HTML→text minimal strategy for body used in hash (document limits)
+- [x] Map `dedup-engine` Message-ID normalize: share helper vs duplicate + parity test
+- [x] Sketch migration SQL v1→v2 per `spec.md` §3.2.4:
+  - [x] Prefer nullable `ADD COLUMN` + `CREATE INDEX`
+  - [x] No assumption that ALTER can add FKs; `parent_item_id` app-enforced if needed
+  - [x] Table-rebuild plan only if a hard constraint forces it
+- [x] API names: `insert_family`, `update_item`, `set_item_family_role`, `list_family_members`, logical hash fns
+- [x] Audit policy: which mutations append events (avoid per-field spam)
 
 ## Phase 2 — Schema migration v2 → DoD-1
 
-- [ ] Bump `SCHEMA_VERSION` to **2** in `schema.rs`
-- [ ] Add `MIGRATION_V2` with new columns + indexes (validate SQLite ALTER limits on Windows)
-- [ ] Ensure `migrate()` keeps `matters.schema_version` in sync (0015 pattern)
-- [ ] Unit test: fresh DB lands on v2
-- [ ] Unit/integration: **v1 fixture data** (0016-style inventory rows) → open/migrate → columns present; data intact
-- [ ] If table rebuild is required, implement inside a transaction + test thoroughly
-- [ ] Keep ingest-purview compiling (update `ItemInput { .. }` literals if exhaustive)
+- [x] Bump `SCHEMA_VERSION` to **2** in `schema.rs`
+- [x] Add `MIGRATION_V2` with new columns + indexes (validate SQLite ALTER limits on Windows)
+- [x] Ensure `migrate()` keeps `matters.schema_version` in sync (0015 pattern)
+- [x] Unit test: fresh DB lands on v2
+- [x] Unit/integration: **v1 fixture data** (0016-style inventory rows) → open/migrate → columns present; data intact
+- [x] If table rebuild is required, implement inside a transaction + test thoroughly
+- [x] Keep ingest-purview compiling (update `ItemInput { .. }` literals if exhaustive)
 
 ## Phase 3 — Item CRUD extensions → DoD-2
 
-- [ ] Extend `Item` / `ItemInput` structs + row mappers
-- [ ] `insert_item` writes new fields (null-safe)
-- [ ] `update_item` (partial or full — prefer explicit `ItemUpdate` with Option fields)
-- [ ] Defaults: `role=standalone`, `logical_hash_version=0` until hash set
-- [ ] Tests: insert → get → update subject/logical_hash → get
+- [x] Extend `Item` / `ItemInput` structs + row mappers
+- [x] `insert_item` writes new fields (null-safe)
+- [x] `update_item` (partial or full — prefer explicit `ItemUpdate` with Option fields)
+- [x] Defaults: `role=standalone`, `logical_hash_version=0` until hash set
+- [x] Tests: insert → get → update subject/logical_hash → get
 
 ## Phase 4 — Family graph → DoD-3
 
-- [ ] `insert_family(kind)`
-- [ ] `get_family`, `list_family_members`
-- [ ] Helper to attach children: set `family_id`, `role`, `parent_item_id`, bump parent `attachment_count`
-- [ ] Tests: parent + 2 attachments; list; get_parent
-- [ ] Reject cross-matter family assignment if cheap to check
+- [x] `insert_family(kind)`
+- [x] `get_family`, `list_family_members`
+- [x] Helper to attach children: set `family_id`, `role`, `parent_item_id`, bump parent `attachment_count`
+- [x] Tests: parent + 2 attachments; list; get_parent
+- [x] Reject cross-matter family assignment if cheap to check
 
 ## Phase 5 — Logical hash module → DoD-4
 
-- [ ] Module `logical_hash.rs` (or `normalize.rs`) in matter-core
-- [ ] Implement **length-prefixed** email + non-email preimage builders + SHA-256 hex
-- [ ] Include **bcc** field (empty list allowed; never omit from framing)
-- [ ] Implement normalize helpers (message_id, subject strict, To/Cc/Bcc addrs, body, times)
-- [ ] Unit tests from `spec.md` §3.7:
-  - [ ] stability / sensitivity / RE kept / native≠logical / attachment order independence
-  - [ ] **BCC distinctness**
-  - [ ] **adversarial body** containing attachment-like text does not alter structure
-- [ ] Optional: helper `apply_email_logical_hash(item fields) -> (hash, version)` for 0018 convenience
-- [ ] Document algorithm + framing + BCC policy + JSON address decision in matter-core README
+- [x] Module `logical_hash.rs` (or `normalize.rs`) in matter-core
+- [x] Implement **length-prefixed** email + non-email preimage builders + SHA-256 hex
+- [x] Include **bcc** field (empty list allowed; never omit from framing)
+- [x] Implement normalize helpers (message_id, subject strict, To/Cc/Bcc addrs, body, times)
+- [x] Unit tests from `spec.md` §3.7:
+  - [x] stability / sensitivity / RE kept / native≠logical / attachment order independence
+  - [x] **BCC distinctness**
+  - [x] **adversarial body** containing attachment-like text does not alter structure
+- [x] Optional: helper `apply_email_logical_hash(item fields) -> (hash, version)` for 0018 convenience
+- [x] Document algorithm + framing + BCC policy + JSON address decision in matter-core README
 
 ## Phase 6 — Compatibility + docs → DoD-5, DoD-6
 
-- [ ] Fix any `ItemInput` construction sites (ingest-purview, tests)
-- [ ] `cargo test -p ingest-purview` — **must pass**
-- [ ] Update `crates/matter-core/README.md` (schema v2, family, logical hash v1 + framing + BCC, JSON vs participants decision, Tier-2 distinction, 0016 inventory compatibility)
-- [ ] Touch root `ARCHITECTURE.md` / `README.md` if item/matter sections need a line
-- [ ] Note for **0018**: expected fill path (extract → CAS native → fields → family → logical_hash)
+- [x] Fix any `ItemInput` construction sites (ingest-purview, tests)
+- [x] `cargo test -p ingest-purview` — **must pass**
+- [x] Update `crates/matter-core/README.md` (schema v2, family, logical hash v1 + framing + BCC, JSON vs participants decision, Tier-2 distinction, 0016 inventory compatibility)
+- [x] Touch root `ARCHITECTURE.md` / `README.md` if item/matter sections need a line
+- [x] Note for **0018**: expected fill path (extract → CAS native → fields → family → logical_hash)
 
 ## Phase 7 — Verification → DoD-7
 
-- [ ] `cargo test -p matter-core`
-- [ ] `cargo test -p ingest-purview`
-- [ ] `cargo fmt --all --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace`
-- [ ] `ledgerful verify` (**required**)
-- [ ] Capture evidence for `review.md`
+- [x] `cargo test -p matter-core`
+- [x] `cargo test -p ingest-purview`
+- [x] `cargo fmt --all --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo test --workspace`
+- [x] `ledgerful verify` (**required**)
+- [x] Capture evidence for `review.md`
 
 ## Phase 8 — Finalize → DoD-8
 
-- [ ] Write `review.md` (schema diff, API list, hash version, compatibility notes, deferred fields)
-- [ ] Update `../conductor.md`: **0017** → **Completed**
-- [ ] Update `../sequencing.md` markers
-- [ ] Commit ledger TX
-- [ ] Handoff: **0018** unblocked (with 0016); **0021** can plan on `logical_hash` / `message_id` indexes
+- [x] Write `review.md` (schema diff, API list, hash version, compatibility notes, deferred fields)
+- [x] Update `../conductor.md`: **0017** → **Completed**
+- [x] Update `../sequencing.md` markers
+- [x] Commit ledger TX
+- [x] Handoff: **0018** unblocked (with 0016); **0021** can plan on `logical_hash` / `message_id` indexes
 
 ---
 

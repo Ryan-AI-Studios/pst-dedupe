@@ -41,7 +41,7 @@
 | # | Phase | Track | Status | Concurrent? |
 |---|---|---|---|---|
 | 1 | P0 Foundation | **0015** MatterStore | ✅ Completed | Unblocks 0016 / 0017 / 0019 |
-| 2 | P0 Foundation | **0017** NormalizedItem | ⬜ Ready | After 0015; can parallel **0016** + **0019** once 0015 lands |
+| 2 | P0 Foundation | **0017** NormalizedItem | ✅ Completed | After 0015; unblocks **0018** with 0016 |
 | 3 | P0 Foundation | **0016** PurviewIngest | ✅ Completed | After 0015; parallel with 0017/0019 |
 | 4 | P0 Foundation | **0019** ProcessJobRunner | ⬜ Ready | After 0015; parallel with 0016/0017 |
 | 5 | P0 Foundation | **0018** PstExtractorAdapter | ⬜ Ready | After **0016 + 0017** |

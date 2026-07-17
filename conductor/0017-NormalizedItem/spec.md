@@ -5,7 +5,7 @@
 - **Governance:** this directory in `C:\dev\dedupe\conductor\`
 - **Plan-of-record reference:** `C:\dev\Dedupe-plan.md` → §2.2 (Normalized Item fields), **§2.3** (physical vs logical hash), Series A / **017**, §4.4 (`matter-core` owns items)
 - **Cross-repo contract:** n/a
-- **Status:** Ready — not started
+- **Status:** Completed
 - **Depends on:** **0015-MatterStore** (Completed). **0016-PurviewIngest** Completed is **recommended** (inventory row shape + path conventions) but not strictly required to implement types/hash in isolation.
 
 ---
@@ -416,14 +416,14 @@ Audit (lightweight):
 
 Complete only when ALL hold:
 
-- [ ] **DoD-1 — Schema v2:** `SCHEMA_VERSION == 2`; migration from v1 applied; 0016-shaped rows remain readable.
-- [ ] **DoD-2 — Item model:** Public `Item` / `ItemInput` (or equivalent) expose P0 fields in §3.2; insert + **update** work.
-- [ ] **DoD-3 — Family graph:** Create family; link parent + attachments; list members; roles/`parent_item_id` consistent.
-- [ ] **DoD-4 — Logical hash:** `compute_email_logical_hash` / non-email; versioned **length-prefixed** preimage; **BCC included**; tests in §3.7 (stability, sensitivity, BCC distinctness, framing, RE kept, native≠logical).
-- [ ] **DoD-5 — Compatibility:** `cargo test -p ingest-purview` still passes (or minor call-site updates only for new struct fields).
-- [ ] **DoD-6 — Docs:** matter-core README documents fields, family, logical hash v1 (framing + **BCC**), JSON address decision, status strings, Tier-2 distinction, migration notes.
-- [ ] **DoD-7 — Workspace gate:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, **`ledgerful verify`** (required).
-- [ ] **DoD-8 — Recorded:** `review.md`; `../conductor.md` → **Completed**; ledger TX committed (`ARCHITECTURE` or `FEATURE`).
+- [x] **DoD-1 — Schema v2:** `SCHEMA_VERSION == 2`; migration from v1 applied; 0016-shaped rows remain readable.
+- [x] **DoD-2 — Item model:** Public `Item` / `ItemInput` (or equivalent) expose P0 fields in §3.2; insert + **update** work.
+- [x] **DoD-3 — Family graph:** Create family; link parent + attachments; list members; roles/`parent_item_id` consistent.
+- [x] **DoD-4 — Logical hash:** `compute_email_logical_hash` / non-email; versioned **length-prefixed** preimage; **BCC included**; tests in §3.7 (stability, sensitivity, BCC distinctness, framing, RE kept, native≠logical).
+- [x] **DoD-5 — Compatibility:** `cargo test -p ingest-purview` still passes (or minor call-site updates only for new struct fields).
+- [x] **DoD-6 — Docs:** matter-core README documents fields, family, logical hash v1 (framing + **BCC**), JSON address decision, status strings, Tier-2 distinction, migration notes.
+- [x] **DoD-7 — Workspace gate:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, **`ledgerful verify`** (required).
+- [x] **DoD-8 — Recorded:** `review.md`; `../conductor.md` → **Completed**; ledger TX committed (`ARCHITECTURE` or `FEATURE`).
 
 ---
 
