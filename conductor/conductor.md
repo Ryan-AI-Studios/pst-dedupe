@@ -52,7 +52,7 @@ Legacy folders keep `plan.md`/`spec.md`/`tdd.md` as written. **New work uses `##
 | Track | Status | Summary |
 |---|---|---|
 | [0015-MatterStore](0015-MatterStore/spec.md) | **Completed** | `matter-core` crate: SQLite + physical SHA-256 CAS + audit hash chain + jobs/checkpoints + item_errors |
-| [0016-PurviewIngest](0016-PurviewIngest/spec.md) | **Ready** | Purview package/ZIP ingest + safety |
+| [0016-PurviewIngest](0016-PurviewIngest/spec.md) | **Completed** | `ingest-purview`: detect + safe ZIP expand + leaf checkpoints + encoding fallbacks |
 | [0017-NormalizedItem](0017-NormalizedItem/spec.md) | **Ready** | Canonical item model + attachment family |
 | [0018-PstExtractorAdapter](0018-PstExtractorAdapter/spec.md) | **Ready** | pst-reader → Normalized Items |
 | [0019-ProcessJobRunner](0019-ProcessJobRunner/spec.md) | **Ready** | In-app jobs; no external daemons |

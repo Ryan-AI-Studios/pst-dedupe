@@ -73,15 +73,26 @@ pst-dedup/                      (Cargo workspace)
 │   │
 │   ├── pst-writer/             Experimental write path / fixture helpers
 │   │
-│   └── matter-core/            Matter store foundation (Desk tracks 0015+)
+│   ├── matter-core/            Matter store foundation (Desk tracks 0015+)
+│   │   src/
+│   │   ├── lib.rs              Public API: Matter, CAS, audit, jobs
+│   │   ├── matter.rs           Layout create/open + high-level store API
+│   │   ├── schema.rs           Versioned SQLite migrations (schema v1)
+│   │   ├── cas.rs              SHA-256 content-addressable blob store
+│   │   ├── audit.rs            Append-only audit log + hash chain verify
+│   │   ├── jobs.rs             Jobs + checkpoint resume primitives
+│   │   ├── item_errors.rs      Item-level error accumulator
+│   │   └── error.rs            Typed thiserror errors
+│   │
+│   └── ingest-purview/         Purview/package/ZIP detect + safe expand (0016)
 │       src/
-│       ├── lib.rs              Public API: Matter, CAS, audit, jobs
-│       ├── matter.rs           Layout create/open + high-level store API
-│       ├── schema.rs           Versioned SQLite migrations (schema v1)
-│       ├── cas.rs              SHA-256 content-addressable blob store
-│       ├── audit.rs            Append-only audit log + hash chain verify
-│       ├── jobs.rs             Jobs + checkpoint resume primitives
-│       ├── item_errors.rs      Item-level error accumulator
+│       ├── lib.rs              Public API: detect, ingest_path, resume_ingest
+│       ├── detect.rs           Package kind heuristics
+│       ├── path_safety.rs      Path sanitize + property tests
+│       ├── encoding.rs         ZIP name UTF-8/CP437/Win-1252 fallbacks
+│       ├── expand.rs           Nested ZIP expand, leaf checkpoints, CAS
+│       ├── ingest.rs           Matter source/job/audit wiring
+│       ├── limits.rs           ExpandLimits defaults
 │       └── error.rs            Typed thiserror errors
 ```
 

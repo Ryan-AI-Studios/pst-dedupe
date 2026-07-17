@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::audit::{self, AuditEvent, AuditEventInput};
@@ -356,18 +356,7 @@ impl Matter {
                 "SELECT id, matter_id, path, kind, status, cursor_json, created_at, updated_at \
                  FROM sources WHERE id = ?1",
                 params![source_id],
-                |row| {
-                    Ok(Source {
-                        id: row.get(0)?,
-                        matter_id: row.get(1)?,
-                        path: row.get(2)?,
-                        kind: row.get(3)?,
-                        status: row.get(4)?,
-                        cursor_json: row.get(5)?,
-                        created_at: row.get(6)?,
-                        updated_at: row.get(7)?,
-                    })
-                },
+                map_source_row,
             )
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => {
@@ -375,6 +364,26 @@ impl Matter {
                 }
                 other => Error::Sqlite(other),
             })
+    }
+
+    /// Update source `status` and `cursor_json` (resume metadata mirror).
+    ///
+    /// `cursor_json: None` stores SQL NULL. Callers that only change status
+    /// should re-pass the existing cursor from [`Self::get_source`].
+    pub fn update_source(
+        &self,
+        source_id: &str,
+        status: &str,
+        cursor_json: Option<&str>,
+    ) -> Result<Source> {
+        // Ensure source exists first.
+        let _ = self.get_source(source_id)?;
+        let now = now_rfc3339();
+        self.conn.execute(
+            "UPDATE sources SET status = ?1, cursor_json = ?2, updated_at = ?3 WHERE id = ?4",
+            params![status, cursor_json, now, source_id],
+        )?;
+        self.get_source(source_id)
     }
 
     /// Insert a normalized item row.
@@ -413,28 +422,45 @@ impl Matter {
                         message_id, status, size_bytes, created_at, modified_at, imported_at \
                  FROM items WHERE id = ?1",
                 params![item_id],
-                |row| {
-                    Ok(Item {
-                        id: row.get(0)?,
-                        matter_id: row.get(1)?,
-                        source_id: row.get(2)?,
-                        family_id: row.get(3)?,
-                        path: row.get(4)?,
-                        native_sha256: row.get(5)?,
-                        logical_hash: row.get(6)?,
-                        message_id: row.get(7)?,
-                        status: row.get(8)?,
-                        size_bytes: row.get(9)?,
-                        created_at: row.get(10)?,
-                        modified_at: row.get(11)?,
-                        imported_at: row.get(12)?,
-                    })
-                },
+                map_item_row,
             )
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => Error::ItemNotFound(item_id.to_string()),
                 other => Error::Sqlite(other),
             })
+    }
+
+    /// Lookup the first inventory item for `(source_id, path)`.
+    ///
+    /// Used by ingest resume to skip already-CAS'd logical paths. Schema v1 has
+    /// no unique index; callers must still avoid double-inserts.
+    pub fn item_by_source_path(&self, source_id: &str, path: &str) -> Result<Option<Item>> {
+        self.conn
+            .query_row(
+                "SELECT id, matter_id, source_id, family_id, path, native_sha256, logical_hash, \
+                        message_id, status, size_bytes, created_at, modified_at, imported_at \
+                 FROM items WHERE source_id = ?1 AND path = ?2 \
+                 ORDER BY imported_at ASC LIMIT 1",
+                params![source_id, path],
+                map_item_row,
+            )
+            .optional()
+            .map_err(Error::from)
+    }
+
+    /// List all items registered under a source (inventory / resume helpers).
+    pub fn list_items_for_source(&self, source_id: &str) -> Result<Vec<Item>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, matter_id, source_id, family_id, path, native_sha256, logical_hash, \
+                    message_id, status, size_bytes, created_at, modified_at, imported_at \
+             FROM items WHERE source_id = ?1 ORDER BY imported_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![source_id], map_item_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     // --- Item errors ---
@@ -480,6 +506,37 @@ fn create_layout_dirs(root: &Utf8Path) -> Result<()> {
     }
     // blobs/ created via Cas::ensure_layout
     Ok(())
+}
+
+fn map_source_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Source> {
+    Ok(Source {
+        id: row.get(0)?,
+        matter_id: row.get(1)?,
+        path: row.get(2)?,
+        kind: row.get(3)?,
+        status: row.get(4)?,
+        cursor_json: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
+    Ok(Item {
+        id: row.get(0)?,
+        matter_id: row.get(1)?,
+        source_id: row.get(2)?,
+        family_id: row.get(3)?,
+        path: row.get(4)?,
+        native_sha256: row.get(5)?,
+        logical_hash: row.get(6)?,
+        message_id: row.get(7)?,
+        status: row.get(8)?,
+        size_bytes: row.get(9)?,
+        created_at: row.get(10)?,
+        modified_at: row.get(11)?,
+        imported_at: row.get(12)?,
+    })
 }
 
 fn now_rfc3339() -> String {
