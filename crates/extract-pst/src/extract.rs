@@ -164,13 +164,15 @@ pub fn extract_pst_path(
     let job = matter.create_job(JOB_KIND_EXTRACT_PST)?;
     matter.set_job_state(&job.id, JobState::Running, None)?;
 
-    let cursor = ExtractCursor::new(
+    let mut cursor = ExtractCursor::new(
         source_id,
         &logical,
         &item.id,
         Some(digest.as_str()),
         limits.batch_size.max(1),
     );
+    // Persist exact FS path so resume does not re-derive a different PST.
+    cursor.open_fs_path = Some(exact_fs.to_string());
 
     run_extract(
         matter,
@@ -227,14 +229,46 @@ fn run_extract(
     let pst_path = inv.path.clone().unwrap_or_else(|| cursor.pst_path.clone());
     let source = matter.get_source(source_id)?;
 
-    // Prefer explicit open path (extract_pst_path), else derive from source + inventory.
-    let fs_candidate = open_fs_override.or_else(|| candidate_fs_path(&source.path, &pst_path));
+    // Open path resolution (custody-safe):
+    // 1) Explicit override for this call (extract_pst_path first run)
+    // 2) Checkpoint-persisted exact path (resume after extract_pst_path)
+    // 3) When a whole-file digest is known: prefer CAS materialize rather than
+    //    fuzzy source+leaf FS guesses that could open a different PST.
+    // 4) Else derive candidate under package root (relative names never use CWD).
+    let digest = inv
+        .native_sha256
+        .clone()
+        .or(cursor.pst_native_sha256.clone());
+
+    if open_fs_override.is_some() && cursor.open_fs_path.is_none() {
+        if let Some(ref p) = open_fs_override {
+            cursor.open_fs_path = Some(p.to_string());
+        }
+    }
+
+    let fs_candidate = open_fs_override
+        .or_else(|| {
+            cursor.open_fs_path.as_ref().and_then(|p| {
+                let pb = camino::Utf8PathBuf::from(p.as_str());
+                if pb.as_std_path().is_file() {
+                    Some(pb)
+                } else {
+                    None
+                }
+            })
+        })
+        .or_else(|| {
+            if digest.is_some() {
+                // Digest known: open via CAS unless we already have an exact path.
+                None
+            } else {
+                candidate_fs_path(&source.path, &pst_path)
+            }
+        });
+
     let spec = PstOpenSpec {
         inventory_path: pst_path.clone(),
-        native_sha256: inv
-            .native_sha256
-            .clone()
-            .or(cursor.pst_native_sha256.clone()),
+        native_sha256: digest,
         filesystem_path: fs_candidate,
     };
 

@@ -137,9 +137,10 @@ fn open_from_path(
 /// original PST beside the zip). Full nested materialization is CAS's job.
 pub fn candidate_fs_path(source_path: &str, inventory_path: &str) -> Option<Utf8PathBuf> {
     let source = Utf8PathBuf::from(source_path);
-    // Direct: inventory is absolute or relative file that exists.
+    // Direct only for **absolute** inventory paths. Relative names like `mail.pst`
+    // must not be resolved against the process CWD (shadowing package root).
     let direct = Utf8PathBuf::from(inventory_path);
-    if direct.as_std_path().is_file() {
+    if direct.is_absolute() && direct.as_std_path().is_file() {
         return Some(direct);
     }
     // source is a file (.pst) itself.
@@ -175,4 +176,43 @@ pub fn candidate_fs_path(source_path: &str, inventory_path: &str) -> Option<Utf8
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn relative_inventory_does_not_use_cwd() {
+        let dir = tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        fs::create_dir_all(&pkg).unwrap();
+        let real = pkg.join("mail.pst");
+        fs::write(&real, b"!BDNfake").unwrap();
+        // CWD decoy
+        let decoy = dir.path().join("mail.pst");
+        fs::write(&decoy, b"decoy").unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let found = candidate_fs_path(pkg.to_str().unwrap(), "mail.pst");
+        std::env::set_current_dir(prev).unwrap();
+        let found = found.expect("package relative");
+        assert!(
+            found.as_str().replace('\\', "/").ends_with("pkg/mail.pst")
+                || found.as_str().ends_with("pkg\\mail.pst")
+        );
+        assert_ne!(found.as_str(), decoy.to_str().unwrap());
+    }
+
+    #[test]
+    fn absolute_inventory_path_accepted() {
+        let dir = tempdir().unwrap();
+        let f = dir.path().join("abs.pst");
+        fs::write(&f, b"x").unwrap();
+        let abs = f.canonicalize().unwrap();
+        let found = candidate_fs_path("C:\\nope", abs.to_str().unwrap()).expect("abs");
+        assert!(found.as_std_path().is_file());
+    }
 }

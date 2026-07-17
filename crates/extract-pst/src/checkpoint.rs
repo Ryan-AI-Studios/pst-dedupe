@@ -10,6 +10,10 @@ pub struct ExtractCursor {
     pub pst_item_id: String,
     #[serde(default)]
     pub pst_native_sha256: Option<String>,
+    /// Exact filesystem path used for open when known (e.g. `extract_pst_path`).
+    /// Persisted so resume does not re-derive a different file via source+leaf.
+    #[serde(default)]
+    pub open_fs_path: Option<String>,
     /// Last completed folder path (or current folder when mid-folder).
     #[serde(default)]
     pub last_folder_path: Option<String>,
@@ -44,6 +48,7 @@ impl ExtractCursor {
             pst_path: pst_path.to_string(),
             pst_item_id: pst_item_id.to_string(),
             pst_native_sha256: pst_native_sha256.map(|s| s.to_string()),
+            open_fs_path: None,
             last_folder_path: None,
             last_message_nid: None,
             folder_message_index: None,
