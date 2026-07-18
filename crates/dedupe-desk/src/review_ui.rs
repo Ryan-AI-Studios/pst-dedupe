@@ -3638,7 +3638,8 @@ fn show_selectable_body(
 
     // Paint highlighted / redacted body (read-only layout job).
     // Dual widget residual (egui 0.34): Label paints ranges; TextEdit below captures
-    // selection. Unifying paint+cursor on one widget is deferred — see desk README.
+    // selection. TextEdit uses the same layouter so redacted ranges stay blacked-out
+    // in both views (glyph color == bar color).
     ui.add(egui::Label::new(job).wrap().selectable(true));
 
     // Selection capture via a second pass TextEdit (same text) — frame-less, used for cursor range.
@@ -3649,12 +3650,23 @@ fn show_selectable_body(
     } else {
         "Select text here to create a highlight…"
     };
+    let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+        let mut job = body_job_for_ui_with_redactions(
+            text.as_str(),
+            resolved,
+            resolved_redactions,
+            wrap_width,
+        );
+        job.wrap.max_width = wrap_width;
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
     let output = egui::TextEdit::multiline(&mut buf)
         .id_salt("review_body_select")
         .font(egui::TextStyle::Monospace)
         .desired_width(ui.available_width())
         .desired_rows(6)
         .hint_text(hint)
+        .layouter(&mut layouter)
         .show(ui);
     if buf != body {
         // Discard edits — body is CAS-backed work product display only.

@@ -286,12 +286,15 @@ pub fn body_layout_job_with_redactions(
             1 => fmt.background = HIGHLIGHT_PAINT,
             2 => fmt.background = HIGHLIGHT_STALE_PAINT,
             3 => {
+                // True blackout: same color as background so glyphs are not readable
+                // (white-on-black left the exact_quote visible — Codex P1).
                 fmt.background = REDACTION_PAINT;
-                fmt.color = Color32::from_rgb(0xFF, 0xFF, 0xFF);
+                fmt.color = REDACTION_PAINT;
             }
             4 => {
+                // Stale: dark bar; still conceal glyphs (dimmer bar signals re-resolve needed).
                 fmt.background = REDACTION_STALE_PAINT;
-                fmt.color = Color32::from_rgb(0xCC, 0xCC, 0xCC);
+                fmt.color = REDACTION_STALE_PAINT;
             }
             _ => {}
         }
@@ -394,6 +397,11 @@ mod tests {
             let slice = &job.text[sec.byte_range.clone()];
             if slice == "bbb" {
                 assert_eq!(sec.format.background, REDACTION_PAINT);
+                // Glyph color matches bar so the quote is not readable on black.
+                assert_eq!(
+                    sec.format.color, REDACTION_PAINT,
+                    "redacted text must be concealed (not white-on-black)"
+                );
                 found_black = true;
             }
             if slice.contains('c') {
