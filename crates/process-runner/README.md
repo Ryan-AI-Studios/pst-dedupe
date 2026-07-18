@@ -84,6 +84,7 @@ runner.shutdown(); // or drop
 | `ingest` | `IngestHandler` | `{ "path": "…" }` | `source_id` from checkpoint / params |
 | `extract_pst` | `ExtractPstHandler` | `{ "source_id", "pst_item_id" }` or `{ "source_id", "path" }` | `resume_extract` |
 | `dedupe` | `MatterDedupeHandler` | `{ "use_message_id", "use_logical_hash", "family_policy", "reset", "batch_size" }` (all optional; defaults apply) | checkpoint `stage=dedupe` cursor |
+| `thread` | `MatterThreadHandler` | `{ "use_headers", "use_subject_fallback", "use_conversation_index", "reset", "batch_size", "family_inherit" }` | checkpoint `stage=thread` cursor |
 
 Register additional handlers with `JobHandler` for future tracks.
 
@@ -94,6 +95,7 @@ process-runner: create_job → set Running → handler(job_id)
 ingest-purview:  ingest_path_on_job(..., job_id, ...)   // no create_job
 extract-pst:     extract_pst_item_on_job(..., job_id, ...)
 matter-dedupe:   run_dedupe(matter, job_id, ...)          // no create_job
+matter-thread:   run_thread(matter, job_id, ...)          // no create_job
 ```
 
 Legacy wrappers (`ingest_path`, `extract_pst_item`) still create a job then call `*_on_job` for CLI/tests that do not use the runner.
@@ -105,6 +107,7 @@ Legacy wrappers (`ingest_path`, `extract_pst_item`) still create a job then call
 | `ingest` | on | `ingest-purview` |
 | `extract_pst` | on | `extract-pst` |
 | `dedupe` | on | `matter-dedupe` |
+| `thread` | on | `matter-thread` |
 
 ## Tests
 

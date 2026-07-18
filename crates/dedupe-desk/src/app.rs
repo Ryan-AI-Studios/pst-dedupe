@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
 use process_runner::{
-    ExtractPstHandler, IngestHandler, JobParams, MatterDedupeHandler, ProcessRunner, RunnerConfig,
+    ExtractPstHandler, IngestHandler, JobParams, MatterDedupeHandler, MatterThreadHandler,
+    ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -58,6 +59,7 @@ impl DeskApp {
         runner.register(Arc::new(IngestHandler::new()));
         runner.register(Arc::new(ExtractPstHandler::new()));
         runner.register(Arc::new(MatterDedupeHandler::new()));
+        runner.register(Arc::new(MatterThreadHandler::new()));
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 
@@ -264,6 +266,25 @@ impl DeskApp {
             Ok(job_id) => {
                 self.last_job_id = Some(job_id.clone());
                 self.status_msg = Some(format!("Started dedupe job {job_id}"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    pub(crate) fn start_thread(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params = JobParams::new(params::thread_default_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "thread", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started thread job {job_id}"));
                 self.error_msg = None;
             }
             Err(e) => self.note_start_error(e),

@@ -9,6 +9,9 @@ pub mod extract_pst;
 #[cfg(feature = "dedupe")]
 pub mod dedupe;
 
+#[cfg(feature = "thread")]
+pub mod thread;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
@@ -17,3 +20,6 @@ pub use extract_pst::ExtractPstHandler;
 
 #[cfg(feature = "dedupe")]
 pub use dedupe::MatterDedupeHandler;
+
+#[cfg(feature = "thread")]
+pub use thread::MatterThreadHandler;

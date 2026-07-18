@@ -48,7 +48,7 @@
 //! | API | Role |
 //! |---|---|
 //! | `read_message_properties` | CLI Tier-2: body preview truncated to 4KB |
-//! | `read_message_extract` / `ExtractedMessage` | Full body, DisplayTo/Cc/Bcc, submit + delivery time, optional HTML |
+//! | `read_message_extract` / `ExtractedMessage` | Full body, DisplayTo/Cc/Bcc, submit + delivery time, optional HTML, In-Reply-To / References / ConversationIndex |
 //! | `list_attachments` / `AttachmentInfo` | NID, filename, size, mime, method |
 //! | `open_attachment_data` / `AttachmentDataReader` | `Read` over attach binary (leaf-block stream; no multi-GB `Vec` production path) |
 //! | `filetime_to_rfc3339` | FILETIME → RFC3339 UTC helper |

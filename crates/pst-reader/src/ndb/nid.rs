@@ -155,6 +155,18 @@ pub const PID_TAG_SENDER_SMTP_ADDRESS: u16 = 0x5D01;
 /// PidTagInternetMessageId (PtypString) — primary dedup key
 pub const PID_TAG_INTERNET_MESSAGE_ID: u16 = 0x1035;
 
+/// PidTagInReplyToId (PtypString) — In-Reply-To Message-ID
+pub const PID_TAG_IN_REPLY_TO_ID: u16 = 0x1042;
+
+/// PidTagInternetReferences (PtypString) — References header chain
+pub const PID_TAG_INTERNET_REFERENCES: u16 = 0x1039;
+
+/// PidTagConversationTopic (PtypString) — Outlook conversation topic
+pub const PID_TAG_CONVERSATION_TOPIC: u16 = 0x0070;
+
+/// PidTagConversationIndex (PtypBinary, sometimes string) — Outlook conversation index
+pub const PID_TAG_CONVERSATION_INDEX: u16 = 0x0071;
+
 /// PidTagBody (PtypString) — plain text body
 pub const PID_TAG_BODY: u16 = 0x1000;
 

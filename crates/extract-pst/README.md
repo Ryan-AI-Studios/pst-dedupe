@@ -4,6 +4,20 @@ Blocking library that opens **Unicode PST** evidence (filesystem and/or matter
 CAS), walks folders/messages/attachments via **`pst-reader`**, and writes
 **Normalized Items** into `matter-core`.
 
+## Threading headers (0022)
+
+Parent email rows store reply-chain fields when present on the message:
+
+| Column | Source |
+|---|---|
+| `in_reply_to` | PidTagInReplyToId `0x1042` (normalized MID) |
+| `references_json` | PidTagInternetReferences `0x1039` (unfold + `<…>` parse) |
+| `conversation_topic` | PidTagConversationTopic `0x0070` |
+| `conversation_index_hex` | PidTagConversationIndex `0x0071` (bytes or Base64 → lowercase hex) |
+
+Missing props stay **NULL** (never fabricated). Matters extracted **before**
+this track lack these columns until **re-extract**.
+
 ## ⚠️ BLOCKING THREAD WARNING
 
 `extract_pst_item`, `extract_pst_item_on_job`, `extract_pst_path`,

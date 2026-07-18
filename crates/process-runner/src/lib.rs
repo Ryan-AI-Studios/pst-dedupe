@@ -42,3 +42,6 @@ pub use handlers::ExtractPstHandler;
 
 #[cfg(feature = "dedupe")]
 pub use handlers::MatterDedupeHandler;
+
+#[cfg(feature = "thread")]
+pub use handlers::MatterThreadHandler;

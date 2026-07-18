@@ -68,6 +68,15 @@ pub mod item_dedup_tier {
     pub const NONE: &str = "none";
 }
 
+/// How a `thread_id` was assigned (schema v4 / track 0022).
+pub mod item_thread_method {
+    pub const HEADERS: &str = "headers";
+    pub const SUBJECT: &str = "subject";
+    pub const CONVERSATION_INDEX: &str = "conversation_index";
+    pub const SINGLETON: &str = "singleton";
+    pub const NONE: &str = "none";
+}
+
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Metadata row for the matter itself.
@@ -102,7 +111,7 @@ pub struct ItemFamily {
     pub created_at: String,
 }
 
-/// Normalized item row (schema v2 P0 + v3 dedupe fields).
+/// Normalized item row (schema v2 P0 + v3 dedupe + v4 thread fields).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     pub id: String,
@@ -146,6 +155,16 @@ pub struct Item {
     pub dedup_group_id: Option<String>,
     pub deduped_at: Option<String>,
     pub dedup_job_id: Option<String>,
+    // --- schema v4 (threading) ---
+    pub in_reply_to: Option<String>,
+    pub references_json: Option<String>,
+    pub conversation_topic: Option<String>,
+    pub conversation_index_hex: Option<String>,
+    pub thread_id: Option<String>,
+    pub thread_root_item_id: Option<String>,
+    pub thread_method: Option<String>,
+    pub threaded_at: Option<String>,
+    pub thread_job_id: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -192,6 +211,16 @@ pub struct ItemInput {
     pub dedup_group_id: Option<String>,
     pub deduped_at: Option<String>,
     pub dedup_job_id: Option<String>,
+    // --- schema v4 (threading) ---
+    pub in_reply_to: Option<String>,
+    pub references_json: Option<String>,
+    pub conversation_topic: Option<String>,
+    pub conversation_index_hex: Option<String>,
+    pub thread_id: Option<String>,
+    pub thread_root_item_id: Option<String>,
+    pub thread_method: Option<String>,
+    pub threaded_at: Option<String>,
+    pub thread_job_id: Option<String>,
 }
 
 /// Thin row for matter-level email parent dedupe (no body text).
@@ -208,6 +237,26 @@ pub struct DedupeCandidate {
     pub file_category: Option<String>,
     pub status: String,
     pub dedup_role: Option<String>,
+}
+
+/// Thin row for matter-level email threading (no body text).
+///
+/// Header + order keys only — safe for large-matter streaming / paging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadCandidate {
+    pub id: String,
+    pub message_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references_json: Option<String>,
+    pub subject: Option<String>,
+    pub conversation_index_hex: Option<String>,
+    pub path: Option<String>,
+    pub imported_at: String,
+    pub role: Option<String>,
+    pub file_category: Option<String>,
+    pub status: String,
+    pub thread_id: Option<String>,
+    pub parent_item_id: Option<String>,
 }
 
 /// Counts of items by `dedup_role` (NULL counted as `null_role`).
@@ -231,6 +280,17 @@ pub struct DedupRoleUpdate {
     pub dedup_job_id: Option<String>,
     /// When set, replaces `extra_json` for the item (e.g. family_attach_unmatched).
     pub extra_json: Option<Option<String>>,
+}
+
+/// One item's thread field assignment for transactional batch write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadFieldUpdate {
+    pub item_id: String,
+    pub thread_id: Option<String>,
+    pub thread_root_item_id: Option<String>,
+    pub thread_method: Option<String>,
+    pub threaded_at: Option<String>,
+    pub thread_job_id: Option<String>,
 }
 
 /// Partial update for an existing item.
@@ -283,6 +343,16 @@ pub struct ItemUpdate {
     pub dedup_group_id: Option<Option<String>>,
     pub deduped_at: Option<Option<String>>,
     pub dedup_job_id: Option<Option<String>>,
+    // --- schema v4 (threading) ---
+    pub in_reply_to: Option<Option<String>>,
+    pub references_json: Option<Option<String>>,
+    pub conversation_topic: Option<Option<String>>,
+    pub conversation_index_hex: Option<Option<String>>,
+    pub thread_id: Option<Option<String>>,
+    pub thread_root_item_id: Option<Option<String>>,
+    pub thread_method: Option<Option<String>>,
+    pub threaded_at: Option<Option<String>>,
+    pub thread_job_id: Option<Option<String>>,
 }
 
 /// An open matter: directory layout + SQLite connection + CAS handle.
@@ -728,12 +798,15 @@ impl Matter {
                 sent_at, received_at, attachment_count, text_sha256, html_sha256, \
                 logical_hash_version, extra_json, \
                 dedup_role, duplicate_of_item_id, dedup_tier, dedup_group_id, \
-                deduped_at, dedup_job_id\
+                deduped_at, dedup_job_id, \
+                in_reply_to, references_json, conversation_topic, conversation_index_hex, \
+                thread_id, thread_root_item_id, thread_method, threaded_at, thread_job_id\
              ) VALUES (\
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, \
                 ?26, ?27, ?28, ?29, ?30, ?31, ?32, \
-                ?33, ?34, ?35, ?36, ?37, ?38\
+                ?33, ?34, ?35, ?36, ?37, ?38, \
+                ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47\
              )",
             params![
                 id,
@@ -774,6 +847,15 @@ impl Matter {
                 input.dedup_group_id,
                 input.deduped_at,
                 input.dedup_job_id,
+                input.in_reply_to,
+                input.references_json,
+                input.conversation_topic,
+                input.conversation_index_hex,
+                input.thread_id,
+                input.thread_root_item_id,
+                input.thread_method,
+                input.threaded_at,
+                input.thread_job_id,
             ],
         )?;
 
@@ -829,6 +911,19 @@ impl Matter {
         let dedup_group_id = apply_opt2(update.dedup_group_id, current.dedup_group_id);
         let deduped_at = apply_opt2(update.deduped_at, current.deduped_at);
         let dedup_job_id = apply_opt2(update.dedup_job_id, current.dedup_job_id);
+        let in_reply_to = apply_opt2(update.in_reply_to, current.in_reply_to);
+        let references_json = apply_opt2(update.references_json, current.references_json);
+        let conversation_topic = apply_opt2(update.conversation_topic, current.conversation_topic);
+        let conversation_index_hex = apply_opt2(
+            update.conversation_index_hex,
+            current.conversation_index_hex,
+        );
+        let thread_id = apply_opt2(update.thread_id, current.thread_id);
+        let thread_root_item_id =
+            apply_opt2(update.thread_root_item_id, current.thread_root_item_id);
+        let thread_method = apply_opt2(update.thread_method, current.thread_method);
+        let threaded_at = apply_opt2(update.threaded_at, current.threaded_at);
+        let thread_job_id = apply_opt2(update.thread_job_id, current.thread_job_id);
 
         let mut family_id = family_id;
         if let Some(ref parent_id) = parent_item_id {
@@ -866,8 +961,11 @@ impl Matter {
                 attachment_count = ?25, text_sha256 = ?26, html_sha256 = ?27, \
                 logical_hash_version = ?28, extra_json = ?29, \
                 dedup_role = ?30, duplicate_of_item_id = ?31, dedup_tier = ?32, \
-                dedup_group_id = ?33, deduped_at = ?34, dedup_job_id = ?35 \
-             WHERE id = ?36",
+                dedup_group_id = ?33, deduped_at = ?34, dedup_job_id = ?35, \
+                in_reply_to = ?36, references_json = ?37, conversation_topic = ?38, \
+                conversation_index_hex = ?39, thread_id = ?40, thread_root_item_id = ?41, \
+                thread_method = ?42, threaded_at = ?43, thread_job_id = ?44 \
+             WHERE id = ?45",
             params![
                 source_id,
                 family_id,
@@ -904,6 +1002,15 @@ impl Matter {
                 dedup_group_id,
                 deduped_at,
                 dedup_job_id,
+                in_reply_to,
+                references_json,
+                conversation_topic,
+                conversation_index_hex,
+                thread_id,
+                thread_root_item_id,
+                thread_method,
+                threaded_at,
+                thread_job_id,
                 item_id,
             ],
         )?;
@@ -1342,6 +1449,145 @@ impl Matter {
         })
     }
 
+    // --- Threading (schema v4) ---
+
+    /// Eligible email parents for matter-level threading, ordered by stable order:
+    /// `imported_at ASC, path ASC, id ASC`.
+    pub fn list_email_parents_for_thread(&self) -> Result<Vec<ThreadCandidate>> {
+        self.list_email_parents_for_thread_range(0, u64::MAX)
+    }
+
+    /// Paged eligible parents (same order/filter as
+    /// [`Self::list_email_parents_for_thread`]).
+    pub fn list_email_parents_for_thread_range(
+        &self,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<ThreadCandidate>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, message_id, in_reply_to, references_json, subject, \
+                    conversation_index_hex, path, imported_at, role, file_category, \
+                    status, thread_id, parent_item_id \
+             FROM items \
+             WHERE matter_id = ?1 \
+               AND status IN ('extracted', 'partial', 'normalized') \
+               AND ( \
+                     role = 'parent' \
+                     OR (file_category = 'email' AND IFNULL(role, '') != 'attachment') \
+                   ) \
+             ORDER BY imported_at ASC, path ASC, id ASC \
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let limit_i = if limit == u64::MAX {
+            i64::MAX
+        } else {
+            limit as i64
+        };
+        let rows = stmt.query_map(
+            params![self.matter_id, limit_i, offset as i64],
+            map_thread_candidate_row,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Count of eligible email parents for threading.
+    pub fn count_email_parents_for_thread(&self) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM items \
+             WHERE matter_id = ?1 \
+               AND status IN ('extracted', 'partial', 'normalized') \
+               AND ( \
+                     role = 'parent' \
+                     OR (file_category = 'email' AND IFNULL(role, '') != 'attachment') \
+                   )",
+            params![self.matter_id],
+            |row| row.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Clear thread *result* columns for eligible parents (and optionally their
+    /// direct attachments). Does **not** clear header storage columns
+    /// (`in_reply_to`, `references_json`, `conversation_topic`,
+    /// `conversation_index_hex`).
+    ///
+    /// Returns the number of rows updated.
+    pub fn clear_thread_fields(&self, include_attachments: bool) -> Result<u64> {
+        let matter_id = self.matter_id.clone();
+        self.with_transaction(|conn| {
+            let n_parents = conn.execute(
+                "UPDATE items SET \
+                    thread_id = NULL, thread_root_item_id = NULL, thread_method = NULL, \
+                    threaded_at = NULL, thread_job_id = NULL \
+                 WHERE matter_id = ?1 \
+                   AND status IN ('extracted', 'partial', 'normalized') \
+                   AND ( \
+                         role = 'parent' \
+                         OR (file_category = 'email' AND IFNULL(role, '') != 'attachment') \
+                       )",
+                params![matter_id],
+            )?;
+            let mut total = n_parents as u64;
+            if include_attachments {
+                let n_att = conn.execute(
+                    "UPDATE items SET \
+                        thread_id = NULL, thread_root_item_id = NULL, thread_method = NULL, \
+                        threaded_at = NULL, thread_job_id = NULL \
+                     WHERE matter_id = ?1 \
+                       AND (role = 'attachment' OR parent_item_id IS NOT NULL) \
+                       AND parent_item_id IN ( \
+                         SELECT id FROM items WHERE matter_id = ?1 \
+                           AND status IN ('extracted', 'partial', 'normalized') \
+                           AND ( \
+                                 role = 'parent' \
+                                 OR (file_category = 'email' AND IFNULL(role, '') != 'attachment') \
+                               ) \
+                       )",
+                    params![matter_id],
+                )?;
+                total += n_att as u64;
+            }
+            Ok(total)
+        })
+    }
+
+    /// Apply N thread field updates and upsert the job checkpoint in **one**
+    /// SQLite transaction (same pattern as dedupe / DoD-5).
+    pub fn apply_thread_batch_with_checkpoint(
+        &self,
+        job_id: &str,
+        stage: &str,
+        updates: &[ThreadFieldUpdate],
+        cursor_json: &str,
+        completed_count: i64,
+    ) -> Result<()> {
+        let now = now_rfc3339();
+        self.with_transaction(|conn| {
+            for u in updates {
+                conn.execute(
+                    "UPDATE items SET \
+                        thread_id = ?1, thread_root_item_id = ?2, thread_method = ?3, \
+                        threaded_at = ?4, thread_job_id = ?5 \
+                     WHERE id = ?6",
+                    params![
+                        u.thread_id,
+                        u.thread_root_item_id,
+                        u.thread_method,
+                        u.threaded_at,
+                        u.thread_job_id,
+                        u.item_id,
+                    ],
+                )?;
+            }
+            jobs::put_checkpoint(conn, job_id, stage, cursor_json, completed_count, &now)?;
+            Ok(())
+        })
+    }
+
     fn recompute_attachment_count(&self, parent_id: &str) -> Result<()> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM items WHERE parent_item_id = ?1",
@@ -1460,7 +1706,9 @@ const ITEM_COLUMNS: &str =
     sent_at, received_at, attachment_count, text_sha256, html_sha256, \
     logical_hash_version, extra_json, \
     dedup_role, duplicate_of_item_id, dedup_tier, dedup_group_id, \
-    deduped_at, dedup_job_id";
+    deduped_at, dedup_job_id, \
+    in_reply_to, references_json, conversation_topic, conversation_index_hex, \
+    thread_id, thread_root_item_id, thread_method, threaded_at, thread_job_id";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -1506,6 +1754,15 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         dedup_group_id: row.get(35)?,
         deduped_at: row.get(36)?,
         dedup_job_id: row.get(37)?,
+        in_reply_to: row.get(38)?,
+        references_json: row.get(39)?,
+        conversation_topic: row.get(40)?,
+        conversation_index_hex: row.get(41)?,
+        thread_id: row.get(42)?,
+        thread_root_item_id: row.get(43)?,
+        thread_method: row.get(44)?,
+        threaded_at: row.get(45)?,
+        thread_job_id: row.get(46)?,
     })
 }
 
@@ -1520,6 +1777,24 @@ fn map_dedupe_candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DedupeC
         file_category: row.get(6)?,
         status: row.get(7)?,
         dedup_role: row.get(8)?,
+    })
+}
+
+fn map_thread_candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadCandidate> {
+    Ok(ThreadCandidate {
+        id: row.get(0)?,
+        message_id: row.get(1)?,
+        in_reply_to: row.get(2)?,
+        references_json: row.get(3)?,
+        subject: row.get(4)?,
+        conversation_index_hex: row.get(5)?,
+        path: row.get(6)?,
+        imported_at: row.get(7)?,
+        role: row.get(8)?,
+        file_category: row.get(9)?,
+        status: row.get(10)?,
+        thread_id: row.get(11)?,
+        parent_item_id: row.get(12)?,
     })
 }
 

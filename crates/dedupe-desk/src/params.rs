@@ -40,6 +40,19 @@ pub fn dedupe_default_params() -> String {
     .to_string()
 }
 
+/// Default params for matter-level email threading (`kind = "thread"`).
+pub fn thread_default_params() -> String {
+    serde_json::json!({
+        "use_headers": true,
+        "use_subject_fallback": true,
+        "use_conversation_index": true,
+        "reset": true,
+        "batch_size": 500,
+        "family_inherit": true
+    })
+    .to_string()
+}
+
 /// True when `path` looks like a PST (case-insensitive `.pst` extension).
 pub fn looks_like_pst(path: &str) -> bool {
     Path::new(path)
@@ -132,6 +145,18 @@ mod tests {
         assert_eq!(v["family_policy"], "suppress_children_with_parent");
         assert_eq!(v["reset"], true);
         assert_eq!(v["batch_size"], 500);
+    }
+
+    #[test]
+    fn thread_default_json_shape() {
+        let j = thread_default_params();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["use_headers"], true);
+        assert_eq!(v["use_subject_fallback"], true);
+        assert_eq!(v["use_conversation_index"], true);
+        assert_eq!(v["reset"], true);
+        assert_eq!(v["batch_size"], 500);
+        assert_eq!(v["family_inherit"], true);
     }
 
     #[test]

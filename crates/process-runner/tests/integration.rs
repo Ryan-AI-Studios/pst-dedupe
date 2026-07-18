@@ -785,6 +785,92 @@ fn dedupe_via_runner_one_job_row() {
     assert!(cp.completed_count >= 2);
 }
 
+#[cfg(feature = "thread")]
+#[test]
+fn thread_via_runner_one_job_row() {
+    use matter_core::{item_role, item_status, item_thread_method, ItemInput};
+    use process_runner::MatterThreadHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-thread");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::PARENT.into()),
+                file_category: Some("email".into()),
+                path: Some("b".into()),
+                message_id: Some("b@ex.com".into()),
+                subject: Some("Hello".into()),
+                ..Default::default()
+            })
+            .expect("b");
+        matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::PARENT.into()),
+                file_category: Some("email".into()),
+                path: Some("a".into()),
+                message_id: Some("a@ex.com".into()),
+                in_reply_to: Some("b@ex.com".into()),
+                subject: Some("Re: Hello".into()),
+                ..Default::default()
+            })
+            .expect("a");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterThreadHandler::new()));
+
+    let params = JobParams::new(
+        serde_json::json!({
+            "use_headers": true,
+            "use_subject_fallback": true,
+            "use_conversation_index": true,
+            "reset": true,
+            "batch_size": 10,
+            "family_inherit": true
+        })
+        .to_string(),
+    );
+    let job_id = runner.start(&root, "thread", params).expect("start thread");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let jobs = matter.list_jobs().expect("list");
+    assert_eq!(jobs.len(), 1, "Option C: exactly one job row");
+    assert_eq!(jobs[0].id, job_id);
+    assert_eq!(jobs[0].kind, "thread");
+    assert_eq!(jobs[0].state, JobState::Succeeded);
+
+    let parents = matter.list_email_parents_for_thread().expect("parents");
+    assert_eq!(parents.len(), 2);
+    assert_eq!(parents[0].thread_id, parents[1].thread_id);
+    assert!(parents[0].thread_id.is_some());
+
+    let a = matter
+        .get_item(
+            &parents
+                .iter()
+                .find(|p| p.path.as_deref() == Some("a"))
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+    assert_eq!(
+        a.thread_method.as_deref(),
+        Some(item_thread_method::HEADERS)
+    );
+
+    let cp = matter
+        .get_checkpoint(&job_id, "thread")
+        .expect("cp")
+        .expect("thread checkpoint");
+    assert!(cp.completed_count >= 2);
+}
+
 /// Resume must restore full nested `params` from the checkpoint cursor (not just
 /// `source_id` / empty object), so non-default dedupe settings survive cancel.
 #[test]

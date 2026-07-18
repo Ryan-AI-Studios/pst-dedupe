@@ -1,11 +1,13 @@
 //! Blocking PST extract → Normalized Items.
 
 use matter_core::{
-    compute_email_logical_hash, item_role, item_status, normalize_body, normalize_message_id,
-    AuditEventInput, EmailLogicalInput, Item, ItemErrorInput, ItemInput, ItemUpdate, JobState,
-    LogicalAttachment, Matter, FAMILY_KIND_EMAIL_ATTACHMENTS, LOGICAL_HASH_VERSION,
+    compute_email_logical_hash, item_role, item_status, normalize_body,
+    normalize_conversation_index_to_hex, normalize_message_id, parse_in_reply_to,
+    parse_references_header, references_to_json, AuditEventInput, ConversationIndexInput,
+    EmailLogicalInput, Item, ItemErrorInput, ItemInput, ItemUpdate, JobState, LogicalAttachment,
+    Matter, FAMILY_KIND_EMAIL_ATTACHMENTS, LOGICAL_HASH_VERSION,
 };
-use pst_reader::{filetime_to_rfc3339, NodeId};
+use pst_reader::{filetime_to_rfc3339, ExtractedMessage, NodeId};
 use serde_json::json;
 
 use crate::checkpoint::{nid_hex, ExtractCursor};
@@ -714,6 +716,9 @@ fn extract_one_message(
         .map(normalize_message_id)
         .filter(|s| !s.is_empty());
 
+    let (in_reply_to, references_json, conversation_topic, conversation_index_hex) =
+        thread_header_fields(&extracted);
+
     // Insert parent shell first so family can link.
     let family = matter.insert_family(FAMILY_KIND_EMAIL_ATTACHMENTS)?;
     let parent = matter.insert_item(ItemInput {
@@ -735,6 +740,10 @@ fn extract_one_message(
         size_bytes: extracted.message_size.map(|s| s as i64),
         text_sha256: text_sha256.clone(),
         html_sha256: html_sha256.clone(),
+        in_reply_to,
+        references_json,
+        conversation_topic,
+        conversation_index_hex,
         extra_json: Some(
             json!({
                 "pst_nid": nid_hex(msg_nid.0),
@@ -979,4 +988,117 @@ fn extract_one_message(
 
     let _ = job_id; // used in error paths
     Ok(())
+}
+
+/// Normalize reply-chain / conversation header fields for parent insert.
+///
+/// Missing props → `None` (never fabricate). Matters extracted before track 0022
+/// lack these columns until re-extract.
+fn thread_header_fields(
+    extracted: &ExtractedMessage,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let in_reply_to = extracted.in_reply_to.as_deref().and_then(parse_in_reply_to);
+
+    let references_json = extracted.references.as_deref().and_then(|raw| {
+        let refs = parse_references_header(raw);
+        if refs.is_empty() {
+            None
+        } else {
+            Some(references_to_json(&refs))
+        }
+    });
+
+    let conversation_topic = extracted
+        .conversation_topic
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let conversation_index_hex = if let Some(ref bytes) = extracted.conversation_index_bytes {
+        normalize_conversation_index_to_hex(ConversationIndexInput::Bytes(bytes))
+    } else if let Some(ref s) = extracted.conversation_index_string {
+        normalize_conversation_index_to_hex(ConversationIndexInput::Base64(s))
+    } else {
+        None
+    };
+
+    (
+        in_reply_to,
+        references_json,
+        conversation_topic,
+        conversation_index_hex,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thread_header_fields_normalize_references_and_index() {
+        let mut msg = ExtractedMessage {
+            nid: NodeId(1),
+            message_id: Some("<a@ex.com>".into()),
+            subject: None,
+            sender_email: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            submit_time: None,
+            delivery_time: None,
+            body_text: None,
+            body_html: None,
+            message_size: None,
+            has_attachments: None,
+            in_reply_to: Some("<Parent@Ex.COM>".into()),
+            references: Some("<one@ex.com>\r\n\t<two@ex.com>".into()),
+            conversation_topic: Some("  Topic  ".into()),
+            conversation_index_bytes: Some(vec![0x01, 0x02, 0x03]),
+            conversation_index_string: None,
+        };
+        let (irt, refs, topic, ci) = thread_header_fields(&msg);
+        assert_eq!(irt.as_deref(), Some("parent@ex.com"));
+        let refs_v: Vec<String> = serde_json::from_str(refs.as_deref().unwrap()).unwrap();
+        assert_eq!(refs_v, vec!["one@ex.com", "two@ex.com"]);
+        assert_eq!(topic.as_deref(), Some("Topic"));
+        assert_eq!(ci.as_deref(), Some("010203"));
+
+        // Base64 path when binary absent
+        msg.conversation_index_bytes = None;
+        // "AQID" is base64 of [1,2,3]
+        msg.conversation_index_string = Some("AQID".into());
+        let (_, _, _, ci2) = thread_header_fields(&msg);
+        assert_eq!(ci2.as_deref(), Some("010203"));
+    }
+
+    #[test]
+    fn thread_header_fields_missing_are_none() {
+        let msg = ExtractedMessage {
+            nid: NodeId(1),
+            message_id: None,
+            subject: None,
+            sender_email: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            submit_time: None,
+            delivery_time: None,
+            body_text: None,
+            body_html: None,
+            message_size: None,
+            has_attachments: None,
+            in_reply_to: None,
+            references: None,
+            conversation_topic: None,
+            conversation_index_bytes: None,
+            conversation_index_string: None,
+        };
+        let (a, b, c, d) = thread_header_fields(&msg);
+        assert!(a.is_none() && b.is_none() && c.is_none() && d.is_none());
+    }
 }

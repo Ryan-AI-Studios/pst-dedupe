@@ -84,6 +84,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
         {
             app.start_dedupe();
         }
+        if ui
+            .add_enabled(!busy, egui::Button::new("Run threading"))
+            .on_hover_text(
+                "Email threading: Message-ID graph → subject → ConversationIndex → family inherit",
+            )
+            .clicked()
+        {
+            app.start_thread();
+        }
 
         ui.separator();
 

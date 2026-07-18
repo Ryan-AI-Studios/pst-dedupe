@@ -7,11 +7,12 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v3**) + family graph
+6. **Normalized Item** model (schema **v4**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
+9. Email **threading** header storage + result columns + batch helpers (0022)
 
-Schema version: **3** (`SCHEMA_VERSION`).
+Schema version: **4** (`SCHEMA_VERSION`).
 
 ## Layout
 

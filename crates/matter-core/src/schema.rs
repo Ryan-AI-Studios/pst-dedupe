@@ -8,12 +8,17 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
 /// Each migration brings the DB from `target_version - 1` to `target_version`.
-const MIGRATIONS: &[(u32, &str)] = &[(1, MIGRATION_V1), (2, MIGRATION_V2), (3, MIGRATION_V3)];
+const MIGRATIONS: &[(u32, &str)] = &[
+    (1, MIGRATION_V1),
+    (2, MIGRATION_V2),
+    (3, MIGRATION_V3),
+    (4, MIGRATION_V4),
+];
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE schema_meta (
@@ -162,6 +167,25 @@ CREATE INDEX IF NOT EXISTS idx_items_duplicate_of ON items(duplicate_of_item_id)
 CREATE INDEX IF NOT EXISTS idx_items_dedup_group ON items(dedup_group_id);
 "#;
 
+/// Schema v4: email threading header storage + result columns (track 0022).
+///
+/// Nullable `ADD COLUMN` only. Header storage columns are not cleared by the
+/// thread job; result columns (`thread_*`) are.
+const MIGRATION_V4: &str = r#"
+ALTER TABLE items ADD COLUMN in_reply_to TEXT;
+ALTER TABLE items ADD COLUMN references_json TEXT;
+ALTER TABLE items ADD COLUMN conversation_topic TEXT;
+ALTER TABLE items ADD COLUMN conversation_index_hex TEXT;
+ALTER TABLE items ADD COLUMN thread_id TEXT;
+ALTER TABLE items ADD COLUMN thread_root_item_id TEXT;
+ALTER TABLE items ADD COLUMN thread_method TEXT;
+ALTER TABLE items ADD COLUMN threaded_at TEXT;
+ALTER TABLE items ADD COLUMN thread_job_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_items_thread_id ON items(thread_id);
+CREATE INDEX IF NOT EXISTS idx_items_in_reply_to ON items(in_reply_to);
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -254,7 +278,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v2 columns present
@@ -283,6 +307,23 @@ mod tests {
             )
             .expect("pragma");
         assert!(has_dedup_role);
+        // v4 thread columns present
+        let has_thread_id: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'thread_id'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_thread_id);
+        let has_in_reply_to: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'in_reply_to'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_in_reply_to);
     }
 
     #[test]
@@ -377,8 +418,8 @@ mod tests {
             .expect("pragma");
         assert!(!role_exists);
 
-        let v = migrate(&conn).expect("migrate v1→v3");
-        assert_eq!(v, 3);
+        let v = migrate(&conn).expect("migrate v1→v4");
+        assert_eq!(v, 4);
 
         // Inventory data intact.
         let (path, status, native, lhv): (String, String, String, i64) = conn
@@ -438,15 +479,17 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 3);
+        assert_eq!(ms, 4);
 
-        // v2 + v3 indexes present.
+        // v2 + v3 + v4 indexes present.
         for idx in [
             "idx_items_logical_hash",
             "idx_items_message_id",
             "idx_items_dedup_role",
             "idx_items_duplicate_of",
             "idx_items_dedup_group",
+            "idx_items_thread_id",
+            "idx_items_in_reply_to",
         ] {
             let exists: bool = conn
                 .query_row(
@@ -459,7 +502,7 @@ mod tests {
         }
     }
 
-    /// v2 fixture → migrate to v3 → data intact + dedupe columns present.
+    /// v2 fixture → migrate to current → data intact + dedupe/thread columns.
     #[test]
     fn migrate_v2_to_v3_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -489,8 +532,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v2→v3");
-        assert_eq!(v, 3);
+        let v = migrate(&conn).expect("migrate v2→v4");
+        assert_eq!(v, 4);
 
         let (status, mid, dedup): (String, Option<String>, Option<String>) = conn
             .query_row(
@@ -510,7 +553,90 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 3);
+        assert_eq!(ms, 4);
+    }
+
+    /// v3 fixture → migrate to v4 → data intact + thread columns present.
+    #[test]
+    fn migrate_v3_to_v4_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute_batch(MIGRATION_V3).expect("v3");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (3)", [])
+            .expect("meta v3");
+        assert_eq!(read_schema_version(&conn).expect("read"), 3);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v3', 'V3 Matter', '2020-01-01T00:00:00Z', 3, '/tmp/v3')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, dedup_role) \
+             VALUES ('itm_mail', 'mat_v3', NULL, NULL, 'inbox/a.eml', NULL, \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             'mid@example.com', 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'parent', 'email', 1, 'unique')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v3→v4");
+        assert_eq!(v, 4);
+
+        let (status, mid, dedup, thread_id, in_reply): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, message_id, dedup_role, thread_id, in_reply_to \
+                 FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("itm_mail");
+        assert_eq!(status, "extracted");
+        assert_eq!(mid.as_deref(), Some("mid@example.com"));
+        assert_eq!(dedup.as_deref(), Some("unique"));
+        assert!(thread_id.is_none());
+        assert!(in_reply.is_none());
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v3'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, 4);
+
+        for idx in ["idx_items_thread_id", "idx_items_in_reply_to"] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name = ?1",
+                    [idx],
+                    |row| row.get(0),
+                )
+                .expect("sqlite_master");
+            assert!(exists, "expected index {idx}");
+        }
     }
 
     /// Each migration step updates schema_meta only after the full batch commits
@@ -526,8 +652,8 @@ mod tests {
             .expect("meta v1");
 
         let v = migrate(&conn).expect("migrate");
-        assert_eq!(v, 3);
-        assert_eq!(read_schema_version(&conn).expect("read"), 3);
+        assert_eq!(v, 4);
+        assert_eq!(read_schema_version(&conn).expect("read"), 4);
 
         let has_role: bool = conn
             .query_row(
@@ -545,5 +671,13 @@ mod tests {
             )
             .expect("pragma");
         assert!(has_dedup);
+        let has_thread: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'thread_id'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_thread);
     }
 }
