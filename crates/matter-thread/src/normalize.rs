@@ -5,27 +5,17 @@
 
 /// Collapse whitespace, repeatedly strip leading `RE:`/`FW:`/`FWD:`, lowercase.
 ///
-/// P0: RE/FW/FWD only (no `[tag]` stripping).
+/// Spec: `(?i)(re|fw|fwd)\s*:\s*` — optional whitespace around the colon
+/// (e.g. `Re : Topic`, `FW  : x`). P0: RE/FW/FWD only (no `[tag]` stripping).
+/// Does **not** change `normalize_subject_strict` / logical_hash rules.
 pub fn normalize_subject_thread(subject: &str) -> String {
     let collapsed = collapse_whitespace(subject.trim());
     if collapsed.is_empty() {
         return String::new();
     }
     let mut s = collapsed;
-    loop {
-        let lower = s.to_ascii_lowercase();
-        let stripped = if let Some(rest) = strip_prefix_ci(&lower, "re:") {
-            rest
-        } else if let Some(rest) = strip_prefix_ci(&lower, "fw:") {
-            rest
-        } else if let Some(rest) = strip_prefix_ci(&lower, "fwd:") {
-            rest
-        } else {
-            break;
-        };
-        // Apply the same cut length on the original-case string, then re-collapse.
-        let cut = s.len() - stripped.len();
-        s = collapse_whitespace(s[cut..].trim_start());
+    while let Some(rest) = strip_leading_reply_prefix(&s) {
+        s = collapse_whitespace(rest.trim_start());
         if s.is_empty() {
             break;
         }
@@ -33,8 +23,23 @@ pub fn normalize_subject_thread(subject: &str) -> String {
     s.to_ascii_lowercase()
 }
 
-fn strip_prefix_ci<'a>(lower: &'a str, prefix: &str) -> Option<&'a str> {
-    lower.strip_prefix(prefix).map(|rest| rest.trim_start())
+/// Strip one leading `(?i)(re|fw|fwd)\s*:\s*` prefix. Longer tokens first (`fwd` before `fw`).
+fn strip_leading_reply_prefix(s: &str) -> Option<&str> {
+    let lower = s.to_ascii_lowercase();
+    // Check longer prefixes first so "fwd" is not partially matched as "fw".
+    for token in ["fwd", "fw", "re"] {
+        if !lower.starts_with(token) {
+            continue;
+        }
+        // SAFETY: `token` is ASCII; byte length equals char length.
+        let after_token = &s[token.len()..];
+        let after_ws = after_token.trim_start();
+        let Some(after_colon) = after_ws.strip_prefix(':') else {
+            continue;
+        };
+        return Some(after_colon.trim_start());
+    }
+    None
 }
 
 fn collapse_whitespace(s: &str) -> String {
@@ -67,8 +72,19 @@ mod tests {
     }
 
     #[test]
+    fn strips_optional_whitespace_around_colon() {
+        // Spec `(?i)(re|fw|fwd)\s*:\s*`
+        assert_eq!(normalize_subject_thread("Re : Topic"), "topic");
+        assert_eq!(normalize_subject_thread("RE  :  Topic"), "topic");
+        assert_eq!(normalize_subject_thread("FW  : x"), "x");
+        assert_eq!(normalize_subject_thread("fwd : Hello"), "hello");
+        assert_eq!(normalize_subject_thread("Fw : Re : Nested"), "nested");
+    }
+
+    #[test]
     fn empty_after_strip() {
         assert_eq!(normalize_subject_thread("Re:"), "");
+        assert_eq!(normalize_subject_thread("Re :"), "");
         assert_eq!(normalize_subject_thread("   "), "");
     }
 

@@ -75,7 +75,8 @@ ingest and extract. Identity is desk MID + `logical_hash` — not CLI content-ha
 Workspace **Run threading** starts `kind=thread` with default params
 (`use_headers` / `use_subject_fallback` / `use_conversation_index` / `reset` /
 `batch_size=500` / `family_inherit`). Reuses progress / cancel / resume.
-Matters extracted before 0022 need **re-extract** to populate reply headers.
+Matters extracted before 0022 need **re-extract** to populate reply headers
+(re-extract refreshes the four header columns on existing message paths).
 
 ## Tests
 

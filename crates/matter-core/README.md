@@ -117,6 +117,39 @@ Nullable columns on `items` (does **not** overload `status`):
 
 Engine: `crates/matter-dedupe`. Never delete items/blobs; never use CLI content-hash as suppress key.
 
+## Schema v4 — Email threading (0022)
+
+Nullable columns on `items` (does **not** overload `status` or `dedup_*`):
+
+| Field | Kind | Notes |
+|---|---|---|
+| `in_reply_to` | **Header storage** | Normalized In-Reply-To Message-ID (single; empty → NULL) |
+| `references_json` | **Header storage** | JSON array of normalized Message-IDs from References (order preserved) |
+| `conversation_topic` | **Header storage** | Optional Outlook/topic string as extracted |
+| `conversation_index_hex` | **Header storage** | Canonical lowercase hex (MAPI bytes or Base64 Thread-Index) |
+| `thread_id` | **Result** | Stable conversation group id |
+| `thread_root_item_id` | **Result** | Earliest stable-order member chosen as root |
+| `thread_method` | **Result** | `headers` \| `subject` \| `conversation_index` \| `singleton` \| `none` — constants in `item_thread_method` |
+| `threaded_at` | **Result** | RFC3339 when last assigned |
+| `thread_job_id` | **Result** | Last job that wrote the result |
+
+**Indexes (v4):** `idx_items_thread_id`, `idx_items_in_reply_to`.
+
+Header storage is written by extractors (`extract-pst`) and is **not** cleared by the thread job. Result columns are assigned by `matter-thread` and are what `clear_thread_fields` resets.
+
+### Thread helpers
+
+| API | Purpose |
+|---|---|
+| `list_email_parents_for_thread` / `_range` | Thin ordered candidates (`ThreadCandidate` — no body text) |
+| `count_email_parents_for_thread` | Eligible parent count |
+| `clear_thread_fields(include_attachments)` | Reset **result** columns only (`thread_id`, `thread_root_item_id`, `thread_method`, `threaded_at`, `thread_job_id`); leaves header storage intact |
+| `apply_thread_batch_with_checkpoint` | **N result updates + checkpoint in one commit** (same DoD-5 pattern as dedupe) |
+
+Header parse helpers live in `thread_headers` (re-exported from the crate root): `parse_in_reply_to`, `parse_references_header`, `references_to_json` / `parse_references_json`, `normalize_conversation_index_to_hex`, `unfold_header_value`.
+
+Engine: `crates/matter-thread`. Never delete items/blobs; never mutate source PST.
+
 ### Address storage (JSON decision)
 
 P0 keeps `to_addrs_json` / `cc_addrs_json` / `bcc_addrs_json` on `items` as JSON arrays.

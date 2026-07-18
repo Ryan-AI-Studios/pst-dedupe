@@ -100,8 +100,21 @@ pub fn parse_references_json(json: Option<&str>) -> Vec<String> {
 }
 
 /// First normalized Message-ID from an In-Reply-To header (may be multi-valued).
+///
+/// Prefer angle-bracket captures (same as References). If none are found, fall
+/// back to `normalize_message_id` on the whole unfolded string (bare MID without
+/// `<>` is common on some MAPI exports).
 pub fn parse_in_reply_to(raw: &str) -> Option<String> {
-    parse_references_header(raw).into_iter().next()
+    if let Some(first) = parse_references_header(raw).into_iter().next() {
+        return Some(first);
+    }
+    let unfolded = unfold_header_value(raw);
+    let norm = normalize_message_id(unfolded.trim());
+    if norm.is_empty() {
+        None
+    } else {
+        Some(norm)
+    }
 }
 
 /// Input form for ConversationIndex normalization (spec §3.3.2).
@@ -264,6 +277,21 @@ mod tests {
     fn in_reply_to_first_only() {
         let v = parse_in_reply_to("<first@ex.com> <second@ex.com>");
         assert_eq!(v.as_deref(), Some("first@ex.com"));
+    }
+
+    #[test]
+    fn in_reply_to_bare_without_angle_brackets() {
+        assert_eq!(
+            parse_in_reply_to("Parent@Ex.COM").as_deref(),
+            Some("parent@ex.com")
+        );
+        assert_eq!(
+            parse_in_reply_to("  <Angle@Ex.COM>  ").as_deref(),
+            Some("angle@ex.com")
+        );
+        // Empty / whitespace-only → None
+        assert!(parse_in_reply_to("   ").is_none());
+        assert!(parse_in_reply_to("<>").is_none());
     }
 
     #[test]

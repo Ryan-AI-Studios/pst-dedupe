@@ -371,6 +371,7 @@ fn reset_recomputes_deterministically() {
 fn cancel_pauses_with_checkpoint() {
     let (_tmp, matter) = temp_matter("cancel");
     let job = matter.create_job("thread").expect("job");
+    // Enough parents that batch_size=1 must commit at least once before finishing.
     for i in 0..20 {
         let _ = parent(
             &matter,
@@ -384,21 +385,16 @@ fn cancel_pauses_with_checkpoint() {
     }
 
     let cancel_after = std::sync::atomic::AtomicU64::new(0);
+    // batch_size=1: first commit → progress(≥1) → cancel flag → next loop Paused.
     let params = ThreadParams {
-        batch_size: 3,
+        batch_size: 1,
         ..Default::default()
     };
     let outcome = run_thread(
         &matter,
         &job.id,
         &params,
-        Some(&|| {
-            // Cancel after first progress tick would be mid-run; force cancel always
-            // after some commits by counting calls... simpler: always cancel after
-            // first non-zero completed via shared state in progress is hard.
-            // Use: cancel when any checkpoint exists with completed > 0.
-            cancel_after.load(std::sync::atomic::Ordering::SeqCst) > 0
-        }),
+        Some(&|| cancel_after.load(std::sync::atomic::Ordering::SeqCst) > 0),
         |completed| {
             if completed > 0 {
                 cancel_after.store(1, std::sync::atomic::Ordering::SeqCst);
@@ -407,21 +403,68 @@ fn cancel_pauses_with_checkpoint() {
     )
     .expect("run");
 
-    // With cancel only after progress, we may get Paused or Succeeded if too fast.
-    // Ensure checkpoint write path works either way.
-    let _cp = matter.get_checkpoint(&job.id, THREAD_STAGE).expect("cp");
-    match outcome {
-        ThreadOutcome::Paused(s) => {
-            assert!(s.completed_count > 0);
-            // Resume
-            let outcome2 = run_thread(&matter, &job.id, &params, None, |_| {}).expect("resume");
-            assert!(matches!(outcome2, ThreadOutcome::Succeeded(_)));
-        }
-        ThreadOutcome::Succeeded(_) => {
-            // Race: finished before cancel observed — still valid.
-        }
-        other => panic!("unexpected {other:?}"),
-    }
+    let ThreadOutcome::Paused(s) = outcome else {
+        panic!("expected Paused with batch_size=1 after first progress, got {outcome:?}");
+    };
+    assert!(
+        s.completed_count > 0,
+        "paused run must have committed progress"
+    );
+    let cp = matter
+        .get_checkpoint(&job.id, THREAD_STAGE)
+        .expect("cp")
+        .expect("checkpoint must exist after pause");
+    assert!(
+        !cp.cursor_json.is_empty(),
+        "checkpoint cursor_json must be present"
+    );
+
+    // Resume to completion without cancel.
+    let outcome2 = run_thread(&matter, &job.id, &params, None, |_| {}).expect("resume");
+    assert!(
+        matches!(outcome2, ThreadOutcome::Succeeded(_)),
+        "resume must succeed, got {outcome2:?}"
+    );
+}
+
+#[test]
+fn audit_thread_start_and_complete() {
+    let (_tmp, matter) = temp_matter("audit-thread");
+    let job = matter.create_job("thread").expect("job");
+    let _ = parent(
+        &matter,
+        "a",
+        Some("a@ex.com"),
+        None,
+        None,
+        Some("Hello"),
+        None,
+    );
+
+    let out = run_default(&matter, &job.id);
+    assert!(matches!(out, ThreadOutcome::Succeeded(_)));
+
+    let mut stmt = matter
+        .connection()
+        .prepare("SELECT action FROM audit_events WHERE action LIKE 'thread.%' ORDER BY seq ASC")
+        .expect("prepare");
+    let actions: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert!(
+        actions.iter().any(|a| a == "thread.start"),
+        "expected thread.start in {actions:?}"
+    );
+    assert!(
+        actions.iter().any(|a| a == "thread.complete"),
+        "expected thread.complete in {actions:?}"
+    );
+    // start before complete
+    let start_pos = actions.iter().position(|a| a == "thread.start").unwrap();
+    let complete_pos = actions.iter().position(|a| a == "thread.complete").unwrap();
+    assert!(start_pos < complete_pos);
 }
 
 #[test]

@@ -502,7 +502,9 @@ fn compute_assignments(candidates: &[ThreadCandidate], params: &ThreadParams) ->
             matter_mids.dedup();
 
             // Root = earliest by stable order (candidates already sorted).
-            let root_idx = *members.iter().min().expect("non-empty");
+            let Some(&root_idx) = members.iter().min() else {
+                continue;
+            };
             let root_item = candidates[root_idx].id.clone();
 
             let tid = if let Some(min_mid) = matter_mids.first() {
@@ -564,7 +566,9 @@ fn compute_assignments(candidates: &[ThreadCandidate], params: &ThreadParams) ->
             }
             let sk = subject_str.get(&hk).map(|s| s.as_str()).unwrap_or("");
             let tid = sha256_hex(&format!("thread-subj:v1\n{sk}"));
-            let root_idx = *members.iter().min().expect("non-empty");
+            let Some(&root_idx) = members.iter().min() else {
+                continue;
+            };
             let root_item = candidates[root_idx].id.clone();
             for &i in &members {
                 method[i] = Some(item_thread_method::SUBJECT.into());
@@ -603,7 +607,9 @@ fn compute_assignments(candidates: &[ThreadCandidate], params: &ThreadParams) ->
             }
             let prefix = ci_str.get(&hk).map(|s| s.as_str()).unwrap_or("");
             let tid = sha256_hex(&format!("thread-ci:v1\n{prefix}"));
-            let root_idx = *members.iter().min().expect("non-empty");
+            let Some(&root_idx) = members.iter().min() else {
+                continue;
+            };
             let root_item = candidates[root_idx].id.clone();
             for &i in &members {
                 method[i] = Some(item_thread_method::CONVERSATION_INDEX.into());

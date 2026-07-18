@@ -16,7 +16,9 @@ Parent email rows store reply-chain fields when present on the message:
 | `conversation_index_hex` | PidTagConversationIndex `0x0071` (bytes or Base64 → lowercase hex) |
 
 Missing props stay **NULL** (never fabricated). Matters extracted **before**
-this track lack these columns until **re-extract**.
+this track lack these columns until **re-extract**. Re-extract of an existing
+`(source_id, path)` **refreshes** these four header columns (headers-only
+update — no double-insert, no body re-CAS).
 
 ## ⚠️ BLOCKING THREAD WARNING
 
@@ -56,10 +58,13 @@ Job kind: `extract_pst`. Stage: `pst_extract`. Default `batch_size`: **500**
 {pst_inventory_path}!/{folder_path}/{message_nid_hex}/attach/{index}_{safe_filename}
 ```
 
-Resume / re-extract skip key: `(source_id, path)` via `item_by_source_path`.
-If **any** item already exists for a message path (`…!/…`), extract **skips**
-that path and never double-inserts (covers `extracted`, `partial`, and prior
-error rows). Retry-with-update is deferred until unique path upsert exists.
+Resume / re-extract key: `(source_id, path)` via `item_by_source_path`.
+If **any** item already exists for a message path (`…!/…`), extract **does not
+double-insert** (covers `extracted`, `partial`, and prior error rows) but
+**does re-read** the message to refresh the four threading header columns
+(`in_reply_to`, `references_json`, `conversation_topic`,
+`conversation_index_hex`). Full field retry-with-update is deferred until
+unique path upsert exists.
 
 ## Native identity (`native_sha256`)
 
