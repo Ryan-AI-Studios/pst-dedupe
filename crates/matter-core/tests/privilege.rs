@@ -250,6 +250,34 @@ fn export_csv_two_items_headers() {
         )
         .expect("export audit");
     assert_eq!(audit, 1);
+
+    // Export audit must include params_hash + path basename (P2-004).
+    let params_json: String = matter
+        .connection()
+        .query_row(
+            "SELECT params_json FROM audit_events \
+             WHERE action = 'privilege.log_export' ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("export audit params");
+    let v: serde_json::Value = serde_json::from_str(&params_json).expect("params json");
+    let hash = v["params_hash"].as_str().expect("params_hash present");
+    assert_eq!(hash.len(), 64, "params_hash is sha256 hex");
+    assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(v["path_basename"].as_str(), Some("priv_log.csv"));
+    assert_eq!(v["row_count"], 2);
+    assert_eq!(v["blank_description_count"], 0);
+    assert_eq!(v["withheld_count"], 2);
+    assert_eq!(v["scope"], SCOPE_REVIEW_CORPUS);
+    assert_eq!(v["review_only"], true);
+    // Recompute expected hash (scope + empty filter_ids + full path).
+    let expected_preimage = format!(
+        "scope={}\nfilter_ids=\npath={}",
+        SCOPE_REVIEW_CORPUS, result.path
+    );
+    let expected = matter_core::sha256_hex(expected_preimage.as_bytes());
+    assert_eq!(hash, expected);
 }
 
 #[test]
@@ -342,6 +370,149 @@ fn attachment_inheritance_on_export() {
     assert!(
         data_line.contains(&parent.id),
         "ParentControlNumber: {data_line}"
+    );
+}
+
+/// Empty item subject must not shadow a non-empty item title (P2-001).
+#[test]
+fn attachment_empty_subject_prefers_item_title_over_parent() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-priv-subj-title");
+    let matter = Matter::create(&root, "Priv").expect("create");
+
+    let fam = matter
+        .insert_family(matter_core::FAMILY_KIND_EMAIL_ATTACHMENTS)
+        .expect("fam");
+    let parent = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::PARENT.into()),
+            family_id: Some(fam.id.clone()),
+            subject: Some("Parent subject should not win".into()),
+            from_addr: Some("counsel@firm.com".into()),
+            to_addrs_json: Some(r#"["ceo@corp.com"]"#.into()),
+            sent_at: Some("2024-03-15T09:00:00Z".into()),
+            path: Some("inbox/parent.eml".into()),
+            in_review: Some(1),
+            ..Default::default()
+        })
+        .expect("parent");
+    let child = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            family_id: Some(fam.id.clone()),
+            parent_item_id: Some(parent.id.clone()),
+            // Empty subject must not win over title via Option::or.
+            subject: Some("".into()),
+            title: Some("Memo".into()),
+            path: Some("inbox/parent/memo.pdf".into()),
+            file_category: Some("pdf".into()),
+            in_review: Some(1),
+            ..Default::default()
+        })
+        .expect("child");
+
+    matter
+        .ensure_item_privilege(&child.id, "att")
+        .expect("ensure");
+    matter
+        .upsert_item_privilege(UpsertItemPrivilegeInput {
+            item_id: child.id.clone(),
+            basis: "attorney_client".into(),
+            description: "Attachment memo".into(),
+            status: "asserted".into(),
+            withhold: true,
+            include_on_log: true,
+            actor: "att".into(),
+        })
+        .expect("upsert");
+
+    let out = root.join("exports").join("subj_title.csv");
+    matter
+        .export_privilege_log(PrivilegeLogExportParams {
+            scope: SCOPE_ENTIRE_MATTER.into(),
+            path: out.clone(),
+            filter_ids: None,
+        })
+        .expect("export");
+
+    let text = std::fs::read_to_string(out.as_std_path()).expect("read");
+    let data_line = text.lines().nth(1).expect("data row");
+    assert!(
+        data_line.contains("Memo"),
+        "CSV Subject should be item title, got: {data_line}"
+    );
+    assert!(
+        !data_line.contains("Parent subject should not win"),
+        "parent subject must not win over item title: {data_line}"
+    );
+}
+
+/// When item subject and title are both empty, inherit parent subject (P2-001).
+#[test]
+fn attachment_empty_subject_and_title_inherits_parent_subject() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-priv-subj-parent");
+    let matter = Matter::create(&root, "Priv").expect("create");
+
+    let fam = matter
+        .insert_family(matter_core::FAMILY_KIND_EMAIL_ATTACHMENTS)
+        .expect("fam");
+    let parent = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::PARENT.into()),
+            family_id: Some(fam.id.clone()),
+            subject: Some("Inherited parent subject".into()),
+            path: Some("inbox/parent.eml".into()),
+            in_review: Some(1),
+            ..Default::default()
+        })
+        .expect("parent");
+    let child = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            family_id: Some(fam.id.clone()),
+            parent_item_id: Some(parent.id.clone()),
+            subject: Some("".into()),
+            title: Some("".into()),
+            path: Some("inbox/parent/blank.pdf".into()),
+            in_review: Some(1),
+            ..Default::default()
+        })
+        .expect("child");
+
+    matter
+        .ensure_item_privilege(&child.id, "att")
+        .expect("ensure");
+    matter
+        .upsert_item_privilege(UpsertItemPrivilegeInput {
+            item_id: child.id.clone(),
+            basis: "attorney_client".into(),
+            description: "blank meta attach".into(),
+            status: "asserted".into(),
+            withhold: true,
+            include_on_log: true,
+            actor: "att".into(),
+        })
+        .expect("upsert");
+
+    let out = root.join("exports").join("subj_parent.csv");
+    matter
+        .export_privilege_log(PrivilegeLogExportParams {
+            scope: SCOPE_ENTIRE_MATTER.into(),
+            path: out.clone(),
+            filter_ids: None,
+        })
+        .expect("export");
+
+    let text = std::fs::read_to_string(out.as_std_path()).expect("read");
+    let data_line = text.lines().nth(1).expect("data row");
+    assert!(
+        data_line.contains("Inherited parent subject"),
+        "CSV Subject should fall back to parent: {data_line}"
     );
 }
 

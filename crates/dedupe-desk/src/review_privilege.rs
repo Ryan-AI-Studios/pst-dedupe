@@ -4,8 +4,8 @@
 //! log descriptions.
 
 use matter_core::{
-    privilege_basis, privilege_status, FamilyPrivilegeConsistency, ItemPrivilege, Matter,
-    PrivilegeLogExportParams, PrivilegeLogExportResult, PrivilegeProtocol,
+    privilege_basis, privilege_log_format, privilege_status, FamilyPrivilegeConsistency,
+    ItemPrivilege, Matter, PrivilegeLogExportParams, PrivilegeLogExportResult, PrivilegeProtocol,
     UpsertItemPrivilegeInput, UpsertPrivilegeProtocolInput, SCOPE_ENTIRE_MATTER,
     SCOPE_REVIEW_CORPUS,
 };
@@ -108,6 +108,39 @@ pub fn status_options() -> &'static [(&'static str, &'static str)] {
         (privilege_status::CLEARED, "Cleared"),
         (privilege_status::PARTIAL_REDACTION, "Partial redaction"),
     ]
+}
+
+/// Desk-editable log formats (P0). `category` is not implemented for export —
+/// API may still store it; Desk only offers standard + automated_metadata.
+pub fn log_format_options() -> &'static [(&'static str, &'static str)] {
+    &[
+        (
+            privilege_log_format::STANDARD,
+            "Standard (document-by-document)",
+        ),
+        (
+            privilege_log_format::AUTOMATED_METADATA,
+            "Automated metadata",
+        ),
+    ]
+}
+
+/// Whether `fmt` is a Desk-selectable log_format (not `category`).
+pub fn is_desk_log_format(fmt: &str) -> bool {
+    log_format_options().iter().any(|(k, _)| *k == fmt.trim())
+}
+
+/// Normalize a protocol log_format for the Desk editor.
+///
+/// Known Desk formats are kept; unknown / `category` fall back to `standard`
+/// so the ComboBox always has a valid selection (operator can re-save).
+pub fn normalize_desk_log_format(fmt: &str) -> String {
+    let t = fmt.trim();
+    if is_desk_log_format(t) {
+        t.to_string()
+    } else {
+        privilege_log_format::STANDARD.to_string()
+    }
 }
 
 /// Family split banner text when consistency fails.
@@ -335,6 +368,23 @@ mod tests {
         };
         let msg = family_split_banner(&split).expect("banner");
         assert!(msg.contains("split"));
+    }
+
+    #[test]
+    fn desk_log_formats_exclude_category() {
+        let keys: Vec<&str> = log_format_options().iter().map(|(k, _)| *k).collect();
+        assert!(keys.contains(&privilege_log_format::STANDARD));
+        assert!(keys.contains(&privilege_log_format::AUTOMATED_METADATA));
+        assert!(!keys.contains(&privilege_log_format::CATEGORY));
+        assert!(is_desk_log_format("standard"));
+        assert!(is_desk_log_format("automated_metadata"));
+        assert!(!is_desk_log_format("category"));
+        assert_eq!(
+            normalize_desk_log_format("automated_metadata"),
+            "automated_metadata"
+        );
+        assert_eq!(normalize_desk_log_format("category"), "standard");
+        assert_eq!(normalize_desk_log_format("  "), "standard");
     }
 
     #[test]

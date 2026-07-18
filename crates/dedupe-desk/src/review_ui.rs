@@ -60,8 +60,8 @@ use crate::review_privilege::{
     assert_privilege_blocking, basis_options, default_privilege_log_path,
     draft_description_from_note, export_privilege_log_blocking, family_split_banner,
     focus_allows_coding_with_privilege, load_privilege_panel, load_protocol_blocking,
-    should_show_privilege_panel, status_options, upsert_privilege_blocking,
-    upsert_protocol_blocking, PrivilegePanelDraft,
+    log_format_options, normalize_desk_log_format, should_show_privilege_panel, status_options,
+    upsert_privilege_blocking, upsert_protocol_blocking, PrivilegePanelDraft,
 };
 
 /// Fixed list row height (sans item spacing) for `ScrollArea::show_rows`.
@@ -447,6 +447,8 @@ pub struct ReviewState {
     protocol_draft_502d: String,
     protocol_draft_502e: String,
     protocol_description_required: bool,
+    /// Privilege log format draft (`standard` | `automated_metadata`).
+    protocol_draft_log_format: String,
     protocol_loaded_for: Option<Utf8PathBuf>,
     protocol_status: Option<String>,
 }
@@ -532,6 +534,7 @@ impl ReviewState {
         self.protocol_draft_502d.clear();
         self.protocol_draft_502e.clear();
         self.protocol_description_required = true;
+        self.protocol_draft_log_format = matter_core::privilege_log_format::STANDARD.into();
         self.protocol_loaded_for = None;
         self.protocol_status = None;
     }
@@ -1264,6 +1267,7 @@ impl ReviewState {
                 self.protocol_draft_502d = p.fre_502d_note.unwrap_or_default();
                 self.protocol_draft_502e = p.fre_502e_note.unwrap_or_default();
                 self.protocol_description_required = p.description_required != 0;
+                self.protocol_draft_log_format = normalize_desk_log_format(&p.log_format);
                 self.protocol_loaded_for = Some(matter_root.to_path_buf());
                 self.protocol_status = None;
             }
@@ -1274,10 +1278,12 @@ impl ReviewState {
     }
 
     fn save_protocol_now(&mut self, matter_root: &Utf8Path, actor: &str) {
+        let log_format = normalize_desk_log_format(&self.protocol_draft_log_format);
+        self.protocol_draft_log_format = log_format.clone();
         match upsert_protocol_blocking(
             matter_root,
             UpsertPrivilegeProtocolInput {
-                log_format: "standard".into(),
+                log_format,
                 fre_502d_note: Some(self.protocol_draft_502d.clone()),
                 fre_502e_note: Some(self.protocol_draft_502e.clone()),
                 description_required: self.protocol_description_required,
@@ -3397,6 +3403,31 @@ fn show_privilege_protocol_strip(
                 .weak()
                 .small(),
         );
+        ui.horizontal(|ui| {
+            ui.label("Log format:");
+            if state.protocol_draft_log_format.trim().is_empty() {
+                state.protocol_draft_log_format =
+                    matter_core::privilege_log_format::STANDARD.into();
+            }
+            egui::ComboBox::from_id_salt("priv_log_format")
+                .selected_text({
+                    log_format_options()
+                        .iter()
+                        .find(|(k, _)| *k == state.protocol_draft_log_format)
+                        .map(|(_, l)| *l)
+                        .unwrap_or(state.protocol_draft_log_format.as_str())
+                })
+                .show_ui(ui, |ui| {
+                    for (key, label) in log_format_options() {
+                        if ui
+                            .selectable_label(state.protocol_draft_log_format == *key, *label)
+                            .clicked()
+                        {
+                            state.protocol_draft_log_format = (*key).to_string();
+                        }
+                    }
+                });
+        });
         ui.horizontal(|ui| {
             ui.label("502(d):");
             ui.add(

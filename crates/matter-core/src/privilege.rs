@@ -1010,10 +1010,20 @@ impl Matter {
             } else {
                 bcc_own
             };
-            let subject = first_nonempty(
-                row.subject.as_deref().or(row.title.as_deref()),
-                parent.and_then(|p| p.subject.as_deref().or(p.title.as_deref())),
-            );
+            // Prefer first non-empty (trim) among item subject, item title; else
+            // parent subject, parent title. Empty `Some("")` must not shadow a
+            // non-empty title or force parent fallback (P2-001).
+            let subject = {
+                let item = first_nonempty(row.subject.as_deref(), row.title.as_deref());
+                if !item.is_empty() {
+                    item
+                } else {
+                    first_nonempty(
+                        parent.and_then(|p| p.subject.as_deref()),
+                        parent.and_then(|p| p.title.as_deref()),
+                    )
+                }
+            };
             let doc_date_item = doc_date_from(
                 row.sent_at.as_deref(),
                 row.received_at.as_deref(),
@@ -1097,13 +1107,35 @@ impl Matter {
 
         let actor = "desk".to_string();
         let now = now_rfc3339();
+        let path_str = result.path.as_str();
+        let path_basename_str = path_basename(Some(path_str));
+        let mut sorted_filter_ids: Vec<String> = params.filter_ids.unwrap_or_default();
+        sorted_filter_ids.sort();
+        sorted_filter_ids.dedup();
+        // params_hash preimage (stable, documented):
+        //   scope=<scope>\nfilter_ids=<sorted unique ids, comma-joined>\npath=<full path>
+        // Full operator-provided path is hashed (and stored); path_basename is also
+        // stored for display. Counts are audited separately and excluded from the hash.
+        let hash_preimage = format!(
+            "scope={scope}\nfilter_ids={}\npath={path_str}",
+            sorted_filter_ids.join(",")
+        );
+        let params_hash = crate::cas::sha256_hex(hash_preimage.as_bytes());
+        let filter_ids_json = if sorted_filter_ids.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(sorted_filter_ids)
+        };
         let params_json = serde_json::json!({
-            "path": result.path,
+            "path": path_str,
+            "path_basename": path_basename_str,
             "scope": scope,
+            "review_only": scope == SCOPE_REVIEW_CORPUS,
             "row_count": row_count,
             "blank_description_count": blank_description_count,
             "withheld_count": withheld_count,
-            "filter_ids": params.filter_ids,
+            "filter_ids": filter_ids_json,
+            "params_hash": params_hash,
         })
         .to_string();
         audit::append_event(
@@ -1371,5 +1403,14 @@ mod tests {
         assert_eq!(PRIVILEGE_LOG_COLUMNS.len(), 19);
         assert_eq!(PRIVILEGE_LOG_COLUMNS[0], "ControlNumber");
         assert_eq!(PRIVILEGE_LOG_COLUMNS[12], "PrivilegeType");
+    }
+
+    #[test]
+    fn first_nonempty_skips_empty_some() {
+        assert_eq!(first_nonempty(Some(""), Some("Memo")), "Memo");
+        assert_eq!(first_nonempty(Some("  "), Some("Memo")), "Memo");
+        assert_eq!(first_nonempty(Some("Subj"), Some("Memo")), "Subj");
+        assert_eq!(first_nonempty(None, Some("Memo")), "Memo");
+        assert_eq!(first_nonempty(None, None), "");
     }
 }
