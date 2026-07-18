@@ -203,7 +203,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0032-13 | — | Stamp text inside produce blackout token | P0 fixed `[REDACTED]`; `label` is UI/list metadata | residual |
 | D-0032-14 | P3 | Privilege hook not same-transaction as redaction create | Region commits then public upsert; rare partial state if hook fails; happy path tested | polish |
 
-## From track 0033-OfficeExtractors (planned — Ready)
+## From track 0033-OfficeExtractors (Completed — Codex luna PASS WITH DEFERRED P3)
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
