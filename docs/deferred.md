@@ -154,7 +154,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0029-07 | — | Windows mmap rebuild Access Denied | **Done in 0029**: drop readers + desk busy gate before rebuild | — |
 | D-0029-08 | P3 | Full GUI smoke for keyword / Update / Rebuild | Automated matter-search + desk unit; operator smoke local | operator / polish |
 
-## From track 0030-NotesHighlights (planned — Ready)
+## From track 0030-NotesHighlights
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
@@ -165,6 +165,8 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0030-05 | — | Multi-user concurrent note edit | Single-desk actor | **0058** |
 | D-0030-06 | — | Rich text / markdown notes | P0 plain text | residual |
 | D-0030-07 | P3 | Full GUI smoke for notes panel / selection highlight | Automated unit + API; operator smoke local | operator / polish |
+| D-0030-08 | P3 | Dual body widgets (Label paint + TextEdit selection) | Usable; document residual under egui 0.34; unify later if API allows | residual polish |
+| D-0029-04 | — | Temporary FTS hit paint | Not shipped in 0030 (nice-to-have); user highlights shipped | residual |
 
 ## Hygiene
 
