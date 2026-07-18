@@ -871,6 +871,110 @@ fn thread_via_runner_one_job_row() {
     assert!(cp.completed_count >= 2);
 }
 
+#[cfg(feature = "neardup")]
+#[test]
+fn neardup_via_runner_one_job_row() {
+    use matter_core::{item_near_dup_role, item_role, item_status, ItemInput};
+    use process_runner::MatterNearDupHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-neardup");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        // Shared long boilerplate so a one-word edit stays above threshold 0.80.
+        let shared = " alpha bravo charlie delta echo foxtrot golf hotel india juliet \
+kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey \
+xray yankee zulu one two three four five six seven eight nine ten eleven twelve \
+thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twentyone \
+twentytwo twentythree twentyfour twentyfive twentysix twentyseven twentyeight \
+twentynine thirty thirtyone thirtytwo thirtythree thirtyfour thirtyfive thirtysix \
+thirtyseven thirtyeight thirtynine forty fortyone fortytwo fortythree fortyfour \
+fortyfive fortysix fortyseven fortyeight fortynine fifty";
+        let body_a = format!(
+            "the quick brown fox jumps over the lazy dog while reviewing the contract draft carefully with counsel present{shared}"
+        );
+        let body_b = format!(
+            "the quick brown fox jumps over the lazy dog while reviewing the contract draft carefully with lawyers present{shared}"
+        );
+        let da = matter.put_bytes(body_a.as_bytes()).expect("cas a");
+        let db = matter.put_bytes(body_b.as_bytes()).expect("cas b");
+        matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                path: Some("a.txt".into()),
+                text_sha256: Some(da),
+                ..Default::default()
+            })
+            .expect("a");
+        matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                path: Some("b.txt".into()),
+                text_sha256: Some(db),
+                ..Default::default()
+            })
+            .expect("b");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterNearDupHandler::new()));
+
+    let params = JobParams::new(
+        serde_json::json!({
+            "reset": true,
+            "batch_size": 10,
+            "threshold": 0.80
+        })
+        .to_string(),
+    );
+    let job_id = runner
+        .start(&root, "neardup", params)
+        .expect("start neardup");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let jobs = matter.list_jobs().expect("list");
+    assert_eq!(jobs.len(), 1, "Option C: exactly one job row");
+    assert_eq!(jobs[0].id, job_id);
+    assert_eq!(jobs[0].kind, "neardup");
+    assert_eq!(jobs[0].state, JobState::Succeeded);
+
+    let cands = matter.list_neardup_candidates(true).expect("cands");
+    assert_eq!(cands.len(), 2);
+    let a = matter
+        .get_item(
+            &cands
+                .iter()
+                .find(|c| c.path.as_deref() == Some("a.txt"))
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+    let b = matter
+        .get_item(
+            &cands
+                .iter()
+                .find(|c| c.path.as_deref() == Some("b.txt"))
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+    assert_eq!(a.near_dup_group_id, b.near_dup_group_id);
+    assert!(a.near_dup_group_id.is_some());
+    let roles = [a.near_dup_role.as_deref(), b.near_dup_role.as_deref()];
+    assert!(roles.contains(&Some(item_near_dup_role::PIVOT)));
+    assert!(roles.contains(&Some(item_near_dup_role::MEMBER)));
+
+    let cp = matter
+        .get_checkpoint(&job_id, "neardup")
+        .expect("cp")
+        .expect("neardup checkpoint");
+    assert!(cp.completed_count >= 2);
+}
+
 /// Resume must restore full nested `params` from the checkpoint cursor (not just
 /// `source_id` / empty object), so non-default dedupe settings survive cancel.
 #[test]

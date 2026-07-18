@@ -1,0 +1,18 @@
+[package]
+name = "matter-neardup"
+version = "0.1.0"
+edition = "2021"
+description = "Matter-level near-duplicate detection: MinHash shingles + banded LSH clusters"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+matter-core = { path = "../matter-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+camino = { workspace = true }

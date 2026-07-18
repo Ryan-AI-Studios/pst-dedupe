@@ -6,11 +6,12 @@ description = "In-process matter job runner: single worker thread, cancel, watch
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["ingest", "extract_pst", "dedupe", "thread"]
+default = ["ingest", "extract_pst", "dedupe", "thread", "neardup"]
 ingest = ["dep:ingest-purview"]
 extract_pst = ["dep:extract-pst"]
 dedupe = ["dep:matter-dedupe"]
 thread = ["dep:matter-thread"]
+neardup = ["dep:matter-neardup"]
 
 [dependencies]
 matter-core = { path = "../matter-core" }
@@ -23,6 +24,7 @@ ingest-purview = { path = "../ingest-purview", optional = true }
 extract-pst = { path = "../extract-pst", optional = true }
 matter-dedupe = { path = "../matter-dedupe", optional = true }
 matter-thread = { path = "../matter-thread", optional = true }
+matter-neardup = { path = "../matter-neardup", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

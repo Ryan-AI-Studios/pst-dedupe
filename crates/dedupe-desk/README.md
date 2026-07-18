@@ -60,8 +60,9 @@ matter-core configures `PRAGMA journal_mode=WAL`. The Counts panel shows the liv
 6. Select a discovered PST → **Extract selected** (or Extract all)
 7. **Run dedupe** — tiered Message-ID → logical_hash → family attach policy
 8. **Run threading** — Message-ID graph → subject → ConversationIndex → family inherit
-9. Confirm jobs table + Counts (unique/duplicate) update; journal_mode shows `wal`
-10. Close the app (worker joins; window may wait briefly if a job is finishing)
+9. **Run near-dup** — MinHash shingles + LSH clusters (pivot/member; not exact suppress)
+10. Confirm jobs table + Counts (unique/duplicate) update; journal_mode shows `wal`
+11. Close the app (worker joins; window may wait briefly if a job is finishing)
 
 ### Run dedupe
 
@@ -77,6 +78,14 @@ Workspace **Run threading** starts `kind=thread` with default params
 `batch_size=500` / `family_inherit`). Reuses progress / cancel / resume.
 Matters extracted before 0022 need **re-extract** to populate reply headers
 (re-extract refreshes the four header columns on existing message paths).
+
+### Run near-dup
+
+Workspace **Run near-dup** starts `kind=neardup` with default params
+(`minhash_shingle_v1`: k=5, cjk_char_n=2, H=128, 16×8 bands, threshold 0.80,
+`skip_exact_duplicates`, `min_chars=80`, `reset`, `batch_size=200`). Reuses
+progress / cancel / resume. Near-dup groups are **flag-only** — Desk does not
+auto-hide them as exact duplicates. See `crates/matter-neardup/README.md`.
 
 ## Tests
 

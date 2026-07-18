@@ -53,6 +53,26 @@ pub fn thread_default_params() -> String {
     .to_string()
 }
 
+/// Default params for matter-level near-duplicate detection (`kind = "neardup"`).
+pub fn neardup_default_params() -> String {
+    serde_json::json!({
+        "shingle_k": 5,
+        "cjk_char_n": 2,
+        "num_hashes": 128,
+        "num_bands": 16,
+        "rows_per_band": 8,
+        "threshold": 0.80,
+        "skip_exact_duplicates": true,
+        "ignore_numbers": true,
+        "min_chars": 80,
+        "reset": true,
+        "batch_size": 200,
+        "include_attachments": true,
+        "strip_email_quotes": false
+    })
+    .to_string()
+}
+
 /// True when `path` looks like a PST (case-insensitive `.pst` extension).
 pub fn looks_like_pst(path: &str) -> bool {
     Path::new(path)
@@ -157,6 +177,24 @@ mod tests {
         assert_eq!(v["reset"], true);
         assert_eq!(v["batch_size"], 500);
         assert_eq!(v["family_inherit"], true);
+    }
+
+    #[test]
+    fn neardup_default_json_shape() {
+        let j = neardup_default_params();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["shingle_k"], 5);
+        assert_eq!(v["cjk_char_n"], 2);
+        assert_eq!(v["num_hashes"], 128);
+        assert_eq!(v["num_bands"], 16);
+        assert_eq!(v["rows_per_band"], 8);
+        assert_eq!(v["threshold"], 0.80);
+        assert_eq!(v["skip_exact_duplicates"], true);
+        assert_eq!(v["min_chars"], 80);
+        assert_eq!(v["reset"], true);
+        assert_eq!(v["batch_size"], 200);
+        assert_eq!(v["include_attachments"], true);
+        assert_eq!(v["strip_email_quotes"], false);
     }
 
     #[test]

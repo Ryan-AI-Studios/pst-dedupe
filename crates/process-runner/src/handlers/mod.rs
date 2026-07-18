@@ -12,6 +12,9 @@ pub mod dedupe;
 #[cfg(feature = "thread")]
 pub mod thread;
 
+#[cfg(feature = "neardup")]
+pub mod neardup;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
@@ -23,3 +26,6 @@ pub use dedupe::MatterDedupeHandler;
 
 #[cfg(feature = "thread")]
 pub use thread::MatterThreadHandler;
+
+#[cfg(feature = "neardup")]
+pub use neardup::MatterNearDupHandler;

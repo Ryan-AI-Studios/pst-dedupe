@@ -45,3 +45,6 @@ pub use handlers::MatterDedupeHandler;
 
 #[cfg(feature = "thread")]
 pub use handlers::MatterThreadHandler;
+
+#[cfg(feature = "neardup")]
+pub use handlers::MatterNearDupHandler;
