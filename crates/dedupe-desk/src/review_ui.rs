@@ -72,8 +72,9 @@ use crate::review_privilege::{
 use crate::review_redaction::{
     body_job_for_ui_with_redactions, find_resolved_redaction, focus_allows_coding_with_redact,
     redacted_artifact_is_stale, redaction_input_from_selection, redaction_ui_status,
-    regenerate_status_message, resolve_redactions_for_paint, selection_creates_redaction,
-    stale_redaction_count_for_ui, DEFAULT_REDACTION_REASON, REDACTION_REASON_CHOICES,
+    refuse_truncated_regenerate, regenerate_status_message, resolve_redactions_for_paint,
+    selection_creates_redaction, stale_redaction_count_for_ui, DEFAULT_REDACTION_REASON,
+    REDACTION_REASON_CHOICES,
 };
 
 /// Fixed list row height (sans item spacing) for `ScrollArea::show_rows`.
@@ -1838,17 +1839,25 @@ impl ReviewState {
         if self.redaction_busy || self.notes_busy {
             return;
         }
-        let body = match self.body.pane() {
+        let (body, truncated) = match self.body.pane() {
             BodyPane::Ready {
                 item_id: bid,
                 text: Ok(t),
-                ..
-            } if bid == &item_id => t.clone(),
+                truncated,
+            } if bid == &item_id => (t.clone(), *truncated),
             _ => {
                 self.redaction_error = Some("Body not ready for regenerate.".into());
                 return;
             }
         };
+        let text_sha256 = self
+            .selection
+            .and_then(|i| self.rows.get(i))
+            .and_then(|r| r.text_sha256.clone());
+        if let Err(msg) = refuse_truncated_regenerate(truncated, text_sha256.as_deref()) {
+            self.redaction_error = Some(msg);
+            return;
+        }
         let actor = actor.to_string();
         let root = matter_root.to_owned();
         let (tx, rx) = mpsc::channel();
@@ -1857,6 +1866,8 @@ impl ReviewState {
         self.redaction_error = None;
         self.redaction_status = Some("Regenerating redacted text…".into());
         let ctx = ctx.clone();
+        // Worker: matter-core prefers full text CAS when text_sha256 is set, so a
+        // truncated display pane string is not used as the produce source.
         thread::spawn(move || {
             let result = (|| -> Result<RedactionMutateResult, String> {
                 let matter = Matter::open(&root).map_err(|e| e.to_string())?;
@@ -3363,6 +3374,7 @@ fn show_viewer(
             state.item_redacted_text_sha256.as_deref(),
             state.item_redacted_source_digest.as_deref(),
             row.text_sha256.as_deref(),
+            row.html_sha256.as_deref(),
         ) {
             ui.colored_label(
                 Color32::from_rgb(180, 80, 40),

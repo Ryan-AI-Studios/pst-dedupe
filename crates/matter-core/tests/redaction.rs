@@ -292,6 +292,202 @@ fn body_digest_change_nulls_redacted_sha() {
 }
 
 #[test]
+fn html_sha256_change_nulls_redacted_sha() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-rdx-html-null");
+    let matter = Matter::create(&root, "Rdx").expect("create");
+    let body = "Hello SECRET sauce";
+    let (item, digest) = insert_text_item(&matter, body);
+    let html_digest = matter
+        .put_bytes(b"<p>Hello SECRET sauce</p>")
+        .expect("html cas");
+    matter
+        .update_item(
+            &item.id,
+            ItemUpdate {
+                html_sha256: Some(Some(html_digest.clone())),
+                ..Default::default()
+            },
+        )
+        .expect("set html");
+    make_redaction(
+        &matter,
+        &item.id,
+        body,
+        &digest,
+        6,
+        12,
+        redaction_reason::OTHER,
+    );
+    matter
+        .regenerate_redacted_text(&item.id, body, "bob")
+        .expect("regen");
+    assert!(matter
+        .get_item(&item.id)
+        .expect("item")
+        .redacted_text_sha256
+        .is_some());
+
+    let new_html = matter
+        .put_bytes(b"<p>Hello SECRET sauce revised</p>")
+        .expect("new html");
+    let updated = matter
+        .update_item(
+            &item.id,
+            ItemUpdate {
+                html_sha256: Some(Some(new_html.clone())),
+                ..Default::default()
+            },
+        )
+        .expect("update html");
+    assert_eq!(updated.html_sha256.as_deref(), Some(new_html.as_str()));
+    assert!(
+        updated.redacted_text_sha256.is_none(),
+        "html_sha256 change must NULL redacted_text_sha256"
+    );
+    assert!(updated.redacted_text_at.is_none());
+    assert!(updated.redacted_source_digest.is_none());
+}
+
+#[test]
+fn regenerate_uses_full_cas_ignoring_truncated_display() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-rdx-full-cas");
+    let matter = Matter::create(&root, "Rdx").expect("create");
+    let body = "Hello SECRET sauce and a long trailing tail that the UI might truncate";
+    let (item, digest) = insert_text_item(&matter, body);
+    make_redaction(
+        &matter,
+        &item.id,
+        body,
+        &digest,
+        6,
+        12,
+        redaction_reason::OTHER,
+    );
+
+    // Truncated display missing the tail — must not become the produce source.
+    let truncated = "Hello SECRET sauce and a long trailing tail that the UI might trun";
+    assert!(body.starts_with(truncated) || truncated.len() < body.len());
+    let result = matter
+        .regenerate_redacted_text(&item.id, truncated, "bob")
+        .expect("regen from truncated display still uses full CAS");
+    assert_eq!(
+        result.redacted_source_digest.as_deref(),
+        Some(digest.as_str())
+    );
+    let sha = result.redacted_text_sha256.expect("sha");
+    let redacted = String::from_utf8(matter.get_bytes(&sha).expect("cas")).expect("utf8");
+    assert!(!redacted.contains("SECRET"));
+    // Full tail preserved after redaction (proves full body was used).
+    assert!(
+        redacted.contains("truncate") || redacted.contains("trailing"),
+        "expected full-body tail in redacted output, got: {redacted}"
+    );
+    assert_eq!(
+        redacted,
+        build_redacted_text(body, &[(6, 12)]),
+        "output must match full-body true redact"
+    );
+}
+
+#[test]
+fn regenerate_fails_closed_when_text_cas_missing() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-rdx-missing-cas");
+    let matter = Matter::create(&root, "Rdx").expect("create");
+    let body = "Hello SECRET sauce";
+    // Point text_sha256 at a digest that is not in CAS.
+    let fake = "f".repeat(64);
+    let item = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            subject: Some("Doc".into()),
+            text_sha256: Some(fake.clone()),
+            path: Some("doc.txt".into()),
+            ..Default::default()
+        })
+        .expect("item");
+    // Create redaction against display body (validation only uses display).
+    make_redaction(
+        &matter,
+        &item.id,
+        body,
+        &fake,
+        6,
+        12,
+        redaction_reason::OTHER,
+    );
+    let err = matter
+        .regenerate_redacted_text(&item.id, body, "bob")
+        .expect_err("must fail closed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cannot load full text body")
+            || msg.contains("not found")
+            || msg.contains("Blob"),
+        "{msg}"
+    );
+    // Must not write a partial artifact.
+    let reloaded = matter.get_item(&item.id).expect("item");
+    assert!(reloaded.redacted_text_sha256.is_none());
+}
+
+#[test]
+fn html_only_regenerate_source_is_html_sha() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-rdx-html-only");
+    let matter = Matter::create(&root, "Rdx").expect("create");
+    let display = "Hello SECRET sauce";
+    let html_digest = matter
+        .put_bytes(b"<p>Hello SECRET sauce</p>")
+        .expect("html");
+    let item = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            subject: Some("HtmlOnly".into()),
+            html_sha256: Some(html_digest.clone()),
+            path: Some("doc.html".into()),
+            ..Default::default()
+        })
+        .expect("item");
+    make_redaction(
+        &matter,
+        &item.id,
+        display,
+        &html_digest,
+        6,
+        12,
+        redaction_reason::OTHER,
+    );
+    let result = matter
+        .regenerate_redacted_text(&item.id, display, "bob")
+        .expect("regen");
+    assert_eq!(
+        result.redacted_source_digest.as_deref(),
+        Some(html_digest.as_str())
+    );
+
+    // HTML change → filter redacted_text_stale after update nulls artifact.
+    matter
+        .update_item(
+            &item.id,
+            ItemUpdate {
+                html_sha256: Some(Some(matter.put_bytes(b"<p>changed</p>").expect("new html"))),
+                ..Default::default()
+            },
+        )
+        .expect("update");
+    assert!(matter
+        .get_item(&item.id)
+        .expect("item")
+        .redacted_text_sha256
+        .is_none());
+}
+
+#[test]
 fn reason_privilege_sets_partial_redaction() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-rdx-priv");

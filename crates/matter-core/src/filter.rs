@@ -666,13 +666,18 @@ fn push_condition(
         ("redacted_text_stale", "eq") => {
             let want = bool_value(cond, "redacted_text_stale")?;
             // Stale when redactions exist and artifact is missing, or source digest
-            // no longer matches item text_sha256 (when both present).
+            // no longer matches the body CAS used as source (prefer text_sha256;
+            // else html_sha256 when plain text is absent).
             let stale_pred = format!(
                 "({alias}.redaction_count > 0 AND (\
                     {alias}.redacted_text_sha256 IS NULL \
                     OR ({alias}.redacted_source_digest IS NOT NULL \
                         AND {alias}.text_sha256 IS NOT NULL \
-                        AND {alias}.redacted_source_digest != {alias}.text_sha256)\
+                        AND {alias}.redacted_source_digest != {alias}.text_sha256) \
+                    OR ({alias}.redacted_source_digest IS NOT NULL \
+                        AND {alias}.text_sha256 IS NULL \
+                        AND {alias}.html_sha256 IS NOT NULL \
+                        AND {alias}.redacted_source_digest != {alias}.html_sha256)\
                 ))"
             );
             if want {

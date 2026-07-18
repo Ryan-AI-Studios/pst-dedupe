@@ -116,12 +116,15 @@ pub fn stale_redaction_count_for_ui(
 
 /// Whether redacted produce artifact is missing/outdated while regions exist.
 ///
-/// P0: count>0 AND (sha NULL OR source digest mismatches item text_sha256).
+/// Stale when count>0 AND (sha NULL OR source digest mismatches the body CAS
+/// used as source: prefer `text_sha256`; else `html_sha256` when plain text is
+/// absent). Matches matter-core `redacted_text_stale` filter.
 pub fn redacted_artifact_is_stale(
     redaction_count: i64,
     redacted_text_sha256: Option<&str>,
     redacted_source_digest: Option<&str>,
     text_sha256: Option<&str>,
+    html_sha256: Option<&str>,
 ) -> bool {
     if redaction_count <= 0 {
         return false;
@@ -133,15 +136,42 @@ pub fn redacted_artifact_is_stale(
     if sha_missing {
         return true;
     }
-    matches!(
-        (
-            redacted_source_digest
-                .map(str::trim)
-                .filter(|s| !s.is_empty()),
-            text_sha256.map(str::trim).filter(|s| !s.is_empty()),
-        ),
-        (Some(src), Some(txt)) if src != txt
-    )
+    let src = redacted_source_digest
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let text = text_sha256.map(str::trim).filter(|s| !s.is_empty());
+    let html = html_sha256.map(str::trim).filter(|s| !s.is_empty());
+    match (src, text, html) {
+        (Some(src), Some(txt), _) => src != txt,
+        (Some(src), None, Some(h)) => src != h,
+        _ => false,
+    }
+}
+
+/// Gate regenerate against a truncated Review display pane.
+///
+/// When `text_sha256` is present, matter-core loads the **full** plain-text CAS
+/// and ignores display bytes — truncated UI is OK.
+///
+/// When only a truncated display pane is available (no text CAS), fail closed so
+/// we never write a partial redacted artifact labeled as full-body source.
+pub fn refuse_truncated_regenerate(
+    truncated: bool,
+    text_sha256: Option<&str>,
+) -> Result<(), String> {
+    let has_text = text_sha256
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
+    if truncated && !has_text {
+        return Err(
+            "Body is truncated and no full text CAS (text_sha256) is available; \
+             refuse redacted regenerate from partial display. Re-extract text or \
+             open a smaller body before regenerating."
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// Status line after regenerate.
@@ -382,20 +412,63 @@ mod tests {
 
     #[test]
     fn artifact_stale_helpers() {
-        assert!(redacted_artifact_is_stale(1, None, None, Some("abc")));
-        assert!(!redacted_artifact_is_stale(0, None, None, Some("abc")));
+        assert!(redacted_artifact_is_stale(1, None, None, Some("abc"), None));
+        assert!(!redacted_artifact_is_stale(
+            0,
+            None,
+            None,
+            Some("abc"),
+            None
+        ));
         assert!(!redacted_artifact_is_stale(
             1,
             Some("sha"),
             Some("abc"),
-            Some("abc")
+            Some("abc"),
+            None
         ));
         assert!(redacted_artifact_is_stale(
             1,
             Some("sha"),
             Some("old"),
-            Some("new")
+            Some("new"),
+            None
         ));
+        // HTML-only source mismatch.
+        assert!(redacted_artifact_is_stale(
+            1,
+            Some("sha"),
+            Some("old_html"),
+            None,
+            Some("new_html")
+        ));
+        assert!(!redacted_artifact_is_stale(
+            1,
+            Some("sha"),
+            Some("html"),
+            None,
+            Some("html")
+        ));
+        // text_sha present wins over html for mismatch check.
+        assert!(!redacted_artifact_is_stale(
+            1,
+            Some("sha"),
+            Some("txt"),
+            Some("txt"),
+            Some("different_html")
+        ));
+    }
+
+    #[test]
+    fn refuse_truncated_regenerate_gate() {
+        assert!(refuse_truncated_regenerate(false, None).is_ok());
+        assert!(refuse_truncated_regenerate(false, Some("abc")).is_ok());
+        // Truncated + full text CAS available → OK (core loads CAS).
+        assert!(refuse_truncated_regenerate(true, Some("abc")).is_ok());
+        // Truncated with no text CAS → fail closed.
+        let err = refuse_truncated_regenerate(true, None).expect_err("fail closed");
+        assert!(err.contains("truncated"), "{err}");
+        assert!(refuse_truncated_regenerate(true, Some("  ")).is_err());
     }
 
     #[test]

@@ -1413,11 +1413,18 @@ impl Matter {
         let received_at = apply_opt2(update.received_at, current.received_at);
         let attachment_count = apply_opt2(update.attachment_count, current.attachment_count);
         // Defense-in-depth: body digest change severs redacted produce pointer (0032).
-        // Compare before move of `current.text_sha256` into apply_opt2.
+        // Compare before move of current digests into apply_opt2. Plain text **or**
+        // HTML body change invalidates the redacted artifact (Review may display
+        // either CAS).
         let text_sha256_changed = match &update.text_sha256 {
             Some(new) => new.as_ref() != current.text_sha256.as_ref(),
             None => false,
         };
+        let html_sha256_changed = match &update.html_sha256 {
+            Some(new) => new.as_ref() != current.html_sha256.as_ref(),
+            None => false,
+        };
+        let body_digest_changed = text_sha256_changed || html_sha256_changed;
 
         let text_sha256 = apply_opt2(update.text_sha256, current.text_sha256);
         let html_sha256 = apply_opt2(update.html_sha256, current.html_sha256);
@@ -1584,7 +1591,7 @@ impl Matter {
                 promoted_at,
                 promote_job_id,
                 promote_policy,
-                text_sha256_changed,
+                body_digest_changed,
                 item_id,
             ],
         )?;

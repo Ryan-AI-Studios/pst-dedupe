@@ -17,8 +17,9 @@
 //! - When `redaction_count > 0`, produce **must** use `redacted_text_sha256` CAS
 //!   (or fail closed / force regenerate). **Never** emit original `text_sha256`
 //!   body as the produced text while redactions exist.
-//! - When body digest changes, this track **NULLs** `redacted_text_sha256` so a
-//!   stale artifact cannot be produced by sha alone.
+//! - When body digest changes (`text_sha256` **or** `html_sha256`), this track
+//!   **NULLs** `redacted_text_sha256` so a stale artifact cannot be produced by
+//!   sha alone.
 //! - Full native withhold still follows **0031**; redacted text may be an allowed
 //!   partial produce path when withhold=1 and a redacted artifact is present.
 
@@ -342,6 +343,45 @@ fn null_redacted_artifact_sql(
     Ok(())
 }
 
+/// Choose regenerate body + source digest for produce bookkeeping.
+///
+/// When `text_sha256` is set, load **full** plain-text CAS bytes (ignore
+/// possibly truncated `display_body`). Fail closed if CAS cannot be read.
+///
+/// Otherwise use `display_body` and prefer `html_sha256` as source digest when
+/// present so HTML-only body changes invalidate the artifact.
+fn resolve_regenerate_body_source(
+    text_sha256: Option<&str>,
+    html_sha256: Option<&str>,
+    display_body: &str,
+    load_cas: impl FnOnce(&str) -> Result<Vec<u8>>,
+) -> Result<(String, String)> {
+    if let Some(text_sha) = text_sha256.map(str::trim).filter(|s| !s.is_empty()) {
+        let bytes = load_cas(text_sha).map_err(|e| {
+            Error::Other(format!(
+                "cannot load full text body for redaction regenerate \
+                 (text_sha256={text_sha}): {e}"
+            ))
+        })?;
+        let body = String::from_utf8(bytes).map_err(|_| {
+            Error::Other(format!(
+                "text CAS body is not valid UTF-8 (text_sha256={text_sha}); \
+                 refuse partial redacted regenerate"
+            ))
+        })?;
+        return Ok((body, text_sha.to_string()));
+    }
+
+    // No plain-text CAS: caller-supplied display body only (desk must not pass
+    // a truncated pane as if it were the full source).
+    let source_digest = html_sha256
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| crate::matter::display_body_digest(display_body));
+    Ok((display_body.to_string(), source_digest))
+}
+
 // ---------------------------------------------------------------------------
 // Matter API
 // ---------------------------------------------------------------------------
@@ -613,6 +653,17 @@ impl Matter {
     /// Resolves regions first; applies **active** only (P0). Warns via
     /// [`RedactedTextResult::has_stale`] when any resolve as stale. Empty active
     /// set clears the artifact pointer (no CAS write).
+    ///
+    /// ## Body source (fail-closed against truncated UI panes)
+    ///
+    /// When the item has `text_sha256`, the **full** plain-text CAS blob is
+    /// loaded and used for resolve + build. The caller's `display_body` is
+    /// ignored so a truncated Review pane cannot produce a partial artifact
+    /// labeled with the full-body source digest.
+    ///
+    /// When `text_sha256` is absent, `display_body` is used and
+    /// `redacted_source_digest` is set to `html_sha256` when present (so HTML
+    /// body re-extract invalidates), else a synthetic digest of `display_body`.
     pub fn regenerate_redacted_text(
         &self,
         item_id: &str,
@@ -623,15 +674,15 @@ impl Matter {
         self.ensure_item_in_matter(item_id)?;
 
         let item = self.get_item(item_id)?;
-        let source_digest = item
-            .text_sha256
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| crate::matter::display_body_digest(display_body));
+        let (body_owned, source_digest) = resolve_regenerate_body_source(
+            item.text_sha256.as_deref(),
+            item.html_sha256.as_deref(),
+            display_body,
+            |digest| self.get_bytes(digest),
+        )?;
+        let body = body_owned.as_str();
 
-        let resolved = self.resolve_redactions(item_id, display_body, &source_digest, true)?;
+        let resolved = self.resolve_redactions(item_id, body, &source_digest, true)?;
         let stale_count = resolved
             .iter()
             .filter(|r| r.status == redaction_status::STALE)
@@ -682,7 +733,7 @@ impl Matter {
             });
         }
 
-        let redacted = build_redacted_text(display_body, &active_ranges);
+        let redacted = build_redacted_text(body, &active_ranges);
         let sha = self.put_bytes(redacted.as_bytes())?;
 
         self.with_transaction(|conn| {
@@ -821,5 +872,46 @@ mod tests {
         assert!(out.contains("café"));
         assert!(out.contains("日本語"));
         assert!(out.contains(REDACTED_TOKEN));
+    }
+
+    #[test]
+    fn regenerate_body_prefers_full_text_cas_over_display() {
+        let full = "full body SECRET remainder that is long";
+        let truncated = "full body SECRET rem";
+        let digest = "a".repeat(64);
+        let (body, source) = resolve_regenerate_body_source(Some(&digest), None, truncated, |d| {
+            assert_eq!(d, digest);
+            Ok(full.as_bytes().to_vec())
+        })
+        .expect("load");
+        assert_eq!(body, full);
+        assert_eq!(source, digest);
+        assert_ne!(body, truncated);
+    }
+
+    #[test]
+    fn regenerate_body_fails_closed_when_text_cas_missing() {
+        let digest = "b".repeat(64);
+        let err = resolve_regenerate_body_source(Some(&digest), None, "partial", |_d| {
+            Err(Error::Other("blob missing".into()))
+        })
+        .expect_err("must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot load full text body") || msg.contains("blob missing"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn regenerate_body_uses_html_sha_when_no_text() {
+        let html = "c".repeat(64);
+        let display = "stripped display body";
+        let (body, source) = resolve_regenerate_body_source(None, Some(&html), display, |_| {
+            unreachable!("no text cas")
+        })
+        .expect("display path");
+        assert_eq!(body, display);
+        assert_eq!(source, html);
     }
 }
