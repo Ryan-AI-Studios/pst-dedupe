@@ -5083,15 +5083,17 @@ pub fn re_resolve_whitespace_normalized(
         return None;
     }
     let (norm_body, raw_at) = build_whitespace_norm_map(display_body);
+    // Context must keep boundary spaces so adjacency to the quote still matches
+    // (trim would turn "alpha " into "alpha" and fail the immediate-prefix check).
     let prefix_n = hl
         .prefix
         .as_deref()
-        .map(normalize_for_quote_match)
+        .map(collapse_whitespace)
         .filter(|s| !s.is_empty());
     let suffix_n = hl
         .suffix
         .as_deref()
-        .map(normalize_for_quote_match)
+        .map(collapse_whitespace)
         .filter(|s| !s.is_empty());
 
     let mut hits: Vec<usize> = Vec::new();

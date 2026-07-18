@@ -5,7 +5,8 @@
 
 use eframe::egui::{text::LayoutJob, text::TextFormat, text::TextWrapping, Color32, FontId};
 use matter_core::{
-    display_body_digest, utf8_char_slice, CreateHighlightInput, ItemHighlight, ResolvedHighlight,
+    display_body_digest, highlight_status, utf8_char_slice, CreateHighlightInput, ItemHighlight,
+    ResolvedHighlight,
 };
 
 /// Yellow paint for active user highlights.
@@ -167,6 +168,10 @@ pub fn focus_allows_coding_shortcuts(no_widget_focus: bool, note_editor_focused:
 }
 
 /// Build resolved paint list from stored highlights + current body (in-memory).
+///
+/// UI banners / header stale counts / list labels **must** use this (or
+/// [`count_stale_resolved`]) rather than raw SQLite `ItemHighlight.status`,
+/// which can lag until optional `persist_stale` runs.
 pub fn resolve_for_paint(
     highlights: &[ItemHighlight],
     body: &str,
@@ -176,6 +181,48 @@ pub fn resolve_for_paint(
         .iter()
         .map(|hl| matter_core::resolve_highlight_against_body(hl, body, digest))
         .collect()
+}
+
+/// Count highlights whose **resolved** status is stale (body re-resolve failed).
+pub fn count_stale_resolved(resolved: &[ResolvedHighlight]) -> usize {
+    resolved
+        .iter()
+        .filter(|r| r.status == highlight_status::STALE)
+        .count()
+}
+
+/// Prefer in-memory resolve status for UI labels; fall back to stored row when
+/// the display body is not ready yet.
+pub fn highlight_ui_status<'a>(
+    hl: &'a ItemHighlight,
+    resolved: Option<&'a ResolvedHighlight>,
+) -> &'a str {
+    resolved
+        .map(|r| r.status.as_str())
+        .unwrap_or(hl.status.as_str())
+}
+
+/// Look up a paint-ready resolve row by highlight id.
+pub fn find_resolved<'a>(
+    resolved: &'a [ResolvedHighlight],
+    highlight_id: &str,
+) -> Option<&'a ResolvedHighlight> {
+    resolved.iter().find(|r| r.highlight_id == highlight_id)
+}
+
+/// Stale count for header / banner: use re-resolve when body is ready, else
+/// provisional stored SQLite status.
+pub fn stale_count_for_ui(
+    highlights: &[ItemHighlight],
+    resolved: Option<&[ResolvedHighlight]>,
+) -> usize {
+    match resolved {
+        Some(r) => count_stale_resolved(r),
+        None => highlights
+            .iter()
+            .filter(|h| h.status == highlight_status::STALE)
+            .count(),
+    }
 }
 
 /// egui TextEdit layouter factory is not stored here — paint uses [`body_layout_job`].
@@ -255,5 +302,81 @@ mod tests {
         assert_eq!(body_digest_for_item(Some("abc"), "hello"), "abc");
         let syn = body_digest_for_item(None, "hello");
         assert_eq!(syn, display_body_digest("hello"));
+    }
+
+    fn sample_hl(id: &str, quote: &str, digest: &str, status: &str) -> ItemHighlight {
+        ItemHighlight {
+            id: id.into(),
+            item_id: "itm".into(),
+            matter_id: "mat".into(),
+            start_utf8: 0,
+            end_utf8: quote.chars().count() as i64,
+            exact_quote: quote.into(),
+            prefix: None,
+            suffix: None,
+            body_digest: digest.into(),
+            color: "#FFF59D".into(),
+            status: status.into(),
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            created_by: "t".into(),
+        }
+    }
+
+    #[test]
+    fn resolve_drives_stale_ui_when_quote_missing() {
+        // Stored row still says active (DB not yet persisted stale).
+        let body_old = "The secret clause is here.";
+        let body_new = "Completely different body text.";
+        let hl = sample_hl(
+            "hlt_stale",
+            "secret",
+            &display_body_digest(body_old),
+            highlight_status::ACTIVE,
+        );
+        let digest_new = display_body_digest(body_new);
+        let resolved = resolve_for_paint(std::slice::from_ref(&hl), body_new, &digest_new);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].status, highlight_status::STALE);
+        // UI helpers must report stale from resolve, not stored active.
+        assert_eq!(count_stale_resolved(&resolved), 1);
+        assert_eq!(
+            stale_count_for_ui(std::slice::from_ref(&hl), Some(&resolved)),
+            1
+        );
+        assert_eq!(
+            highlight_ui_status(&hl, find_resolved(&resolved, "hlt_stale")),
+            highlight_status::STALE
+        );
+        // Without body resolve, fall back to stored (still active).
+        assert_eq!(stale_count_for_ui(std::slice::from_ref(&hl), None), 0);
+    }
+
+    #[test]
+    fn resolve_keeps_active_when_digest_and_quote_match() {
+        let body = "hello yellow world";
+        let digest = display_body_digest(body);
+        let hl = ItemHighlight {
+            id: "hlt_ok".into(),
+            item_id: "itm".into(),
+            matter_id: "mat".into(),
+            start_utf8: 6,
+            end_utf8: 12,
+            exact_quote: "yellow".into(),
+            prefix: Some("hello ".into()),
+            suffix: Some(" world".into()),
+            body_digest: digest.clone(),
+            color: "#FFF59D".into(),
+            status: highlight_status::ACTIVE.into(),
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            created_by: "t".into(),
+        };
+        let resolved = resolve_for_paint(std::slice::from_ref(&hl), body, &digest);
+        assert_eq!(count_stale_resolved(&resolved), 0);
+        assert_eq!(
+            highlight_ui_status(&hl, find_resolved(&resolved, "hlt_ok")),
+            highlight_status::ACTIVE
+        );
     }
 }

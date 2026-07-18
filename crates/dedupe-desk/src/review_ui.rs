@@ -39,15 +39,16 @@ use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense};
 use matter_core::{
     parse_bound_instant, ApplyCodesInput, ApplyCodesResult, CodeDef, CodeDefInput, FilterCondition,
-    FilterSpec, ItemCodeInfo, ItemHighlight, ItemNote, Matter, ReviewListRow, SavedSearch,
-    SavedSearchInput, UpsertNoteInput,
+    FilterSpec, ItemCodeInfo, ItemHighlight, ItemNote, Matter, ResolvedHighlight, ReviewListRow,
+    SavedSearch, SavedSearchInput, UpsertNoteInput,
 };
 
 use crate::review_body::{BodyLoader, BodyPane};
 use crate::review_nav;
 use crate::review_notes::{
-    body_digest_for_item, body_job_for_ui, focus_allows_coding_shortcuts,
-    highlight_input_from_selection, resolve_for_paint, selection_from_char_range, BodySelection,
+    body_digest_for_item, body_job_for_ui, find_resolved, focus_allows_coding_shortcuts,
+    highlight_input_from_selection, highlight_ui_status, resolve_for_paint,
+    selection_from_char_range, stale_count_for_ui, BodySelection,
 };
 
 /// Fixed list row height (sans item spacing) for `ScrollArea::show_rows`.
@@ -332,8 +333,11 @@ pub struct ReviewState {
     filter_status: Option<String>,
     /// Notes for the current selection (newest first).
     item_notes: Vec<ItemNote>,
-    /// Highlights for the current selection.
+    /// Highlights for the current selection (stored SQLite rows).
     item_highlights: Vec<ItemHighlight>,
+    /// `(item_id, display_digest)` for which we already ran
+    /// `resolve_highlights(..., persist_stale: true)` this session.
+    stale_persist_key: Option<(String, String)>,
     /// Draft for new document note.
     note_draft: String,
     /// Note id being edited (if any) + draft body.
@@ -404,6 +408,7 @@ impl ReviewState {
         self.filter_status = None;
         self.item_notes.clear();
         self.item_highlights.clear();
+        self.stale_persist_key = None;
         self.note_draft.clear();
         self.note_edit_id = None;
         self.note_edit_body.clear();
@@ -921,6 +926,7 @@ impl ReviewState {
     fn clear_notes_for_selection(&mut self) {
         self.item_notes.clear();
         self.item_highlights.clear();
+        self.stale_persist_key = None;
         self.note_draft.clear();
         self.note_edit_id = None;
         self.note_edit_body.clear();
@@ -940,12 +946,80 @@ impl ReviewState {
             Ok((notes, highlights)) => {
                 self.item_notes = notes;
                 self.item_highlights = highlights;
+                // Force re-resolve + optional persist against the current body.
+                self.stale_persist_key = None;
                 self.notes_error = None;
             }
             Err(e) => {
                 self.item_notes.clear();
                 self.item_highlights.clear();
+                self.stale_persist_key = None;
                 self.notes_error = Some(e);
+            }
+        }
+    }
+
+    /// Ready display body for the current selection, if loaded.
+    fn ready_body_for_item(&self, item_id: &str) -> Option<&str> {
+        match self.body.pane() {
+            BodyPane::Ready {
+                item_id: bid,
+                text: Ok(t),
+                ..
+            } if bid == item_id => Some(t.as_str()),
+            _ => None,
+        }
+    }
+
+    /// In-memory re-resolve against the ready body (None when body not ready).
+    fn resolved_highlights_for_item(
+        &self,
+        item_id: &str,
+        text_sha256: Option<&str>,
+    ) -> Option<Vec<ResolvedHighlight>> {
+        let body = self.ready_body_for_item(item_id)?;
+        let digest = body_digest_for_item(text_sha256, body);
+        Some(resolve_for_paint(&self.item_highlights, body, &digest))
+    }
+
+    /// Persist `status=stale` in SQLite once per (item, digest) when body is ready.
+    /// UI still prefers in-memory resolve; this only aligns stored rows.
+    fn maybe_persist_stale_resolves(
+        &mut self,
+        matter_root: &Utf8Path,
+        item_id: &str,
+        text_sha256: Option<&str>,
+    ) {
+        if self.item_highlights.is_empty() {
+            return;
+        }
+        let Some(body) = self.ready_body_for_item(item_id).map(|s| s.to_string()) else {
+            return;
+        };
+        let digest = body_digest_for_item(text_sha256, &body);
+        let key = (item_id.to_string(), digest.clone());
+        if self.stale_persist_key.as_ref() == Some(&key) {
+            return;
+        }
+        match Matter::open(matter_root) {
+            Ok(matter) => {
+                match matter.resolve_highlights(item_id, &body, &digest, true) {
+                    Ok(_resolved) => {
+                        // Refresh stored rows so status columns match persist.
+                        if let Ok(hls) = matter.list_highlights(item_id) {
+                            self.item_highlights = hls;
+                        }
+                        self.stale_persist_key = Some(key);
+                    }
+                    Err(_) => {
+                        // Non-fatal: banners still use in-memory resolve; avoid
+                        // clobbering an operator-visible notes_error.
+                        self.stale_persist_key = Some(key);
+                    }
+                }
+            }
+            Err(_) => {
+                // Matter briefly unreadable — skip; try next frame / reload.
             }
         }
     }
@@ -2171,6 +2245,22 @@ fn show_filter_bar(
             ui.checkbox(&mut state.filter_draft.include_family, "Include family");
         });
 
+        ui.horizontal(|ui| {
+            ui.label("Note text:");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.filter_draft.note_text)
+                    .desired_width(220.0)
+                    .hint_text("Note text contains…"),
+            );
+            if !state.filter_draft.note_text.trim().is_empty() {
+                ui.label(
+                    RichText::new("active: note text")
+                        .small()
+                        .color(Color32::from_rgb(40, 120, 60)),
+                );
+            }
+        });
+
         // Codes multi-select (active defs)
         ui.horizontal_wrapped(|ui| {
             ui.label("Codes:");
@@ -2450,14 +2540,18 @@ fn show_viewer(
         // Coding panel
         show_coding_panel(ui, state, matter_root, ctx, actor, &row.id);
 
+        // Align DB stale flags once body is available (cheap; once per item+digest).
+        state.maybe_persist_stale_resolves(matter_root, &row.id, row.text_sha256.as_deref());
+
+        // In-memory re-resolve drives banners / labels / paint (not raw DB alone).
+        let resolved_for_ui =
+            state.resolved_highlights_for_item(&row.id, row.text_sha256.as_deref());
+        let resolved_slice = resolved_for_ui.as_deref();
+
         // Notes / highlights header counts
         let n_notes = state.item_notes.len();
         let n_hl = state.item_highlights.len();
-        let n_stale = state
-            .item_highlights
-            .iter()
-            .filter(|h| h.status == "stale")
-            .count();
+        let n_stale = stale_count_for_ui(&state.item_highlights, resolved_slice);
         ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new(format!("📝 {n_notes} notes · {n_hl} highlights"))
@@ -2534,7 +2628,13 @@ fn show_viewer(
                                 .color(Color32::GRAY),
                         );
                     } else {
-                        show_selectable_body(ui, state, &row, &text);
+                        show_selectable_body(
+                            ui,
+                            state,
+                            &row,
+                            &text,
+                            resolved_for_ui.as_deref().unwrap_or(&[]),
+                        );
                     }
                 }
                 BodyView::Error(e) if e.contains("No extracted text") => {
@@ -2583,8 +2683,15 @@ fn show_viewer(
 
         ui.separator();
 
-        // Notes panel
-        show_notes_panel(ui, state, matter_root, ctx, actor);
+        // Notes panel (banner + labels use same resolved list as paint).
+        show_notes_panel(
+            ui,
+            state,
+            matter_root,
+            ctx,
+            actor,
+            resolved_for_ui.as_deref(),
+        );
 
         ui.separator();
 
@@ -2605,6 +2712,7 @@ fn show_selectable_body(
     state: &mut ReviewState,
     row: &ReviewListRow,
     body: &str,
+    resolved: &[ResolvedHighlight],
 ) {
     // Sync edit buffer when selection/body changes.
     if state.body_edit_item_id.as_deref() != Some(row.id.as_str()) || state.body_edit_buf != body {
@@ -2618,12 +2726,12 @@ fn show_selectable_body(
         }
     }
 
-    let digest = body_digest_for_item(row.text_sha256.as_deref(), body);
-    let resolved = resolve_for_paint(&state.item_highlights, body, &digest);
     let wrap_width = ui.available_width();
-    let job = body_job_for_ui(body, &resolved, wrap_width);
+    let job = body_job_for_ui(body, resolved, wrap_width);
 
     // Paint highlighted body (read-only layout job).
+    // Dual widget residual (egui 0.34): Label paints ranges; TextEdit below captures
+    // selection. Unifying paint+cursor on one widget is deferred — see desk README.
     ui.add(egui::Label::new(job).wrap().selectable(true));
 
     // Selection capture via a second pass TextEdit (same text) — frame-less, used for cursor range.
@@ -2657,6 +2765,7 @@ fn show_notes_panel(
     matter_root: &Utf8Path,
     ctx: &egui::Context,
     actor: &str,
+    resolved: Option<&[ResolvedHighlight]>,
 ) {
     ui.label(RichText::new("Notes").strong().small());
     ui.label(
@@ -2667,19 +2776,12 @@ fn show_notes_panel(
         .small(),
     );
 
-    // Stale banner
-    let stale: Vec<&ItemHighlight> = state
-        .item_highlights
-        .iter()
-        .filter(|h| h.status == "stale")
-        .collect();
-    if !stale.is_empty() {
+    // Stale banner — from in-memory re-resolve when body is ready.
+    let n_stale = stale_count_for_ui(&state.item_highlights, resolved);
+    if n_stale > 0 {
         ui.colored_label(
             Color32::from_rgb(180, 120, 40),
-            format!(
-                "⚠ {} highlight(s) are stale (body changed; quote not re-found).",
-                stale.len()
-            ),
+            format!("⚠ {n_stale} highlight(s) are stale (body changed; quote not re-found)."),
         );
     }
 
@@ -2777,23 +2879,27 @@ fn show_notes_panel(
             }
         });
 
-    // Highlights list (compact)
+    // Highlights list (compact) — status labels from re-resolve when available.
     if !state.item_highlights.is_empty() {
         ui.add_space(4.0);
         ui.label(RichText::new("Highlights").strong().small());
         let hls: Vec<ItemHighlight> = state.item_highlights.clone();
         for hl in hls {
             ui.horizontal_wrapped(|ui| {
-                let status = if hl.status == "stale" {
+                let res = resolved.and_then(|r| find_resolved(r, &hl.id));
+                let status_raw = highlight_ui_status(&hl, res);
+                let status = if status_raw == "stale" {
                     "⚠ stale"
                 } else {
                     "active"
                 };
+                // Prefer remapped offsets from resolve for display when present.
+                let (start, end) = res
+                    .map(|r| (r.start_utf8, r.end_utf8))
+                    .unwrap_or((hl.start_utf8, hl.end_utf8));
                 ui.label(
                     RichText::new(format!(
-                        "[{status}] chars {}..{} “{}”",
-                        hl.start_utf8,
-                        hl.end_utf8,
+                        "[{status}] chars {start}..{end} “{}”",
                         hl.exact_quote.chars().take(40).collect::<String>()
                     ))
                     .small()

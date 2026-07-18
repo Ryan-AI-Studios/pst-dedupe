@@ -336,6 +336,66 @@ fn digest_change_missing_quote_is_stale() {
 }
 
 #[test]
+fn ambiguous_normalized_quote_disambiguated_by_prefix() {
+    // Two identical normalized quotes; prefix selects the correct occurrence.
+    let body = "alpha foo beta foo gamma";
+    // First "foo" at chars 6..9, second at 15..18.
+    let digest_orig = display_body_digest("old body so re-resolve path is used");
+    let digest_new = display_body_digest(body);
+    assert_ne!(digest_orig, digest_new);
+
+    let base = |prefix: Option<&str>| ItemHighlight {
+        id: "hlt_amb".into(),
+        item_id: "itm".into(),
+        matter_id: "mat".into(),
+        start_utf8: 0,
+        end_utf8: 3,
+        exact_quote: "foo".into(),
+        prefix: prefix.map(|s| s.to_string()),
+        suffix: None,
+        body_digest: digest_orig.clone(),
+        color: HIGHLIGHT_DEFAULT_COLOR.into(),
+        status: highlight_status::ACTIVE.into(),
+        created_at: "t".into(),
+        updated_at: "t".into(),
+        created_by: "t".into(),
+    };
+
+    // No prefix → two hits → ambiguous → None / stale.
+    let no_prefix = base(None);
+    assert!(
+        re_resolve_whitespace_normalized(&no_prefix, body).is_none(),
+        "ambiguous without prefix must not resolve"
+    );
+    let stale = resolve_highlight_against_body(&no_prefix, body, &digest_new);
+    assert_eq!(stale.status, highlight_status::STALE);
+
+    // Wrong prefix → zero filtered hits → None / stale.
+    let wrong = base(Some("zzz "));
+    assert!(re_resolve_whitespace_normalized(&wrong, body).is_none());
+    assert_eq!(
+        resolve_highlight_against_body(&wrong, body, &digest_new).status,
+        highlight_status::STALE
+    );
+
+    // Correct prefix for first occurrence → single range.
+    let first = base(Some("alpha "));
+    let range = re_resolve_whitespace_normalized(&first, body).expect("first foo");
+    assert_eq!(range, (6, 9));
+    let slice = utf8_char_slice(body, range.0 as usize, range.1 as usize).expect("slice");
+    assert_eq!(slice, "foo");
+    let resolved = resolve_highlight_against_body(&first, body, &digest_new);
+    assert_eq!(resolved.status, highlight_status::ACTIVE);
+    assert!(resolved.remapped);
+    assert_eq!((resolved.start_utf8, resolved.end_utf8), (6, 9));
+
+    // Correct prefix for second occurrence.
+    let second = base(Some("beta "));
+    let range2 = re_resolve_whitespace_normalized(&second, body).expect("second foo");
+    assert_eq!(range2, (15, 18));
+}
+
+#[test]
 fn delete_highlight_unlinks_notes() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-hl-unlink");

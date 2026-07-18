@@ -132,7 +132,7 @@ Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 |---|---|
 | Keyword bar | Keyword box + **Search** / **Clear**; composes FTS hits ∩ metadata filters; status “N keyword hits · M after filters” |
 | Index | **Update index** / **Rebuild index** (`fts_index` job; rebuild uses `reset:true`) |
-| Filter bar | Custodian, codes, date from/to (RFC3339+offset), include family; **Apply** / **Clear**; quick chips Uncoded / Privilege / Responsive / **Has notes** / **Has highlights** |
+| Filter bar | Custodian, codes, date from/to (RFC3339+offset), include family, **Note text contains…**; **Apply** / **Clear**; quick chips Uncoded / Privilege / Responsive / **Has notes** / **Has highlights** |
 | Saved searches | Dropdown Load / Save (name) / Delete — stores `FilterSpec` JSON + optional `keyword` in `saved_searches` |
 | Corpus list | Thin rows (`list_review_thin`, filtered, or keyword-composed); multi-select ☑; fixed `ROW_HEIGHT` 22.0 |
 | Status | “Showing N of M” + **Load more** when filtered/large count exceeds loaded rows |
@@ -140,7 +140,7 @@ Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 | Code chips | Current-item codes; click chip to **remove** (no confirm) |
 | Coding panel | Active code buttons toggle current item; batch **Add** / **Remove** mode; family checkbox; Apply |
 | Body | CAS text (`text_sha256` preferred, else `html_sha256` with block-aware strip); yellow paint on active highlights; select text → **Highlight** / **Note on selection** |
-| Notes panel | List newest-first; add document note; edit/delete; stale highlight banner |
+| Notes panel | List newest-first; add document note; edit/delete; stale banner from **in-memory re-resolve** (not raw DB status alone) |
 | Family strip | Same-`family_id` members in the loaded list; click to open |
 
 **Work product:** Notes and highlights live in the matter DB only. They are **not**
@@ -170,10 +170,13 @@ and note-editor focus (previous frame) — note / filter / keyword `TextEdit` bl
 | Document note | Notes panel multiline + **Save note** (`highlight_id` null) |
 | Highlight | Select in body select box → **Highlight** (default yellow `#FFF59D`) |
 | Passage note | **Note on selection** creates highlight + linked note |
-| Paint | Active ranges yellow on layout job; stale banner when re-resolve fails |
+| Paint | Active ranges yellow on layout job; header/banner/list status from **re-resolve** against current body |
+| Stale | Digest mismatch + quote not found → stale UI immediately; optional `persist_stale` aligns SQLite once per item+digest |
 | Delete highlight | Unlinks notes (keeps note body as document-level) |
 | Anchoring | Char indices + quote + digest; whitespace-normalized re-resolve on body drift |
-| Filter | Quick chips **Has notes** / **Has highlights**; optional note text contains |
+| Filter | Quick chips **Has notes** / **Has highlights**; **Note text contains…** bound to `FilterDraft.note_text` |
+
+**Residual — dual body widgets (egui 0.34):** Review body uses a painted `Label` (`LayoutJob` highlight backgrounds) **plus** a second multiline `TextEdit` for char-range selection. Unifying paint + selection on one widget is deferred to avoid breaking highlight creation under the current egui version; operators select text in the lower box.
 
 #### Filters / saved searches (0028)
 
