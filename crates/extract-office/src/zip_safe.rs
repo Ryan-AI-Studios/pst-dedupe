@@ -83,11 +83,22 @@ pub fn precheck_entry(entry: &ZipFile<'_, impl Read>) -> Result<()> {
 /// (even when headers claim a smaller size).
 pub fn read_entry_capped<R: Read>(entry: &mut ZipFile<'_, R>) -> Result<Vec<u8>> {
     precheck_entry(entry)?;
+    read_entry_capped_with_max(entry, MAX_UNCOMPRESSED_ENTRY_BYTES)
+}
+
+/// Same as [`read_entry_capped`] with an injectable hard cap (tests / custom bounds).
+///
+/// Always applies `Read::take(cap + 1)` so a stream that delivers more than `cap`
+/// is detected even when zip headers under-declare uncompressed size.
+pub fn read_entry_capped_with_max<R: Read>(
+    entry: &mut ZipFile<'_, R>,
+    cap: u64,
+) -> Result<Vec<u8>> {
     let name = entry.name().to_string();
+    validate_entry_name(&name)?;
     let declared = entry.size();
-    let cap = MAX_UNCOMPRESSED_ENTRY_BYTES;
     let mut limited = entry.take(cap.saturating_add(1));
-    let mut buf = Vec::with_capacity(declared.min(cap) as usize);
+    let mut buf = Vec::with_capacity((declared.min(cap) as usize).min(64 * 1024));
     limited
         .read_to_end(&mut buf)
         .map_err(|e| Error::parse(format!("read entry '{name}': {e}")))?;
@@ -154,26 +165,20 @@ mod tests {
 
     #[test]
     fn streaming_take_caps_read() {
-        // Build a zip whose declared uncompressed size is small but we still
-        // always apply take(cap+1). Prove the helper uses take by reading a
-        // normal entry successfully and verifying cap constant is applied.
         let data = zip_bytes(&[("word/document.xml", b"<w:t>hi</w:t>")]);
         let mut archive = open_zip(&data).unwrap();
         let bytes = read_named_entry(&mut archive, "word/document.xml").unwrap();
         assert_eq!(bytes, b"<w:t>hi</w:t>");
-        // Cap is a production constant; read path always applies take(cap+1).
-        let _ = MAX_UNCOMPRESSED_ENTRY_BYTES;
     }
 
     #[test]
-    fn take_limit_logic_rejects_over_cap_buffer() {
-        // Unit-level: simulate what read_entry_capped does when more than cap arrives.
-        let oversized = vec![0u8; 16];
-        let cap = 8u64;
-        let mut cursor = Cursor::new(oversized.as_slice());
-        let mut limited = (&mut cursor).take(cap.saturating_add(1));
-        let mut buf = Vec::new();
-        limited.read_to_end(&mut buf).unwrap();
-        assert!(buf.len() as u64 > cap);
+    fn read_entry_capped_rejects_large_stored_entry() {
+        // Real zip entry larger than a small injectable cap → LimitExceeded via take.
+        let payload = vec![b'Z'; 64];
+        let data = zip_bytes(&[("word/document.xml", payload.as_slice())]);
+        let mut archive = open_zip(&data).unwrap();
+        let mut entry = archive.by_name("word/document.xml").unwrap();
+        let err = read_entry_capped_with_max(&mut entry, 16).expect_err("over cap");
+        assert_eq!(err.code(), "office_limit_exceeded");
     }
 }

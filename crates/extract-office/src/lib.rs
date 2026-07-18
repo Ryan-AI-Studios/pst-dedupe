@@ -55,8 +55,8 @@ pub use limits::{
 };
 pub use params::OfficeExtractParams;
 pub use run::{
-    run_office_extract, OfficeExtractOutcome, OfficeExtractSummary, JOB_KIND_OFFICE_EXTRACT,
-    OFFICE_EXTRACT_STAGE,
+    reject_oversized_native_len, reject_oversized_native_len_with_max, run_office_extract,
+    OfficeExtractOutcome, OfficeExtractSummary, JOB_KIND_OFFICE_EXTRACT, OFFICE_EXTRACT_STAGE,
 };
 
 /// Successful extract payload.

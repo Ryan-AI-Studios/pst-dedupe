@@ -2,15 +2,16 @@
 
 use std::time::Instant;
 
-use chrono::Utc;
 use matter_core::{
     ApplyOfficeTextInput, AuditEventInput, Matter, OfficeCandidate, OfficeExtractApplyResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::detect;
 use crate::error::{Error, Result};
 use crate::extract::extract_office_catch_unwind;
+use crate::limits::MAX_NATIVE_INPUT_BYTES;
 use crate::params::OfficeExtractParams;
 
 /// Job kind string for process-runner.
@@ -50,6 +51,22 @@ struct CheckpointCursor {
     skipped_count: u64,
     error_count: u64,
     params: serde_json::Value,
+}
+
+/// Reject oversized native length before any full CAS load / extract.
+///
+/// Used by the job path after [`Matter::cas_len`] so hostile natives never OOM
+/// the process before the limit error is recorded.
+pub fn reject_oversized_native_len(len: u64) -> Result<()> {
+    reject_oversized_native_len_with_max(len, MAX_NATIVE_INPUT_BYTES)
+}
+
+/// Same as [`reject_oversized_native_len`] with an injectable max (tests).
+pub fn reject_oversized_native_len_with_max(len: u64, max: u64) -> Result<()> {
+    if len > max {
+        return Err(Error::limit(format!("native size {len} exceeds max {max}")));
+    }
+    Ok(())
 }
 
 /// Run office extract on `matter` for the runner-created `job_id`.
@@ -227,7 +244,7 @@ fn run_inner(
                 return Ok(OfficeExtractOutcome::Paused(summary));
             }
 
-            // Format filter from params
+            // Format filter from params (path/mime only; sniff happens in process_one).
             if let Some(fmt) = format_hint(&cand) {
                 if !params.allows_format(fmt) {
                     summary.skipped_count += 1;
@@ -262,6 +279,33 @@ fn format_hint(cand: &OfficeCandidate) -> Option<&'static str> {
     crate::detect::from_extension(path).map(|f| f.as_str())
 }
 
+/// True when a successful extract already covers this native (non-force skip).
+///
+/// Requires text present, source matching native, and status not `error`
+/// (`ok` after extract, or `skipped` after a prior idempotent pass). Failed
+/// extracts leave status=`error` without updating source so they remain retryable.
+fn already_extracted_ok(cand: &OfficeCandidate, native_sha: &str, force: bool) -> bool {
+    if force || cand.text_sha256.is_none() {
+        return false;
+    }
+    if cand.office_source_native_sha256.as_deref() != Some(native_sha) {
+        return false;
+    }
+    matches!(
+        cand.office_extract_status.as_deref(),
+        Some(matter_core::office_extract_status::OK)
+            | Some(matter_core::office_extract_status::SKIPPED)
+    )
+}
+
+/// True when we already sniffed this native as not-office (skip without re-read).
+fn already_skipped_not_office(cand: &OfficeCandidate, native_sha: &str, force: bool) -> bool {
+    !force
+        && cand.office_extract_status.as_deref()
+            == Some(matter_core::office_extract_status::SKIPPED)
+        && cand.office_source_native_sha256.as_deref() == Some(native_sha)
+}
+
 fn process_one(
     matter: &Matter,
     cand: &OfficeCandidate,
@@ -274,11 +318,8 @@ fn process_one(
         return Ok(());
     };
 
-    // Idempotent skip (also enforced in apply, but avoid CAS read when possible).
-    if !force
-        && cand.text_sha256.is_some()
-        && cand.office_source_native_sha256.as_deref() == Some(native_sha)
-    {
+    // Idempotent skip after successful extract for this native.
+    if already_extracted_ok(cand, native_sha, force) {
         let _ = matter.apply_office_text(ApplyOfficeTextInput {
             item_id: cand.id.clone(),
             force,
@@ -296,20 +337,88 @@ fn process_one(
         return Ok(());
     }
 
-    let native_bytes = match matter.get_bytes(native_sha) {
-        Ok(b) => b,
+    // Avoid re-loading natives already sniffed as not-office.
+    if already_skipped_not_office(cand, native_sha, force) {
+        summary.skipped_count += 1;
+        summary.completed_count += 1;
+        return Ok(());
+    }
+
+    // Size precheck via CAS metadata — never materialize oversized natives.
+    match matter.cas_len(native_sha) {
+        Ok(len) => {
+            if let Err(e) = reject_oversized_native_len(len) {
+                record_error(matter, &cand.id, native_sha, &e)?;
+                summary.error_count += 1;
+                summary.completed_count += 1;
+                return Ok(());
+            }
+        }
         Err(e) => {
             record_error(
                 matter,
                 &cand.id,
                 native_sha,
-                &Error::Other(format!("CAS read: {e}")),
+                &Error::Other(format!("CAS stat: {e}")),
             )?;
             summary.error_count += 1;
             summary.completed_count += 1;
             return Ok(());
         }
+    }
+
+    let native_bytes = match matter.get_bytes_capped(native_sha, MAX_NATIVE_INPUT_BYTES) {
+        Ok(b) => b,
+        Err(e) => {
+            // Map size-cap failures from get_bytes_capped to limit code when possible.
+            let err = {
+                let msg = e.to_string();
+                if msg.contains("exceeds cap") {
+                    Error::limit(msg)
+                } else {
+                    Error::Other(format!("CAS read: {e}"))
+                }
+            };
+            record_error(matter, &cand.id, native_sha, &err)?;
+            summary.error_count += 1;
+            summary.completed_count += 1;
+            return Ok(());
+        }
     };
+
+    // Sniff before full extract so CAS-only non-office natives can be marked
+    // skipped (with source) instead of error-retrying forever.
+    match detect::detect_format(
+        cand.path.as_deref(),
+        cand.mime_type.as_deref(),
+        Some(&native_bytes),
+    ) {
+        Ok(None) => {
+            matter.apply_office_text(ApplyOfficeTextInput {
+                item_id: cand.id.clone(),
+                force: true, // bookkeeping even if prior error status
+                text: None,
+                method: None,
+                status: Some(matter_core::office_extract_status::SKIPPED.into()),
+                error: Some("not_office".into()),
+                source_native_sha256: Some(native_sha.into()),
+                partial: false,
+                file_category: None,
+                refine_file_category: false,
+            })?;
+            summary.skipped_count += 1;
+            summary.completed_count += 1;
+            return Ok(());
+        }
+        Ok(Some(_)) => {}
+        Err(e) => {
+            // Legacy / encrypted detection errors — record and continue job.
+            record_error(matter, &cand.id, native_sha, &e)?;
+            summary.error_count += 1;
+            summary.completed_count += 1;
+            return Ok(());
+        }
+    }
 
     let extract_result = extract_office_catch_unwind(
         &native_bytes,
@@ -345,6 +454,7 @@ fn process_one(
         }
         Err(e) => {
             // Empty text / parse errors: bookkeeping without text CAS.
+            // Does not set office_source_native_sha256 → next non-force run retries.
             record_error(matter, &cand.id, native_sha, &e)?;
             summary.error_count += 1;
             summary.completed_count += 1;
@@ -354,7 +464,11 @@ fn process_one(
 }
 
 fn record_error(matter: &Matter, item_id: &str, native_sha: &str, err: &Error) -> Result<()> {
-    let _ = matter.apply_office_text(ApplyOfficeTextInput {
+    // Error path: status=error, do not claim successful source (apply leaves
+    // office_source_native_sha256 untouched). `source_native_sha256` is passed
+    // only for apply's native resolution fallback on skip checks — apply ignores
+    // it for error UPDATE of the source column.
+    matter.apply_office_text(ApplyOfficeTextInput {
         item_id: item_id.into(),
         force: true, // allow writing error bookkeeping even when text present
         text: None,
@@ -366,16 +480,18 @@ fn record_error(matter: &Matter, item_id: &str, native_sha: &str, err: &Error) -
         file_category: None,
         refine_file_category: false,
     })?;
-    // Also accumulate item_errors for operators.
-    let _ = matter.record_item_error(matter_core::ItemErrorInput {
-        item_id: Some(item_id.into()),
-        source_id: None,
-        job_id: None,
-        stage: OFFICE_EXTRACT_STAGE.into(),
-        code: err.code().into(),
-        message: err.short_message(),
-        detail: None,
-    });
+    // Propagate item_errors persistence failures so the job can surface them.
+    matter
+        .record_item_error(matter_core::ItemErrorInput {
+            item_id: Some(item_id.into()),
+            source_id: None,
+            job_id: None,
+            stage: OFFICE_EXTRACT_STAGE.into(),
+            code: err.code().into(),
+            message: err.short_message(),
+            detail: None,
+        })
+        .map_err(|e| Error::Other(format!("record_item_error failed: {e}")))?;
     Ok(())
 }
 
@@ -403,6 +519,37 @@ fn write_checkpoint(
         &cursor_json,
         summary.completed_count as i64,
     )?;
-    let _ = Utc::now(); // keep chrono linked for future timestamps if needed
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reject_oversized_native_len_unit() {
+        assert!(reject_oversized_native_len_with_max(10, 10).is_ok());
+        let err = reject_oversized_native_len_with_max(11, 10).unwrap_err();
+        assert_eq!(err.code(), "office_limit_exceeded");
+    }
+
+    #[test]
+    fn already_extracted_requires_success_status_not_error() {
+        let mut cand = OfficeCandidate {
+            id: "i1".into(),
+            path: Some("a.docx".into()),
+            mime_type: None,
+            native_sha256: Some("abc".into()),
+            text_sha256: Some("txt".into()),
+            office_source_native_sha256: Some("abc".into()),
+            office_extract_status: Some("error".into()),
+            file_category: None,
+        };
+        assert!(!already_extracted_ok(&cand, "abc", false));
+        cand.office_extract_status = Some("ok".into());
+        assert!(already_extracted_ok(&cand, "abc", false));
+        cand.office_extract_status = Some("skipped".into());
+        assert!(already_extracted_ok(&cand, "abc", false));
+        assert!(!already_extracted_ok(&cand, "abc", true));
+    }
 }

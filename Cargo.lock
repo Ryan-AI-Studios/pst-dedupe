@@ -1467,7 +1467,6 @@ version = "0.1.0"
 dependencies = [
  "calamine",
  "camino",
- "chrono",
  "matter-core",
  "quick-xml 0.41.0",
  "rusqlite",

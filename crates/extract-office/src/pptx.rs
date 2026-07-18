@@ -129,7 +129,12 @@ fn extract_at_text(xml: &[u8], out: &mut TextBuf) -> Result<()> {
                 }
             }
             Ok(Event::Text(t)) if in_t => {
-                let decoded = t.decode().unwrap_or_default();
+                // Prefer decoded XML text; on encoding failure use lossy UTF-8
+                // replacement rather than silently dropping the run.
+                let decoded = match t.decode() {
+                    Ok(s) => s.into_owned(),
+                    Err(_) => String::from_utf8_lossy(t.as_ref()).into_owned(),
+                };
                 if !decoded.is_empty() && !out.push_str(&decoded) {
                     break;
                 }

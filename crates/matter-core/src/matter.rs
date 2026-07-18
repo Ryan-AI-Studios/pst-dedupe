@@ -1065,6 +1065,16 @@ impl Matter {
         self.cas.get_bytes(digest_hex)
     }
 
+    /// On-disk byte length of a CAS blob (metadata only; no full read).
+    pub fn cas_len(&self, digest_hex: &str) -> Result<u64> {
+        self.cas.blob_len(digest_hex)
+    }
+
+    /// Get raw bytes only when the on-disk length is `<= max_bytes`.
+    pub fn get_bytes_capped(&self, digest_hex: &str, max_bytes: u64) -> Result<Vec<u8>> {
+        self.cas.get_bytes_capped(digest_hex, max_bytes)
+    }
+
     /// Whether a blob with this digest exists.
     pub fn blob_exists(&self, digest_hex: &str) -> Result<bool> {
         self.cas.exists(digest_hex)

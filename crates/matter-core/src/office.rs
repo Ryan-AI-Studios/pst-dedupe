@@ -75,8 +75,11 @@ impl Matter {
     ///
     /// **Never** rewrites native CAS.
     ///
-    /// Idempotent: when `text_sha256` is already set, `office_source_native_sha256`
-    /// matches the current native, and `force` is false → [`OfficeExtractApplyResult::Skipped`].
+    /// Idempotent: when `text_sha256` is already set, last **successful** extract
+    /// (`office_extract_status == ok`) used this native, and `force` is false →
+    /// [`OfficeExtractApplyResult::Skipped`]. Failed extracts do **not** set
+    /// `office_source_native_sha256` (that column is the native of the last
+    /// successful text write) so non-force runs can retry.
     pub fn apply_office_text(
         &self,
         input: ApplyOfficeTextInput,
@@ -87,12 +90,17 @@ impl Matter {
             .clone()
             .or(input.source_native_sha256.clone());
 
-        // Idempotent skip (successful extract already done for this native).
-        if !input.force
-            && item.text_sha256.is_some()
+        // Idempotent skip only when last successful text is for this native.
+        // Status may be `ok` (just extracted) or `skipped` (prior idempotent pass).
+        // Status `error` means the last attempt failed → do not skip (retry).
+        let prior_success_for_native = item.text_sha256.is_some()
             && item.office_source_native_sha256.is_some()
             && item.office_source_native_sha256 == native
-        {
+            && matches!(
+                item.office_extract_status.as_deref(),
+                Some(office_extract_status::OK) | Some(office_extract_status::SKIPPED)
+            );
+        if !input.force && prior_success_for_native {
             // Pure skip request or re-apply of successful text without force.
             if input.text.is_some()
                 || input
@@ -123,29 +131,34 @@ impl Matter {
             let err = input.error.clone().unwrap_or_else(|| status.clone());
             let now = now_rfc3339();
             if status == office_extract_status::SKIPPED {
+                // Skipped (e.g. not-office after sniff): may set source so the
+                // job does not re-read the same native forever. Only set
+                // office_extract_error when the caller provided one.
                 self.connection().execute(
                     "UPDATE items SET office_extract_status = ?1, office_extracted_at = ?2, \
-                            office_source_native_sha256 = COALESCE(?3, office_source_native_sha256) \
-                     WHERE id = ?4 AND matter_id = ?5",
-                    params![status, now, native, input.item_id, self.id()],
+                            office_extract_error = COALESCE(?3, office_extract_error), \
+                            office_source_native_sha256 = COALESCE(?4, office_source_native_sha256) \
+                     WHERE id = ?5 AND matter_id = ?6",
+                    params![
+                        status,
+                        now,
+                        input.error,
+                        input.source_native_sha256,
+                        input.item_id,
+                        self.id()
+                    ],
                 )?;
                 return Ok(OfficeExtractApplyResult::Skipped);
             }
+            // Error: do **not** overwrite office_source_native_sha256 — that
+            // column is defined as the native used for the last **successful**
+            // text extract so failed items remain retry-eligible.
             self.connection().execute(
                 "UPDATE items SET office_extract_status = ?1, office_extract_error = ?2, \
                         office_extracted_at = ?3, \
-                        office_source_native_sha256 = COALESCE(?4, office_source_native_sha256), \
-                        office_extract_method = COALESCE(?5, office_extract_method) \
-                 WHERE id = ?6 AND matter_id = ?7",
-                params![
-                    status,
-                    err,
-                    now,
-                    native,
-                    input.method,
-                    input.item_id,
-                    self.id()
-                ],
+                        office_extract_method = COALESCE(?4, office_extract_method) \
+                 WHERE id = ?5 AND matter_id = ?6",
+                params![status, err, now, input.method, input.item_id, self.id()],
             )?;
             return Ok(OfficeExtractApplyResult::Error { error: err });
         }
@@ -154,19 +167,18 @@ impl Matter {
         if text.is_empty() {
             let err = input.error.unwrap_or_else(|| "office_empty_text".into());
             let now = now_rfc3339();
+            // Empty text is not a successful extract — leave prior successful source.
             self.connection().execute(
                 "UPDATE items SET text_sha256 = NULL, \
                         office_extract_status = ?1, office_extract_error = ?2, \
                         office_extracted_at = ?3, \
-                        office_source_native_sha256 = ?4, \
-                        office_extract_method = ?5, \
+                        office_extract_method = ?4, \
                         fts_text_sha256 = NULL, fts_indexed_at = NULL, fts_error = NULL \
-                 WHERE id = ?6 AND matter_id = ?7",
+                 WHERE id = ?5 AND matter_id = ?6",
                 params![
                     office_extract_status::ERROR,
                     err,
                     now,
-                    native,
                     input.method,
                     input.item_id,
                     self.id()
@@ -183,7 +195,12 @@ impl Matter {
             .status
             .unwrap_or_else(|| office_extract_status::OK.into());
         let method = input.method;
-        let err = input.error;
+        // `partial` is surfaced via office_extract_error ("truncated") when set by the job.
+        let err = if input.partial {
+            Some(input.error.unwrap_or_else(|| "truncated".into()))
+        } else {
+            input.error
+        };
         let file_cat = if input.refine_file_category {
             input.file_category
         } else {
@@ -192,6 +209,7 @@ impl Matter {
 
         // Always clear FTS bookkeeping after a successful text write so 0029
         // incremental re-index picks it up. NULL redacted_* when digest changes.
+        // office_source_native_sha256 is set only on successful text write.
         self.connection().execute(
             "UPDATE items SET \
                 text_sha256 = ?1, \
@@ -222,8 +240,6 @@ impl Matter {
             ],
         )?;
 
-        let _ = input.partial; // reserved for future partial status flag
-
         Ok(OfficeExtractApplyResult::Applied {
             text_sha256: text_sha,
             text_changed,
@@ -232,8 +248,9 @@ impl Matter {
 
     /// List office-eligible candidates for the extract job.
     ///
-    /// Stable ordered set: items with `native_sha256` NOT NULL and path/mime
-    /// looking office-ish. Does **not** filter on existing text — callers skip
+    /// Stable ordered set: items with `native_sha256` NOT NULL and either
+    /// path/mime looking office-ish **or** missing path/mime (CAS-only / sniff
+    /// candidates). Does **not** filter on existing text — callers skip
     /// already-extracted items in-process (`force: false` idempotent skip).
     ///
     /// Using a shrinking "pending only" list with SQL OFFSET is incorrect:
@@ -253,6 +270,8 @@ impl Matter {
         } else {
             limit as i64
         };
+        // Path/mime office-like OR path/mime missing so CAS-only natives can be
+        // sniffed in process_one. Non-office sniffs are marked skipped with source.
         let sql = "SELECT id, path, mime_type, native_sha256, text_sha256, \
                     office_source_native_sha256, office_extract_status, file_category \
              FROM items \
@@ -267,6 +286,9 @@ impl Matter {
                  OR IFNULL(mime_type, '') LIKE '%wordprocessingml%' \
                  OR IFNULL(mime_type, '') LIKE '%spreadsheetml%' \
                  OR IFNULL(mime_type, '') LIKE '%presentationml%' \
+                 OR IFNULL(mime_type, '') LIKE '%officedocument%' \
+                 OR path IS NULL OR path = '' \
+                 OR mime_type IS NULL OR mime_type = '' \
                ) \
              ORDER BY imported_at ASC, path ASC, id ASC \
              LIMIT ?2 OFFSET ?3";

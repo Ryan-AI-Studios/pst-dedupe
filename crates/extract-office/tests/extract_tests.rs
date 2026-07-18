@@ -1,18 +1,17 @@
 //! Integration tests for extract-office (spec §3.9).
 
-use std::fs;
-use std::io::{Cursor, Read, Write};
+use std::fs::{self, File};
+use std::io::{Cursor, Write};
 use std::path::PathBuf;
 
 use extract_office::limits::{
-    methods, MAX_EXTRACTED_TEXT_BYTES, MAX_NATIVE_INPUT_BYTES, MAX_UNCOMPRESSED_ENTRY_BYTES,
-    TRUNCATION_MARKER,
+    methods, MAX_EXTRACTED_TEXT_BYTES, MAX_NATIVE_INPUT_BYTES, TRUNCATION_MARKER,
 };
 use extract_office::xlsx::extract_xlsx_with_limit;
-use extract_office::zip_safe::{open_zip, read_entry_capped, read_named_entry};
+use extract_office::zip_safe::{open_zip, read_entry_capped, read_entry_capped_with_max};
 use extract_office::{
-    extract_office, extract_office_catch_unwind, run_office_extract, OfficeExtractOutcome,
-    OfficeExtractParams, JOB_KIND_OFFICE_EXTRACT,
+    extract_office, reject_oversized_native_len, reject_oversized_native_len_with_max,
+    run_office_extract, OfficeExtractOutcome, OfficeExtractParams, JOB_KIND_OFFICE_EXTRACT,
 };
 use matter_core::{
     redaction_reason, ApplyOfficeTextInput, CreateRedactionInput, ItemInput, Matter,
@@ -100,37 +99,125 @@ fn over_limit_native_errors() {
 
 #[test]
 fn streaming_take_caps_entry_read() {
-    // Prove read_entry_capped uses take: normal small entry works; cap constant is applied.
-    let data = load_fixture("minimal.docx");
+    // Real zip stored entry larger than injectable cap → LimitExceeded (take path).
+    let payload = vec![b'x'; 128];
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut z = ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        z.start_file("word/document.xml", opts).unwrap();
+        z.write_all(&payload).unwrap();
+        z.finish().unwrap();
+    }
+    let data = buf.into_inner();
     let mut archive = open_zip(&data).unwrap();
-    let bytes = read_named_entry(&mut archive, "word/document.xml").unwrap();
-    assert!(!bytes.is_empty());
-    let _ = MAX_UNCOMPRESSED_ENTRY_BYTES;
+    let mut entry = archive.by_name("word/document.xml").unwrap();
+    let err = read_entry_capped_with_max(&mut entry, 32).expect_err("over cap");
+    assert_eq!(err.code(), "office_limit_exceeded");
 
-    // Simulate over-cap take behaviour unit-style.
-    let payload = vec![b'x'; 32];
-    let mut cursor = Cursor::new(payload.as_slice());
-    let cap = 8u64;
-    let mut limited = (&mut cursor).take(cap.saturating_add(1));
-    let mut buf = Vec::new();
-    limited.read_to_end(&mut buf).unwrap();
-    assert!(buf.len() as u64 > cap, "take(cap+1) must reveal over-cap");
+    // Normal fixture entry still loads under production cap.
+    let fixture = load_fixture("minimal.docx");
+    let mut archive = open_zip(&fixture).unwrap();
+    let mut entry = archive.by_name("word/document.xml").unwrap();
+    let bytes = read_entry_capped(&mut entry).unwrap();
+    assert!(!bytes.is_empty());
 }
 
 #[test]
-fn xlsx_early_break_truncates() {
-    let data = load_fixture("minimal.xlsx");
-    // Tiny limit forces truncation marker without materializing a giant sheet first.
-    let extracted = extract_xlsx_with_limit(&data, 10).expect("xlsx tiny");
-    assert!(extracted.partial);
+fn xlsx_early_break_truncates_multi_row() {
+    // Multi-row workbook: tiny limit must truncate with marker and partial=true
+    // while a full extract still contains later-row content.
+    let data = multi_row_xlsx(8);
+    let extracted = extract_xlsx_with_limit(&data, 40).expect("xlsx multi");
+    assert!(extracted.partial, "text={}", extracted.text);
     assert!(
-        extracted.text.contains(TRUNCATION_MARKER)
-            || extracted.text.len() <= 10 + TRUNCATION_MARKER.len()
+        extracted.text.contains(TRUNCATION_MARKER),
+        "text={}",
+        extracted.text
     );
-    // Sanity: full extract is larger / contains marker phrase
-    let full = extract_office(&data, Some("minimal.xlsx"), None).unwrap();
-    assert!(full.text.contains("OFFICE_XLSX_MARKER"));
-    assert!(full.text.len() > extracted.text.len() || extracted.partial);
+    // Later rows should not all fit under the tiny cap.
+    assert!(
+        !extracted.text.contains("ROW7_MARKER"),
+        "early break should stop before last rows: {}",
+        extracted.text
+    );
+
+    let full = extract_xlsx_with_limit(&data, MAX_EXTRACTED_TEXT_BYTES).unwrap();
+    assert!(!full.partial);
+    assert!(full.text.contains("ROW0_MARKER"));
+    assert!(full.text.contains("ROW7_MARKER"));
+    assert!(full.text.len() > extracted.text.len());
+}
+
+/// Minimal multi-row XLSX (shared strings) for early-break tests.
+fn multi_row_xlsx(rows: usize) -> Vec<u8> {
+    let mut sst_items = String::new();
+    let mut sheet_rows = String::new();
+    for i in 0..rows {
+        let marker = format!("ROW{i}_MARKER");
+        sst_items.push_str(&format!(r#"<si><t>{marker}</t></si>"#));
+        let r = i + 1;
+        sheet_rows.push_str(&format!(
+            r#"<row r="{r}"><c r="A{r}" t="s"><v>{i}</v></c></row>"#
+        ));
+    }
+    let sst = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="{rows}" uniqueCount="{rows}">
+{sst_items}
+</sst>"#
+    );
+    let sheet = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+{sheet_rows}
+  </sheetData>
+</worksheet>"#
+    );
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+</Types>"#;
+    let rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+    let wb = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+    let wb_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
+</Relationships>"#;
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut z = ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in [
+            ("[Content_Types].xml", content_types),
+            ("_rels/.rels", rels),
+            ("xl/workbook.xml", wb),
+            ("xl/_rels/workbook.xml.rels", wb_rels),
+            ("xl/worksheets/sheet1.xml", sheet.as_str()),
+            ("xl/sharedStrings.xml", sst.as_str()),
+        ] {
+            z.start_file(name, opts).unwrap();
+            z.write_all(body.as_bytes()).unwrap();
+        }
+        z.finish().unwrap();
+    }
+    buf.into_inner()
 }
 
 #[test]
@@ -515,7 +602,8 @@ fn encrypted_ooxml_entry_markers() {
 
 #[test]
 fn fuzz_random_bytes_no_panic() {
-    // Property-style: random-ish byte buffers must not panic (catch_unwind path).
+    // Property-style: random-ish byte buffers must not panic.
+    // Call `extract_office` directly (not catch_unwind) so a panic fails the test.
     let seeds: &[&[u8]] = &[
         b"",
         b"PK\x03\x04",
@@ -526,13 +614,14 @@ fn fuzz_random_bytes_no_panic() {
     ];
     for (i, seed) in seeds.iter().enumerate() {
         let mut data = seed.to_vec();
-        // Expand with pseudo-random pattern
         for j in 0..64 {
             data.push(((i * 31 + j * 17) % 256) as u8);
         }
-        let _ = extract_office_catch_unwind(&data, Some("fuzz.docx"), None);
-        let _ = extract_office_catch_unwind(&data, Some("fuzz.xlsx"), None);
-        let _ = extract_office_catch_unwind(&data, Some("fuzz.pptx"), None);
+        // Result may be Ok or Err — only a panic fails.
+        let _ = extract_office(&data, Some("fuzz.docx"), None);
+        let _ = extract_office(&data, Some("fuzz.xlsx"), None);
+        let _ = extract_office(&data, Some("fuzz.pptx"), None);
+        let _ = extract_office(&data, None, None);
     }
 }
 
@@ -617,5 +706,222 @@ fn body_change_nulls_redacted_via_apply() {
     assert_ne!(reloaded.text_sha256.as_deref(), Some(text_sha.as_str()));
 }
 
-// Silence unused import if redaction API differs slightly — compile will tell.
+#[test]
+fn reject_oversized_native_len_helper() {
+    assert!(reject_oversized_native_len(MAX_NATIVE_INPUT_BYTES).is_ok());
+    let err = reject_oversized_native_len(MAX_NATIVE_INPUT_BYTES + 1).unwrap_err();
+    assert_eq!(err.code(), "office_limit_exceeded");
+    let err = reject_oversized_native_len_with_max(11, 10).unwrap_err();
+    assert_eq!(err.code(), "office_limit_exceeded");
+}
+
+/// CAS size precheck: oversized on-disk blob is rejected without full extract success.
+#[test]
+fn job_oversized_cas_blob_limit_without_full_load_path() {
+    let dir = tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().join("m")).unwrap();
+    let matter = Matter::create(&root, "OfficeHuge").unwrap();
+
+    // Plant a real digest path, then extend the file past the cap via set_len
+    // (sparse-friendly; avoids allocating 100MiB+ in the test process).
+    let digest = matter.put_bytes(b"small-placeholder").unwrap();
+    let path = matter.cas().object_path(&digest).unwrap();
+    {
+        let f = File::options()
+            .write(true)
+            .open(path.as_std_path())
+            .unwrap();
+        f.set_len(MAX_NATIVE_INPUT_BYTES + 1).unwrap();
+    }
+    assert_eq!(matter.cas_len(&digest).unwrap(), MAX_NATIVE_INPUT_BYTES + 1);
+    // get_bytes_capped must refuse without returning the full body.
+    let capped = matter.get_bytes_capped(&digest, MAX_NATIVE_INPUT_BYTES);
+    assert!(capped.is_err(), "capped read must fail");
+
+    matter
+        .insert_item(ItemInput {
+            path: Some("huge.docx".into()),
+            native_sha256: Some(digest),
+            status: "extracted".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let job = matter.create_job(JOB_KIND_OFFICE_EXTRACT).unwrap();
+    let outcome = run_office_extract(
+        &matter,
+        &job.id,
+        &OfficeExtractParams::default(),
+        None,
+        |_| {},
+    )
+    .unwrap();
+    match outcome {
+        OfficeExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.error_count, 1, "summary={s:?}");
+            assert_eq!(s.extracted_count, 0);
+        }
+        other => panic!("expected success with error: {other:?}"),
+    }
+    let items = matter.list_office_candidates(0, 10, false).unwrap();
+    let item = matter.get_item(&items[0].id).unwrap();
+    assert_eq!(item.office_extract_status.as_deref(), Some("error"));
+    let err = item.office_extract_error.unwrap_or_default();
+    assert!(err.contains("office_limit_exceeded"), "error={err}");
+    // Failed extract must not set successful source (retry-eligible).
+    assert!(item.office_source_native_sha256.is_none());
+}
+
+/// Failed extract must not permanently skip; second non-force run still attempts.
+#[test]
+fn failed_extract_retries_on_second_non_force_run() {
+    let dir = tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().join("m")).unwrap();
+    let matter = Matter::create(&root, "OfficeRetry").unwrap();
+
+    // Prior text + corrupt native: first run errors; second non-force still errors (not skip).
+    let prior_text = matter.put_bytes(b"stale text body").unwrap();
+    let corrupt = matter.put_bytes(b"PK\x03\x04not-a-real-docx").unwrap();
+    let item = matter
+        .insert_item(ItemInput {
+            path: Some("broken.docx".into()),
+            native_sha256: Some(corrupt.clone()),
+            text_sha256: Some(prior_text),
+            status: "extracted".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let params = OfficeExtractParams::default();
+    let job1 = matter.create_job(JOB_KIND_OFFICE_EXTRACT).unwrap();
+    let o1 = run_office_extract(&matter, &job1.id, &params, None, |_| {}).unwrap();
+    match o1 {
+        OfficeExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.error_count, 1, "summary={s:?}");
+            assert_eq!(s.skipped_count, 0, "must not skip on first failure");
+        }
+        other => panic!("expected Succeeded: {other:?}"),
+    }
+    let after1 = matter.get_item(&item.id).unwrap();
+    assert_eq!(after1.office_extract_status.as_deref(), Some("error"));
+    // Source must remain unset so skip condition cannot fire.
+    assert!(after1.office_source_native_sha256.is_none());
+    assert!(
+        after1.text_sha256.is_some(),
+        "prior text preserved on error"
+    );
+
+    let job2 = matter.create_job(JOB_KIND_OFFICE_EXTRACT).unwrap();
+    let o2 = run_office_extract(&matter, &job2.id, &params, None, |_| {}).unwrap();
+    match o2 {
+        OfficeExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.error_count, 1, "second run must retry, not skip: {s:?}");
+            assert_eq!(s.skipped_count, 0, "second run must not skip: {s:?}");
+            assert_eq!(s.extracted_count, 0);
+        }
+        other => panic!("expected Succeeded: {other:?}"),
+    }
+    let after2 = matter.get_item(&item.id).unwrap();
+    assert_eq!(after2.office_extract_status.as_deref(), Some("error"));
+    assert!(after2.office_source_native_sha256.is_none());
+
+    // Item errors recorded for both attempts.
+    let errs = matter.item_errors_for_item(&item.id).unwrap();
+    assert!(
+        errs.len() >= 2,
+        "expected >=2 item_errors, got {}",
+        errs.len()
+    );
+}
+
+/// CAS-only item (no path/mime) is listed, sniffed, and extracted.
+#[test]
+fn cas_only_pathless_office_item_extracted() {
+    let dir = tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().join("m")).unwrap();
+    let matter = Matter::create(&root, "OfficeCasOnly").unwrap();
+
+    let data = load_fixture("minimal.docx");
+    let native = matter.put_bytes(&data).unwrap();
+    let item = matter
+        .insert_item(ItemInput {
+            path: None,
+            mime_type: None,
+            native_sha256: Some(native.clone()),
+            status: "extracted".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let listed = matter.list_office_candidates(0, 10, false).unwrap();
+    assert!(
+        listed.iter().any(|c| c.id == item.id),
+        "CAS-only item must appear in candidates"
+    );
+
+    let job = matter.create_job(JOB_KIND_OFFICE_EXTRACT).unwrap();
+    let outcome = run_office_extract(
+        &matter,
+        &job.id,
+        &OfficeExtractParams::default(),
+        None,
+        |_| {},
+    )
+    .unwrap();
+    match outcome {
+        OfficeExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.extracted_count, 1, "summary={s:?}");
+            assert_eq!(s.error_count, 0);
+        }
+        other => panic!("expected success: {other:?}"),
+    }
+    let reloaded = matter.get_item(&item.id).unwrap();
+    assert!(reloaded.text_sha256.is_some());
+    assert_eq!(reloaded.office_extract_status.as_deref(), Some("ok"));
+    assert_eq!(
+        reloaded.office_source_native_sha256.as_deref(),
+        Some(native.as_str())
+    );
+}
+
+#[test]
+fn invalid_xml_text_not_silently_dropped() {
+    // DOCX with a text run that includes a replacement-requiring byte sequence
+    // still yields content (lossy) rather than empty success from unwrap_or_default.
+    let doc_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body><w:p><w:r><w:t>KEEP_ME</w:t></w:r></w:p></w:body>
+    </w:document>"#;
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8"?>
+    <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+      <Default Extension="xml" ContentType="application/xml"/>
+      <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+    </Types>"#;
+    let rels = br#"<?xml version="1.0" encoding="UTF-8"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+    </Relationships>"#;
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut z = ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        z.start_file("[Content_Types].xml", opts).unwrap();
+        z.write_all(content_types).unwrap();
+        z.start_file("_rels/.rels", opts).unwrap();
+        z.write_all(rels).unwrap();
+        z.start_file("word/document.xml", opts).unwrap();
+        z.write_all(doc_xml).unwrap();
+        z.finish().unwrap();
+    }
+    let data = buf.into_inner();
+    let extracted = extract_office(&data, Some("t.docx"), None).expect("docx");
+    assert!(
+        extracted.text.contains("KEEP_ME"),
+        "text={}",
+        extracted.text
+    );
+}
+
+// Silence unused if redaction path changes — compile will tell.
 const _: usize = MAX_EXTRACTED_TEXT_BYTES;
