@@ -51,7 +51,8 @@ pub struct DeskApp {
     last_refresh: Instant,
     /// Job id of the last known active job (for resume).
     last_job_id: Option<String>,
-    /// Selected built-in cull preset name for the workspace dropdown.
+    /// Selected cull preset for the workspace dropdown.
+    /// Built-ins: bare name (`unique_only`). User presets: `user:<id>`.
     pub(crate) cull_preset: String,
 }
 
@@ -320,12 +321,7 @@ impl DeskApp {
             self.error_msg = Some("No matter open.".into());
             return;
         };
-        // Always pass the selected preset (defaults to unique_only via cull_default_params shape).
-        let params_json = if self.cull_preset == "unique_only" {
-            params::cull_default_params()
-        } else {
-            params::cull_params_for_preset(&self.cull_preset)
-        };
+        let params_json = params::cull_params_for_selection(&self.cull_preset);
         let params = JobParams::new(params_json);
         match self
             .runner
@@ -333,13 +329,28 @@ impl DeskApp {
         {
             Ok(job_id) => {
                 self.last_job_id = Some(job_id.clone());
-                self.status_msg = Some(format!(
-                    "Started cull job {job_id} (preset={})",
-                    self.cull_preset
-                ));
+                let display = self.cull_preset_display_name();
+                self.status_msg = Some(format!("Started cull job {job_id} (preset={display})"));
                 self.error_msg = None;
             }
             Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Human name for the current cull selection (resolves `user:<id>` via snapshot).
+    pub(crate) fn cull_preset_display_name(&self) -> String {
+        if let Some(id) = self
+            .cull_preset
+            .strip_prefix(params::CULL_USER_PRESET_PREFIX)
+        {
+            self.snapshot
+                .cull_presets
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| id.to_string())
+        } else {
+            self.cull_preset.clone()
         }
     }
 

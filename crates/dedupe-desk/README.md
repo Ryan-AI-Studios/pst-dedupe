@@ -89,15 +89,22 @@ auto-hide them as exact duplicates. See `crates/matter-neardup/README.md`.
 
 ### Run cull
 
-Workspace **cull preset** dropdown (built-ins that work out of the box:
-`unique_only`, `unique_plus_family`, `noise_light`) + **Run cull** starts
-`kind=cull` with `{ "preset_name", "reset": true, "batch_size": 500 }`.
-`date_window` remains an engine built-in but is **not** listed in the desk
-dropdown until bounds are filled — operators supply `start`/`end` (offset-aware
-RFC3339) via JSON params or a user preset edit. Flag-only: sets `cull_status` /
-reasons; never deletes items or CAS. Reuses progress / cancel / resume. See
-`crates/matter-cull/README.md`. **0025 promote** should prefer
-`cull_status=included` when present.
+Workspace **cull preset** dropdown + **Run cull** starts `kind=cull`:
+
+| Selection | Params shape |
+|---|---|
+| Built-in (`unique_only`, `unique_plus_family`, `noise_light`) | `{ "preset_name", "reset": true, "batch_size": 500 }` |
+| User preset (from matter DB) | `{ "preset_id", "reset": true, "batch_size": 500 }` |
+
+Built-ins that work out of the box are always listed. **User presets** appear
+when present in the open matter’s `cull_presets` table (loaded on refresh).
+Desk 0024 does not ship a full preset editor — create/update presets via
+matter-core API (`upsert_cull_preset`) or future UI. `date_window` remains an
+engine built-in but is **not** listed until bounds are filled — operators
+supply `start`/`end` (offset-aware RFC3339) via JSON params or a user preset.
+Flag-only: sets `cull_status` / reasons; never deletes items or CAS. Reuses
+progress / cancel / resume. See `crates/matter-cull/README.md`. **0025 promote**
+should prefer `cull_status=included` when present.
 
 ## Tests
 
