@@ -241,29 +241,38 @@ fn pivot_is_longer_token_count() {
     let _ = run_default(&matter, &job.id);
     let short_item = matter.get_item(&id_short).unwrap();
     let long_item = matter.get_item(&id_long).unwrap();
-    // If grouped, pivot should be the longer one
-    if short_item.near_dup_group_id.is_some() {
-        assert_eq!(
-            long_item.near_dup_role.as_deref(),
-            Some(item_near_dup_role::PIVOT)
-        );
-        assert_eq!(
-            short_item.near_dup_role.as_deref(),
-            Some(item_near_dup_role::MEMBER)
-        );
-        assert_eq!(
-            short_item.near_dup_pivot_item_id.as_deref(),
-            Some(id_long.as_str())
-        );
-    }
+    // Fixture must group; pivot is the longer-token item.
+    assert!(
+        short_item.near_dup_group_id.is_some(),
+        "expected short+long to form a near-dup group; short role={:?} long role={:?}",
+        short_item.near_dup_role,
+        long_item.near_dup_role
+    );
+    assert_eq!(
+        short_item.near_dup_group_id, long_item.near_dup_group_id,
+        "both items must share the group id"
+    );
+    assert_eq!(
+        long_item.near_dup_role.as_deref(),
+        Some(item_near_dup_role::PIVOT)
+    );
+    assert_eq!(
+        short_item.near_dup_role.as_deref(),
+        Some(item_near_dup_role::MEMBER)
+    );
+    assert_eq!(
+        short_item.near_dup_pivot_item_id.as_deref(),
+        Some(id_long.as_str())
+    );
 }
 
 #[test]
 fn single_link_demotion_weak_member() {
-    // Construct three synthetic signatures via carefully controlled texts is hard;
-    // instead unit-level cluster test covers demotion. Here: A~B and B~C chain
-    // with default threshold should not force A into C's group if A vs C is weak.
-    // Use three progressively drifted copies.
+    // Forced demotion (synthetic sigs A~B, B~C, A vs pivot C weak) is covered by
+    // unit tests `single_link_demotion_weak_vs_pivot` and
+    // `demoted_items_never_remain_members_below_threshold` in cluster.rs.
+    // This integration fixture only asserts the post-condition invariant on real texts:
+    // no member may have similarity below the job threshold.
     let (_tmp, matter) = temp_matter("demote");
     let job = matter.create_job(JOB_KIND_NEARDUP).expect("job");
 
@@ -291,8 +300,6 @@ fn single_link_demotion_weak_member() {
     let ib = matter.get_item(&id_b).unwrap();
     let ic = matter.get_item(&id_c).unwrap();
 
-    // A and B should likely group; C may be unique or separate.
-    // Critical: if C is pivot of a group, A must not be a weak member with sim < threshold.
     for item in [&ia, &ib, &ic] {
         if item.near_dup_role.as_deref() == Some(item_near_dup_role::MEMBER) {
             let sim = item.near_dup_similarity.expect("sim");
@@ -413,10 +420,19 @@ fn cjk_unrelated_not_same_group() {
 
 #[test]
 fn hash_family_not_km_and_splitmix_golden() {
+    // Hard-coded first outputs for seed 0xDEAD_BEEF_CAFE_BABE (absolute freeze).
     let mut rng = SplitMix64::new(0xDEAD_BEEF_CAFE_BABE);
-    let a = rng.next_u64();
-    let b = rng.next_u64();
-    assert_ne!(a, b);
+    let got: Vec<u64> = (0..4).map(|_| rng.next_u64()).collect();
+    assert_eq!(
+        got,
+        vec![
+            0x0d7d_9356_0d19_29d2,
+            0x491d_fb74_0e50_d43f,
+            0x4272_2bf4_473e_5e7d,
+            0xd6ca_8a07_90ff_fc45,
+        ]
+    );
+    assert_ne!(got[0], got[1]);
 
     let shingle = b"sample\x1fshingle\x1ffor\x1fhash\x1ftest";
     let ours = expand_shingle_hashes(shingle, 0x4E44_5F6D_685F_7631, 32);
@@ -515,4 +531,47 @@ fn audit_neardup_start_and_complete() {
         .position(|a| a == "neardup.complete")
         .unwrap();
     assert!(start_pos < complete_pos);
+}
+
+#[test]
+fn audit_neardup_fail_on_bad_job_id() {
+    // Force write-phase failure after `neardup.start` by using a job id that
+    // does not exist (checkpoint FK on jobs). Asserts `neardup.fail` is audited.
+    let (_tmp, matter) = temp_matter("audit-fail");
+    let body = pad("audit fail path document for near duplicate detection job lifecycle events");
+    insert_doc(&matter, "a.txt", &body, None);
+
+    let params = NearDupParams::default();
+    let result = run_neardup(
+        &matter,
+        "missing-job-id-for-fail-audit",
+        &params,
+        None,
+        |_| {},
+    );
+    assert!(
+        result.is_err(),
+        "expected Err from missing job FK, got {result:?}"
+    );
+
+    let mut stmt = matter
+        .connection()
+        .prepare("SELECT action FROM audit_events WHERE action LIKE 'neardup.%' ORDER BY seq ASC")
+        .expect("prepare");
+    let actions: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert!(
+        actions.iter().any(|a| a == "neardup.start"),
+        "expected neardup.start in {actions:?}"
+    );
+    assert!(
+        actions.iter().any(|a| a == "neardup.fail"),
+        "expected neardup.fail in {actions:?}"
+    );
+    let start_pos = actions.iter().position(|a| a == "neardup.start").unwrap();
+    let fail_pos = actions.iter().position(|a| a == "neardup.fail").unwrap();
+    assert!(start_pos < fail_pos);
 }

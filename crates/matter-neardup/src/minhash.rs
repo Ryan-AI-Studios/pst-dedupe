@@ -132,23 +132,21 @@ mod tests {
 
     #[test]
     fn splitmix_golden_sequence() {
-        // Fixed seed → golden first five values (regression for algorithm freeze).
+        // Fixed seed → hard-coded external golden vector (algorithm freeze).
+        // Values are absolute literals, not recomputed from the same mix steps.
         let mut rng = SplitMix64::new(0x1234_5678_9ABC_DEF0);
-        let got: Vec<u64> = (0..5).map(|_| rng.next_u64()).collect();
-        // Recompute independently in-test to pin the constants.
-        let mut expect_rng = SplitMix64 {
-            state: 0x1234_5678_9ABC_DEF0,
-        };
-        let expect: Vec<u64> = (0..5)
-            .map(|_| {
-                expect_rng.state = expect_rng.state.wrapping_add(0x9E3779B97F4A7C15);
-                let mut z = expect_rng.state;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-                z ^ (z >> 31)
-            })
-            .collect();
-        assert_eq!(got, expect);
+        let got: Vec<u64> = (0..8).map(|_| rng.next_u64()).collect();
+        const EXPECTED: [u64; 8] = [
+            0x1619_22c6_45ce_50e8,
+            0xad76_0caf_a169_7b60,
+            0x3501_ff44_902c_a50d,
+            0x417c_b9a8_26d8_31df,
+            0x99af_6f9b_0c44_76b6,
+            0x5d51_f5f7_5b76_2c59,
+            0x6623_9e8c_309a_282b,
+            0x53e0_1f58_0916_c5cb,
+        ];
+        assert_eq!(got, EXPECTED);
         // Non-zero / not identity
         assert_ne!(got[0], 0);
         assert_ne!(got[0], got[1]);

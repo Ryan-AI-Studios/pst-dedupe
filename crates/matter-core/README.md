@@ -12,7 +12,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
 
-Schema version: **4** (`SCHEMA_VERSION`).
+Schema version: **5** (`SCHEMA_VERSION`) — includes near-dup result columns (`near_dup_*`).
 
 ## Layout
 
