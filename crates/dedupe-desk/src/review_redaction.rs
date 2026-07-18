@@ -280,19 +280,25 @@ pub fn body_layout_job_with_redactions(
         while j < char_len && cover[j] == kind {
             j += 1;
         }
-        let slice: String = chars[i..j].iter().collect();
+        // Redacted spans: substitute full-block chars (same char count) so even when
+        // egui selection recolors glyphs (visuals.selection.stroke.color), the
+        // exact_quote cannot be read. Indices still map 1:1 to display body for
+        // create_redaction (desk reads quote from real body, not Galley text).
+        let is_redaction = kind == 3 || kind == 4;
+        let slice: String = if is_redaction {
+            chars[i..j].iter().map(|_| '█').collect()
+        } else {
+            chars[i..j].iter().collect()
+        };
         let mut fmt = base.clone();
         match kind {
             1 => fmt.background = HIGHLIGHT_PAINT,
             2 => fmt.background = HIGHLIGHT_STALE_PAINT,
             3 => {
-                // True blackout: same color as background so glyphs are not readable
-                // (white-on-black left the exact_quote visible — Codex P1).
                 fmt.background = REDACTION_PAINT;
                 fmt.color = REDACTION_PAINT;
             }
             4 => {
-                // Stale: dark bar; still conceal glyphs (dimmer bar signals re-resolve needed).
                 fmt.background = REDACTION_STALE_PAINT;
                 fmt.color = REDACTION_STALE_PAINT;
             }
@@ -389,15 +395,28 @@ mod tests {
             reason: redaction_reason::PII.into(),
         }];
         let job = body_layout_job_with_redactions(body, &highlights, &redactions);
-        assert_eq!(job.text, body);
-        // Find section covering "bbb" (chars 4..7) — must be black.
+        // Redacted ranges become full-block glyphs (not the original quote).
+        assert_ne!(
+            job.text, body,
+            "redacted spans must not keep exact_quote in Galley"
+        );
+        assert!(
+            !job.text.contains("bbb"),
+            "redacted quote must not appear in painted job text"
+        );
+        assert!(
+            job.text.contains('█'),
+            "redacted spans should use block mask characters"
+        );
+        // Char length preserved so selection indices still map to display body.
+        assert_eq!(job.text.chars().count(), body.chars().count());
+        // Find section covering the redacted span (chars 4..7) — must be black bars.
         let mut found_black = false;
         let mut found_yellow = false;
         for sec in &job.sections {
             let slice = &job.text[sec.byte_range.clone()];
-            if slice == "bbb" {
+            if slice.chars().all(|c| c == '█') && !slice.is_empty() {
                 assert_eq!(sec.format.background, REDACTION_PAINT);
-                // Glyph color matches bar so the quote is not readable on black.
                 assert_eq!(
                     sec.format.color, REDACTION_PAINT,
                     "redacted text must be concealed (not white-on-black)"
