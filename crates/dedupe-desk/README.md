@@ -169,7 +169,7 @@ and note-editor focus (previous frame) — note / filter / keyword `TextEdit` bl
 |---|---|
 | Document note | Notes panel multiline + **Save note** (`highlight_id` null) |
 | Highlight | Select in body select box → **Highlight** (default yellow `#FFF59D`) |
-| Passage note | **Note on selection** creates highlight + linked note |
+| Passage note | **Note on selection** creates/binds highlight, opens draft with quote as **hint only**; operator types body and **Save** (empty body rejected) |
 | Paint | Active ranges yellow on layout job; header/banner/list status from **re-resolve** against current body |
 | Stale | Digest mismatch + quote not found → stale UI immediately; optional `persist_stale` aligns SQLite once per item+digest |
 | Delete highlight | Unlinks notes (keeps note body as document-level) |

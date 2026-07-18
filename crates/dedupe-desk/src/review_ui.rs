@@ -46,8 +46,9 @@ use matter_core::{
 use crate::review_body::{BodyLoader, BodyPane};
 use crate::review_nav;
 use crate::review_notes::{
-    body_digest_for_item, body_job_for_ui, find_resolved, focus_allows_coding_shortcuts,
-    highlight_input_from_selection, highlight_ui_status, resolve_for_paint,
+    body_digest_for_item, body_job_for_ui, find_highlight_for_selection, find_resolved,
+    focus_allows_coding_shortcuts, highlight_input_from_selection, highlight_ui_status,
+    note_upsert_from_draft, passage_note_hint_from_quote, resolve_for_paint,
     selection_from_char_range, stale_count_for_ui, BodySelection,
 };
 
@@ -338,8 +339,12 @@ pub struct ReviewState {
     /// `(item_id, display_digest)` for which we already ran
     /// `resolve_highlights(..., persist_stale: true)` this session.
     stale_persist_key: Option<(String, String)>,
-    /// Draft for new document note.
+    /// Draft for new document or passage note (user-entered only).
     note_draft: String,
+    /// When set, next Save binds the draft as a passage note to this highlight.
+    pending_highlight_id: Option<String>,
+    /// Hint-only quote context for the passage-note editor (never auto-saved).
+    passage_note_hint: String,
     /// Note id being edited (if any) + draft body.
     note_edit_id: Option<String>,
     note_edit_body: String,
@@ -410,6 +415,8 @@ impl ReviewState {
         self.item_highlights.clear();
         self.stale_persist_key = None;
         self.note_draft.clear();
+        self.pending_highlight_id = None;
+        self.passage_note_hint.clear();
         self.note_edit_id = None;
         self.note_edit_body.clear();
         self.body_selection = None;
@@ -928,6 +935,8 @@ impl ReviewState {
         self.item_highlights.clear();
         self.stale_persist_key = None;
         self.note_draft.clear();
+        self.pending_highlight_id = None;
+        self.passage_note_hint.clear();
         self.note_edit_id = None;
         self.note_edit_body.clear();
         self.body_selection = None;
@@ -1061,19 +1070,31 @@ impl ReviewState {
         let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
             return;
         };
-        let body = self.note_draft.clone();
-        let actor = actor.to_string();
-        self.run_notes_mutate(matter_root, ctx, item_id.clone(), move |matter| {
-            matter.upsert_note(UpsertNoteInput {
-                id: None,
-                item_id: item_id.clone(),
-                body,
-                highlight_id: None,
-                actor,
-            })?;
-            Ok("Document note saved.".into())
+        let pending = self.pending_highlight_id.clone();
+        let input =
+            match note_upsert_from_draft(&item_id, &self.note_draft, pending.as_deref(), actor) {
+                Ok(i) => i,
+                Err(e) => {
+                    self.notes_error = Some(e);
+                    return;
+                }
+            };
+        let is_passage = input.highlight_id.is_some();
+        let ok = self.run_notes_mutate(matter_root, ctx, item_id, move |matter| {
+            matter.upsert_note(input)?;
+            Ok(if is_passage {
+                "Passage note saved.".into()
+            } else {
+                "Document note saved.".into()
+            })
         });
-        self.note_draft.clear();
+        // Keep draft + pending highlight binding on failure so the operator
+        // does not lose work product text.
+        if ok {
+            self.note_draft.clear();
+            self.pending_highlight_id = None;
+            self.passage_note_hint.clear();
+        }
     }
 
     fn save_note_edit(&mut self, matter_root: &Utf8Path, ctx: &egui::Context, actor: &str) {
@@ -1083,20 +1104,27 @@ impl ReviewState {
         let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
             return;
         };
+        if self.note_edit_body.trim().is_empty() {
+            self.notes_error = Some("note body cannot be empty or whitespace-only".into());
+            return;
+        }
         let body = self.note_edit_body.clone();
         let actor = actor.to_string();
-        self.run_notes_mutate(matter_root, ctx, item_id.clone(), move |matter| {
+        let ok = self.run_notes_mutate(matter_root, ctx, item_id.clone(), move |matter| {
             matter.upsert_note(UpsertNoteInput {
                 id: Some(note_id),
                 item_id,
                 body,
+                // highlight_id ignored on update (matter-core); body-only edit.
                 highlight_id: None,
                 actor,
             })?;
             Ok("Note updated.".into())
         });
-        self.note_edit_id = None;
-        self.note_edit_body.clear();
+        if ok {
+            self.note_edit_id = None;
+            self.note_edit_body.clear();
+        }
     }
 
     fn delete_note_ui(
@@ -1131,6 +1159,23 @@ impl ReviewState {
             self.notes_error = Some("Select text in the body first.".into());
             return;
         };
+
+        // Passage-note path: bind draft to an existing matching highlight when
+        // present (no second create), else create highlight first — never
+        // auto-persist synthetic "Note on: …" body text.
+        if with_note {
+            if let Some(existing) = find_highlight_for_selection(&self.item_highlights, sel) {
+                let hid = existing.id.clone();
+                let hint = passage_note_hint_from_quote(&existing.exact_quote);
+                self.pending_highlight_id = Some(hid);
+                self.passage_note_hint = hint;
+                self.notes_status =
+                    Some("Type a passage note and Save (linked to selection highlight).".into());
+                self.notes_error = None;
+                return;
+            }
+        }
+
         let body = match self.body.pane() {
             BodyPane::Ready {
                 item_id: bid,
@@ -1155,30 +1200,27 @@ impl ReviewState {
                 return;
             }
         };
-        let note_body = if with_note {
-            Some(format!(
-                "Note on: {}",
-                input.exact_quote.chars().take(80).collect::<String>()
-            ))
-        } else {
-            None
-        };
-        let actor = actor.to_string();
-        self.run_notes_mutate(matter_root, ctx, item_id, move |matter| {
-            let hl = matter.create_highlight(input)?;
-            if let Some(nb) = note_body {
-                matter.upsert_note(UpsertNoteInput {
-                    id: None,
-                    item_id: hl.item_id.clone(),
-                    body: nb,
-                    highlight_id: Some(hl.id),
-                    actor: actor.clone(),
-                })?;
-                Ok("Highlight + passage note created.".into())
-            } else {
-                Ok("Highlight created.".into())
-            }
+        let quote_for_hint = input.exact_quote.clone();
+        let ok = self.run_notes_mutate(matter_root, ctx, item_id, move |matter| {
+            let _hl = matter.create_highlight(input)?;
+            Ok("Highlight created.".into())
         });
+        if ok && with_note {
+            // Bind draft to the just-created (or matching) highlight — user must type body.
+            if let Some(hl) = find_highlight_for_selection(&self.item_highlights, sel) {
+                self.pending_highlight_id = Some(hl.id.clone());
+                self.passage_note_hint = passage_note_hint_from_quote(&quote_for_hint);
+                self.notes_status = Some(
+                    "Highlight created — type a passage note and Save (not auto-saved).".into(),
+                );
+            } else {
+                self.passage_note_hint = passage_note_hint_from_quote(&quote_for_hint);
+                self.notes_status = Some(
+                    "Highlight created — type a passage note after reload if binding missing."
+                        .into(),
+                );
+            }
+        }
     }
 
     fn delete_highlight_ui(
@@ -1199,43 +1241,54 @@ impl ReviewState {
         });
     }
 
+    /// Run a notes/highlights mutation. Returns `true` only when the write
+    /// succeeded (reload of lists may still surface a secondary error).
     fn run_notes_mutate<F>(
         &mut self,
         matter_root: &Utf8Path,
         ctx: &egui::Context,
         item_id: String,
         f: F,
-    ) where
+    ) -> bool
+    where
         F: FnOnce(&Matter) -> Result<String, matter_core::Error> + Send + 'static,
     {
         if self.notes_busy {
-            return;
+            return false;
         }
         // Sync path for small single writes (notes/highlights are cheap).
         let root = matter_root.to_owned();
-        match Matter::open(&root) {
+        let write_ok = match Matter::open(&root) {
             Ok(matter) => match f(&matter) {
-                Ok(message) => match load_notes_highlights(&root, &item_id) {
-                    Ok((notes, highlights)) => {
-                        self.item_notes = notes;
-                        self.item_highlights = highlights;
-                        self.notes_status = Some(message);
-                        self.notes_error = None;
+                Ok(message) => {
+                    match load_notes_highlights(&root, &item_id) {
+                        Ok((notes, highlights)) => {
+                            self.item_notes = notes;
+                            self.item_highlights = highlights;
+                            self.notes_status = Some(message);
+                            self.notes_error = None;
+                        }
+                        Err(e) => {
+                            // Write already committed; keep success so drafts clear.
+                            self.notes_status = Some(message);
+                            self.notes_error = Some(e);
+                        }
                     }
-                    Err(e) => {
-                        self.notes_error = Some(e);
-                    }
-                },
+                    true
+                }
                 Err(e) => {
                     self.notes_error = Some(e.to_string());
                     self.notes_status = None;
+                    false
                 }
             },
             Err(e) => {
                 self.notes_error = Some(e.to_string());
+                false
             }
-        }
+        };
         let _ = ctx; // reserved for future off-thread path + request_repaint
+        write_ok
     }
 
     /// Toggle a code on the current item (no confirm).
@@ -2667,7 +2720,9 @@ fn show_viewer(
                     has_sel && !state.notes_busy,
                     egui::Button::new("Note on selection").small(),
                 )
-                .on_hover_text("Create highlight + passage note")
+                .on_hover_text(
+                    "Create highlight (if needed) and open a passage-note draft — type text, then Save",
+                )
                 .clicked()
             {
                 state.create_highlight_from_selection(matter_root, ctx, actor, true);
@@ -2785,27 +2840,62 @@ fn show_notes_panel(
         );
     }
 
-    // Add document note
+    // Add document note, or passage note when pending_highlight_id is set.
+    let is_passage_draft = state.pending_highlight_id.is_some();
     ui.horizontal(|ui| {
-        ui.label("New document note:");
+        if is_passage_draft {
+            ui.label("New passage note:");
+            if let Some(hid) = state.pending_highlight_id.as_deref() {
+                ui.label(
+                    RichText::new(format!("🔗 {hid}"))
+                        .small()
+                        .color(Color32::from_rgb(80, 100, 160)),
+                );
+            }
+        } else {
+            ui.label("New document note:");
+        }
     });
+    let hint: String = if is_passage_draft && !state.passage_note_hint.is_empty() {
+        state.passage_note_hint.clone()
+    } else if is_passage_draft {
+        "Type a passage note linked to the highlight…".into()
+    } else {
+        "Type a document note…".into()
+    };
     let draft_resp = ui.add(
         egui::TextEdit::multiline(&mut state.note_draft)
             .id_salt("note_draft")
             .desired_width(ui.available_width())
             .desired_rows(2)
-            .hint_text("Type a document note…"),
+            .hint_text(hint),
     );
     if draft_resp.has_focus() {
         state.note_editor_focused = true;
     }
     ui.horizontal(|ui| {
         let can_save = !state.note_draft.trim().is_empty() && !state.notes_busy;
+        let save_label = if is_passage_draft {
+            "Save passage note"
+        } else {
+            "Save note"
+        };
         if ui
-            .add_enabled(can_save, egui::Button::new("Save note").small())
+            .add_enabled(can_save, egui::Button::new(save_label).small())
             .clicked()
         {
             state.save_document_note(matter_root, ctx, actor);
+        }
+        if is_passage_draft
+            && ui
+                .small_button("Cancel passage")
+                .on_hover_text("Keep the highlight; discard passage-note draft binding")
+                .clicked()
+        {
+            state.pending_highlight_id = None;
+            state.passage_note_hint.clear();
+            // Keep note_draft text so the operator can still save as a document note.
+            state.notes_status = Some("Passage binding cleared (highlight kept).".into());
         }
     });
 
@@ -2849,8 +2939,10 @@ fn show_notes_panel(
                             state.note_editor_focused = true;
                         }
                         ui.horizontal(|ui| {
+                            let can_edit_save =
+                                !state.note_edit_body.trim().is_empty() && !state.notes_busy;
                             if ui
-                                .add_enabled(!state.notes_busy, egui::Button::new("Save").small())
+                                .add_enabled(can_edit_save, egui::Button::new("Save").small())
                                 .clicked()
                             {
                                 state.save_note_edit(matter_root, ctx, actor);
@@ -3951,5 +4043,127 @@ mod tests {
         // Scoped load: only requested ids.
         let empty = load_item_codes(&root, &[]).expect("empty");
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn note_on_selection_draft_binds_highlight_without_fake_body() {
+        // Desk helper contract: user text + highlight_id; never "Note on: …".
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = base.join("matter-passage-draft");
+        let matter = Matter::create(&root, "Passage Draft").expect("create");
+        let body = "The confidential clause is material.";
+        let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+        let item = matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                subject: Some("Note me".into()),
+                text_sha256: Some(digest.clone()),
+                ..Default::default()
+            })
+            .expect("item");
+        // Char range of "confidential"
+        let start = body.find("confidential").expect("quote") as i64;
+        let end = start + "confidential".chars().count() as i64;
+        let hl = matter
+            .create_highlight(matter_core::CreateHighlightInput {
+                item_id: item.id.clone(),
+                start_utf8: start,
+                end_utf8: end,
+                exact_quote: "confidential".into(),
+                display_body: body.into(),
+                body_digest: digest,
+                color: None,
+                actor: "desk-test".into(),
+            })
+            .expect("hl");
+        drop(matter);
+
+        // Empty draft rejected (UI would not call Save).
+        assert!(note_upsert_from_draft(&item.id, "", Some(&hl.id), "desk-test").is_err());
+
+        let input = note_upsert_from_draft(
+            &item.id,
+            "Attorney: this may be privileged.",
+            Some(&hl.id),
+            "desk-test",
+        )
+        .expect("input");
+        assert_eq!(input.highlight_id.as_deref(), Some(hl.id.as_str()));
+        assert_eq!(input.body, "Attorney: this may be privileged.");
+        assert!(!input.body.starts_with("Note on:"));
+
+        let matter = Matter::open(&root).expect("open");
+        let note = matter.upsert_note(input).expect("save");
+        assert_eq!(note.highlight_id.as_deref(), Some(hl.id.as_str()));
+        assert_eq!(note.body, "Attorney: this may be privileged.");
+        // Only user text was stored — no synthetic placeholder notes.
+        let notes = matter.list_notes(&item.id).expect("list");
+        assert_eq!(notes.len(), 1);
+        assert!(!notes[0].body.starts_with("Note on:"));
+    }
+
+    #[test]
+    fn failed_note_save_keeps_draft_and_edit_state() {
+        let mut state = ReviewState {
+            rows: vec![stub_row("itm_missing")],
+            selection: Some(0),
+            note_draft: "precious draft text".into(),
+            pending_highlight_id: Some("hlt_pending".into()),
+            passage_note_hint: "Passage note on “x”…".into(),
+            ..Default::default()
+        };
+
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        // No matter created → open fails; draft must remain.
+        let missing = base.join("no-such-matter");
+        let ctx = egui::Context::default();
+        state.save_document_note(&missing, &ctx, "desk-test");
+        assert_eq!(state.note_draft, "precious draft text");
+        assert_eq!(state.pending_highlight_id.as_deref(), Some("hlt_pending"));
+        assert!(!state.passage_note_hint.is_empty());
+        assert!(state.notes_error.is_some());
+
+        // Edit path: keep edit buffer on failure.
+        state.note_edit_id = Some("note_x".into());
+        state.note_edit_body = "edit body keep me".into();
+        state.save_note_edit(&missing, &ctx, "desk-test");
+        assert_eq!(state.note_edit_id.as_deref(), Some("note_x"));
+        assert_eq!(state.note_edit_body, "edit body keep me");
+        assert!(state.notes_error.is_some());
+    }
+
+    #[test]
+    fn successful_document_note_clears_draft() {
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = base.join("matter-note-clear");
+        let matter = Matter::create(&root, "Note Clear").expect("create");
+        let item = matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                subject: Some("Doc note".into()),
+                ..Default::default()
+            })
+            .expect("item");
+        drop(matter);
+
+        let mut state = ReviewState {
+            rows: vec![stub_row(&item.id)],
+            selection: Some(0),
+            note_draft: "  durable work product  ".into(),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        state.save_document_note(&root, &ctx, "desk-test");
+        assert!(state.notes_error.is_none(), "err: {:?}", state.notes_error);
+        assert!(state.note_draft.is_empty(), "draft cleared after success");
+        assert!(state.pending_highlight_id.is_none());
+        assert_eq!(state.item_notes.len(), 1);
+        assert_eq!(state.item_notes[0].body, "durable work product");
+        assert!(state.item_notes[0].highlight_id.is_none());
     }
 }

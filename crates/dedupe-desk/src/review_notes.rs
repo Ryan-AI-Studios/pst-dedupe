@@ -6,7 +6,7 @@
 use eframe::egui::{text::LayoutJob, text::TextFormat, text::TextWrapping, Color32, FontId};
 use matter_core::{
     display_body_digest, highlight_status, utf8_char_slice, CreateHighlightInput, ItemHighlight,
-    ResolvedHighlight,
+    ResolvedHighlight, UpsertNoteInput,
 };
 
 /// Yellow paint for active user highlights.
@@ -237,6 +237,54 @@ pub fn selection_from_char_range(range: std::ops::Range<usize>) -> Option<BodySe
     BodySelection::new(range.start, range.end)
 }
 
+/// Build a create-note [`UpsertNoteInput`] from desk draft text + optional passage highlight.
+///
+/// Rejects empty/whitespace bodies (mirrors matter-core). Never invents synthetic
+/// `"Note on: …"` placeholder text — callers must pass attorney-entered `draft_body`.
+pub fn note_upsert_from_draft(
+    item_id: &str,
+    draft_body: &str,
+    pending_highlight_id: Option<&str>,
+    actor: &str,
+) -> Result<UpsertNoteInput, String> {
+    let body = draft_body.trim();
+    if body.is_empty() {
+        return Err("note body cannot be empty or whitespace-only".into());
+    }
+    Ok(UpsertNoteInput {
+        id: None,
+        item_id: item_id.to_string(),
+        body: body.to_string(),
+        highlight_id: pending_highlight_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        actor: actor.to_string(),
+    })
+}
+
+/// Hint-only quote snippet for the passage-note draft editor (not persisted).
+pub fn passage_note_hint_from_quote(exact_quote: &str) -> String {
+    let snippet: String = exact_quote.chars().take(80).collect();
+    if snippet.is_empty() {
+        "Type a passage note linked to the highlight…".into()
+    } else {
+        format!("Passage note on “{snippet}”…")
+    }
+}
+
+/// Find an existing highlight matching the selection range (char offsets).
+pub fn find_highlight_for_selection(
+    highlights: &[ItemHighlight],
+    sel: BodySelection,
+) -> Option<&ItemHighlight> {
+    let start = sel.start as i64;
+    let end = sel.end as i64;
+    highlights
+        .iter()
+        .find(|h| h.start_utf8 == start && h.end_utf8 == end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +426,58 @@ mod tests {
             highlight_ui_status(&hl, find_resolved(&resolved, "hlt_ok")),
             highlight_status::ACTIVE
         );
+    }
+
+    #[test]
+    fn note_on_selection_path_uses_user_text_and_highlight_id() {
+        // Empty draft must not save (and never auto-fake "Note on: …").
+        let empty = note_upsert_from_draft("itm_1", "   ", Some("hlt_abc"), "alice");
+        assert!(empty.is_err(), "empty body rejected");
+
+        let quote = "important clause";
+        let fake = format!("Note on: {}", quote.chars().take(80).collect::<String>());
+        let input = note_upsert_from_draft(
+            "itm_1",
+            "  attorney observation about privilege  ",
+            Some("hlt_abc"),
+            "alice",
+        )
+        .expect("user text");
+        assert_eq!(input.item_id, "itm_1");
+        assert_eq!(input.body, "attorney observation about privilege");
+        assert_eq!(input.highlight_id.as_deref(), Some("hlt_abc"));
+        assert!(input.id.is_none());
+        assert_ne!(input.body, fake);
+        assert!(!input.body.starts_with("Note on:"));
+
+        // Document note path: no highlight_id.
+        let doc = note_upsert_from_draft("itm_1", "doc note", None, "bob").expect("doc");
+        assert!(doc.highlight_id.is_none());
+        assert_eq!(doc.body, "doc note");
+    }
+
+    #[test]
+    fn passage_hint_is_not_auto_saved_body() {
+        let hint = passage_note_hint_from_quote("secret sauce");
+        assert!(hint.contains("secret sauce"));
+        assert!(hint.starts_with("Passage note"));
+        // Empty draft still fails — quote hint is never used as the body.
+        assert!(note_upsert_from_draft("i", "", Some("h"), "a").is_err());
+        assert!(note_upsert_from_draft("i", "   ", Some("h"), "a").is_err());
+    }
+
+    #[test]
+    fn find_highlight_matches_selection_offsets() {
+        let hl = sample_hl("hlt_1", "yellow", "d", highlight_status::ACTIVE);
+        let mut hl = hl;
+        hl.start_utf8 = 6;
+        hl.end_utf8 = 12;
+        let sel = BodySelection::new(6, 12).expect("sel");
+        assert_eq!(
+            find_highlight_for_selection(std::slice::from_ref(&hl), sel).map(|h| h.id.as_str()),
+            Some("hlt_1")
+        );
+        let other = BodySelection::new(0, 5).expect("other");
+        assert!(find_highlight_for_selection(std::slice::from_ref(&hl), other).is_none());
     }
 }
