@@ -232,21 +232,28 @@ impl Matter {
 
     /// List office-eligible candidates for the extract job.
     ///
-    /// Items with `native_sha256` NOT NULL and (path/mime looks office-ish) and
-    /// (`text_sha256` NULL OR force OR native ≠ office_source).
+    /// Stable ordered set: items with `native_sha256` NOT NULL and path/mime
+    /// looking office-ish. Does **not** filter on existing text — callers skip
+    /// already-extracted items in-process (`force: false` idempotent skip).
+    ///
+    /// Using a shrinking "pending only" list with SQL OFFSET is incorrect:
+    /// successful extracts remove rows while OFFSET advances, silently skipping
+    /// remaining candidates.
+    ///
+    /// `force` is retained for call-site compatibility and does not change the
+    /// result set (skip vs re-extract is decided when applying).
     pub fn list_office_candidates(
         &self,
         offset: u64,
         limit: u64,
-        force: bool,
+        _force: bool,
     ) -> Result<Vec<OfficeCandidate>> {
         let limit_i = if limit == u64::MAX {
             i64::MAX
         } else {
             limit as i64
         };
-        let sql = if force {
-            "SELECT id, path, mime_type, native_sha256, text_sha256, \
+        let sql = "SELECT id, path, mime_type, native_sha256, text_sha256, \
                     office_source_native_sha256, office_extract_status, file_category \
              FROM items \
              WHERE matter_id = ?1 \
@@ -262,31 +269,7 @@ impl Matter {
                  OR IFNULL(mime_type, '') LIKE '%presentationml%' \
                ) \
              ORDER BY imported_at ASC, path ASC, id ASC \
-             LIMIT ?2 OFFSET ?3"
-        } else {
-            "SELECT id, path, mime_type, native_sha256, text_sha256, \
-                    office_source_native_sha256, office_extract_status, file_category \
-             FROM items \
-             WHERE matter_id = ?1 \
-               AND native_sha256 IS NOT NULL \
-               AND ( \
-                 lower(IFNULL(path, '')) LIKE '%.docx' OR lower(IFNULL(path, '')) LIKE '%.docm' \
-                 OR lower(IFNULL(path, '')) LIKE '%.xlsx' OR lower(IFNULL(path, '')) LIKE '%.xlsm' \
-                 OR lower(IFNULL(path, '')) LIKE '%.pptx' OR lower(IFNULL(path, '')) LIKE '%.pptm' \
-                 OR lower(IFNULL(path, '')) LIKE '%.doc' OR lower(IFNULL(path, '')) LIKE '%.xls' \
-                 OR lower(IFNULL(path, '')) LIKE '%.ppt' \
-                 OR IFNULL(mime_type, '') LIKE '%wordprocessingml%' \
-                 OR IFNULL(mime_type, '') LIKE '%spreadsheetml%' \
-                 OR IFNULL(mime_type, '') LIKE '%presentationml%' \
-               ) \
-               AND ( \
-                 text_sha256 IS NULL \
-                 OR office_source_native_sha256 IS NULL \
-                 OR office_source_native_sha256 != native_sha256 \
-               ) \
-             ORDER BY imported_at ASC, path ASC, id ASC \
-             LIMIT ?2 OFFSET ?3"
-        };
+             LIMIT ?2 OFFSET ?3";
         let mut stmt = self.connection().prepare(sql)?;
         let rows = stmt.query_map(params![self.id(), limit_i, offset as i64], |row| {
             Ok(OfficeCandidate {

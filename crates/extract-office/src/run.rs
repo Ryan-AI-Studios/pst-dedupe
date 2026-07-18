@@ -196,8 +196,10 @@ fn run_inner(
         summary.error_count = p.error_count;
     }
 
-    // List a large page of candidates starting at cursor. Re-list from offset
-    // each batch so force/idempotent changes stay consistent.
+    // Page a **stable** office-eligible list with OFFSET = cursor_index.
+    // Do not filter out already-extracted rows in SQL: a shrinking pending list
+    // plus advancing OFFSET silently skips remaining candidates after successes.
+    // Non-force idempotent skip is applied in process_one / apply_office_text.
     let batch = params.batch_size.max(1);
     loop {
         if cancel.map(|c| c()).unwrap_or(false) {

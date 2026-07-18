@@ -290,15 +290,16 @@ fn job_run_extracts_and_skips() {
         other => panic!("expected success: {other:?}"),
     }
 
-    // Second run: no candidates (skip list empty) → 0 completed
+    // Second run: stable candidate list still lists the item; process_one skips.
     let job2 = matter.create_job(JOB_KIND_OFFICE_EXTRACT).unwrap();
     let outcome2 = run_office_extract(&matter, &job2.id, &params, None, |_| {}).unwrap();
     match outcome2 {
         OfficeExtractOutcome::Succeeded(s) => {
             assert_eq!(s.extracted_count, 0);
-            assert_eq!(s.completed_count, 0);
+            assert_eq!(s.skipped_count, 1);
+            assert_eq!(s.completed_count, 1);
         }
-        other => panic!("expected success empty: {other:?}"),
+        other => panic!("expected success with skip: {other:?}"),
     }
 
     // Force re-extract
@@ -365,6 +366,151 @@ fn job_cancel_between_items() {
             let _ = other;
         }
     }
+}
+
+/// Regression: non-force + batch_size 1 must extract **all** N items.
+///
+/// Old bug: pending-only SQL + OFFSET into a shrinking list processed A, skipped
+/// B, processed C (or stopped early). Stable list + OFFSET visits every row.
+#[test]
+fn multi_item_batch_size_one_extracts_all() {
+    const N: usize = 3;
+    let dir = tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().join("m")).unwrap();
+    let matter = Matter::create(&root, "OfficeMulti").unwrap();
+
+    let data = load_fixture("minimal.docx");
+    let native = matter.put_bytes(&data).unwrap();
+    let mut ids = Vec::with_capacity(N);
+    for i in 0..N {
+        let item = matter
+            .insert_item(ItemInput {
+                path: Some(format!("memo-{i}.docx")),
+                native_sha256: Some(native.clone()),
+                status: "extracted".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        ids.push(item.id);
+    }
+
+    let job = matter.create_job(JOB_KIND_OFFICE_EXTRACT).unwrap();
+    let params = OfficeExtractParams {
+        force: false,
+        batch_size: 1,
+        ..Default::default()
+    };
+    let outcome = run_office_extract(&matter, &job.id, &params, None, |_| {}).unwrap();
+    match outcome {
+        OfficeExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.extracted_count, N as u64, "summary={s:?}");
+            assert_eq!(s.completed_count, N as u64, "summary={s:?}");
+            assert_eq!(s.error_count, 0, "summary={s:?}");
+        }
+        other => panic!("expected success: {other:?}"),
+    }
+
+    for id in &ids {
+        let item = matter.get_item(id).unwrap();
+        assert!(
+            item.text_sha256.is_some(),
+            "item {id} missing text_sha256 after multi-item extract"
+        );
+        assert_eq!(
+            item.office_source_native_sha256.as_deref(),
+            Some(native.as_str())
+        );
+    }
+}
+
+/// Cancel after one item → Paused; resume same job → remaining finish; all have text.
+#[test]
+fn multi_item_cancel_then_resume_completes_all() {
+    const N: usize = 3;
+    let dir = tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().join("m")).unwrap();
+    let matter = Matter::create(&root, "OfficeResume").unwrap();
+
+    let data = load_fixture("minimal.docx");
+    let native = matter.put_bytes(&data).unwrap();
+    let mut ids = Vec::with_capacity(N);
+    for i in 0..N {
+        let item = matter
+            .insert_item(ItemInput {
+                path: Some(format!("resume-{i}.docx")),
+                native_sha256: Some(native.clone()),
+                status: "extracted".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        ids.push(item.id);
+    }
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let job = matter.create_job(JOB_KIND_OFFICE_EXTRACT).unwrap();
+    let params = OfficeExtractParams {
+        force: false,
+        batch_size: 1,
+        ..Default::default()
+    };
+
+    let done = Arc::new(AtomicU64::new(0));
+    let done_cancel = done.clone();
+    let cancel_fn = move || done_cancel.load(Ordering::SeqCst) >= 1;
+    let done_progress = done.clone();
+    let paused = run_office_extract(&matter, &job.id, &params, Some(&cancel_fn), |c| {
+        done_progress.store(c, Ordering::SeqCst)
+    })
+    .unwrap();
+    match paused {
+        OfficeExtractOutcome::Paused(s) => {
+            assert_eq!(
+                s.completed_count, 1,
+                "expected cancel after first item: {s:?}"
+            );
+            assert_eq!(s.extracted_count, 1, "summary={s:?}");
+        }
+        other => panic!("expected Paused after 1 item, got {other:?}"),
+    }
+
+    // Resume: no cancel; checkpoint cursor continues OFFSET past item 0.
+    let resumed = run_office_extract(&matter, &job.id, &params, None, |_| {}).unwrap();
+    match resumed {
+        OfficeExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.completed_count, N as u64, "summary={s:?}");
+            assert_eq!(s.extracted_count, N as u64, "summary={s:?}");
+            assert_eq!(s.error_count, 0, "summary={s:?}");
+        }
+        other => panic!("expected Succeeded on resume: {other:?}"),
+    }
+
+    for id in &ids {
+        let item = matter.get_item(id).unwrap();
+        assert!(
+            item.text_sha256.is_some(),
+            "item {id} missing text after cancel/resume"
+        );
+    }
+}
+
+#[test]
+fn encrypted_ooxml_entry_markers() {
+    // Minimal zip whose only payload is EncryptionInfo / EncryptedPackage markers.
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut z = ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default();
+        z.start_file("EncryptionInfo", opts).unwrap();
+        z.write_all(b"not-real-encryption-info").unwrap();
+        z.start_file("EncryptedPackage", opts).unwrap();
+        z.write_all(b"ciphertext").unwrap();
+        z.finish().unwrap();
+    }
+    let data = buf.into_inner();
+    let err = extract_office(&data, Some("secret.docx"), None).expect_err("encrypted");
+    assert_eq!(err.code(), "encrypted_office");
 }
 
 #[test]

@@ -57,6 +57,7 @@ stringify the whole workbook first. Truncation marker:
 
 - Idempotent skip when `text_sha256` set and `office_source_native_sha256 == native_sha256`
 - `force: true` re-extracts
+- Candidate paging uses a **stable** office-eligible list + OFFSET (not a shrinking pending-only queue)
 - On text write: NULL `redacted_text_*` (0032); clear `fts_*` so 0029 re-indexes
 - **Never** rewrites native CAS
 - Cancel between items; checkpoint cursor
