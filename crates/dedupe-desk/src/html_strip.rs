@@ -130,7 +130,15 @@ fn match_entity(s: &str) -> Option<(&'static str, usize)> {
         ("&apos;", "'"),
     ];
     for (ent, rep) in ENTITIES {
-        if s.len() >= ent.len() && s[..ent.len()].eq_ignore_ascii_case(ent) {
+        // Use get() + char-boundary check so malformed UTF-8 tails (e.g. `&ééé`)
+        // never panic via mid-codepoint slicing.
+        let Some(prefix) = s.get(..ent.len()) else {
+            continue;
+        };
+        if !s.is_char_boundary(ent.len()) {
+            continue;
+        }
+        if prefix.eq_ignore_ascii_case(ent) {
             return Some((*rep, ent.len()));
         }
     }
@@ -200,5 +208,13 @@ mod tests {
     fn non_block_tags_strip_cleanly() {
         let out = html_to_review_text("<span>Hi</span> <b>there</b>");
         assert_eq!(out, "Hi there");
+    }
+
+    #[test]
+    fn malformed_non_ascii_entity_does_not_panic() {
+        // Byte-length prefix match must not slice mid-codepoint (e.g. `&ééé`).
+        let out = std::panic::catch_unwind(|| html_to_review_text("x&éééy"));
+        let text = out.expect("must not panic on malformed entity + UTF-8");
+        assert!(text.contains('x') && text.contains('y'), "{text:?}");
     }
 }

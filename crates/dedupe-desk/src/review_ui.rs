@@ -97,6 +97,11 @@ impl ReviewState {
     fn reload_list(&mut self, matter_root: &Utf8Path) {
         self.needs_reload = false;
         self.list_error = None;
+        // Always drop in-flight / stale body + parties: selection may change after
+        // re-promote (item demoted/removed). Leaving Ready/Loading with an old
+        // item_id would show permanent "Loading…" because spawn only runs on Idle.
+        self.body.clear();
+        self.selection_detail = None;
         match load_review_thin(matter_root) {
             Ok((count, rows)) => {
                 self.count = count;
@@ -113,6 +118,7 @@ impl ReviewState {
                     if let Some(row) = self.rows.get(i) {
                         self.last_item_id = Some(row.id.clone());
                     }
+                    self.load_selection_detail(matter_root);
                 }
             }
             Err(e) => {

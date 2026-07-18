@@ -96,7 +96,8 @@ impl BodyLoader {
 
         let root: Utf8PathBuf = matter_root.to_owned();
         let ctx = ctx.clone();
-        let _ = thread::Builder::new()
+        let spawn_item = item_id.clone();
+        match thread::Builder::new()
             .name("desk-review-body".into())
             .spawn(move || {
                 let result =
@@ -115,7 +116,18 @@ impl BodyLoader {
                 let _ = tx.send(payload);
                 // REQUIRED: wake egui after async body load (0026 DoD-4).
                 ctx.request_repaint();
-            });
+            }) {
+            Ok(_) => {}
+            Err(e) => {
+                // Do not leave the pane stuck on Loading forever.
+                self.rx = None;
+                self.pane = BodyPane::Ready {
+                    item_id: spawn_item,
+                    text: Err(format!("Failed to start body load thread: {e}")),
+                    truncated: false,
+                };
+            }
+        }
     }
 
     /// Poll for a completed load; apply only if generation still matches.
@@ -269,19 +281,69 @@ mod tests {
     }
 
     #[test]
-    fn generation_ignores_stale() {
-        let mut loader = BodyLoader::default();
-        assert!(matches!(loader.pane(), BodyPane::Idle));
-        // Bump gen as if selection changed mid-flight.
-        loader.gen = 1;
-        loader.pane = BodyPane::Loading {
+    fn generation_ignores_stale_channel_result() {
+        // Prove try_take drops a delivered BodyLoadResult when gen no longer matches
+        // (selection changed mid-flight). Manual pane mutation alone is not enough.
+        let (tx_stale, rx_stale) = mpsc::channel();
+        let mut loader = BodyLoader {
             gen: 1,
-            item_id: "a".into(),
+            pane: BodyPane::Loading {
+                gen: 1,
+                item_id: "a".into(),
+            },
+            rx: Some(rx_stale),
         };
-        // Simulate stale result by manually setting higher gen then applying check.
+
+        // Newer selection: gen 2, item b (old channel still holds gen-1 payload).
         loader.gen = 2;
-        // try_take with no channel is a no-op.
+        loader.pane = BodyPane::Loading {
+            gen: 2,
+            item_id: "b".into(),
+        };
+
+        tx_stale
+            .send(BodyLoadResult {
+                gen: 1,
+                item_id: "a".into(),
+                text: Ok("stale body".into()),
+                truncated: false,
+            })
+            .expect("send stale");
         loader.try_take();
-        assert!(matches!(loader.pane(), BodyPane::Loading { gen: 1, .. }));
+        assert!(
+            matches!(
+                loader.pane(),
+                BodyPane::Loading {
+                    gen: 2,
+                    item_id
+                } if item_id == "b"
+            ),
+            "stale gen-1 result must not apply; pane={:?}",
+            loader.pane()
+        );
+
+        // Fresh result for current gen applies.
+        let (tx_fresh, rx_fresh) = mpsc::channel();
+        loader.rx = Some(rx_fresh);
+        tx_fresh
+            .send(BodyLoadResult {
+                gen: 2,
+                item_id: "b".into(),
+                text: Ok("fresh body".into()),
+                truncated: false,
+            })
+            .expect("send fresh");
+        loader.try_take();
+        match loader.pane() {
+            BodyPane::Ready {
+                item_id,
+                text: Ok(t),
+                truncated: false,
+            } => {
+                assert_eq!(item_id, "b");
+                assert_eq!(t, "fresh body");
+            }
+            other => panic!("expected Ready fresh, got {other:?}"),
+        }
     }
 }
