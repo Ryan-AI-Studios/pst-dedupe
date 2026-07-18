@@ -1,4 +1,4 @@
-//! Review screen: linear corpus list + body viewer + family strip (track 0026).
+//! Review screen: linear corpus list + body viewer + family strip + coding (0026/0027).
 //!
 //! # List virtualization
 //!
@@ -11,10 +11,22 @@
 //! Thin rows only (`list_review_thin`). If `count_in_review ≤` [`THIN_LOAD_ALL_THRESHOLD`],
 //! load the full thin list; otherwise page in chunks of [`THIN_PAGE_SIZE`].
 //! Never load full corpus bodies into the list.
+//!
+//! # Coding (0027)
+//!
+//! Codes for **visible rows** only (`list_item_codes`). Multi-select + batch
+//! Add/Remove with optional whole-family propagate. Digits 1–9 toggle the first
+//! nine active codes on the current item when the focus gate is clear.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense};
-use matter_core::{Matter, ReviewListRow};
+use matter_core::{
+    ApplyCodesInput, ApplyCodesResult, CodeDef, ItemCodeInfo, Matter, ReviewListRow,
+};
 
 use crate::review_body::{BodyLoader, BodyPane};
 use crate::review_nav;
@@ -28,12 +40,28 @@ pub const THIN_LOAD_ALL_THRESHOLD: u64 = 50_000;
 /// Page size when corpus exceeds [`THIN_LOAD_ALL_THRESHOLD`].
 pub const THIN_PAGE_SIZE: u64 = 500;
 
+/// Prefer off-UI-thread apply when expanded target count exceeds this.
+pub const CODING_OFF_THREAD_THRESHOLD: usize = 50;
+
 /// Selection-time detail for header parties (not loaded in thin list).
 #[derive(Debug, Clone, Default)]
 pub struct SelectionDetail {
     pub item_id: String,
     pub to_display: Option<String>,
     pub cc_display: Option<String>,
+}
+
+/// Pending batch confirm dialog.
+#[derive(Debug, Clone)]
+struct BatchConfirm {
+    add: bool,
+    code_ids: Vec<String>,
+    code_labels: Vec<String>,
+    selected_ids: Vec<String>,
+    selected_count: usize,
+    /// Estimated targets after optional family expand (best-effort pre-expand).
+    target_count: usize,
+    propagate_family: bool,
 }
 
 /// Review screen state held by the desk app.
@@ -57,6 +85,25 @@ pub struct ReviewState {
     last_item_id: Option<String>,
     /// Cached To/Cc for the current selection (fetched via `get_item`).
     selection_detail: Option<SelectionDetail>,
+    /// Multi-selected item ids (checkbox column).
+    pub multi_selected: HashSet<String>,
+    /// Code catalog for the open matter.
+    code_defs: Vec<CodeDef>,
+    /// Codes for loaded/visible item ids.
+    row_codes: HashMap<String, Vec<ItemCodeInfo>>,
+    /// Batch panel mode: true = Add, false = Remove.
+    batch_mode_add: bool,
+    /// Codes checked in the batch panel (definition ids).
+    batch_code_ids: HashSet<String>,
+    /// Whole-family propagate checkbox (default false).
+    propagate_family: bool,
+    /// Open batch confirm dialog.
+    batch_confirm: Option<BatchConfirm>,
+    /// Async coding apply in flight.
+    coding_busy: bool,
+    coding_rx: Option<Receiver<Result<ApplyCodesResult, String>>>,
+    coding_status: Option<String>,
+    coding_error: Option<String>,
 }
 
 impl ReviewState {
@@ -71,11 +118,32 @@ impl ReviewState {
         self.needs_reload = true;
         self.last_item_id = None;
         self.selection_detail = None;
+        self.multi_selected.clear();
+        self.code_defs.clear();
+        self.row_codes.clear();
+        self.batch_code_ids.clear();
+        self.batch_confirm = None;
+        self.coding_busy = false;
+        self.coding_rx = None;
+        self.coding_status = None;
+        self.coding_error = None;
+        self.batch_mode_add = true;
+        self.propagate_family = false;
     }
 
     /// Request a thin-list reload on next show.
     pub fn request_reload(&mut self) {
         self.needs_reload = true;
+    }
+
+    /// Toggle multi-select membership for one item id.
+    pub fn toggle_multi_select(&mut self, item_id: &str) {
+        toggle_selection_set(&mut self.multi_selected, item_id);
+    }
+
+    /// Clear multi-select.
+    pub fn clear_multi_select(&mut self) {
+        self.multi_selected.clear();
     }
 
     fn ensure_loaded(&mut self, matter_root: &Utf8Path) {
@@ -107,6 +175,9 @@ impl ReviewState {
                 self.count = count;
                 self.rows = rows;
                 self.loaded_root = Some(matter_root.to_owned());
+                // Drop multi-select ids that are no longer present.
+                let present: HashSet<String> = self.rows.iter().map(|r| r.id.clone()).collect();
+                self.multi_selected.retain(|id| present.contains(id));
                 // Restore selection by id if possible.
                 let sel = if let Some(ref id) = self.last_item_id {
                     self.rows.iter().position(|r| &r.id == id)
@@ -120,6 +191,8 @@ impl ReviewState {
                     }
                     self.load_selection_detail(matter_root);
                 }
+                self.reload_coding_catalog(matter_root);
+                self.refresh_row_codes(matter_root);
             }
             Err(e) => {
                 self.list_error = Some(e);
@@ -127,8 +200,193 @@ impl ReviewState {
                 self.count = 0;
                 self.selection = None;
                 self.loaded_root = Some(matter_root.to_owned());
+                self.code_defs.clear();
+                self.row_codes.clear();
             }
         }
+    }
+
+    fn reload_coding_catalog(&mut self, matter_root: &Utf8Path) {
+        match load_code_definitions(matter_root) {
+            Ok(defs) => self.code_defs = defs,
+            Err(e) => {
+                self.coding_error = Some(format!("Code catalog: {e}"));
+                self.code_defs.clear();
+            }
+        }
+    }
+
+    fn refresh_row_codes(&mut self, matter_root: &Utf8Path) {
+        let ids: Vec<String> = self.rows.iter().map(|r| r.id.clone()).collect();
+        match load_item_codes(matter_root, &ids) {
+            Ok(map) => self.row_codes = map,
+            Err(e) => {
+                self.coding_error = Some(format!("Load codes: {e}"));
+            }
+        }
+    }
+
+    fn current_item_id(&self) -> Option<&str> {
+        self.selection
+            .and_then(|i| self.rows.get(i))
+            .map(|r| r.id.as_str())
+    }
+
+    fn codes_for(&self, item_id: &str) -> &[ItemCodeInfo] {
+        self.row_codes
+            .get(item_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn active_defs(&self) -> Vec<&CodeDef> {
+        self.code_defs.iter().filter(|d| d.is_active != 0).collect()
+    }
+
+    fn poll_coding(&mut self, matter_root: &Utf8Path, ctx: &egui::Context) {
+        let Some(rx) = self.coding_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(result)) => {
+                self.coding_busy = false;
+                self.coding_rx = None;
+                self.coding_status = Some(format!("Coded {} item(s).", result.target_count));
+                self.coding_error = None;
+                self.refresh_row_codes(matter_root);
+                ctx.request_repaint();
+            }
+            Ok(Err(e)) => {
+                self.coding_busy = false;
+                self.coding_rx = None;
+                self.coding_error = Some(e);
+                self.coding_status = None;
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.coding_busy = false;
+                self.coding_rx = None;
+                self.coding_error = Some("Coding worker ended unexpectedly.".into());
+            }
+        }
+    }
+
+    fn apply_codes_now(
+        &mut self,
+        matter_root: &Utf8Path,
+        ctx: &egui::Context,
+        input: ApplyCodesInput,
+    ) {
+        if self.coding_busy {
+            return;
+        }
+        let n = if input.propagate_family {
+            // Unknown expand size — off-thread when selected is large.
+            input.item_ids.len().max(CODING_OFF_THREAD_THRESHOLD)
+        } else {
+            input.item_ids.len()
+        };
+        if n > CODING_OFF_THREAD_THRESHOLD {
+            self.spawn_apply_codes(matter_root, ctx, input);
+        } else {
+            match apply_codes_blocking(matter_root, input) {
+                Ok(result) => {
+                    self.coding_status = Some(format!("Coded {} item(s).", result.target_count));
+                    self.coding_error = None;
+                    self.refresh_row_codes(matter_root);
+                }
+                Err(e) => {
+                    self.coding_error = Some(e);
+                    self.coding_status = None;
+                }
+            }
+        }
+    }
+
+    fn spawn_apply_codes(
+        &mut self,
+        matter_root: &Utf8Path,
+        ctx: &egui::Context,
+        input: ApplyCodesInput,
+    ) {
+        if self.coding_busy {
+            return;
+        }
+        let root = matter_root.to_owned();
+        let ctx = ctx.clone();
+        let (tx, rx) = mpsc::channel();
+        self.coding_rx = Some(rx);
+        self.coding_busy = true;
+        self.coding_status = Some("Applying codes…".into());
+        self.coding_error = None;
+        let _ = thread::Builder::new()
+            .name("desk-coding-apply".into())
+            .spawn(move || {
+                let result = apply_codes_blocking(&root, input);
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            });
+    }
+
+    /// Toggle a code on the current item (no confirm).
+    fn toggle_current_code(
+        &mut self,
+        matter_root: &Utf8Path,
+        ctx: &egui::Context,
+        code_id: &str,
+        actor: &str,
+    ) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            return;
+        };
+        let has = self
+            .codes_for(&item_id)
+            .iter()
+            .any(|c| c.code_id == code_id);
+        let input = if has {
+            ApplyCodesInput {
+                item_ids: vec![item_id],
+                add_code_ids: vec![],
+                remove_code_ids: vec![code_id.to_string()],
+                propagate_family: false,
+                actor: actor.to_string(),
+            }
+        } else {
+            ApplyCodesInput {
+                item_ids: vec![item_id],
+                add_code_ids: vec![code_id.to_string()],
+                remove_code_ids: vec![],
+                propagate_family: false,
+                actor: actor.to_string(),
+            }
+        };
+        self.apply_codes_now(matter_root, ctx, input);
+    }
+
+    fn remove_current_code(
+        &mut self,
+        matter_root: &Utf8Path,
+        ctx: &egui::Context,
+        code_id: &str,
+        actor: &str,
+    ) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            return;
+        };
+        self.apply_codes_now(
+            matter_root,
+            ctx,
+            ApplyCodesInput {
+                item_ids: vec![item_id],
+                add_code_ids: vec![],
+                remove_code_ids: vec![code_id.to_string()],
+                propagate_family: false,
+                actor: actor.to_string(),
+            },
+        );
     }
 
     fn select_index(&mut self, idx: usize, ctx: &egui::Context, matter_root: &Utf8Path) {
@@ -269,12 +527,70 @@ pub fn load_review_thin(matter_root: &Utf8Path) -> Result<(u64, Vec<ReviewListRo
     Ok((count, rows))
 }
 
+/// Load code catalog (seeds if empty via writer open path when needed).
+pub fn load_code_definitions(matter_root: &Utf8Path) -> Result<Vec<CodeDef>, String> {
+    // Prefer read path; if empty (legacy matter never seeded), seed via open.
+    let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
+    let mut defs = matter.list_code_definitions().map_err(|e| e.to_string())?;
+    drop(matter);
+    if defs.is_empty() {
+        let matter = Matter::open(matter_root).map_err(|e| e.to_string())?;
+        matter.seed_default_codes().map_err(|e| e.to_string())?;
+        defs = matter.list_code_definitions().map_err(|e| e.to_string())?;
+    }
+    Ok(defs)
+}
+
+/// Batch-load codes for the given item ids (visible rows).
+pub fn load_item_codes(
+    matter_root: &Utf8Path,
+    item_ids: &[String],
+) -> Result<HashMap<String, Vec<ItemCodeInfo>>, String> {
+    let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
+    matter.list_item_codes(item_ids).map_err(|e| e.to_string())
+}
+
+/// Apply codes on a worker / sync path.
+pub fn apply_codes_blocking(
+    matter_root: &Utf8Path,
+    input: ApplyCodesInput,
+) -> Result<ApplyCodesResult, String> {
+    let matter = Matter::open(matter_root).map_err(|e| e.to_string())?;
+    matter.seed_default_codes().map_err(|e| e.to_string())?;
+    matter.apply_codes(input).map_err(|e| e.to_string())
+}
+
+/// Toggle membership of `item_id` in a multi-select set (pure helper for tests).
+pub fn toggle_selection_set(selected: &mut HashSet<String>, item_id: &str) {
+    if !selected.remove(item_id) {
+        selected.insert(item_id.to_string());
+    }
+}
+
+/// Select a contiguous index range into multi-select by item id (pure helper).
+pub fn select_range_into(
+    selected: &mut HashSet<String>,
+    rows: &[ReviewListRow],
+    from: usize,
+    to: usize,
+) {
+    if rows.is_empty() {
+        return;
+    }
+    let lo = from.min(to).min(rows.len().saturating_sub(1));
+    let hi = from.max(to).min(rows.len().saturating_sub(1));
+    for r in &rows[lo..=hi] {
+        selected.insert(r.id.clone());
+    }
+}
+
 /// Paint the Review screen.
-pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path) {
+pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path, actor: &str) {
     let ctx = ui.ctx().clone();
 
     state.ensure_loaded(matter_root);
     state.body.try_take();
+    state.poll_coding(matter_root, &ctx);
 
     // Kick body load when we have a selection but body is idle (first paint after reload).
     if state.selection.is_some() && matches!(state.body.pane(), BodyPane::Idle) {
@@ -312,14 +628,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path) 
     // Keyboard: only when no widget has focus (egui 0.34: focused()).
     let no_focus = ctx.memory(|m| m.focused().is_none());
     if review_nav::focus_allows_shortcuts(no_focus) {
-        let (want_next, want_prev, want_enter) = ui.input(|i| {
+        let (want_next, want_prev, want_enter, digit) = ui.input(|i| {
             let next =
                 i.key_pressed(Key::CloseBracket) || (i.modifiers.alt && i.key_pressed(Key::N));
             let prev =
                 i.key_pressed(Key::OpenBracket) || (i.modifiers.alt && i.key_pressed(Key::P));
-            // Spec §3.4: Enter opens selected (re-ensure body + detail for current row).
             let enter = i.key_pressed(Key::Enter);
-            (next, prev, enter)
+            let digit = digit_key_index(i);
+            (next, prev, enter, digit)
         });
         if want_next {
             state.go_next(&ctx, matter_root);
@@ -329,8 +645,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path) 
             if let Some(i) = state.selection {
                 state.select_index(i, &ctx, matter_root);
             }
+        } else if let Some(di) = digit {
+            let active: Vec<CodeDef> = state.active_defs().into_iter().take(9).cloned().collect();
+            if let Some(def) = active.get(di) {
+                let id = def.id.clone();
+                state.toggle_current_code(matter_root, &ctx, &id, actor);
+            }
         }
-        // Consume so other widgets do not also see them when we handled.
         if want_next {
             ui.input_mut(|i| {
                 let _ = i.consume_key(Modifiers::NONE, Key::CloseBracket);
@@ -353,10 +674,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path) 
     // Status bar
     let n_shown = state.rows.len();
     let n_total = state.count as usize;
+    let n_multi = state.multi_selected.len();
     ui.horizontal(|ui| {
         ui.label(review_nav::position_label(state.selection, n_shown));
         if n_total > n_shown {
             ui.label(format!("(showing {n_shown} of {n_total} in corpus)"));
+        }
+        if n_multi > 0 {
+            ui.separator();
+            ui.label(format!("{n_multi} selected"));
+            if ui.small_button("Clear selection").clicked() {
+                state.clear_multi_select();
+            }
         }
         ui.separator();
         let can_prev = state
@@ -381,13 +710,33 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path) 
         {
             state.go_next(&ctx, matter_root);
         }
-        ui.label(RichText::new("  [ / ]  Alt+P / Alt+N").weak().small());
+        ui.label(
+            RichText::new("  [ / ]  Alt+P / Alt+N  ·  1–9 toggle codes")
+                .weak()
+                .small(),
+        );
     });
+    if let Some(status) = state.coding_status.clone() {
+        ui.label(
+            RichText::new(status)
+                .small()
+                .color(Color32::from_rgb(40, 120, 60)),
+        );
+    }
+    if let Some(err) = state.coding_error.clone() {
+        ui.colored_label(Color32::from_rgb(200, 60, 60), format!("Coding: {err}"));
+    }
+    if state.coding_busy {
+        ui.label(RichText::new("Applying codes…").italics().small());
+    }
     ui.add_space(4.0);
+
+    // Batch confirm modal
+    show_batch_confirm(ui, state, matter_root, &ctx, actor);
 
     // Main split: list | viewer
     let available = ui.available_size();
-    let list_width = (available.x * 0.34).clamp(220.0, 420.0);
+    let list_width = (available.x * 0.34).clamp(220.0, 480.0);
 
     ui.horizontal(|ui| {
         // --- Corpus list ---
@@ -404,11 +753,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path) 
                         .auto_shrink([false, false])
                         .show_rows(ui, ROW_HEIGHT, state.rows.len(), |ui, row_range| {
                             for row_idx in row_range {
-                                let Some(row) = state.rows.get(row_idx) else {
+                                let Some(row) = state.rows.get(row_idx).cloned() else {
                                     continue;
                                 };
                                 let selected = state.selection == Some(row_idx);
-                                let label = format_list_row(row);
+                                let checked = state.multi_selected.contains(&row.id);
+                                let code_snip = format_code_snip(state.codes_for(&row.id));
+                                let label = format_list_row(&row, &code_snip);
                                 let indent = if row.parent_item_id.is_some() {
                                     14.0
                                 } else {
@@ -431,7 +782,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path) 
                                         ui.visuals().widgets.hovered.bg_fill,
                                     );
                                 }
-                                let text_rect = rect.shrink2(egui::vec2(4.0 + indent, 0.0));
+                                // Checkbox glyph (fixed row height — not a nested widget).
+                                let box_x = rect.left() + 4.0;
+                                let box_c = rect.center().y;
+                                let mark = if checked { "☑" } else { "☐" };
+                                ui.painter().text(
+                                    egui::pos2(box_x, box_c),
+                                    egui::Align2::LEFT_CENTER,
+                                    mark,
+                                    egui::TextStyle::Body.resolve(ui.style()),
+                                    ui.visuals().text_color(),
+                                );
+                                let text_rect = rect.shrink2(egui::vec2(22.0 + indent, 0.0));
                                 ui.painter().text(
                                     text_rect.left_center(),
                                     egui::Align2::LEFT_CENTER,
@@ -443,8 +805,32 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path) 
                                         ui.visuals().text_color()
                                     },
                                 );
+                                // Left strip click toggles multi-select; rest selects current.
+                                let check_rect = egui::Rect::from_min_size(
+                                    rect.left_top(),
+                                    egui::vec2(20.0, ROW_HEIGHT),
+                                );
                                 if response.clicked() {
-                                    state.select_index(row_idx, &ctx, matter_root);
+                                    if let Some(pos) = response.interact_pointer_pos() {
+                                        if check_rect.contains(pos) {
+                                            state.toggle_multi_select(&row.id);
+                                        } else if ui.input(|i| i.modifiers.shift) {
+                                            // Optional shift-range multi-select from current selection.
+                                            if let Some(from) = state.selection {
+                                                select_range_into(
+                                                    &mut state.multi_selected,
+                                                    &state.rows,
+                                                    from,
+                                                    row_idx,
+                                                );
+                                            }
+                                            state.select_index(row_idx, &ctx, matter_root);
+                                        } else {
+                                            state.select_index(row_idx, &ctx, matter_root);
+                                        }
+                                    } else {
+                                        state.select_index(row_idx, &ctx, matter_root);
+                                    }
                                 }
                             }
                         });
@@ -457,13 +843,45 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path) 
             egui::vec2(ui.available_width(), available.y - 4.0),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                show_viewer(ui, state, matter_root, &ctx);
+                show_viewer(ui, state, matter_root, &ctx, actor);
             },
         );
     });
 }
 
-fn format_list_row(row: &ReviewListRow) -> String {
+fn digit_key_index(i: &egui::InputState) -> Option<usize> {
+    const KEYS: [Key; 9] = [
+        Key::Num1,
+        Key::Num2,
+        Key::Num3,
+        Key::Num4,
+        Key::Num5,
+        Key::Num6,
+        Key::Num7,
+        Key::Num8,
+        Key::Num9,
+    ];
+    for (idx, k) in KEYS.iter().enumerate() {
+        if i.key_pressed(*k) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn format_code_snip(codes: &[ItemCodeInfo]) -> String {
+    if codes.is_empty() {
+        return String::new();
+    }
+    let labels: Vec<&str> = codes.iter().take(3).map(|c| c.label.as_str()).collect();
+    let mut s = labels.join(", ");
+    if codes.len() > 3 {
+        s.push('…');
+    }
+    s
+}
+
+fn format_list_row(row: &ReviewListRow, code_snip: &str) -> String {
     let subj = row
         .subject
         .as_deref()
@@ -493,6 +911,11 @@ fn format_list_row(row: &ReviewListRow) -> String {
         let short = if date.len() >= 10 { &date[..10] } else { date };
         s.push_str(short);
     }
+    if !code_snip.is_empty() {
+        s.push_str("  [");
+        s.push_str(code_snip);
+        s.push(']');
+    }
     // Hard cap for list label length (ellipsis).
     const MAX: usize = 120;
     if s.chars().count() > MAX {
@@ -508,6 +931,7 @@ fn show_viewer(
     state: &mut ReviewState,
     matter_root: &Utf8Path,
     ctx: &egui::Context,
+    actor: &str,
 ) {
     let row = state.selection.and_then(|i| state.rows.get(i).cloned());
 
@@ -579,14 +1003,34 @@ fn show_viewer(
             }
         });
 
-        // Coding placeholder (0027)
+        // Current-item code chips (click to remove).
         ui.add_space(2.0);
-        ui.label(
-            RichText::new("Coding: (read-only placeholder — track 0027)")
-                .italics()
-                .weak()
-                .small(),
-        );
+        let current_codes: Vec<ItemCodeInfo> = state.codes_for(&row.id).to_vec();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Codes:").strong().small());
+            if current_codes.is_empty() {
+                ui.label(RichText::new("(none)").weak().small());
+            } else {
+                for c in &current_codes {
+                    let tip = if c.is_active == 0 {
+                        format!("{} (inactive — click to remove)", c.label)
+                    } else {
+                        format!("{} — click to remove", c.label)
+                    };
+                    if ui
+                        .add(egui::Button::new(format!("[{}]", c.label)).small())
+                        .on_hover_text(tip)
+                        .clicked()
+                        && !state.coding_busy
+                    {
+                        state.remove_current_code(matter_root, ctx, &c.code_id, actor);
+                    }
+                }
+            }
+        });
+
+        // Coding panel
+        show_coding_panel(ui, state, matter_root, ctx, actor, &row.id);
 
         ui.separator();
 
@@ -652,6 +1096,233 @@ fn show_viewer(
         // Family / attachment strip
         show_family_strip(ui, state, &row, matter_root, ctx);
     });
+}
+
+fn show_coding_panel(
+    ui: &mut egui::Ui,
+    state: &mut ReviewState,
+    matter_root: &Utf8Path,
+    ctx: &egui::Context,
+    actor: &str,
+    current_item_id: &str,
+) {
+    ui.add_space(4.0);
+    ui.label(RichText::new("Coding panel").strong().small());
+    ui.label(
+        RichText::new("Current-item: click a code button to toggle (no confirm). 1–9 shortcuts when focus clear.")
+            .weak()
+            .small(),
+    );
+
+    let active: Vec<CodeDef> = state.active_defs().into_iter().cloned().collect();
+    let current_codes: HashSet<String> = state
+        .codes_for(current_item_id)
+        .iter()
+        .map(|c| c.code_id.clone())
+        .collect();
+
+    ui.horizontal_wrapped(|ui| {
+        for (i, def) in active.iter().enumerate() {
+            let on = current_codes.contains(&def.id);
+            let shortcut = if i < 9 {
+                format!(" [{}]", i + 1)
+            } else {
+                String::new()
+            };
+            let label = if on {
+                format!("● {}{shortcut}", def.label)
+            } else {
+                format!("○ {}{shortcut}", def.label)
+            };
+            if ui
+                .add_enabled(!state.coding_busy, egui::Button::new(label).small())
+                .on_hover_text(format!("{} ({})", def.key, def.group_key))
+                .clicked()
+            {
+                state.toggle_current_code(matter_root, ctx, &def.id, actor);
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Batch:").strong().small());
+        if ui
+            .selectable_label(state.batch_mode_add, "Add mode")
+            .clicked()
+        {
+            state.batch_mode_add = true;
+        }
+        if ui
+            .selectable_label(!state.batch_mode_add, "Remove mode")
+            .clicked()
+        {
+            state.batch_mode_add = false;
+        }
+        ui.checkbox(&mut state.propagate_family, "Apply to family")
+            .on_hover_text(
+                "Whole family unit: parent + all direct children (siblings). Default off.",
+            );
+    });
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Batch codes:").small());
+        for def in &active {
+            let mut checked = state.batch_code_ids.contains(&def.id);
+            if ui.checkbox(&mut checked, def.label.as_str()).changed() {
+                if checked {
+                    state.batch_code_ids.insert(def.id.clone());
+                } else {
+                    state.batch_code_ids.remove(&def.id);
+                }
+            }
+        }
+    });
+
+    let n_sel = state.multi_selected.len();
+    let can_batch = n_sel > 0 && !state.batch_code_ids.is_empty() && !state.coding_busy;
+    let mode_word = if state.batch_mode_add {
+        "Add"
+    } else {
+        "Remove"
+    };
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                can_batch,
+                egui::Button::new(format!("{mode_word} on {n_sel} selected")),
+            )
+            .on_hover_text("Confirm dialog before batch apply")
+            .clicked()
+        {
+            let selected_ids: Vec<String> = state.multi_selected.iter().cloned().collect();
+            let code_ids: Vec<String> = state.batch_code_ids.iter().cloned().collect();
+            let code_labels: Vec<String> = active
+                .iter()
+                .filter(|d| state.batch_code_ids.contains(&d.id))
+                .map(|d| d.label.clone())
+                .collect();
+            // Pre-estimate targets: without expand = N; with expand use a local best-effort
+            // from loaded rows (parent + siblings in RAM) — API expands for real.
+            let target_count = if state.propagate_family {
+                estimate_family_targets(&state.rows, &selected_ids)
+            } else {
+                selected_ids.len()
+            };
+            state.batch_confirm = Some(BatchConfirm {
+                add: state.batch_mode_add,
+                code_ids,
+                code_labels,
+                selected_ids,
+                selected_count: n_sel,
+                target_count,
+                propagate_family: state.propagate_family,
+            });
+        }
+        ui.label(
+            RichText::new(format!(
+                "(actor: {actor}; Privilege code ≠ full privilege log — see 0031)"
+            ))
+            .weak()
+            .small(),
+        );
+    });
+}
+
+fn estimate_family_targets(rows: &[ReviewListRow], selected_ids: &[String]) -> usize {
+    let mut set: HashSet<String> = HashSet::new();
+    let by_id: HashMap<&str, &ReviewListRow> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
+    for id in selected_ids {
+        let Some(row) = by_id.get(id.as_str()) else {
+            set.insert(id.clone());
+            continue;
+        };
+        let parent = row.parent_item_id.clone().unwrap_or_else(|| row.id.clone());
+        set.insert(parent.clone());
+        for r in rows {
+            if r.id == parent || r.parent_item_id.as_deref() == Some(parent.as_str()) {
+                set.insert(r.id.clone());
+            }
+            if let (Some(fid), Some(pfid)) = (
+                r.family_id.as_deref(),
+                by_id
+                    .get(parent.as_str())
+                    .and_then(|p| p.family_id.as_deref())
+                    .or(row.family_id.as_deref()),
+            ) {
+                if fid == pfid {
+                    set.insert(r.id.clone());
+                }
+            }
+        }
+    }
+    set.len().max(selected_ids.len())
+}
+
+fn show_batch_confirm(
+    ui: &mut egui::Ui,
+    state: &mut ReviewState,
+    matter_root: &Utf8Path,
+    ctx: &egui::Context,
+    actor: &str,
+) {
+    let Some(confirm) = state.batch_confirm.clone() else {
+        return;
+    };
+    let mut open = true;
+    egui::Window::new("Confirm batch coding")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            let mode = if confirm.add { "Add" } else { "Remove" };
+            let codes = confirm.code_labels.join(", ");
+            ui.label(format!(
+                "{mode} [{codes}] on {} selected item(s)",
+                confirm.selected_count
+            ));
+            if confirm.propagate_family {
+                ui.label(format!(
+                    "(family expanded → ~{} targets; final count is after whole-family unit expand)",
+                    confirm.target_count
+                ));
+            } else {
+                ui.label(format!("(no family expand → {} targets)", confirm.target_count));
+            }
+            ui.label(
+                RichText::new("Audit records every target id. This cannot be undone except by Remove mode.")
+                    .small()
+                    .weak(),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    state.batch_confirm = None;
+                }
+                if ui
+                    .add_enabled(!state.coding_busy, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    let (add_ids, remove_ids) = if confirm.add {
+                        (confirm.code_ids.clone(), Vec::new())
+                    } else {
+                        (Vec::new(), confirm.code_ids.clone())
+                    };
+                    let input = ApplyCodesInput {
+                        item_ids: confirm.selected_ids.clone(),
+                        add_code_ids: add_ids,
+                        remove_code_ids: remove_ids,
+                        propagate_family: confirm.propagate_family,
+                        actor: actor.to_string(),
+                    };
+                    state.batch_confirm = None;
+                    state.apply_codes_now(matter_root, ctx, input);
+                }
+            });
+        });
+    if !open {
+        state.batch_confirm = None;
+    }
 }
 
 fn show_family_strip(
@@ -732,11 +1403,91 @@ mod tests {
     #[test]
     fn row_height_is_fixed_positive() {
         // Document the virtualization contract: uniform height in (0, 100).
+        // Coding multi-select must not change this constant (virtualization).
         const {
             assert!(ROW_HEIGHT > 0.0);
             assert!(ROW_HEIGHT < 100.0);
         };
         assert!((ROW_HEIGHT - 22.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn selection_set_toggle_and_range() {
+        let mut set = HashSet::new();
+        toggle_selection_set(&mut set, "a");
+        assert!(set.contains("a"));
+        toggle_selection_set(&mut set, "a");
+        assert!(!set.contains("a"));
+        toggle_selection_set(&mut set, "a");
+        toggle_selection_set(&mut set, "b");
+        assert_eq!(set.len(), 2);
+
+        let rows = vec![
+            ReviewListRow {
+                id: "r0".into(),
+                review_order: Some(0),
+                role: None,
+                parent_item_id: None,
+                subject: Some("0".into()),
+                from_addr: None,
+                sent_at: None,
+                received_at: None,
+                path: None,
+                file_category: None,
+                mime_type: None,
+                size_bytes: None,
+                text_sha256: None,
+                html_sha256: None,
+                dedup_role: None,
+                cull_status: None,
+                attachment_count: None,
+                family_id: None,
+            },
+            ReviewListRow {
+                id: "r1".into(),
+                review_order: Some(1),
+                role: None,
+                parent_item_id: None,
+                subject: Some("1".into()),
+                from_addr: None,
+                sent_at: None,
+                received_at: None,
+                path: None,
+                file_category: None,
+                mime_type: None,
+                size_bytes: None,
+                text_sha256: None,
+                html_sha256: None,
+                dedup_role: None,
+                cull_status: None,
+                attachment_count: None,
+                family_id: None,
+            },
+            ReviewListRow {
+                id: "r2".into(),
+                review_order: Some(2),
+                role: None,
+                parent_item_id: None,
+                subject: Some("2".into()),
+                from_addr: None,
+                sent_at: None,
+                received_at: None,
+                path: None,
+                file_category: None,
+                mime_type: None,
+                size_bytes: None,
+                text_sha256: None,
+                html_sha256: None,
+                dedup_role: None,
+                cull_status: None,
+                attachment_count: None,
+                family_id: None,
+            },
+        ];
+        let mut range = HashSet::new();
+        select_range_into(&mut range, &rows, 0, 2);
+        assert_eq!(range.len(), 3);
+        assert!(range.contains("r0") && range.contains("r2"));
     }
 
     #[test]

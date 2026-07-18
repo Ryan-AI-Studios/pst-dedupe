@@ -768,7 +768,8 @@ impl eframe::App for DeskApp {
             Screen::StubReduce => self.show_stub(ui, "Reduce"),
             Screen::Review => {
                 if let Some(root) = self.matter_root.clone() {
-                    review_ui::show(ui, &mut self.review, &root);
+                    let actor = self.settings.actor().to_string();
+                    review_ui::show(ui, &mut self.review, &root, &actor);
                 } else {
                     ui.label("Open a matter to review.");
                 }
