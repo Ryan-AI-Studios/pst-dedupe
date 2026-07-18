@@ -5,9 +5,10 @@ use std::fs;
 use camino::Utf8PathBuf;
 use matter_core::{
     compute_email_logical_hash, item_role, item_status, verify_audit_chain, AuditEventInput,
-    EmailLogicalInput, Error, ItemErrorInput, ItemInput, ItemUpdate, JobState, LogicalAttachment,
-    Matter, DB_FILE, EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR, LOGICAL_HASH_VERSION,
-    LOGS_DIR, PUT_READER_BUF_SIZE, SCHEMA_VERSION, WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
+    EmailLogicalInput, Error, FilterSpec, ItemErrorInput, ItemInput, ItemUpdate, JobState,
+    LogicalAttachment, Matter, DB_FILE, EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR,
+    LOGICAL_HASH_VERSION, LOGS_DIR, PUT_READER_BUF_SIZE, SCHEMA_VERSION, WORKSPACE_DIR,
+    WORKSPACE_TEMP_DIR,
 };
 use tempfile::tempdir;
 
@@ -376,19 +377,33 @@ fn audit_append_verify_and_detect_broken_chain() {
 }
 
 #[test]
-fn schema_v9_on_create() {
+fn schema_v10_on_create() {
     let (_tmp, base) = utf8_tempdir();
-    let root = base.join("matter-v9");
-    let matter = Matter::create(&root, "V9").expect("create");
-    assert_eq!(SCHEMA_VERSION, 9);
-    assert_eq!(matter.schema_version().expect("ver"), 9);
-    assert_eq!(matter.info().expect("info").schema_version, 9);
+    let root = base.join("matter-v10");
+    let matter = Matter::create(&root, "V10").expect("create");
+    assert_eq!(SCHEMA_VERSION, 10);
+    assert_eq!(matter.schema_version().expect("ver"), 10);
+    assert_eq!(matter.info().expect("info").schema_version, 10);
     // Default coding catalog seeded on create.
     let defs = matter.list_code_definitions().expect("defs");
     assert_eq!(defs.len(), 6);
-    // saved_searches table present (empty).
+    // saved_searches table present (empty); keyword column exists via v10.
     let saved = matter.list_saved_searches().expect("saved");
     assert!(saved.is_empty());
+    // FTS bookkeeping columns present and null for new items.
+    let digest = matter.put_bytes(b"probe").expect("cas");
+    let item = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            text_sha256: Some(digest),
+            path: Some("p.txt".into()),
+            ..Default::default()
+        })
+        .expect("item");
+    let cands = matter.list_fts_candidates(0, 10).expect("fts cands");
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].id, item.id);
+    assert!(cands[0].fts_text_sha256.is_none());
 }
 
 #[test]
@@ -1338,6 +1353,69 @@ fn near_dup_batch_and_checkpoint_same_transaction() {
     let cleared = matter.get_item(&a.id).expect("get");
     assert!(cleared.near_dup_role.is_none());
     assert!(cleared.near_dup_group_id.is_none());
+}
+
+#[test]
+fn fts_batch_checkpoint_and_candidates() {
+    use matter_core::{item_role, item_status, FtsFieldUpdate};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-fts-txn");
+    let matter = Matter::create(&root, "Fts Txn").expect("create");
+    let job = matter.create_job("fts_index").expect("job");
+
+    let digest = matter.put_bytes(b"keyword body alpha").expect("cas");
+    let a = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            path: Some("doc-a.txt".into()),
+            text_sha256: Some(digest.clone()),
+            subject: Some("Alpha".into()),
+            ..Default::default()
+        })
+        .expect("a");
+
+    matter
+        .apply_fts_batch_with_checkpoint(
+            &job.id,
+            "fts_index",
+            &[FtsFieldUpdate {
+                item_id: a.id.clone(),
+                fts_text_sha256: Some(digest.clone()),
+                fts_indexed_at: Some("2020-01-01T00:00:00Z".into()),
+                fts_error: None,
+            }],
+            r#"{"phase":"index","cursor_index":1}"#,
+            1,
+        )
+        .expect("batch");
+
+    let cands = matter.list_fts_candidates(0, 100).expect("cands");
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].id, a.id);
+    assert_eq!(cands[0].fts_text_sha256.as_deref(), Some(digest.as_str()));
+
+    let attach_map = matter
+        .list_attachment_names_for_parents(std::slice::from_ref(&a.id))
+        .expect("atts");
+    assert!(!attach_map.contains_key(&a.id) || attach_map.get(&a.id).is_some_and(|v| v.is_empty()));
+
+    matter.clear_fts_fields().expect("clear");
+    let cands2 = matter.list_fts_candidates(0, 100).expect("cands2");
+    assert!(cands2[0].fts_text_sha256.is_none());
+
+    // filtered-in-ids: empty hits → empty
+    let empty = matter
+        .list_items_filtered_thin_in_ids(&FilterSpec::default(), &[], 10, 0)
+        .expect("empty");
+    assert!(empty.is_empty());
+    assert_eq!(
+        matter
+            .count_items_filtered_in_ids(&FilterSpec::default(), &[])
+            .expect("c0"),
+        0
+    );
 }
 
 #[test]
