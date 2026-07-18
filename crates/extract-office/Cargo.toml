@@ -19,3 +19,4 @@ camino = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 rusqlite = { workspace = true }
+proptest = "1"

@@ -163,7 +163,12 @@ impl Matter {
             return Ok(OfficeExtractApplyResult::Error { error: err });
         }
 
-        let text = input.text.unwrap();
+        let Some(text) = input.text else {
+            // Unreachable: None handled above; keep production free of unwrap().
+            return Ok(OfficeExtractApplyResult::Error {
+                error: "internal: missing text payload".into(),
+            });
+        };
         if text.is_empty() {
             let err = input.error.unwrap_or_else(|| "office_empty_text".into());
             let now = now_rfc3339();

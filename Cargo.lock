@@ -1468,6 +1468,7 @@ dependencies = [
  "calamine",
  "camino",
  "matter-core",
+ "proptest",
  "quick-xml 0.41.0",
  "rusqlite",
  "serde",

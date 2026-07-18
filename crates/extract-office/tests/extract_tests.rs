@@ -602,7 +602,7 @@ fn encrypted_ooxml_entry_markers() {
 
 #[test]
 fn fuzz_random_bytes_no_panic() {
-    // Property-style: random-ish byte buffers must not panic.
+    // Fixed-seed hostile corpus: random-ish buffers must not panic.
     // Call `extract_office` directly (not catch_unwind) so a panic fails the test.
     let seeds: &[&[u8]] = &[
         b"",
@@ -623,6 +623,96 @@ fn fuzz_random_bytes_no_panic() {
         let _ = extract_office(&data, Some("fuzz.pptx"), None);
         let _ = extract_office(&data, None, None);
     }
+}
+
+/// True property test (proptest): arbitrary byte vectors never panic the extract path.
+#[test]
+fn prop_random_bytes_never_panic() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
+
+    let mut runner = TestRunner::new(Config {
+        cases: 48,
+        ..Config::default()
+    });
+    runner
+        .run(&proptest::collection::vec(any::<u8>(), 0..512), |data| {
+            // Direct call — panic fails the property. Ok/Err both fine.
+            let _ = extract_office(&data, Some("prop.docx"), None);
+            let _ = extract_office(&data, Some("prop.xlsx"), None);
+            let _ = extract_office(&data, Some("prop.pptx"), None);
+            let _ = extract_office(&data, None, Some("application/octet-stream"));
+            Ok(())
+        })
+        .expect("proptest: extract_office panicked on random bytes");
+}
+
+#[test]
+fn streaming_take_ignores_trusting_declared_size_alone() {
+    // Prove hard cap is applied on the decompressed stream, not only via headers:
+    // entry payload is larger than cap; declared size from zip crate equals payload
+    // length, but we still take(cap+1) and reject when more than cap is delivered.
+    // (True spoofed headers are hostile in the wild; production always uses take.)
+    let payload = vec![b'Z'; 200];
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut z = ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        z.start_file("word/document.xml", opts).unwrap();
+        z.write_all(&payload).unwrap();
+        z.finish().unwrap();
+    }
+    let data = buf.into_inner();
+    let mut archive = open_zip(&data).unwrap();
+    let mut entry = archive.by_name("word/document.xml").unwrap();
+    let declared = entry.size();
+    assert_eq!(declared, 200, "stored entry declares true size");
+    // Cap well below declared — take must stop us even though precheck would
+    // accept declared sizes under production MAX_UNCOMPRESSED_ENTRY_BYTES.
+    let err = read_entry_capped_with_max(&mut entry, 50).expect_err("over cap");
+    assert_eq!(err.code(), "office_limit_exceeded");
+}
+
+#[test]
+fn docx_invalid_utf8_run_uses_lossy_not_silent_drop() {
+    // Hand-built OOXML: w:t contains invalid UTF-8; extract must not drop the run.
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"#;
+    let rels = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#;
+    // Mix valid ASCII with invalid UTF-8 byte 0xFF inside text node content.
+    let mut document = b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+  <w:body><w:p><w:r><w:t>BEFORE_"
+        .to_vec();
+    document.push(0xFF);
+    document.extend_from_slice(b"_AFTER_MARKER</w:t></w:r></w:p></w:body></w:document>");
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut z = ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        z.start_file("[Content_Types].xml", opts).unwrap();
+        z.write_all(content_types.as_bytes()).unwrap();
+        z.start_file("_rels/.rels", opts).unwrap();
+        z.write_all(rels.as_bytes()).unwrap();
+        z.start_file("word/document.xml", opts).unwrap();
+        z.write_all(&document).unwrap();
+        z.finish().unwrap();
+    }
+    let data = buf.into_inner();
+    let extracted = extract_office(&data, Some("bad-utf8.docx"), None).expect("extract");
+    assert!(
+        extracted.text.contains("BEFORE_") && extracted.text.contains("_AFTER_MARKER"),
+        "lossy path must keep surrounding text, not silent-drop: {}",
+        extracted.text
+    );
 }
 
 #[test]
