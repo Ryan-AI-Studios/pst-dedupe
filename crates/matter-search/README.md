@@ -11,11 +11,15 @@ segments live under `<matter_root>/index/`.
 |---|---|
 | **tantivy** | **0.26.x** (workspace; locks to **0.26.1**) |
 
-**Default features** kept: `mmap`, `stopwords`, `stemmer` (Tantivy 0.26 default).
-The P0 schema uses Tantivy’s default English/Latin analyzer for `TEXT` fields:
-**stopwords are active** and **stemming is active** via those default features.
-Do not disable them without documenting a dialect change. Avoid `quickwit` and
-other optional features.
+**Default features** kept: `mmap`, plus optional `stopwords` / `stemmer` crates
+bundled by Tantivy 0.26 defaults (available if a field selects those tokenizers).
+
+**P0 field analyzer (actual):** schema fields use Tantivy `TEXT`, which selects
+the built-in **`default` tokenizer** (simple Latin tokenization / lowercasing).
+It does **not** automatically enable `en_stem` or stopword filtering unless a
+custom `TextFieldIndexing` is configured — **P0 does not**. Operators should not
+expect stem expansion or stopword removal. Avoid `quickwit` and other optional
+features.
 
 **MSRV:** tantivy 0.26 requires Rust **≥ 1.86** (project already meets this).
 
@@ -33,7 +37,7 @@ other optional features.
 | Field | Type | Notes |
 |---|---|---|
 | `item_id` | `STRING \| STORED \| FAST` | **Untokenized** — exact `delete_term` + stored + fast |
-| `subject` | `TEXT` | Tokenized + positions; default stopwords + stemmer |
+| `subject` | `TEXT` | Tokenized + positions (`default` tokenizer; no stem/stop) |
 | `body` | `TEXT` | CAS plain text (prefer `text_sha256`; else HTML strip) — **not STORED** |
 | `path` | `TEXT` | Path / filename tokens |
 | `attach_names` | `TEXT` | Concat of attachment child filenames |
@@ -44,7 +48,7 @@ other optional features.
 - **Phrases:** `"quoted phrase"`
 - **Default multi-term:** **AND** (`set_conjunction_by_default`)
 - **Fields searched:** subject, body, path, attach_names
-- **Tokenizer:** default English/Latin; **stopwords ON**, **stemming ON** (Tantivy default features)
+- **Tokenizer:** Tantivy `default` (simple tokenize + lowercase). **Stemming OFF**, **stopwords OFF** in P0 schema
 - **Hit cap:** at most **`DEFAULT_FTS_FETCH_LIMIT` (50_000)** unique `item_id`s are fetched for compose / status. Larger result sets are truncated at that window (document for operators; keyset/streaming deferred).
 - **Not P0:** fuzzy, regex, dtSearch proximity, CJK segmenters (→ **0054**)
 
