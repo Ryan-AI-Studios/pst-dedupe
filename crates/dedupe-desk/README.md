@@ -121,13 +121,16 @@ Flag-only membership (`in_review` / `review_order`); never deletes items or CAS.
 Bidirectional family expand is on by default. Reuses progress / cancel / resume.
 See `crates/matter-promote/README.md`.
 
-### Review screen (0026) + coding (0027)
+### Review screen (0026) + coding (0027) + filters (0028)
 
 Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 
 | Region | Behavior |
 |---|---|
-| Corpus list | Thin rows only (`list_review_thin`), ordered by `review_order`; multi-select ☑ column (fixed `ROW_HEIGHT` 22.0) |
+| Filter bar | Custodian, codes, date from/to (RFC3339+offset), include family; **Apply** / **Clear**; quick chips Uncoded / Privilege / Responsive |
+| Saved searches | Dropdown Load / Save (name) / Delete — stores `FilterSpec` JSON in `saved_searches` |
+| Corpus list | Thin rows (`list_review_thin` or `list_items_filtered_thin`); multi-select ☑; fixed `ROW_HEIGHT` 22.0 |
+| Status | “Showing N of M” + **Load more** when filtered/large count exceeds loaded rows |
 | Header | Subject, From, To/Cc (selection-time fetch), dates, path, mime, size, role chips |
 | Code chips | Current-item codes; click chip to **remove** (no confirm) |
 | Coding panel | Active code buttons toggle current item; batch **Add** / **Remove** mode; family checkbox; Apply |
@@ -136,7 +139,9 @@ Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 
 **Prerequisite:** run **Promote to review** on Workspace first. Empty state points operators there.
 
-**Keyboard (only when no widget has focus):**
+**Not body FTS:** the filter bar is **metadata only** (custodian, codes, dates, path fields via API, etc.). Full-text body keyword search is track **0029** (Tantivy) and will compose later.
+
+**Keyboard (only when no widget has focus — filter text fields steal focus):**
 
 | Action | Binding |
 |---|---|
@@ -146,6 +151,20 @@ Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 | Toggle code 1–9 | Digits `1`–`9` map first 9 **active** codes on **current** item |
 
 No wrap at ends. Focus gate: `ctx.memory(\|m\| m.focused().is_none())` (egui 0.34).
+
+#### Filters / saved searches (0028)
+
+| Step | Behavior |
+|---|---|
+| Apply | Compile draft → `FilterSpec` → `count_items_filtered` + `list_items_filtered_thin`; reset multi-select to present ids |
+| Clear | Empty filter → full Review Corpus via `list_review_thin` |
+| Include family | Expand hits to parent + attachments (conditions only on hits; outer still `in_review`) |
+| Quick chips | Preset `FilterSpec` constants (`code_missing`, privilege, responsive) |
+| Save / Load | Named row in `saved_searches`; Load replaces draft + Apply |
+| Batch coding | Still **current multi-selection within the filtered list** — not auto-select-all-filtered |
+| Paging | Load more appends next `LIMIT/OFFSET` page (compound partial index on matter DB) |
+
+Handoff **0029:** body keyword predicates / id-set post-filter will compose with this metadata FilterSpec.
 
 #### Coding / batch (0027)
 
@@ -168,11 +187,12 @@ No wrap at ends. Focus gate: `ctx.memory(\|m\| m.focused().is_none())` (egui 0.3
 |---|---|
 | Variable-height list rows kill FPS on large corpora | Fixed `ROW_HEIGHT` (22.0) + `ScrollArea::show_rows`; single-line truncate; multi-select must not change height |
 | Async body stays on “Loading…” until mouse moves | Worker clones `egui::Context`, sends channel payload, then **`ctx.request_repaint()`** |
-| Shortcuts steal from future search boxes | Handle next/prev/digits only when `focused().is_none()` |
+| Shortcuts steal from filter / search boxes | Handle next/prev/digits only when `focused().is_none()` |
 | Full corpus bodies in RAM | List never loads bodies; body load is selection-scoped + 2 MiB display cap |
 | Huge batch freezes UI | Off-thread `apply_codes` when N &gt; ~50 |
+| Flat WHERE drops family attachments | Family expand via CTE (matter-core); UI checkbox only |
 
-**Load policy:** if `count_in_review ≤ 50_000`, load all thin rows; else first page of 500.
+**Load policy:** if count ≤ 50_000, load all thin rows; else first page of 500 + **Load more**.
 
 ## Tests
 

@@ -122,7 +122,7 @@ Small Aspose/sample fixtures live under `fixtures/` (see `fixtures/README.md`). 
 | `pst-dedup-cli` | CLI surface: inspect / scan / dups (JSON + CSV) |
 | `pst-dedup-gui` | egui app and background scan worker |
 | `pst-writer` | Experimental/fixture PST writing and EML import helpers |
-| `matter-core` | Matter layout + SQLite (schema v8: Normalized Item + dedupe/thread/neardup/cull/promote + `review_sets` + coding `code_definitions`/`item_codes`) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + logical_hash v1 + `workspace/temp/` |
+| `matter-core` | Matter layout + SQLite (schema v9: Normalized Item + dedupe/thread/neardup/cull/promote + `review_sets` + coding + `saved_searches` + review-list index + metadata filters) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + logical_hash v1 + `workspace/temp/` |
 | `ingest-purview` | Purview/package/ZIP detect + safe expand + resumable inventory (blocking worker API; `*_on_job` for runner) |
 | `extract-pst` | PST → Normalized Items + families + logical_hash; `pst-native-message-v1` native (not EML); mid-folder resume (blocking; `*_on_job` for runner) |
 | `process-runner` | In-process job runner: single matter worker, cancel, watch progress, Option C job-id authority |

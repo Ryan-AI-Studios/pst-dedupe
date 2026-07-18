@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v8**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v9**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -16,6 +16,7 @@
 //! - **Promote** review-set membership columns + transactional batch helpers (0025)
 //! - **Review list** thin projections for the desk Review surface (0026)
 //! - **Coding** catalog + item membership + batch apply/remove with audit (0027)
+//! - **Metadata filters** + `saved_searches` + paged filtered review list (0028)
 //!
 //! ## Layout
 //!
@@ -42,6 +43,7 @@
 pub mod audit;
 pub mod cas;
 pub mod error;
+pub mod filter;
 pub mod item_errors;
 pub mod jobs;
 pub mod logical_hash;
@@ -55,6 +57,12 @@ pub use audit::{
 };
 pub use cas::{sha256_hex, Cas, PUT_READER_BUF_SIZE};
 pub use error::{Error, Result};
+pub use filter::{
+    compile_filter, normalize_stored_instant_for_compare, parse_bound_instant, parse_item_instant,
+    register_filter_functions, stored_instant_to_epoch_ms, CompiledFilter, FilterCondition,
+    FilterSpec, DESK_UTC_EPOCH_MS_FN, FILTER_SPEC_VERSION, SCOPE_ENTIRE_MATTER,
+    SCOPE_REVIEW_CORPUS,
+};
 pub use item_errors::{ItemError, ItemErrorInput};
 pub use jobs::{Job, JobCheckpoint, JobState};
 pub use logical_hash::{
@@ -69,9 +77,9 @@ pub use matter::{
     CullFieldUpdate, CullPreset, CullPresetInput, DedupRoleCounts, DedupRoleUpdate,
     DedupeCandidate, Item, ItemCodeInfo, ItemFamily, ItemInput, ItemUpdate, Matter, MatterInfo,
     NearDupCandidate, NearDupFieldUpdate, PromoteCandidate, PromoteFieldUpdate, ReviewListRow,
-    ReviewSet, Source, ThreadCandidate, ThreadFieldUpdate, DB_FILE, DEFAULT_REVIEW_SET_NAME,
-    EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR, LOGS_DIR, WORKSPACE_DIR,
-    WORKSPACE_TEMP_DIR,
+    ReviewSet, SavedSearch, SavedSearchInput, Source, ThreadCandidate, ThreadFieldUpdate, DB_FILE,
+    DEFAULT_REVIEW_SET_NAME, EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR, LOGS_DIR,
+    WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
 };
 pub use schema::SCHEMA_VERSION;
 pub use thread_headers::{
