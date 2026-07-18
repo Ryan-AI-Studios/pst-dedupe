@@ -376,16 +376,19 @@ fn audit_append_verify_and_detect_broken_chain() {
 }
 
 #[test]
-fn schema_v8_on_create() {
+fn schema_v9_on_create() {
     let (_tmp, base) = utf8_tempdir();
-    let root = base.join("matter-v8");
-    let matter = Matter::create(&root, "V8").expect("create");
-    assert_eq!(SCHEMA_VERSION, 8);
-    assert_eq!(matter.schema_version().expect("ver"), 8);
-    assert_eq!(matter.info().expect("info").schema_version, 8);
+    let root = base.join("matter-v9");
+    let matter = Matter::create(&root, "V9").expect("create");
+    assert_eq!(SCHEMA_VERSION, 9);
+    assert_eq!(matter.schema_version().expect("ver"), 9);
+    assert_eq!(matter.info().expect("info").schema_version, 9);
     // Default coding catalog seeded on create.
     let defs = matter.list_code_definitions().expect("defs");
     assert_eq!(defs.len(), 6);
+    // saved_searches table present (empty).
+    let saved = matter.list_saved_searches().expect("saved");
+    assert!(saved.is_empty());
 }
 
 #[test]

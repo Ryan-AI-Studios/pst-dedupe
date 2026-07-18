@@ -6,12 +6,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::audit::{self, AuditEvent, AuditEventInput};
 use crate::cas::Cas;
 use crate::error::{Error, Result};
+use crate::filter::{self, FilterSpec};
 use crate::item_errors::{self, ItemError, ItemErrorInput};
 use crate::jobs::{self, Job, JobCheckpoint, JobState};
 use crate::schema::{self, SCHEMA_VERSION};
@@ -587,6 +588,35 @@ pub struct CullPresetInput {
     pub name: String,
     pub description: Option<String>,
     pub rules_json: String,
+    pub created_by: Option<String>,
+}
+
+/// Named saved search (schema v9 / track 0028).
+///
+/// `filter_json` is a serialized [`FilterSpec`]; load re-runs against live item state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedSearch {
+    pub id: String,
+    pub matter_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// `review_corpus` or `entire_matter` (denormalized from FilterSpec for listing).
+    pub scope: String,
+    pub filter_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by: Option<String>,
+}
+
+/// Input for inserting or updating a saved search.
+#[derive(Debug, Clone)]
+pub struct SavedSearchInput {
+    /// When `Some`, update that id; when `None`, insert a new row.
+    pub id: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
+    /// Serialized [`FilterSpec`] JSON (validated on upsert).
+    pub filter_json: String,
     pub created_by: Option<String>,
 }
 
@@ -2775,6 +2805,224 @@ impl Matter {
         self.get_default_review_set_id()
     }
 
+    // --- Metadata filters + saved searches (schema v9 / track 0028) ---
+
+    /// Count items matching a metadata [`FilterSpec`].
+    ///
+    /// For `scope = review_corpus`, uses the default review set when present
+    /// (same semantics as [`Self::count_in_review`] with `set_id = None`).
+    /// Family expand counts **distinct outer** ids, not hit count alone.
+    pub fn count_items_filtered(&self, spec: &FilterSpec) -> Result<u64> {
+        let compiled = self.compile_filter_for_matter(spec)?;
+        let n: i64 = self.conn.query_row(
+            &compiled.count_sql,
+            params_from_iter(compiled.params.iter().cloned()),
+            |row| row.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Thin filtered rows for the Review list (same columns as [`ReviewListRow`]).
+    ///
+    /// ORDER BY: `review_order` NULLS LAST, then `imported_at`, `path`, `id`.
+    /// User values are bound parameters only — see [`filter::compile_filter`].
+    pub fn list_items_filtered_thin(
+        &self,
+        spec: &FilterSpec,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<ReviewListRow>> {
+        let compiled = self.compile_filter_for_matter(spec)?;
+        let limit_i = if limit == u64::MAX {
+            i64::MAX
+        } else {
+            limit as i64
+        };
+        let offset_i = offset as i64;
+        let mut params = compiled.params;
+        params.push(Value::Integer(limit_i));
+        params.push(Value::Integer(offset_i));
+        let mut stmt = self.conn.prepare(&compiled.list_sql)?;
+        let rows = stmt.query_map(params_from_iter(params), map_review_list_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    /// Compile a filter with this matter's id and default review-set resolution.
+    fn compile_filter_for_matter(&self, spec: &FilterSpec) -> Result<filter::CompiledFilter> {
+        let review_set_id = if spec.scope == filter::SCOPE_REVIEW_CORPUS {
+            self.resolve_review_set_filter(None)?
+        } else {
+            None
+        };
+        filter::compile_filter(spec, &self.matter_id, review_set_id.as_deref())
+    }
+
+    /// List saved searches for this matter, ordered by name.
+    pub fn list_saved_searches(&self) -> Result<Vec<SavedSearch>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, matter_id, name, description, scope, filter_json, \
+                    created_at, updated_at, created_by \
+             FROM saved_searches WHERE matter_id = ?1 ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map(params![self.matter_id], map_saved_search_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    /// Load a saved search by id.
+    pub fn get_saved_search(&self, search_id: &str) -> Result<SavedSearch> {
+        self.conn
+            .query_row(
+                "SELECT id, matter_id, name, description, scope, filter_json, \
+                        created_at, updated_at, created_by \
+                 FROM saved_searches WHERE id = ?1",
+                params![search_id],
+                map_saved_search_row,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::Other(format!("saved search not found: {search_id}"))
+                }
+                other => Error::Sqlite(other),
+            })
+    }
+
+    /// Insert or update a saved search. Name unique per matter (DB + app).
+    ///
+    /// Validates `filter_json` as a [`FilterSpec`] and audits `search.save`.
+    pub fn upsert_saved_search(&self, input: SavedSearchInput) -> Result<SavedSearch> {
+        let now = now_rfc3339();
+        let name = input.name.trim();
+        if name.is_empty() {
+            return Err(Error::Other("saved search name cannot be empty".into()));
+        }
+        if input.filter_json.trim().is_empty() {
+            return Err(Error::Other(
+                "saved search filter_json cannot be empty".into(),
+            ));
+        }
+        let spec: FilterSpec = serde_json::from_str(&input.filter_json)
+            .map_err(|e| Error::Other(format!("invalid filter_json: {e}")))?;
+        // Validate compile (dates, field/ops, scope).
+        let _ = self.compile_filter_for_matter(&spec)?;
+        let scope = spec.scope.clone();
+        let filter_json = serde_json::to_string(&spec)?;
+
+        let saved = if let Some(ref id) = input.id {
+            let existing = self.get_saved_search(id)?;
+            if existing.matter_id != self.matter_id {
+                return Err(Error::Other(format!(
+                    "saved search {id} belongs to another matter"
+                )));
+            }
+            let clash: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT id FROM saved_searches WHERE matter_id = ?1 AND name = ?2 AND id != ?3",
+                    params![self.matter_id, name, id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if clash.is_some() {
+                return Err(Error::Other(format!(
+                    "saved search name already exists in matter: {name}"
+                )));
+            }
+            self.conn.execute(
+                "UPDATE saved_searches SET name = ?1, description = ?2, scope = ?3, \
+                 filter_json = ?4, updated_at = ?5, created_by = COALESCE(?6, created_by) \
+                 WHERE id = ?7",
+                params![
+                    name,
+                    input.description,
+                    scope,
+                    filter_json,
+                    now,
+                    input.created_by,
+                    id
+                ],
+            )?;
+            self.get_saved_search(id)?
+        } else {
+            let clash: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT id FROM saved_searches WHERE matter_id = ?1 AND name = ?2",
+                    params![self.matter_id, name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if clash.is_some() {
+                return Err(Error::Other(format!(
+                    "saved search name already exists in matter: {name}"
+                )));
+            }
+            let id = new_id("ssr");
+            self.conn.execute(
+                "INSERT INTO saved_searches (id, matter_id, name, description, scope, \
+                 filter_json, created_at, updated_at, created_by) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    id,
+                    self.matter_id,
+                    name,
+                    input.description,
+                    scope,
+                    filter_json,
+                    now,
+                    now,
+                    input.created_by
+                ],
+            )?;
+            self.get_saved_search(&id)?
+        };
+
+        let _ = self.append_audit(AuditEventInput {
+            actor: input.created_by.clone().unwrap_or_else(|| "system".into()),
+            action: "search.save".into(),
+            entity: format!("saved_search:{}", saved.id),
+            params_json: serde_json::json!({
+                "name": saved.name,
+                "scope": saved.scope,
+            })
+            .to_string(),
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+        })?;
+
+        Ok(saved)
+    }
+
+    /// Delete a saved search. Does **not** affect item codes or membership.
+    ///
+    /// Audits `search.delete`.
+    pub fn delete_saved_search(&self, search_id: &str) -> Result<()> {
+        let existing = self.get_saved_search(search_id)?;
+        if existing.matter_id != self.matter_id {
+            return Err(Error::Other(format!(
+                "saved search {search_id} belongs to another matter"
+            )));
+        }
+        self.conn.execute(
+            "DELETE FROM saved_searches WHERE id = ?1",
+            params![search_id],
+        )?;
+        let _ = self.append_audit(AuditEventInput {
+            actor: existing
+                .created_by
+                .clone()
+                .unwrap_or_else(|| "system".into()),
+            action: "search.delete".into(),
+            entity: format!("saved_search:{search_id}"),
+            params_json: serde_json::json!({
+                "name": existing.name,
+            })
+            .to_string(),
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+        })?;
+        Ok(())
+    }
+
     // --- Coding / tags (schema v8 / track 0027) ---
 
     /// Seed the default code catalog. Idempotent insert-if-missing by `key`.
@@ -3533,6 +3781,20 @@ fn map_cull_preset_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CullPreset> 
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
         created_by: row.get(7)?,
+    })
+}
+
+fn map_saved_search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedSearch> {
+    Ok(SavedSearch {
+        id: row.get(0)?,
+        matter_id: row.get(1)?,
+        name: row.get(2)?,
+        description: row.get(3)?,
+        scope: row.get(4)?,
+        filter_json: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+        created_by: row.get(8)?,
     })
 }
 

@@ -1,4 +1,5 @@
-//! Review screen: linear corpus list + body viewer + family strip + coding (0026/0027).
+//! Review screen: linear corpus list + body viewer + family strip + coding + filters
+//! (0026/0027/0028).
 //!
 //! # List virtualization
 //!
@@ -8,15 +9,21 @@
 //!
 //! # Load policy
 //!
-//! Thin rows only (`list_review_thin`). If `count_in_review ≤` [`THIN_LOAD_ALL_THRESHOLD`],
-//! load the full thin list; otherwise page in chunks of [`THIN_PAGE_SIZE`].
-//! Never load full corpus bodies into the list.
+//! Thin rows only (`list_review_thin` / `list_items_filtered_thin`). If count ≤
+//! [`THIN_LOAD_ALL_THRESHOLD`], load the full thin list; otherwise page in
+//! chunks of [`THIN_PAGE_SIZE`] with **Load more**. Never load full corpus
+//! bodies into the list.
 //!
 //! # Coding (0027)
 //!
 //! Codes for **visible rows** only (`list_item_codes`). Multi-select + batch
 //! Add/Remove with optional whole-family propagate. Digits 1–9 toggle the first
 //! nine active codes on the current item when the focus gate is clear.
+//!
+//! # Filters (0028)
+//!
+//! Metadata [`FilterSpec`] only (no body FTS — that is **0029**). Filter text
+//! fields steal focus; digit shortcuts respect `focus().is_none()`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -25,7 +32,8 @@ use std::thread;
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense};
 use matter_core::{
-    ApplyCodesInput, ApplyCodesResult, CodeDef, CodeDefInput, ItemCodeInfo, Matter, ReviewListRow,
+    ApplyCodesInput, ApplyCodesResult, CodeDef, CodeDefInput, FilterCondition, FilterSpec,
+    ItemCodeInfo, Matter, ReviewListRow, SavedSearch, SavedSearchInput,
 };
 
 use crate::review_body::{BodyLoader, BodyPane};
@@ -64,12 +72,118 @@ struct BatchConfirm {
     propagate_family: bool,
 }
 
+/// Draft fields for the Review filter bar (0028).
+#[derive(Debug, Clone, Default)]
+pub struct FilterDraft {
+    pub custodian: String,
+    pub date_from: String,
+    pub date_to: String,
+    pub include_family: bool,
+    /// Selected code **keys** for any_of (empty = no code condition).
+    pub code_keys: HashSet<String>,
+    /// Name for Save as.
+    pub save_name: String,
+    /// Currently selected saved search id in the dropdown (if any).
+    pub selected_saved_id: Option<String>,
+}
+
+impl FilterDraft {
+    /// Build a [`FilterSpec`] from draft fields. Empty draft → default corpus filter.
+    pub fn to_filter_spec(&self) -> Result<FilterSpec, String> {
+        let mut conditions = Vec::new();
+        let cust = self.custodian.trim();
+        if !cust.is_empty() {
+            conditions.push(FilterCondition {
+                field: "custodian".into(),
+                op: "contains".into(),
+                value: Some(serde_json::json!(cust)),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        if !self.code_keys.is_empty() {
+            let mut keys: Vec<String> = self.code_keys.iter().cloned().collect();
+            keys.sort();
+            conditions.push(FilterCondition {
+                field: "code".into(),
+                op: "any_of".into(),
+                value: None,
+                values: Some(keys),
+                start: None,
+                end: None,
+            });
+        }
+        let from = self.date_from.trim();
+        let to = self.date_to.trim();
+        if !from.is_empty() || !to.is_empty() {
+            if from.is_empty() || to.is_empty() {
+                return Err("Date filter needs both From and To (RFC3339 with offset or Z)".into());
+            }
+            conditions.push(FilterCondition {
+                field: "best_effort_date".into(),
+                op: "between".into(),
+                value: None,
+                values: None,
+                start: Some(from.to_string()),
+                end: Some(to.to_string()),
+            });
+        }
+        Ok(FilterSpec {
+            include_family: self.include_family,
+            conditions,
+            ..FilterSpec::default()
+        })
+    }
+
+    /// Populate draft from an applied / loaded FilterSpec (best-effort).
+    pub fn from_filter_spec(spec: &FilterSpec) -> Self {
+        let mut d = Self {
+            include_family: spec.include_family,
+            ..Self::default()
+        };
+        for c in &spec.conditions {
+            match (c.field.as_str(), c.op.as_str()) {
+                ("custodian", "eq" | "contains") => {
+                    if let Some(v) = c.value.as_ref().and_then(|v| v.as_str()) {
+                        d.custodian = v.to_string();
+                    }
+                }
+                ("code", "any_of") => {
+                    if let Some(vals) = &c.values {
+                        for k in vals {
+                            d.code_keys.insert(k.clone());
+                        }
+                    }
+                }
+                ("code_missing", _) => {
+                    // Represent as no code keys + special: leave empty; chips set applied directly.
+                }
+                ("best_effort_date" | "sent_at" | "received_at", "between") => {
+                    if let Some(s) = &c.start {
+                        d.date_from = s.clone();
+                    }
+                    if let Some(e) = &c.end {
+                        d.date_to = e.clone();
+                    }
+                }
+                _ => {}
+            }
+        }
+        d
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// Review screen state held by the desk app.
 #[derive(Default)]
 pub struct ReviewState {
-    /// Thin rows currently in RAM (ordered by `review_order`).
+    /// Thin rows currently in RAM (ordered by `review_order` / filter order).
     pub rows: Vec<ReviewListRow>,
-    /// Total corpus count (may exceed `rows.len()` when paged).
+    /// Total corpus / filtered count (may exceed `rows.len()` when paged).
     pub count: u64,
     /// Selected index into `rows` (0-based).
     pub selection: Option<usize>,
@@ -112,6 +226,18 @@ pub struct ReviewState {
     coding_rx: Option<Receiver<Result<ApplyCodesResult, String>>>,
     coding_status: Option<String>,
     coding_error: Option<String>,
+    /// Filter bar draft (edit fields).
+    pub filter_draft: FilterDraft,
+    /// Applied filter (None = full corpus via empty default FilterSpec path).
+    pub applied_filter: Option<FilterSpec>,
+    /// True when an Apply was used with non-empty conditions or include_family.
+    pub filter_active: bool,
+    /// Saved searches for the open matter.
+    saved_searches: Vec<SavedSearch>,
+    /// Filter validation / save errors.
+    filter_error: Option<String>,
+    /// Filter status line (e.g. saved / loaded).
+    filter_status: Option<String>,
 }
 
 impl ReviewState {
@@ -141,6 +267,12 @@ impl ReviewState {
         self.coding_error = None;
         self.batch_mode_add = true;
         self.propagate_family = false;
+        self.filter_draft.clear();
+        self.applied_filter = None;
+        self.filter_active = false;
+        self.saved_searches.clear();
+        self.filter_error = None;
+        self.filter_status = None;
     }
 
     /// Request a thin-list reload on next show.
@@ -182,8 +314,14 @@ impl ReviewState {
         // item_id would show permanent "Loading…" because spawn only runs on Idle.
         self.body.clear();
         self.selection_detail = None;
-        match load_review_thin(matter_root) {
-            Ok((count, rows)) => {
+        let load = if self.filter_active {
+            let spec = self.applied_filter.clone().unwrap_or_default();
+            load_review_filtered(matter_root, &spec, 0, None)
+        } else {
+            load_review_thin(matter_root).map(|(c, r)| (c, r, false))
+        };
+        match load {
+            Ok((count, rows, _more)) => {
                 self.count = count;
                 self.rows = rows;
                 self.loaded_root = Some(matter_root.to_owned());
@@ -207,6 +345,7 @@ impl ReviewState {
                 }
                 self.reload_coding_catalog(matter_root);
                 self.refresh_row_codes(matter_root);
+                self.reload_saved_searches(matter_root);
             }
             Err(e) => {
                 self.list_error = Some(e);
@@ -217,6 +356,186 @@ impl ReviewState {
                 self.visible_row_range = 0..0;
                 self.code_defs.clear();
                 self.row_codes.clear();
+            }
+        }
+    }
+
+    fn reload_saved_searches(&mut self, matter_root: &Utf8Path) {
+        match load_saved_searches(matter_root) {
+            Ok(list) => self.saved_searches = list,
+            Err(e) => {
+                self.filter_error = Some(format!("Saved searches: {e}"));
+            }
+        }
+    }
+
+    /// Apply draft filter and reload list.
+    pub fn apply_filter(&mut self, matter_root: &Utf8Path) {
+        match self.filter_draft.to_filter_spec() {
+            Ok(spec) => {
+                let active = !spec.conditions.is_empty() || spec.include_family;
+                self.applied_filter = Some(spec);
+                self.filter_active = active;
+                self.filter_error = None;
+                self.filter_status = if active {
+                    Some("Filter applied.".into())
+                } else {
+                    Some("No conditions — showing full corpus.".into())
+                };
+                self.needs_reload = true;
+                self.ensure_loaded(matter_root);
+            }
+            Err(e) => {
+                self.filter_error = Some(e);
+                self.filter_status = None;
+            }
+        }
+    }
+
+    /// Clear filter draft + applied filter; restore full corpus.
+    pub fn clear_filter(&mut self, matter_root: &Utf8Path) {
+        self.filter_draft.clear();
+        self.applied_filter = None;
+        self.filter_active = false;
+        self.filter_error = None;
+        self.filter_status = Some("Filter cleared.".into());
+        self.needs_reload = true;
+        self.ensure_loaded(matter_root);
+    }
+
+    /// Apply a preset FilterSpec (quick chip).
+    pub fn apply_preset(&mut self, matter_root: &Utf8Path, spec: FilterSpec) {
+        self.filter_draft = FilterDraft::from_filter_spec(&spec);
+        self.applied_filter = Some(spec);
+        self.filter_active = true;
+        self.filter_error = None;
+        self.filter_status = Some("Preset applied.".into());
+        self.needs_reload = true;
+        self.ensure_loaded(matter_root);
+    }
+
+    /// Load more rows when count exceeds loaded (filtered or large corpus).
+    pub fn load_more(&mut self, matter_root: &Utf8Path) {
+        if (self.rows.len() as u64) >= self.count {
+            return;
+        }
+        let offset = self.rows.len() as u64;
+        let result = if self.filter_active {
+            let spec = self.applied_filter.clone().unwrap_or_default();
+            load_review_filtered(matter_root, &spec, offset, Some(THIN_PAGE_SIZE))
+        } else {
+            load_review_page(matter_root, offset, THIN_PAGE_SIZE).map(|(c, r)| {
+                let n = r.len() as u64;
+                (c, r, offset + n < c)
+            })
+        };
+        match result {
+            Ok((count, more_rows, _)) => {
+                self.count = count;
+                let existing: HashSet<String> = self.rows.iter().map(|r| r.id.clone()).collect();
+                for r in more_rows {
+                    if !existing.contains(&r.id) {
+                        self.rows.push(r);
+                    }
+                }
+                self.filter_error = None;
+            }
+            Err(e) => {
+                self.filter_error = Some(format!("Load more: {e}"));
+            }
+        }
+    }
+
+    fn save_current_filter(&mut self, matter_root: &Utf8Path, actor: &str) {
+        let name = self.filter_draft.save_name.trim().to_string();
+        if name.is_empty() {
+            self.filter_error = Some("Enter a name to save the search.".into());
+            return;
+        }
+        let spec = match self.filter_draft.to_filter_spec() {
+            Ok(s) => s,
+            Err(e) => {
+                self.filter_error = Some(e);
+                return;
+            }
+        };
+        let filter_json = match serde_json::to_string(&spec) {
+            Ok(j) => j,
+            Err(e) => {
+                self.filter_error = Some(format!("Serialize filter: {e}"));
+                return;
+            }
+        };
+        // Upsert by name if an existing saved search matches.
+        let existing_id = self
+            .saved_searches
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.id.clone());
+        match upsert_saved_search(
+            matter_root,
+            SavedSearchInput {
+                id: existing_id,
+                name,
+                description: None,
+                filter_json,
+                created_by: Some(actor.to_string()),
+            },
+        ) {
+            Ok(saved) => {
+                self.filter_draft.selected_saved_id = Some(saved.id.clone());
+                self.filter_draft.save_name = saved.name.clone();
+                self.filter_status = Some(format!("Saved “{}”.", saved.name));
+                self.filter_error = None;
+                self.reload_saved_searches(matter_root);
+            }
+            Err(e) => {
+                self.filter_error = Some(e);
+            }
+        }
+    }
+
+    fn load_selected_saved_search(&mut self, matter_root: &Utf8Path) {
+        let Some(id) = self.filter_draft.selected_saved_id.clone() else {
+            self.filter_error = Some("Select a saved search first.".into());
+            return;
+        };
+        let Some(ss) = self.saved_searches.iter().find(|s| s.id == id).cloned() else {
+            self.filter_error = Some("Saved search not found.".into());
+            return;
+        };
+        match serde_json::from_str::<FilterSpec>(&ss.filter_json) {
+            Ok(spec) => {
+                self.filter_draft = FilterDraft::from_filter_spec(&spec);
+                self.filter_draft.selected_saved_id = Some(ss.id);
+                self.filter_draft.save_name = ss.name.clone();
+                self.applied_filter = Some(spec);
+                self.filter_active = true;
+                self.filter_error = None;
+                self.filter_status = Some(format!("Loaded “{}”.", ss.name));
+                self.needs_reload = true;
+                self.ensure_loaded(matter_root);
+            }
+            Err(e) => {
+                self.filter_error = Some(format!("Invalid saved filter: {e}"));
+            }
+        }
+    }
+
+    fn delete_selected_saved_search(&mut self, matter_root: &Utf8Path) {
+        let Some(id) = self.filter_draft.selected_saved_id.clone() else {
+            self.filter_error = Some("Select a saved search to delete.".into());
+            return;
+        };
+        match delete_saved_search(matter_root, &id) {
+            Ok(()) => {
+                self.filter_draft.selected_saved_id = None;
+                self.filter_status = Some("Saved search deleted.".into());
+                self.filter_error = None;
+                self.reload_saved_searches(matter_root);
+            }
+            Err(e) => {
+                self.filter_error = Some(e);
             }
         }
     }
@@ -549,12 +868,80 @@ pub fn load_review_thin(matter_root: &Utf8Path) -> Result<(u64, Vec<ReviewListRo
             .list_review_thin(None, count, 0)
             .map_err(|e| e.to_string())?
     } else {
-        // Large corpus: load first page only (P0). Operator can re-promote / filter later.
+        // Large corpus: load first page only; UI offers Load more.
         matter
             .list_review_thin(None, THIN_PAGE_SIZE, 0)
             .map_err(|e| e.to_string())?
     };
     Ok((count, rows))
+}
+
+/// Load a page of the unfiltered review corpus.
+pub fn load_review_page(
+    matter_root: &Utf8Path,
+    offset: u64,
+    limit: u64,
+) -> Result<(u64, Vec<ReviewListRow>), String> {
+    let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
+    let count = matter.count_in_review(None).map_err(|e| e.to_string())?;
+    let rows = matter
+        .list_review_thin(None, limit, offset)
+        .map_err(|e| e.to_string())?;
+    Ok((count, rows))
+}
+
+/// Load filtered count + thin rows. Returns `(count, rows, has_more)`.
+///
+/// When `limit_override` is `None`, uses full load if count ≤ threshold else first page.
+pub fn load_review_filtered(
+    matter_root: &Utf8Path,
+    spec: &FilterSpec,
+    offset: u64,
+    limit_override: Option<u64>,
+) -> Result<(u64, Vec<ReviewListRow>, bool), String> {
+    let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
+    let count = matter
+        .count_items_filtered(spec)
+        .map_err(|e| e.to_string())?;
+    if count == 0 {
+        return Ok((0, Vec::new(), false));
+    }
+    let limit = if let Some(l) = limit_override {
+        l
+    } else if offset == 0 && count <= THIN_LOAD_ALL_THRESHOLD {
+        count
+    } else {
+        THIN_PAGE_SIZE
+    };
+    let rows = matter
+        .list_items_filtered_thin(spec, limit, offset)
+        .map_err(|e| e.to_string())?;
+    let loaded = rows.len() as u64;
+    let has_more = offset + loaded < count;
+    Ok((count, rows, has_more))
+}
+
+/// List saved searches for the matter.
+pub fn load_saved_searches(matter_root: &Utf8Path) -> Result<Vec<SavedSearch>, String> {
+    let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
+    matter.list_saved_searches().map_err(|e| e.to_string())
+}
+
+/// Upsert a saved search (writer open).
+pub fn upsert_saved_search(
+    matter_root: &Utf8Path,
+    input: SavedSearchInput,
+) -> Result<SavedSearch, String> {
+    let matter = Matter::open(matter_root).map_err(|e| e.to_string())?;
+    matter.upsert_saved_search(input).map_err(|e| e.to_string())
+}
+
+/// Delete a saved search (writer open).
+pub fn delete_saved_search(matter_root: &Utf8Path, search_id: &str) -> Result<(), String> {
+    let matter = Matter::open(matter_root).map_err(|e| e.to_string())?;
+    matter
+        .delete_saved_search(search_id)
+        .map_err(|e| e.to_string())
 }
 
 /// Load code catalog (seeds if empty via writer open path when needed).
@@ -720,7 +1107,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path, 
 
     ui.horizontal(|ui| {
         ui.heading("Review");
-        ui.label("— Review Corpus (in_review)");
+        if state.filter_active {
+            ui.label("— Filtered subset (metadata; not body FTS)");
+        } else {
+            ui.label("— Review Corpus (in_review)");
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("Refresh list").clicked() {
                 // Preserve last_item_id across reload.
@@ -739,14 +1130,26 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path, 
         return;
     }
 
+    // Filter bar always available (even when list empty).
+    show_filter_bar(ui, state, matter_root, actor);
+    ui.add_space(4.0);
+
     if state.rows.is_empty() {
-        ui.add_space(12.0);
-        ui.label(RichText::new("No items in review. Run Promote to review on Workspace.").strong());
-        ui.label("Promote builds the Review Corpus (`in_review` + `review_order`).");
+        ui.add_space(8.0);
+        if state.filter_active {
+            ui.label(RichText::new("No items match the current filter.").strong());
+            ui.label("Adjust conditions or Clear to restore the full Review Corpus.");
+        } else {
+            ui.label(
+                RichText::new("No items in review. Run Promote to review on Workspace.").strong(),
+            );
+            ui.label("Promote builds the Review Corpus (`in_review` + `review_order`).");
+        }
         return;
     }
 
     // Keyboard: only when no widget has focus (egui 0.34: focused()).
+    // Filter text fields steal focus — digit shortcuts must not fire then.
     let no_focus = ctx.memory(|m| m.focused().is_none());
     if review_nav::focus_allows_shortcuts(no_focus) {
         let (want_next, want_prev, want_enter, digit) = ui.input(|i| {
@@ -799,7 +1202,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path, 
     ui.horizontal(|ui| {
         ui.label(review_nav::position_label(state.selection, n_shown));
         if n_total > n_shown {
-            ui.label(format!("(showing {n_shown} of {n_total} in corpus)"));
+            let label = if state.filter_active {
+                format!("(showing {n_shown} of {n_total} filtered)")
+            } else {
+                format!("(showing {n_shown} of {n_total} in corpus)")
+            };
+            ui.label(label);
+            if ui.small_button("Load more").clicked() {
+                state.load_more(matter_root);
+            }
+        } else if state.filter_active {
+            ui.label(format!("({n_total} match filter)"));
         }
         if n_multi > 0 {
             ui.separator();
@@ -972,6 +1385,153 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path, 
                 show_viewer(ui, state, matter_root, &ctx, actor);
             },
         );
+    });
+}
+
+/// Filter bar: draft fields, quick chips, Apply/Clear, saved search CRUD.
+fn show_filter_bar(
+    ui: &mut egui::Ui,
+    state: &mut ReviewState,
+    matter_root: &Utf8Path,
+    actor: &str,
+) {
+    ui.group(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Filter").strong());
+            ui.label(
+                RichText::new("(metadata only — body search is 0029)")
+                    .weak()
+                    .small(),
+            );
+        });
+
+        // Quick chips
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Quick:");
+            if ui.small_button("Uncoded").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_uncoded());
+            }
+            if ui.small_button("Privilege").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_privilege());
+            }
+            if ui.small_button("Responsive").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_responsive());
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Custodian:");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.filter_draft.custodian)
+                    .desired_width(160.0)
+                    .hint_text("contains…"),
+            );
+            ui.label("Date from:");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.filter_draft.date_from)
+                    .desired_width(170.0)
+                    .hint_text("RFC3339+offset"),
+            );
+            ui.label("to:");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.filter_draft.date_to)
+                    .desired_width(170.0)
+                    .hint_text("exclusive end"),
+            );
+            ui.checkbox(&mut state.filter_draft.include_family, "Include family");
+        });
+
+        // Codes multi-select (active defs)
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Codes:");
+            let active: Vec<CodeDef> = state
+                .code_defs
+                .iter()
+                .filter(|d| d.is_active != 0)
+                .cloned()
+                .collect();
+            if active.is_empty() {
+                ui.label(RichText::new("(catalog empty)").weak().small());
+            } else {
+                for def in &active {
+                    let mut on = state.filter_draft.code_keys.contains(&def.key);
+                    if ui.checkbox(&mut on, &def.label).changed() {
+                        if on {
+                            state.filter_draft.code_keys.insert(def.key.clone());
+                        } else {
+                            state.filter_draft.code_keys.remove(&def.key);
+                        }
+                    }
+                }
+            }
+        });
+
+        ui.horizontal(|ui| {
+            if ui.button("Apply filter").clicked() {
+                state.apply_filter(matter_root);
+            }
+            if ui.button("Clear").clicked() {
+                state.clear_filter(matter_root);
+            }
+            ui.separator();
+            ui.label("Saved:");
+            let selected_label = state
+                .filter_draft
+                .selected_saved_id
+                .as_ref()
+                .and_then(|id| {
+                    state
+                        .saved_searches
+                        .iter()
+                        .find(|s| &s.id == id)
+                        .map(|s| s.name.clone())
+                })
+                .unwrap_or_else(|| "(none)".into());
+            egui::ComboBox::from_id_salt("review_saved_search")
+                .selected_text(selected_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(state.filter_draft.selected_saved_id.is_none(), "(none)")
+                        .clicked()
+                    {
+                        state.filter_draft.selected_saved_id = None;
+                    }
+                    for ss in state.saved_searches.clone() {
+                        let selected =
+                            state.filter_draft.selected_saved_id.as_deref() == Some(&ss.id);
+                        if ui.selectable_label(selected, &ss.name).clicked() {
+                            state.filter_draft.selected_saved_id = Some(ss.id);
+                        }
+                    }
+                });
+            if ui.button("Load").clicked() {
+                state.load_selected_saved_search(matter_root);
+            }
+            if ui.button("Delete").clicked() {
+                state.delete_selected_saved_search(matter_root);
+            }
+            ui.separator();
+            ui.label("Save as:");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.filter_draft.save_name)
+                    .desired_width(120.0)
+                    .hint_text("name"),
+            );
+            if ui.button("Save").clicked() {
+                state.save_current_filter(matter_root, actor);
+            }
+        });
+
+        if let Some(st) = state.filter_status.clone() {
+            ui.label(
+                RichText::new(st)
+                    .small()
+                    .color(Color32::from_rgb(40, 120, 60)),
+            );
+        }
+        if let Some(err) = state.filter_error.clone() {
+            ui.colored_label(Color32::from_rgb(200, 60, 60), format!("Filter: {err}"));
+        }
     });
 }
 
@@ -1623,6 +2183,84 @@ mod tests {
             assert!(ROW_HEIGHT < 100.0);
         };
         assert!((ROW_HEIGHT - 22.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn filter_draft_to_spec_and_clear() {
+        let mut draft = FilterDraft {
+            custodian: "alice".into(),
+            include_family: true,
+            ..FilterDraft::default()
+        };
+        draft.code_keys.insert("responsive".into());
+        let spec = draft.to_filter_spec().expect("spec");
+        assert!(spec.include_family);
+        assert_eq!(spec.conditions.len(), 2);
+        assert!(spec
+            .conditions
+            .iter()
+            .any(|c| c.field == "custodian" && c.op == "contains"));
+        assert!(spec
+            .conditions
+            .iter()
+            .any(|c| c.field == "code" && c.op == "any_of"));
+
+        // Incomplete date range rejected.
+        draft.date_from = "2023-01-01T00:00:00Z".into();
+        assert!(draft.to_filter_spec().is_err());
+        draft.date_to = "2024-01-01T00:00:00Z".into();
+        let with_date = draft.to_filter_spec().expect("with date");
+        assert_eq!(with_date.conditions.len(), 3);
+
+        draft.clear();
+        assert!(draft.custodian.is_empty());
+        assert!(!draft.include_family);
+        assert!(draft.code_keys.is_empty());
+        let empty = draft.to_filter_spec().expect("empty");
+        assert!(empty.conditions.is_empty());
+        assert!(!empty.include_family);
+    }
+
+    #[test]
+    fn filter_spec_serde_presets() {
+        let u = FilterSpec::preset_uncoded();
+        let j = serde_json::to_string(&u).expect("ser");
+        let back: FilterSpec = serde_json::from_str(&j).expect("de");
+        assert_eq!(back.conditions.len(), 1);
+        assert_eq!(back.conditions[0].field, "code_missing");
+
+        let p = FilterSpec::preset_privilege();
+        assert_eq!(p.conditions[0].values.as_ref().unwrap()[0], "privilege");
+        let r = FilterSpec::preset_responsive();
+        assert_eq!(r.conditions[0].values.as_ref().unwrap()[0], "responsive");
+    }
+
+    #[test]
+    fn focus_gate_blocks_shortcuts_when_text_focused() {
+        // Mirrors review_nav contract used by filter TextEdit fields.
+        assert!(review_nav::focus_allows_shortcuts(true));
+        assert!(!review_nav::focus_allows_shortcuts(false));
+    }
+
+    #[test]
+    fn apply_clear_filter_state_machine() {
+        let mut state = ReviewState::default();
+        assert!(!state.filter_active);
+        state.filter_draft.custodian = "alice".into();
+        let spec = state.filter_draft.to_filter_spec().expect("spec");
+        state.applied_filter = Some(spec);
+        state.filter_active = true;
+        assert!(state.filter_active);
+        state.filter_draft.clear();
+        state.applied_filter = None;
+        state.filter_active = false;
+        assert!(!state.filter_active);
+        assert!(state
+            .filter_draft
+            .to_filter_spec()
+            .expect("empty")
+            .conditions
+            .is_empty());
     }
 
     #[test]

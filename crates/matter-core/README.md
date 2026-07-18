@@ -7,15 +7,16 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v8**) + family graph
+6. **Normalized Item** model (schema **v9**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
 10. **Cull** result columns + named presets + transactional batch helpers (0024)
 11. **Promote** review-set membership columns + `review_sets` + batch helpers (0025)
 12. **Coding** catalog + `item_codes` membership + batch apply/remove with audit (0027)
+13. **Metadata filters** + `saved_searches` + paged filtered review list (0028)
 
-Schema version: **8** (`SCHEMA_VERSION`) — includes cull, promote/review sets, and coding (`code_definitions` / `item_codes`).
+Schema version: **9** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, and the review-list ORDER BY partial index.
 
 ## Layout
 
@@ -231,12 +232,79 @@ Deleting a preset does **not** clear item cull fields.
 | `cull_has_run` / `any_dedup_role_present` | Policy resolution helpers |
 | `count_in_review` / `list_review_thin` | Thin review corpus list for desk **0026** (ordered by `review_order`) |
 | `get_default_review_set_id` | Default set id helper for list filter |
+| `count_items_filtered` / `list_items_filtered_thin` | Metadata [`FilterSpec`] → parameterized SQL (**0028**) |
+| `list_saved_searches` / `get_saved_search` / `upsert_saved_search` / `delete_saved_search` | Named saved filters (live re-run) |
 
 `ReviewListRow` is a thin projection (no body text / participant JSON). When
 `set_id` is `None`, list/count use the default review set if present, else all
 `in_review = 1`.
 
 Engine: `crates/matter-cull`. **0025 promote** should prefer `cull_status=included` when any cull has run; else unique-only.
+
+## Schema v9 — Filters + saved searches (0028)
+
+Structured **metadata** filters over the Review Corpus (or entire matter). Body
+keyword / FTS is **0029** (Tantivy) — not SQLite FTS5 and not this track.
+
+### `FilterSpec` (JSON)
+
+```json
+{
+  "version": 1,
+  "scope": "review_corpus",
+  "include_family": false,
+  "conditions": [
+    { "field": "custodian", "op": "eq", "value": "alice@example.com" },
+    { "field": "code", "op": "any_of", "values": ["responsive"] },
+    { "field": "sent_at", "op": "between",
+      "start": "2023-01-01T00:00:00-05:00",
+      "end": "2024-01-01T00:00:00-05:00" }
+  ]
+}
+```
+
+| Rule | Behavior |
+|---|---|
+| AND only | Flat `conditions` list (no nested OR builder in P0) |
+| Parameterized SQL | User strings → `?` binds only (`filter::compile_filter`) |
+| Date bounds | RFC3339 **with offset or Z** required; start inclusive, end exclusive for `between` |
+| `scope=review_corpus` | `in_review = 1` + default review set (same as `list_review_thin`) |
+| `scope=entire_matter` | Status in `extracted` / `partial` / `normalized` |
+| `include_family` | Conditions apply **only** in a `hits` CTE; outer SELECT is membership-by-family (parent + direct children / `family_id`). Outer still requires scope (e.g. still `in_review = 1`). |
+| Sort | `(review_order IS NULL), review_order, imported_at, path, id` (emulates NULLS LAST; SQLite ASC puts NULLs first by default) |
+| Index | Partial `idx_items_review_list_order ON items(review_set_id, review_order, imported_at, path, id) WHERE in_review = 1` for deep OFFSET |
+
+**Family SQL shape (conceptual):**
+
+```sql
+WITH hits AS (
+  SELECT i.id, i.family_id, COALESCE(i.parent_item_id, i.id) AS family_root
+  FROM items i
+  WHERE <scope> AND <conditions>   -- predicates only here
+)
+SELECT DISTINCT thin columns
+FROM items out
+WHERE <scope_on_out>
+  AND (
+    out.family_id IN (SELECT family_id FROM hits WHERE family_id IS NOT NULL)
+    OR out.id IN (SELECT family_root FROM hits)
+    OR out.parent_item_id IN (SELECT family_root FROM hits)
+  )
+ORDER BY ... LIMIT ? OFFSET ?;
+```
+
+### `saved_searches`
+
+| Column | Notes |
+|---|---|
+| `id` / `matter_id` / `name` | UNIQUE `(matter_id, name)` |
+| `scope` | Denormalized from FilterSpec |
+| `filter_json` | Serialized `FilterSpec` — re-runs against **live** item state |
+| `created_at` / `updated_at` / `created_by` | RFC3339 |
+
+Audit: `search.save` / `search.delete` only (not every Apply).
+
+Module: `matter_core::filter` (`FilterSpec`, `compile_filter`, presets).
 
 ## Schema v8 — Coding / tags (0027)
 
