@@ -208,6 +208,132 @@ fn incremental_reindex_after_text_change() {
 }
 
 #[test]
+fn subject_change_reindexes_without_body_change() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-subj");
+    let matter = Matter::create(&root, "Subj").expect("create");
+    let id = insert_text_item(&matter, "s.txt", "oldsubject", b"bodytoken fixed");
+    run_index(&matter, true);
+
+    matter
+        .update_item(
+            &id,
+            matter_core::ItemUpdate {
+                subject: Some(Some("newsubject".into())),
+                ..Default::default()
+            },
+        )
+        .expect("subj");
+
+    let job = matter.create_job("fts_index").expect("job");
+    let outcome = run_fts_index(
+        &matter,
+        &job.id,
+        &FtsIndexParams {
+            reset: false,
+            ..Default::default()
+        },
+        None,
+        |_| {},
+    )
+    .expect("incr");
+    assert!(matches!(outcome, FtsOutcome::Succeeded(_)), "{outcome:?}");
+
+    let hits = search_keyword(
+        &root,
+        &KeywordQuery {
+            query: "newsubject".into(),
+            limit: 10,
+            offset: 0,
+        },
+    )
+    .expect("new subj");
+    assert_eq!(hits.item_ids, vec![id.clone()]);
+
+    let old = search_keyword(
+        &root,
+        &KeywordQuery {
+            query: "oldsubject".into(),
+            limit: 10,
+            offset: 0,
+        },
+    )
+    .expect("old subj");
+    assert!(
+        old.item_ids.is_empty(),
+        "stale subject must not remain after re-index"
+    );
+}
+
+#[test]
+fn orphan_cleared_text_removed_from_index() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-orphan");
+    let matter = Matter::create(&root, "Orphan").expect("create");
+    let id = insert_text_item(&matter, "o.txt", "O", b"ghosttoken body");
+    run_index(&matter, true);
+    assert_eq!(
+        search_keyword(
+            &root,
+            &KeywordQuery {
+                query: "ghosttoken".into(),
+                limit: 5,
+                offset: 0,
+            },
+        )
+        .expect("before")
+        .item_ids,
+        vec![id.clone()]
+    );
+
+    // Clear text CAS pointers — item is no longer eligible but fts_* still set.
+    matter
+        .update_item(
+            &id,
+            matter_core::ItemUpdate {
+                text_sha256: Some(None),
+                html_sha256: Some(None),
+                ..Default::default()
+            },
+        )
+        .expect("clear text");
+
+    let job = matter.create_job("fts_index").expect("job");
+    let outcome = run_fts_index(
+        &matter,
+        &job.id,
+        &FtsIndexParams {
+            reset: false,
+            ..Default::default()
+        },
+        None,
+        |_| {},
+    )
+    .expect("purge");
+    assert!(matches!(outcome, FtsOutcome::Succeeded(_)), "{outcome:?}");
+
+    let after = search_keyword(
+        &root,
+        &KeywordQuery {
+            query: "ghosttoken".into(),
+            limit: 5,
+            offset: 0,
+        },
+    );
+    // Index may be empty (IndexMissing) or return no hits.
+    match after {
+        Ok(h) => assert!(h.item_ids.is_empty(), "orphan doc must be deleted"),
+        Err(e) => {
+            let s = e.to_string().to_lowercase();
+            assert!(
+                s.contains("index") || s.contains("empty") || s.contains("build"),
+                "unexpected error: {e}"
+            );
+        }
+    }
+}
+
+#[test]
 fn delete_before_add_no_duplicate_ids() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("fts-dedup");

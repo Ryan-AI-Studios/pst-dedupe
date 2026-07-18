@@ -3,13 +3,15 @@
 use std::time::Instant;
 
 use chrono::Utc;
-use matter_core::{AuditEventInput, FtsFieldUpdate, Matter};
+use matter_core::{sha256_hex, AuditEventInput, FtsFieldUpdate, Matter};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tantivy::schema::Term;
 
 use crate::error::{Result, SearchError};
 use crate::index::{delete_then_add, remove_index_dir, MatterIndex, DEFAULT_WRITER_HEAP_BYTES};
 use crate::params::FtsIndexParams;
+use crate::schema::FtsSchema;
 
 /// Job kind string for process-runner.
 pub const JOB_KIND_FTS_INDEX: &str = "fts_index";
@@ -226,11 +228,29 @@ fn run_fts_inner(
     let mut writer = index.writer(heap)?;
 
     let batch_size = params.batch_size.max(1);
+
+    // Phase 0: remove Tantivy docs for items that lost text / eligibility.
+    // cursor_index is reused across orphan-delete then index phases; on resume
+    // after partial index, orphans may already be gone (idempotent delete).
+    if !purge_orphans(
+        matter,
+        job_id,
+        &mut writer,
+        &fts_schema,
+        params_json,
+        cancel,
+        progress,
+        &mut summary,
+    )? {
+        drop(writer);
+        index.shutdown();
+        return Ok(FtsOutcome::Paused(summary));
+    }
+
     // Page through candidates; skip already-current when incremental.
     // cursor_index is the absolute offset into list_fts_candidates.
     loop {
         if cancel.map(|c| c()).unwrap_or(false) {
-            // Drop writer/index before pause return.
             drop(writer);
             index.shutdown();
             return Ok(FtsOutcome::Paused(summary));
@@ -260,13 +280,6 @@ fn run_fts_inner(
                 continue;
             };
 
-            // Incremental: skip when fts_text_sha256 already matches content.
-            if !params.reset && cand.fts_text_sha256.as_deref() == Some(content_sha.as_str()) {
-                summary.skipped_count = summary.skipped_count.saturating_add(1);
-                summary.completed_count = summary.completed_count.saturating_add(1);
-                continue;
-            }
-
             let subject = cand
                 .subject
                 .clone()
@@ -277,6 +290,17 @@ fn run_fts_inner(
                 .get(&cand.id)
                 .map(|v| v.join(" "))
                 .unwrap_or_default();
+
+            // Payload digest covers body digest + searchable metadata so subject/
+            // path/attach_names changes re-index even when body digest is unchanged.
+            let payload = indexed_payload_digest(&content_sha, &subject, &path, &attach_names);
+
+            // Incremental: skip when bookkeeping matches full indexed payload.
+            if !params.reset && cand.fts_text_sha256.as_deref() == Some(payload.as_str()) {
+                summary.skipped_count = summary.skipped_count.saturating_add(1);
+                summary.completed_count = summary.completed_count.saturating_add(1);
+                continue;
+            }
 
             let body_result = load_body_text(matter, cand);
             match body_result {
@@ -304,7 +328,7 @@ fn run_fts_inner(
                     summary.completed_count = summary.completed_count.saturating_add(1);
                     updates.push(FtsFieldUpdate {
                         item_id: cand.id.clone(),
-                        fts_text_sha256: Some(content_sha),
+                        fts_text_sha256: Some(payload),
                         fts_indexed_at: Some(now.clone()),
                         fts_error: None,
                     });
@@ -367,6 +391,96 @@ fn run_fts_inner(
     drop(writer);
     index.shutdown();
     Ok(FtsOutcome::Succeeded(summary))
+}
+
+/// SHA-256 hex of body digest + searchable metadata fields.
+///
+/// Stored in `fts_text_sha256` so incremental skip stays honest when subject,
+/// path, or attachment names change without a body rewrite.
+pub fn indexed_payload_digest(
+    body_sha: &str,
+    subject: &str,
+    path: &str,
+    attach_names: &str,
+) -> String {
+    let mut buf =
+        Vec::with_capacity(body_sha.len() + subject.len() + path.len() + attach_names.len() + 3);
+    buf.extend_from_slice(body_sha.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(subject.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(path.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(attach_names.as_bytes());
+    sha256_hex(&buf)
+}
+
+/// Delete Tantivy docs + clear fts_* for ineligible items that still look indexed.
+///
+/// Returns `false` if cancelled mid-pass (caller should return Paused).
+#[allow(clippy::too_many_arguments)]
+fn purge_orphans(
+    matter: &Matter,
+    job_id: &str,
+    writer: &mut tantivy::IndexWriter,
+    fts_schema: &FtsSchema,
+    params_json: &serde_json::Value,
+    cancel: Option<&dyn Fn() -> bool>,
+    progress: &impl Fn(u64),
+    summary: &mut FtsSummary,
+) -> Result<bool> {
+    let mut orphan_offset = 0u64;
+    const BATCH: u64 = 200;
+    loop {
+        if cancel.map(|c| c()).unwrap_or(false) {
+            return Ok(false);
+        }
+        let orphans = matter.list_fts_orphans(orphan_offset, BATCH)?;
+        if orphans.is_empty() {
+            break;
+        }
+        let mut updates = Vec::new();
+        let now = Utc::now().to_rfc3339();
+        for id in &orphans {
+            let term = Term::from_field_text(fts_schema.item_id, id);
+            writer.delete_term(term);
+            updates.push(FtsFieldUpdate {
+                item_id: id.clone(),
+                fts_text_sha256: None,
+                fts_indexed_at: Some(now.clone()),
+                fts_error: None,
+            });
+            summary.skipped_count = summary.skipped_count.saturating_add(1);
+            summary.completed_count = summary.completed_count.saturating_add(1);
+        }
+        writer
+            .commit()
+            .map_err(|e| SearchError::Index(format!("orphan delete commit: {e}")))?;
+        let cursor = CheckpointCursor {
+            phase: "purge".into(),
+            cursor_index: orphan_offset,
+            completed_count: summary.completed_count,
+            indexed_count: summary.indexed_count,
+            skipped_count: summary.skipped_count,
+            error_count: summary.error_count,
+            params: params_json.clone(),
+        };
+        let cursor_json = serde_json::to_string(&cursor).unwrap_or_else(|_| "{}".into());
+        matter.apply_fts_batch_with_checkpoint(
+            job_id,
+            FTS_STAGE,
+            &updates,
+            &cursor_json,
+            summary.completed_count as i64,
+        )?;
+        progress(summary.completed_count);
+        if (orphans.len() as u64) < BATCH {
+            break;
+        }
+        // After clearing fts_*, orphans drop out of the list; keep offset 0.
+        orphan_offset = 0;
+    }
+    Ok(true)
 }
 
 fn load_body_text(matter: &Matter, cand: &matter_core::FtsCandidate) -> Result<String> {

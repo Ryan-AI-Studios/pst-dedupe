@@ -81,7 +81,8 @@ API: `MatterIndex::shutdown()` and `remove_index_dir`.
 |---|---|
 | Kind / stage | `fts_index` |
 | Params | `{ "reset": false, "batch_size": 100, "scope": "all_with_text", "writer_heap_bytes": 52428800 }` |
-| Incremental | `text_sha256` (or html) ≠ `fts_text_sha256` or fts null |
+| Incremental | `fts_text_sha256` stores **payload digest** = SHA-256(body_sha ∥ subject ∥ path ∥ attach_names); re-indexes when body **or** searchable metadata changes |
+| Orphan purge | Items with `fts_*` set but no text / ineligible status → `delete_term` + clear bookkeeping |
 | Commit order | Tantivy commit → SQLite `fts_*` + checkpoint **one txn** |
 | Cancel | Between batches → Paused |
 

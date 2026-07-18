@@ -2965,6 +2965,36 @@ impl Matter {
         Ok(out)
     }
 
+    /// Items that still have FTS bookkeeping but are no longer index-eligible
+    /// (no text CAS, or status not extracted-like). The FTS job should
+    /// `delete_term` these and clear `fts_*` so searches do not return ghosts.
+    pub fn list_fts_orphans(&self, offset: u64, limit: u64) -> Result<Vec<String>> {
+        let limit_i = if limit == u64::MAX {
+            i64::MAX
+        } else {
+            limit as i64
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM items \
+             WHERE matter_id = ?1 \
+               AND fts_text_sha256 IS NOT NULL \
+               AND ( \
+                 status NOT IN ('extracted', 'partial', 'normalized') \
+                 OR (text_sha256 IS NULL AND html_sha256 IS NULL) \
+               ) \
+             ORDER BY id ASC \
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt.query_map(params![self.matter_id, limit_i, offset as i64], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Attachment child paths keyed by parent item id (role = `attachment`).
     pub fn list_attachment_names_for_parents(
         &self,
