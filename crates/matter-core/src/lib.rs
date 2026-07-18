@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v5**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v6**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -12,6 +12,7 @@
 //! - Matter-level **dedupe** result columns + transactional batch helpers (0021)
 //! - Email **threading** header storage + result columns + batch helpers (0022)
 //! - **Near-duplicate** result columns + transactional batch helpers (0023)
+//! - **Cull** result columns + named presets + transactional batch helpers (0024)
 //!
 //! ## Layout
 //!
@@ -60,11 +61,12 @@ pub use logical_hash::{
     LogicalAttachment, NonEmailLogicalInput, LOGICAL_HASH_VERSION,
 };
 pub use matter::{
-    item_dedup_role, item_dedup_tier, item_near_dup_role, item_role, item_status,
-    item_thread_method, DedupRoleCounts, DedupRoleUpdate, DedupeCandidate, Item, ItemFamily,
-    ItemInput, ItemUpdate, Matter, MatterInfo, NearDupCandidate, NearDupFieldUpdate, Source,
-    ThreadCandidate, ThreadFieldUpdate, DB_FILE, EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS,
-    INDEX_DIR, LOGS_DIR, WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
+    item_cull_status, item_dedup_role, item_dedup_tier, item_near_dup_role, item_role, item_status,
+    item_thread_method, CullCandidate, CullFieldUpdate, CullPreset, CullPresetInput,
+    DedupRoleCounts, DedupRoleUpdate, DedupeCandidate, Item, ItemFamily, ItemInput, ItemUpdate,
+    Matter, MatterInfo, NearDupCandidate, NearDupFieldUpdate, Source, ThreadCandidate,
+    ThreadFieldUpdate, DB_FILE, EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR, LOGS_DIR,
+    WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
 };
 pub use schema::SCHEMA_VERSION;
 pub use thread_headers::{

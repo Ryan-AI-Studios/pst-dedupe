@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
 use process_runner::{
-    ExtractPstHandler, IngestHandler, JobParams, MatterDedupeHandler, MatterNearDupHandler,
-    MatterThreadHandler, ProcessRunner, RunnerConfig,
+    ExtractPstHandler, IngestHandler, JobParams, MatterCullHandler, MatterDedupeHandler,
+    MatterNearDupHandler, MatterThreadHandler, ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -51,6 +51,8 @@ pub struct DeskApp {
     last_refresh: Instant,
     /// Job id of the last known active job (for resume).
     last_job_id: Option<String>,
+    /// Selected built-in cull preset name for the workspace dropdown.
+    pub(crate) cull_preset: String,
 }
 
 impl DeskApp {
@@ -61,6 +63,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterDedupeHandler::new()));
         runner.register(Arc::new(MatterThreadHandler::new()));
         runner.register(Arc::new(MatterNearDupHandler::new()));
+        runner.register(Arc::new(MatterCullHandler::new()));
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 
@@ -83,6 +86,7 @@ impl DeskApp {
             last_progress_state: "idle".into(),
             last_refresh: Instant::now() - Duration::from_secs(60),
             last_job_id: None,
+            cull_preset: "unique_only".into(),
         }
     }
 
@@ -305,6 +309,34 @@ impl DeskApp {
             Ok(job_id) => {
                 self.last_job_id = Some(job_id.clone());
                 self.status_msg = Some(format!("Started near-dup job {job_id}"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    pub(crate) fn start_cull(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        // Always pass the selected preset (defaults to unique_only via cull_default_params shape).
+        let params_json = if self.cull_preset == "unique_only" {
+            params::cull_default_params()
+        } else {
+            params::cull_params_for_preset(&self.cull_preset)
+        };
+        let params = JobParams::new(params_json);
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "cull", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!(
+                    "Started cull job {job_id} (preset={})",
+                    self.cull_preset
+                ));
                 self.error_msg = None;
             }
             Err(e) => self.note_start_error(e),

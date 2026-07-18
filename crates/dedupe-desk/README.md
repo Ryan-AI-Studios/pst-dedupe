@@ -87,6 +87,15 @@ Workspace **Run near-dup** starts `kind=neardup` with default params
 progress / cancel / resume. Near-dup groups are **flag-only** — Desk does not
 auto-hide them as exact duplicates. See `crates/matter-neardup/README.md`.
 
+### Run cull
+
+Workspace **cull preset** dropdown (built-ins: `unique_only`, `unique_plus_family`,
+`date_window`, `noise_light`) + **Run cull** starts `kind=cull` with
+`{ "preset_name", "reset": true, "batch_size": 500 }`. Flag-only: sets
+`cull_status` / reasons; never deletes items or CAS. Reuses progress / cancel /
+resume. See `crates/matter-cull/README.md`. **0025 promote** should prefer
+`cull_status=included` when present.
+
 ## Tests
 
 ```powershell

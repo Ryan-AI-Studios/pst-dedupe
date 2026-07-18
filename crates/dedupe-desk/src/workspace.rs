@@ -4,6 +4,7 @@ use eframe::egui;
 
 use crate::app::DeskApp;
 use crate::matter_ui::MatterSnapshot;
+use crate::params;
 use crate::progress_ui;
 
 pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
@@ -101,6 +102,27 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
             .clicked()
         {
             app.start_neardup();
+        }
+
+        ui.separator();
+
+        // Cull preset pick + Run cull (flag-only data reduction).
+        egui::ComboBox::from_id_salt("cull_preset")
+            .selected_text(&app.cull_preset)
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                for name in params::CULL_BUILTIN_PRESETS {
+                    ui.selectable_value(&mut app.cull_preset, (*name).to_string(), *name);
+                }
+            });
+        if ui
+            .add_enabled(!busy, egui::Button::new("Run cull"))
+            .on_hover_text(
+                "Flag-only data reduction: apply cull preset (included vs culled + reasons)",
+            )
+            .clicked()
+        {
+            app.start_cull();
         }
 
         ui.separator();

@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -19,6 +19,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (3, MIGRATION_V3),
     (4, MIGRATION_V4),
     (5, MIGRATION_V5),
+    (6, MIGRATION_V6),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -203,6 +204,35 @@ CREATE INDEX IF NOT EXISTS idx_items_near_dup_group ON items(near_dup_group_id);
 CREATE INDEX IF NOT EXISTS idx_items_near_dup_role ON items(near_dup_role);
 "#;
 
+/// Schema v6: cull / data-reduction result columns + named presets (track 0024).
+///
+/// Nullable `ADD COLUMN` only. Does not overload `dedup_*`, `thread_*`, or `near_dup_*`.
+/// Preset delete never clears item cull fields.
+const MIGRATION_V6: &str = r#"
+ALTER TABLE items ADD COLUMN cull_status TEXT;
+ALTER TABLE items ADD COLUMN cull_reasons_json TEXT;
+ALTER TABLE items ADD COLUMN cull_preset_id TEXT;
+ALTER TABLE items ADD COLUMN cull_preset_name TEXT;
+ALTER TABLE items ADD COLUMN culled_at TEXT;
+ALTER TABLE items ADD COLUMN cull_job_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_items_cull_status ON items(cull_status);
+CREATE INDEX IF NOT EXISTS idx_items_cull_preset ON items(cull_preset_id);
+
+CREATE TABLE cull_presets (
+    id TEXT PRIMARY KEY NOT NULL,
+    matter_id TEXT NOT NULL REFERENCES matters(id),
+    name TEXT NOT NULL,
+    description TEXT,
+    rules_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_cull_presets_matter ON cull_presets(matter_id);
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -295,7 +325,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 5);
+        assert_eq!(v, 6);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v2 columns present
@@ -358,6 +388,23 @@ mod tests {
             )
             .expect("pragma");
         assert!(has_near_dup_sim);
+        // v6 cull columns present
+        let has_cull_status: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'cull_status'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_cull_status);
+        let has_cull_presets: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='cull_presets'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_cull_presets);
     }
 
     #[test]
@@ -452,8 +499,8 @@ mod tests {
             .expect("pragma");
         assert!(!role_exists);
 
-        let v = migrate(&conn).expect("migrate v1→v5");
-        assert_eq!(v, 5);
+        let v = migrate(&conn).expect("migrate v1→v6");
+        assert_eq!(v, 6);
 
         // Inventory data intact.
         let (path, status, native, lhv): (String, String, String, i64) = conn
@@ -505,6 +552,16 @@ mod tests {
             .expect("near_dup_role");
         assert!(near_dup_role.is_none());
 
+        // v6 cull columns present and NULL.
+        let cull_status: Option<String> = conn
+            .query_row(
+                "SELECT cull_status FROM items WHERE id = 'itm_a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("cull_status");
+        assert!(cull_status.is_none());
+
         // Existing FKs still work: source_id / family_id.
         let src: String = conn
             .query_row(
@@ -523,9 +580,9 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 5);
+        assert_eq!(ms, 6);
 
-        // v2 + v3 + v4 + v5 indexes present.
+        // v2 + v3 + v4 + v5 + v6 indexes present.
         for idx in [
             "idx_items_logical_hash",
             "idx_items_message_id",
@@ -536,6 +593,8 @@ mod tests {
             "idx_items_in_reply_to",
             "idx_items_near_dup_group",
             "idx_items_near_dup_role",
+            "idx_items_cull_status",
+            "idx_items_cull_preset",
         ] {
             let exists: bool = conn
                 .query_row(
@@ -578,8 +637,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v2→v5");
-        assert_eq!(v, 5);
+        let v = migrate(&conn).expect("migrate v2→v6");
+        assert_eq!(v, 6);
 
         let (status, mid, dedup): (String, Option<String>, Option<String>) = conn
             .query_row(
@@ -599,7 +658,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 5);
+        assert_eq!(ms, 6);
     }
 
     /// v3 fixture → migrate to current → data intact + thread columns present.
@@ -633,8 +692,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v3→v5");
-        assert_eq!(v, 5);
+        let v = migrate(&conn).expect("migrate v3→v6");
+        assert_eq!(v, 6);
 
         let (status, mid, dedup, thread_id, in_reply): (
             String,
@@ -671,7 +730,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 5);
+        assert_eq!(ms, 6);
 
         for idx in ["idx_items_thread_id", "idx_items_in_reply_to"] {
             let exists: bool = conn
@@ -717,8 +776,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v4→v5");
-        assert_eq!(v, 5);
+        let v = migrate(&conn).expect("migrate v4→v6");
+        assert_eq!(v, 6);
 
         let status: String = conn
             .query_row(
@@ -776,9 +835,93 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 5);
+        assert_eq!(ms, 6);
 
         for idx in ["idx_items_near_dup_group", "idx_items_near_dup_role"] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name = ?1",
+                    [idx],
+                    |row| row.get(0),
+                )
+                .expect("sqlite_master");
+            assert!(exists, "expected index {idx}");
+        }
+    }
+
+    /// v5 fixture → migrate to v6 → data intact + cull columns + cull_presets table.
+    #[test]
+    fn migrate_v5_to_v6_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute_batch(MIGRATION_V3).expect("v3");
+        conn.execute_batch(MIGRATION_V4).expect("v4");
+        conn.execute_batch(MIGRATION_V5).expect("v5");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (5)", [])
+            .expect("meta v5");
+        assert_eq!(read_schema_version(&conn).expect("read"), 5);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v5', 'V5 Matter', '2020-01-01T00:00:00Z', 5, '/tmp/v5')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, dedup_role, thread_id, near_dup_role) \
+             VALUES ('itm_mail', 'mat_v5', NULL, NULL, 'inbox/a.eml', NULL, \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             'mid@example.com', 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'parent', 'email', 1, 'unique', 'tid-1', 'unique')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v5→v6");
+        assert_eq!(v, 6);
+
+        let near_role: Option<String> = conn
+            .query_row(
+                "SELECT near_dup_role FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("near_role");
+        assert_eq!(near_role.as_deref(), Some("unique"));
+
+        let cull_status: Option<String> = conn
+            .query_row(
+                "SELECT cull_status FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("cull_status");
+        assert!(cull_status.is_none());
+
+        let has_presets: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='cull_presets'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("cull_presets table");
+        assert!(has_presets);
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v5'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, 6);
+
+        for idx in ["idx_items_cull_status", "idx_items_cull_preset"] {
             let exists: bool = conn
                 .query_row(
                     "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name = ?1",
@@ -803,8 +946,8 @@ mod tests {
             .expect("meta v1");
 
         let v = migrate(&conn).expect("migrate");
-        assert_eq!(v, 5);
-        assert_eq!(read_schema_version(&conn).expect("read"), 5);
+        assert_eq!(v, 6);
+        assert_eq!(read_schema_version(&conn).expect("read"), 6);
 
         let has_role: bool = conn
             .query_row(
@@ -838,5 +981,13 @@ mod tests {
             )
             .expect("pragma");
         assert!(has_near);
+        let has_cull: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'cull_status'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_cull);
     }
 }

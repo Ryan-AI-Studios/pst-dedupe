@@ -975,6 +975,90 @@ fortyfive fortysix fortyseven fortyeight fortynine fifty";
     assert!(cp.completed_count >= 2);
 }
 
+#[cfg(feature = "cull")]
+#[test]
+fn cull_via_runner_one_job_row() {
+    use matter_core::{item_cull_status, item_dedup_role, item_role, item_status, ItemInput};
+    use process_runner::MatterCullHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-cull");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                path: Some("unique.eml".into()),
+                dedup_role: Some(item_dedup_role::UNIQUE.into()),
+                size_bytes: Some(10),
+                ..Default::default()
+            })
+            .expect("u");
+        matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                path: Some("dup.eml".into()),
+                dedup_role: Some(item_dedup_role::DUPLICATE.into()),
+                size_bytes: Some(10),
+                ..Default::default()
+            })
+            .expect("d");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterCullHandler::new()));
+
+    let params = JobParams::new(
+        serde_json::json!({
+            "preset_name": "unique_only",
+            "reset": true,
+            "batch_size": 10
+        })
+        .to_string(),
+    );
+    let job_id = runner.start(&root, "cull", params).expect("start cull");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let jobs = matter.list_jobs().expect("list");
+    assert_eq!(jobs.len(), 1, "Option C: exactly one job row");
+    assert_eq!(jobs[0].id, job_id);
+    assert_eq!(jobs[0].kind, "cull");
+    assert_eq!(jobs[0].state, JobState::Succeeded);
+
+    let cands = matter.list_cull_candidates(true).expect("cands");
+    assert_eq!(cands.len(), 2);
+    let u = matter
+        .get_item(
+            &cands
+                .iter()
+                .find(|c| c.path.as_deref() == Some("unique.eml"))
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+    let d = matter
+        .get_item(
+            &cands
+                .iter()
+                .find(|c| c.path.as_deref() == Some("dup.eml"))
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+    assert_eq!(u.cull_status.as_deref(), Some(item_cull_status::INCLUDED));
+    assert_eq!(d.cull_status.as_deref(), Some(item_cull_status::CULLED));
+
+    let cp = matter
+        .get_checkpoint(&job_id, "cull")
+        .expect("cp")
+        .expect("cull checkpoint");
+    assert!(cp.completed_count >= 2);
+}
+
 /// Resume must restore full nested `params` from the checkpoint cursor (not just
 /// `source_id` / empty object), so non-default dedupe settings survive cancel.
 #[test]

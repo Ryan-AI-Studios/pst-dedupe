@@ -89,6 +89,15 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0021-02 | — | Near-duplicate / fuzzy match | **Done in 0023** | — |
 | D-0017-01 | P3 | Unique index on `items(source_id, path)` | Unchanged | future polish |
 
+## From track 0024-CullAndReduce (planned ownership)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0024-plan | — | Full official NSRL RDS import / quarterly update UX | Spec: optional **SHA-256** local hash-list only; RDSv2 MD5/SHA-1 unsupported; off by default | **0024** residual after ship |
+| D-0024-plan | — | Interactive filter builder | Presets only in 0024 | **0028** |
+| D-0024-plan | — | MD5/SHA-1 native digests for legacy DeNIST | Desk identity is SHA-256; fail closed on MD5 lists | residual if ever needed |
+| (promote) | — | 0025 unique-only without cull | Allowed; prefer `cull_status=included` when 0024 has run | **0025** |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

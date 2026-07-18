@@ -73,6 +73,31 @@ pub fn neardup_default_params() -> String {
     .to_string()
 }
 
+/// Built-in cull preset names (desk dropdown).
+pub const CULL_BUILTIN_PRESETS: &[&str] = &[
+    "unique_only",
+    "unique_plus_family",
+    "date_window",
+    "noise_light",
+];
+
+/// Cull params for a built-in (or named) preset (`kind = "cull"`).
+///
+/// Default desk selection is `"unique_only"`.
+pub fn cull_params_for_preset(preset_name: &str) -> String {
+    serde_json::json!({
+        "preset_name": preset_name,
+        "reset": true,
+        "batch_size": 500
+    })
+    .to_string()
+}
+
+/// Default params for matter-level cull (`unique_only`).
+pub fn cull_default_params() -> String {
+    cull_params_for_preset("unique_only")
+}
+
 /// True when `path` looks like a PST (case-insensitive `.pst` extension).
 pub fn looks_like_pst(path: &str) -> bool {
     Path::new(path)
@@ -195,6 +220,16 @@ mod tests {
         assert_eq!(v["batch_size"], 200);
         assert_eq!(v["include_attachments"], true);
         assert_eq!(v["strip_email_quotes"], false);
+    }
+
+    #[test]
+    fn cull_default_json_shape() {
+        let j = cull_default_params();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["preset_name"], "unique_only");
+        assert_eq!(v["reset"], true);
+        assert_eq!(v["batch_size"], 500);
+        assert_eq!(CULL_BUILTIN_PRESETS[0], "unique_only");
     }
 
     #[test]

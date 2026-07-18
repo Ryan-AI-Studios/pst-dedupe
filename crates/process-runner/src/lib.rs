@@ -48,3 +48,6 @@ pub use handlers::MatterThreadHandler;
 
 #[cfg(feature = "neardup")]
 pub use handlers::MatterNearDupHandler;
+
+#[cfg(feature = "cull")]
+pub use handlers::MatterCullHandler;

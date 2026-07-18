@@ -15,6 +15,9 @@ pub mod thread;
 #[cfg(feature = "neardup")]
 pub mod neardup;
 
+#[cfg(feature = "cull")]
+pub mod cull;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
@@ -29,3 +32,6 @@ pub use thread::MatterThreadHandler;
 
 #[cfg(feature = "neardup")]
 pub use neardup::MatterNearDupHandler;
+
+#[cfg(feature = "cull")]
+pub use cull::MatterCullHandler;
