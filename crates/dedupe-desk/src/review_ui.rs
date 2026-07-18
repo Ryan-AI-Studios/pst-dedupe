@@ -32,8 +32,8 @@ use std::thread;
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense};
 use matter_core::{
-    ApplyCodesInput, ApplyCodesResult, CodeDef, CodeDefInput, FilterCondition, FilterSpec,
-    ItemCodeInfo, Matter, ReviewListRow, SavedSearch, SavedSearchInput,
+    parse_bound_instant, ApplyCodesInput, ApplyCodesResult, CodeDef, CodeDefInput, FilterCondition,
+    FilterSpec, ItemCodeInfo, Matter, ReviewListRow, SavedSearch, SavedSearchInput,
 };
 
 use crate::review_body::{BodyLoader, BodyPane};
@@ -81,6 +81,9 @@ pub struct FilterDraft {
     pub include_family: bool,
     /// Selected code **keys** for any_of (empty = no code condition).
     pub code_keys: HashSet<String>,
+    /// Uncoded chip / `code_missing eq true`. Mutually exclusive with [`Self::code_keys`]
+    /// when serializing via [`Self::to_filter_spec`].
+    pub code_missing: bool,
     /// Name for Save as.
     pub save_name: String,
     /// Currently selected saved search id in the dropdown (if any).
@@ -89,6 +92,10 @@ pub struct FilterDraft {
 
 impl FilterDraft {
     /// Build a [`FilterSpec`] from draft fields. Empty draft → default corpus filter.
+    ///
+    /// Dates are pre-validated with [`parse_bound_instant`] so naive timestamps fail
+    /// before list load. `code_missing` and `code_keys` are mutually exclusive: when
+    /// `code_missing` is set, only the uncoded condition is emitted.
     pub fn to_filter_spec(&self) -> Result<FilterSpec, String> {
         let mut conditions = Vec::new();
         let cust = self.custodian.trim();
@@ -102,7 +109,16 @@ impl FilterDraft {
                 end: None,
             });
         }
-        if !self.code_keys.is_empty() {
+        if self.code_missing {
+            conditions.push(FilterCondition {
+                field: "code_missing".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            });
+        } else if !self.code_keys.is_empty() {
             let mut keys: Vec<String> = self.code_keys.iter().cloned().collect();
             keys.sort();
             conditions.push(FilterCondition {
@@ -120,6 +136,8 @@ impl FilterDraft {
             if from.is_empty() || to.is_empty() {
                 return Err("Date filter needs both From and To (RFC3339 with offset or Z)".into());
             }
+            parse_bound_instant(from).map_err(|e| e.to_string())?;
+            parse_bound_instant(to).map_err(|e| e.to_string())?;
             conditions.push(FilterCondition {
                 field: "best_effort_date".into(),
                 op: "between".into(),
@@ -157,7 +175,12 @@ impl FilterDraft {
                     }
                 }
                 ("code_missing", _) => {
-                    // Represent as no code keys + special: leave empty; chips set applied directly.
+                    // Default true when value omitted (engine treats missing as true).
+                    let want = c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
+                    d.code_missing = want;
+                    if want {
+                        d.code_keys.clear();
+                    }
                 }
                 ("best_effort_date" | "sent_at" | "received_at", "between") => {
                     if let Some(s) = &c.start {
@@ -348,14 +371,25 @@ impl ReviewState {
                 self.reload_saved_searches(matter_root);
             }
             Err(e) => {
-                self.list_error = Some(e);
-                self.rows.clear();
-                self.count = 0;
-                self.selection = None;
+                // Filter compile/load failures: surface on filter bar so Clear stays usable.
+                // Keep previous rows when possible so the list is not blanked on a bad Apply.
+                if self.filter_active {
+                    self.filter_error = Some(format!("Filter list load: {e}"));
+                    if self.rows.is_empty() {
+                        self.list_error = Some(e);
+                        self.count = 0;
+                        self.selection = None;
+                    }
+                } else {
+                    self.list_error = Some(e);
+                    self.rows.clear();
+                    self.count = 0;
+                    self.selection = None;
+                    self.code_defs.clear();
+                    self.row_codes.clear();
+                }
                 self.loaded_root = Some(matter_root.to_owned());
                 self.visible_row_range = 0..0;
-                self.code_defs.clear();
-                self.row_codes.clear();
             }
         }
     }
@@ -452,11 +486,27 @@ impl ReviewState {
             self.filter_error = Some("Enter a name to save the search.".into());
             return;
         }
-        let spec = match self.filter_draft.to_filter_spec() {
-            Ok(s) => s,
-            Err(e) => {
-                self.filter_error = Some(e);
-                return;
+        // Prefer the *applied* FilterSpec when a filter is active so Uncoded /
+        // loaded non-UI conditions are preserved (draft is a partial view).
+        let spec = if self.filter_active {
+            if let Some(applied) = self.applied_filter.clone() {
+                applied
+            } else {
+                match self.filter_draft.to_filter_spec() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.filter_error = Some(e);
+                        return;
+                    }
+                }
+            }
+        } else {
+            match self.filter_draft.to_filter_spec() {
+                Ok(s) => s,
+                Err(e) => {
+                    self.filter_error = Some(e);
+                    return;
+                }
             }
         };
         let filter_json = match serde_json::to_string(&spec) {
@@ -483,6 +533,10 @@ impl ReviewState {
             },
         ) {
             Ok(saved) => {
+                // Keep applied_filter in sync with what was persisted.
+                let active = !spec.conditions.is_empty() || spec.include_family;
+                self.applied_filter = Some(spec);
+                self.filter_active = active;
                 self.filter_draft.selected_saved_id = Some(saved.id.clone());
                 self.filter_draft.save_name = saved.name.clone();
                 self.filter_status = Some(format!("Saved “{}”.", saved.name));
@@ -1125,17 +1179,27 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path, 
     });
     ui.add_space(4.0);
 
-    if let Some(err) = state.list_error.clone() {
-        ui.colored_label(Color32::from_rgb(200, 60, 60), format!("List error: {err}"));
-        return;
-    }
-
-    // Filter bar always available (even when list empty).
+    // Filter bar always available — including when list_error is set — so Clear
+    // remains reachable after a failed Apply (e.g. historical load errors).
     show_filter_bar(ui, state, matter_root, actor);
     ui.add_space(4.0);
 
+    if let Some(err) = state.list_error.clone() {
+        ui.colored_label(Color32::from_rgb(200, 60, 60), format!("List error: {err}"));
+        ui.label(
+            RichText::new("Use Clear or adjust the filter above, then Apply / Refresh.")
+                .weak()
+                .small(),
+        );
+        // Fall through: still show empty/list body when rows remain.
+    }
+
     if state.rows.is_empty() {
         ui.add_space(8.0);
+        if state.list_error.is_some() {
+            // List failed and no rows to show; filter bar already rendered.
+            return;
+        }
         if state.filter_active {
             ui.label(RichText::new("No items match the current filter.").strong());
             ui.label("Adjust conditions or Clear to restore the full Review Corpus.");
@@ -1417,6 +1481,13 @@ fn show_filter_bar(
             if ui.small_button("Responsive").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_responsive());
             }
+            if state.filter_draft.code_missing {
+                ui.label(
+                    RichText::new("active: Uncoded")
+                        .small()
+                        .color(Color32::from_rgb(40, 120, 60)),
+                );
+            }
         });
 
         ui.horizontal(|ui| {
@@ -1458,6 +1529,8 @@ fn show_filter_bar(
                     if ui.checkbox(&mut on, &def.label).changed() {
                         if on {
                             state.filter_draft.code_keys.insert(def.key.clone());
+                            // Code any_of and uncoded are mutually exclusive in draft.
+                            state.filter_draft.code_missing = false;
                         } else {
                             state.filter_draft.code_keys.remove(&def.key);
                         }
@@ -2212,10 +2285,27 @@ mod tests {
         let with_date = draft.to_filter_spec().expect("with date");
         assert_eq!(with_date.conditions.len(), 3);
 
+        // Naive dates rejected before Apply (parse_bound_instant).
+        draft.date_from = "2023-01-01T00:00:00".into();
+        draft.date_to = "2024-01-01T00:00:00".into();
+        assert!(draft.to_filter_spec().is_err());
+        draft.date_from.clear();
+        draft.date_to.clear();
+
+        // code_missing takes precedence over code_keys when serializing.
+        draft.code_missing = true;
+        let uncoded = draft.to_filter_spec().expect("uncoded");
+        assert!(uncoded.conditions.iter().any(|c| c.field == "code_missing"));
+        assert!(!uncoded
+            .conditions
+            .iter()
+            .any(|c| c.field == "code" && c.op == "any_of"));
+
         draft.clear();
         assert!(draft.custodian.is_empty());
         assert!(!draft.include_family);
         assert!(draft.code_keys.is_empty());
+        assert!(!draft.code_missing);
         let empty = draft.to_filter_spec().expect("empty");
         assert!(empty.conditions.is_empty());
         assert!(!empty.include_family);
@@ -2228,6 +2318,14 @@ mod tests {
         let back: FilterSpec = serde_json::from_str(&j).expect("de");
         assert_eq!(back.conditions.len(), 1);
         assert_eq!(back.conditions[0].field, "code_missing");
+
+        // Draft must encode Uncoded so re-Apply does not wipe to empty corpus.
+        let draft = FilterDraft::from_filter_spec(&u);
+        assert!(draft.code_missing);
+        assert!(draft.code_keys.is_empty());
+        let round = draft.to_filter_spec().expect("round");
+        assert_eq!(round.conditions.len(), 1);
+        assert_eq!(round.conditions[0].field, "code_missing");
 
         let p = FilterSpec::preset_privilege();
         assert_eq!(p.conditions[0].values.as_ref().unwrap()[0], "privilege");
@@ -2261,6 +2359,171 @@ mod tests {
             .expect("empty")
             .conditions
             .is_empty());
+    }
+
+    #[test]
+    fn save_prefers_applied_filter_over_empty_draft() {
+        // Uncoded chip path historically left draft empty; Save must still persist applied.
+        let mut state = ReviewState::default();
+        let uncoded = FilterSpec::preset_uncoded();
+        state.applied_filter = Some(uncoded.clone());
+        state.filter_active = true;
+        // Intentionally leave draft empty (pre-fix regression shape).
+        state.filter_draft = FilterDraft::default();
+        state.filter_draft.save_name = "Uncoded save".into();
+
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = base.join("matter-save-applied");
+        let _ = Matter::create(&root, "Save Applied").expect("create");
+
+        state.save_current_filter(&root, "tester");
+        assert!(
+            state.filter_error.is_none(),
+            "save err: {:?}",
+            state.filter_error
+        );
+
+        let list = load_saved_searches(&root).expect("list");
+        assert_eq!(list.len(), 1);
+        let loaded: FilterSpec =
+            serde_json::from_str(&list[0].filter_json).expect("parse saved json");
+        assert_eq!(loaded.conditions.len(), 1);
+        assert_eq!(loaded.conditions[0].field, "code_missing");
+    }
+
+    /// Matter-backed Apply / Clear / Save Uncoded round-trip (§3.8.12 + P2).
+    #[test]
+    fn filter_apply_clear_save_uncoded_integration() {
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = base.join("matter-filter-apply");
+        let matter = Matter::create(&root, "Filter Apply").expect("create");
+        let set = matter
+            .ensure_default_review_set(DEFAULT_REVIEW_SET_NAME)
+            .expect("set");
+        let coded = matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                subject: Some("coded".into()),
+                ..Default::default()
+            })
+            .expect("coded");
+        let bare = matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                subject: Some("bare".into()),
+                ..Default::default()
+            })
+            .expect("bare");
+        let job = matter.create_job("promote").expect("job");
+        matter
+            .apply_promote_batch_with_checkpoint(
+                &job.id,
+                "promote",
+                &[
+                    PromoteFieldUpdate {
+                        item_id: coded.id.clone(),
+                        in_review: Some(1),
+                        review_set_id: Some(set.id.clone()),
+                        review_order: Some(1),
+                        promoted_at: Some("2020-01-01T00:00:00Z".into()),
+                        promote_job_id: Some(job.id.clone()),
+                        promote_policy: Some("unique_only".into()),
+                    },
+                    PromoteFieldUpdate {
+                        item_id: bare.id.clone(),
+                        in_review: Some(1),
+                        review_set_id: Some(set.id.clone()),
+                        review_order: Some(2),
+                        promoted_at: Some("2020-01-01T00:00:00Z".into()),
+                        promote_job_id: Some(job.id.clone()),
+                        promote_policy: Some("unique_only".into()),
+                    },
+                ],
+                "{}",
+                2,
+            )
+            .expect("promote");
+        drop(matter);
+
+        let defs = load_code_definitions(&root).expect("defs");
+        let priv_code = defs.iter().find(|d| d.key == "privilege").expect("priv");
+        apply_codes_blocking(
+            &root,
+            ApplyCodesInput {
+                item_ids: vec![coded.id.clone()],
+                add_code_ids: vec![priv_code.id.clone()],
+                remove_code_ids: vec![],
+                propagate_family: false,
+                actor: "desk-test".into(),
+            },
+        )
+        .expect("code");
+
+        // Unfiltered load path via filtered helper with empty default.
+        let (full_count, full_rows, _) =
+            load_review_filtered(&root, &FilterSpec::default(), 0, None).expect("full");
+        assert_eq!(full_count, 2);
+        assert_eq!(full_rows.len(), 2);
+
+        let mut state = ReviewState::default();
+        state.apply_preset(&root, FilterSpec::preset_uncoded());
+        assert!(state.filter_active);
+        assert!(state.filter_draft.code_missing);
+        assert!(state.list_error.is_none());
+        assert!(state.filter_error.is_none());
+        assert_eq!(state.count, 1);
+        assert_eq!(state.rows.len(), 1);
+        assert_eq!(state.rows[0].id, bare.id);
+
+        // Re-Apply from draft must keep uncoded (not wipe to empty corpus).
+        state.apply_filter(&root);
+        assert!(state.filter_active);
+        assert!(state.filter_draft.code_missing);
+        assert_eq!(state.count, 1);
+        assert_eq!(state.rows[0].id, bare.id);
+
+        // Save applied Uncoded → JSON contains code_missing.
+        state.filter_draft.save_name = "Uncoded only".into();
+        state.save_current_filter(&root, "desk-test");
+        assert!(
+            state.filter_error.is_none(),
+            "save: {:?}",
+            state.filter_error
+        );
+        let saved = load_saved_searches(&root).expect("saved");
+        assert_eq!(saved.len(), 1);
+        let json_spec: FilterSpec =
+            serde_json::from_str(&saved[0].filter_json).expect("filter_json");
+        assert!(json_spec
+            .conditions
+            .iter()
+            .any(|c| c.field == "code_missing"));
+
+        // Clear restores full corpus.
+        state.clear_filter(&root);
+        assert!(!state.filter_active);
+        assert!(!state.filter_draft.code_missing);
+        assert_eq!(state.count, 2);
+        assert_eq!(state.rows.len(), 2);
+
+        // Load saved search re-applies uncoded.
+        state.filter_draft.selected_saved_id = Some(saved[0].id.clone());
+        state.load_selected_saved_search(&root);
+        assert!(state.filter_active);
+        assert!(state.filter_draft.code_missing);
+        assert_eq!(state.count, 1);
+        assert_eq!(state.rows[0].id, bare.id);
+
+        // Naive dates rejected on Apply (filter_error, not silent full corpus).
+        state.filter_draft.code_missing = false;
+        state.filter_draft.date_from = "2023-01-01T00:00:00".into();
+        state.filter_draft.date_to = "2024-01-01T00:00:00".into();
+        state.apply_filter(&root);
+        assert!(state.filter_error.is_some());
     }
 
     #[test]
