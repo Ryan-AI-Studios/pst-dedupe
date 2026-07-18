@@ -471,7 +471,7 @@ items/CAS. All writes go through `apply_codes` (single-group rules + audit).
 | Audit | `coding.apply` with **complete** sorted `item_ids` of final targets (never hash/sample), plus `add`, `remove`, `propagate_family`, `selected_count`, `target_count` |
 | Failed batch | No partial membership commit |
 
-**Note:** The Privilege **code** is not a privilege log export — that is track **0031**.
+**Note:** The Privilege **code** (0027) is membership only; full claim fields, withhold holds, and privilege log CSV export ship in **0031** (schema v12 — see above).
 
 ### Address storage (JSON decision)
 
