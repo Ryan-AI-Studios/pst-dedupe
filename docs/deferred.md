@@ -89,13 +89,15 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0021-02 | — | Near-duplicate / fuzzy match | **Done in 0023** | — |
 | D-0017-01 | P3 | Unique index on `items(source_id, path)` | Unchanged | future polish |
 
-## From track 0024-CullAndReduce (planned ownership)
+## From track 0024-CullAndReduce
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0024-plan | — | Full official NSRL RDS import / quarterly update UX | Spec: optional **SHA-256** local hash-list only; RDSv2 MD5/SHA-1 unsupported; off by default | **0024** residual after ship |
-| D-0024-plan | — | Interactive filter builder | Presets only in 0024 | **0028** |
-| D-0024-plan | — | MD5/SHA-1 native digests for legacy DeNIST | Desk identity is SHA-256; fail closed on MD5 lists | residual if ever needed |
+| D-0024-01 | — | Full official NSRL RDS import / quarterly update UX | P0: optional local **SHA-256** hash-list only; RDSv2 MD5/SHA-1 unsupported; off by default | residual polish |
+| D-0024-02 | — | Interactive filter builder / ad-hoc UI query | Presets + thin Run cull only in 0024 | **0028** |
+| D-0024-03 | — | MD5/SHA-1 native digests for legacy DeNIST | Desk identity is SHA-256; fail closed on MD5-looking lists | residual if ever needed |
+| D-0024-04 | P3 | Full GUI smoke for Run cull click path | Automated handler + unit tests; operator smoke local | operator / polish |
+| D-0024-05 | P3 | Dedicated family-phase mid-write cancel integration test | Items-phase cancel/resume proven; family cancel covered in engine path | polish |
 | (promote) | — | 0025 unique-only without cull | Allowed; prefer `cull_status=included` when 0024 has run | **0025** |
 
 ## Hygiene

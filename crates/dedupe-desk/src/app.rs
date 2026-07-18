@@ -151,6 +151,8 @@ impl DeskApp {
         self.screen = Screen::Workspace;
         self.extract_queue.clear();
         self.selected_pst = None;
+        // Reset cull selection so a prior matter's user:<id> cannot leak.
+        self.cull_preset = "unique_only".into();
         self.refresh_matter_lists();
         self.status_msg = Some(format!("Opened matter at {root}"));
     }
