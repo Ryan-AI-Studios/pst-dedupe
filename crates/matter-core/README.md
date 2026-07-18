@@ -7,10 +7,11 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v2**) + family graph
+6. **Normalized Item** model (schema **v3**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
+8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 
-Schema version: **2** (`SCHEMA_VERSION`).
+Schema version: **3** (`SCHEMA_VERSION`).
 
 ## Layout
 
@@ -86,6 +87,34 @@ Extends v1 `items` with nullable columns (safe `ALTER TABLE … ADD COLUMN` migr
 | `extra_json` | Extractor escape hatch |
 
 **Indexes (v2):** `idx_items_logical_hash`, `idx_items_message_id` (plus v1 source/family/native indexes).
+
+## Schema v3 — Matter dedupe results (0021)
+
+Nullable columns on `items` (does **not** overload `status`):
+
+| Field | Notes |
+|---|---|
+| `dedup_role` | `unique` \| `duplicate` \| `skipped` \| NULL (not run) — constants in `item_dedup_role` |
+| `duplicate_of_item_id` | Canonical unique item id when duplicate |
+| `dedup_tier` | `message_id` \| `logical_hash` \| `family` \| `none` — constants in `item_dedup_tier` |
+| `dedup_group_id` | Optional group key (often canonical id) |
+| `deduped_at` | RFC3339 when last assigned |
+| `dedup_job_id` | Last job that wrote the result |
+
+**Indexes (v3):** `idx_items_dedup_role`, `idx_items_duplicate_of`, `idx_items_dedup_group`.
+
+### Dedupe helpers
+
+| API | Purpose |
+|---|---|
+| `list_email_parents_for_dedupe` / `_range` | Thin ordered candidates (no body text) |
+| `count_email_parents_for_dedupe` | Eligible parent count |
+| `count_by_dedup_role` | Aggregate unique/duplicate/skipped/null |
+| `clear_dedupe_fields` | Reset columns (transactional) |
+| `with_transaction` | `BEGIN IMMEDIATE` helper |
+| `apply_dedup_batch_with_checkpoint` | **N role updates + checkpoint in one commit** (DoD-5) |
+
+Engine: `crates/matter-dedupe`. Never delete items/blobs; never use CLI content-hash as suppress key.
 
 ### Address storage (JSON decision)
 

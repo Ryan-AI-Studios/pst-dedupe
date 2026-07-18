@@ -710,3 +710,178 @@ fn durable_running_job_blocks_second_start() {
         other => panic!("expected Busy, got {other}"),
     }
 }
+
+#[cfg(feature = "dedupe")]
+#[test]
+fn dedupe_via_runner_one_job_row() {
+    use matter_core::{item_dedup_role, item_role, item_status, ItemInput};
+    use process_runner::MatterDedupeHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-dedupe");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::PARENT.into()),
+                file_category: Some("email".into()),
+                path: Some("a".into()),
+                message_id: Some("same@ex.com".into()),
+                ..Default::default()
+            })
+            .expect("a");
+        matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::PARENT.into()),
+                file_category: Some("email".into()),
+                path: Some("b".into()),
+                message_id: Some("same@ex.com".into()),
+                ..Default::default()
+            })
+            .expect("b");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterDedupeHandler::new()));
+
+    let params = JobParams::new(
+        serde_json::json!({
+            "use_message_id": true,
+            "use_logical_hash": true,
+            "family_policy": "suppress_children_with_parent",
+            "reset": true,
+            "batch_size": 10
+        })
+        .to_string(),
+    );
+    let job_id = runner.start(&root, "dedupe", params).expect("start dedupe");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let jobs = matter.list_jobs().expect("list");
+    assert_eq!(jobs.len(), 1, "Option C: exactly one job row");
+    assert_eq!(jobs[0].id, job_id);
+    assert_eq!(jobs[0].kind, "dedupe");
+    assert_eq!(jobs[0].state, JobState::Succeeded);
+
+    let counts = matter.count_by_dedup_role().expect("counts");
+    assert_eq!(counts.unique, 1);
+    assert_eq!(counts.duplicate, 1);
+
+    let parents = matter.list_email_parents_for_dedupe().expect("parents");
+    let uniques: Vec<_> = parents
+        .iter()
+        .filter(|p| p.dedup_role.as_deref() == Some(item_dedup_role::UNIQUE))
+        .collect();
+    assert_eq!(uniques.len(), 1);
+
+    let cp = matter
+        .get_checkpoint(&job_id, "dedupe")
+        .expect("cp")
+        .expect("dedupe checkpoint");
+    assert!(cp.completed_count >= 2);
+}
+
+/// Resume must restore full nested `params` from the checkpoint cursor (not just
+/// `source_id` / empty object), so non-default dedupe settings survive cancel.
+#[test]
+fn resume_loads_full_params_from_checkpoint() {
+    use std::sync::Mutex;
+
+    struct CaptureParamsHandler {
+        seen: Arc<Mutex<Vec<(bool, String)>>>,
+    }
+
+    impl JobHandler for CaptureParamsHandler {
+        fn kind(&self) -> &'static str {
+            "mock_params"
+        }
+
+        fn run(&self, ctx: &JobContext<'_>) -> Result<JobOutcome, RunnerError> {
+            self.seen
+                .lock()
+                .expect("lock")
+                .push((ctx.is_resume, ctx.params_json.to_string()));
+
+            if !ctx.is_resume {
+                let cursor = serde_json::json!({
+                    "cursor_index": 1,
+                    "completed_count": 1,
+                    "unique": 1,
+                    "duplicate": 0,
+                    "skipped": 0,
+                    "mid_logical_conflicts": 0,
+                    "phase": "parents",
+                    "family_cursor": 0,
+                    "params": {
+                        "use_message_id": false,
+                        "use_logical_hash": true,
+                        "family_policy": "parents_only",
+                        "reset": false,
+                        "batch_size": 7
+                    }
+                });
+                ctx.matter
+                    .put_checkpoint(ctx.job_id, "dedupe", &cursor.to_string(), 1)
+                    .map_err(RunnerError::from)?;
+                ctx.matter
+                    .set_job_state(ctx.job_id, JobState::Paused, Some("midway"))
+                    .map_err(RunnerError::from)?;
+                return Ok(JobOutcome::Paused {
+                    message: Some("midway".into()),
+                    completed_count: 1,
+                });
+            }
+
+            ctx.matter
+                .set_job_state(ctx.job_id, JobState::Succeeded, None)
+                .map_err(RunnerError::from)?;
+            Ok(JobOutcome::Succeeded {
+                message: Some("resumed".into()),
+                completed_count: 2,
+            })
+        }
+    }
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-resume-params");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(CaptureParamsHandler {
+        seen: Arc::clone(&seen),
+    }));
+
+    let job_id = runner
+        .start(
+            &root,
+            "mock_params",
+            JobParams::new(r#"{"use_message_id":true,"batch_size":99}"#),
+        )
+        .expect("start");
+    assert!(runner.wait_until_idle(Duration::from_secs(5)));
+
+    runner.resume(&root, &job_id).expect("resume");
+    assert!(runner.wait_until_idle(Duration::from_secs(5)));
+
+    let shots = seen.lock().expect("lock");
+    assert_eq!(shots.len(), 2, "start + resume");
+    assert!(!shots[0].0, "first run is not resume");
+    assert!(shots[1].0, "second run is resume");
+
+    let resumed: serde_json::Value = serde_json::from_str(&shots[1].1).expect("resume params json");
+    assert_eq!(
+        resumed.get("use_message_id").and_then(|v| v.as_bool()),
+        Some(false),
+        "resume must restore nested checkpoint params, got {}",
+        shots[1].1
+    );
+    assert_eq!(
+        resumed.get("family_policy").and_then(|v| v.as_str()),
+        Some("parents_only")
+    );
+    assert_eq!(resumed.get("batch_size").and_then(|v| v.as_u64()), Some(7));
+}

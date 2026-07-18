@@ -77,6 +77,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
 
         ui.separator();
 
+        if ui
+            .add_enabled(!busy, egui::Button::new("Run dedupe"))
+            .on_hover_text("Tiered matter dedupe: Message-ID → logical_hash → family attachments")
+            .clicked()
+        {
+            app.start_dedupe();
+        }
+
+        ui.separator();
+
         let job_id = snap.job_id.clone();
         let can_cancel = snap.state == "running" && !job_id.is_empty();
         if ui
@@ -120,6 +130,10 @@ fn show_stats(ui: &mut egui::Ui, snap: &MatterSnapshot) {
         ui.label(format!("Discovered PSTs: {}", snap.psts.len()));
         ui.label(format!("Items (all): {}", snap.item_count));
         ui.label(format!("Jobs: {}", snap.jobs.len()));
+        ui.label(format!(
+            "Dedupe: unique={}  duplicate={}",
+            snap.dedup_unique, snap.dedup_duplicate
+        ));
         ui.label(format!("SQLite journal_mode: {}", snap.journal_mode));
     });
 }

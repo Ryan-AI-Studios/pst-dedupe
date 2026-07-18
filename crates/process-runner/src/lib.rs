@@ -39,3 +39,6 @@ pub use handlers::IngestHandler;
 
 #[cfg(feature = "extract_pst")]
 pub use handlers::ExtractPstHandler;
+
+#[cfg(feature = "dedupe")]
+pub use handlers::MatterDedupeHandler;

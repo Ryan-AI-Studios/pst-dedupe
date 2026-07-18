@@ -8,12 +8,12 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
 /// Each migration brings the DB from `target_version - 1` to `target_version`.
-const MIGRATIONS: &[(u32, &str)] = &[(1, MIGRATION_V1), (2, MIGRATION_V2)];
+const MIGRATIONS: &[(u32, &str)] = &[(1, MIGRATION_V1), (2, MIGRATION_V2), (3, MIGRATION_V3)];
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE schema_meta (
@@ -146,6 +146,22 @@ CREATE INDEX IF NOT EXISTS idx_items_logical_hash ON items(logical_hash);
 CREATE INDEX IF NOT EXISTS idx_items_message_id ON items(message_id);
 "#;
 
+/// Schema v3: matter-level dedupe result columns (track 0021).
+///
+/// Nullable `ADD COLUMN` only. Does not overload `status`.
+const MIGRATION_V3: &str = r#"
+ALTER TABLE items ADD COLUMN dedup_role TEXT;
+ALTER TABLE items ADD COLUMN duplicate_of_item_id TEXT;
+ALTER TABLE items ADD COLUMN dedup_tier TEXT;
+ALTER TABLE items ADD COLUMN dedup_group_id TEXT;
+ALTER TABLE items ADD COLUMN deduped_at TEXT;
+ALTER TABLE items ADD COLUMN dedup_job_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_items_dedup_role ON items(dedup_role);
+CREATE INDEX IF NOT EXISTS idx_items_duplicate_of ON items(duplicate_of_item_id);
+CREATE INDEX IF NOT EXISTS idx_items_dedup_group ON items(dedup_group_id);
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -238,7 +254,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v2 columns present
@@ -258,6 +274,15 @@ mod tests {
             )
             .expect("pragma");
         assert!(has_lhash_ver);
+        // v3 dedupe columns present
+        let has_dedup_role: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'dedup_role'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_dedup_role);
     }
 
     #[test]
@@ -352,8 +377,8 @@ mod tests {
             .expect("pragma");
         assert!(!role_exists);
 
-        let v = migrate(&conn).expect("migrate v1→v2");
-        assert_eq!(v, 2);
+        let v = migrate(&conn).expect("migrate v1→v3");
+        assert_eq!(v, 3);
 
         // Inventory data intact.
         let (path, status, native, lhv): (String, String, String, i64) = conn
@@ -385,6 +410,16 @@ mod tests {
             .expect("role");
         assert!(role.is_none());
 
+        // v3 dedupe columns present and NULL on pre-dedupe inventory.
+        let dedup_role: Option<String> = conn
+            .query_row(
+                "SELECT dedup_role FROM items WHERE id = 'itm_a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("dedup_role");
+        assert!(dedup_role.is_none());
+
         // Existing FKs still work: source_id / family_id.
         let src: String = conn
             .query_row(
@@ -403,10 +438,16 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 2);
+        assert_eq!(ms, 3);
 
-        // v2 indexes present.
-        for idx in ["idx_items_logical_hash", "idx_items_message_id"] {
+        // v2 + v3 indexes present.
+        for idx in [
+            "idx_items_logical_hash",
+            "idx_items_message_id",
+            "idx_items_dedup_role",
+            "idx_items_duplicate_of",
+            "idx_items_dedup_group",
+        ] {
             let exists: bool = conn
                 .query_row(
                     "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name = ?1",
@@ -418,21 +459,75 @@ mod tests {
         }
     }
 
+    /// v2 fixture → migrate to v3 → data intact + dedupe columns present.
+    #[test]
+    fn migrate_v2_to_v3_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (2)", [])
+            .expect("meta v2");
+        assert_eq!(read_schema_version(&conn).expect("read"), 2);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v2', 'V2 Matter', '2020-01-01T00:00:00Z', 2, '/tmp/v2')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version) \
+             VALUES ('itm_mail', 'mat_v2', NULL, NULL, 'inbox/a.eml', NULL, \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             'mid@example.com', 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'parent', 'email', 1)",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v2→v3");
+        assert_eq!(v, 3);
+
+        let (status, mid, dedup): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, message_id, dedup_role FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("itm_mail");
+        assert_eq!(status, "extracted");
+        assert_eq!(mid.as_deref(), Some("mid@example.com"));
+        assert!(dedup.is_none());
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v2'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, 3);
+    }
+
     /// Each migration step updates schema_meta only after the full batch commits
-    /// in the same transaction (smoke: completed migrate leaves version==2).
+    /// in the same transaction (smoke: completed migrate leaves version==SCHEMA_VERSION).
     #[test]
     fn migrate_steps_are_transactional() {
         let conn = Connection::open_in_memory().expect("open");
         configure_connection(&conn).expect("configure");
 
-        // Apply v1 only, then v2 via migrate — version and columns must agree.
+        // Apply v1 only, then remaining via migrate — version and columns must agree.
         conn.execute_batch(MIGRATION_V1).expect("v1");
         conn.execute("INSERT INTO schema_meta (version) VALUES (1)", [])
             .expect("meta v1");
 
         let v = migrate(&conn).expect("migrate");
-        assert_eq!(v, 2);
-        assert_eq!(read_schema_version(&conn).expect("read"), 2);
+        assert_eq!(v, 3);
+        assert_eq!(read_schema_version(&conn).expect("read"), 3);
 
         let has_role: bool = conn
             .query_row(
@@ -442,5 +537,13 @@ mod tests {
             )
             .expect("pragma");
         assert!(has_role);
+        let has_dedup: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'dedup_role'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_dedup);
     }
 }

@@ -1,6 +1,7 @@
 # dedupe-desk
 
-**Dedupe Desk** — single-exe Windows shell for matter create/open, source ingest, and PST extract with live progress (track **0020**).
+**Dedupe Desk** — single-exe Windows shell for matter create/open, source ingest,
+PST extract, and matter-level **tiered dedupe** with live progress (tracks **0020**, **0021**).
 
 ## Build / run
 
@@ -57,8 +58,16 @@ matter-core configures `PRAGMA journal_mode=WAL`. The Counts panel shows the liv
 4. **Add PST** from `fixtures/` (or Add folder / ZIP)
 5. Watch ingest progress; optionally **Cancel** then **Resume**
 6. Select a discovered PST → **Extract selected** (or Extract all)
-7. Confirm jobs table + counts update; journal_mode shows `wal`
-8. Close the app (worker joins; window may wait briefly if a job is finishing)
+7. **Run dedupe** — tiered Message-ID → logical_hash → family attach policy
+8. Confirm jobs table + Counts (unique/duplicate) update; journal_mode shows `wal`
+9. Close the app (worker joins; window may wait briefly if a job is finishing)
+
+### Run dedupe
+
+Workspace **Run dedupe** starts `kind=dedupe` with default params
+(`use_message_id` / `use_logical_hash` / `suppress_children_with_parent` /
+`reset` / `batch_size=500`). Uses the same progress / cancel / resume path as
+ingest and extract. Identity is desk MID + `logical_hash` — not CLI content-hash.
 
 ## Tests
 

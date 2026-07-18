@@ -54,11 +54,13 @@ Besides the in-memory `active` slot, `start` rejects with `Busy` if any job row 
 use std::sync::Arc;
 use process_runner::{
     ProcessRunner, RunnerConfig, JobParams, IngestHandler, ExtractPstHandler,
+    MatterDedupeHandler,
 };
 
 let mut runner = ProcessRunner::new(RunnerConfig::default());
 runner.register(Arc::new(IngestHandler::new()));
 runner.register(Arc::new(ExtractPstHandler::new()));
+runner.register(Arc::new(MatterDedupeHandler::new()));
 
 let mut progress = runner.watch_progress();
 let job_id = runner.start(
@@ -81,8 +83,9 @@ runner.shutdown(); // or drop
 |---|---|---|---|
 | `ingest` | `IngestHandler` | `{ "path": "…" }` | `source_id` from checkpoint / params |
 | `extract_pst` | `ExtractPstHandler` | `{ "source_id", "pst_item_id" }` or `{ "source_id", "path" }` | `resume_extract` |
+| `dedupe` | `MatterDedupeHandler` | `{ "use_message_id", "use_logical_hash", "family_policy", "reset", "batch_size" }` (all optional; defaults apply) | checkpoint `stage=dedupe` cursor |
 
-Register custom handlers with `JobHandler` for future tracks (0021 dedupe, …).
+Register additional handlers with `JobHandler` for future tracks.
 
 ## Option C (job-id injection)
 
@@ -90,6 +93,7 @@ Register custom handlers with `JobHandler` for future tracks (0021 dedupe, …).
 process-runner: create_job → set Running → handler(job_id)
 ingest-purview:  ingest_path_on_job(..., job_id, ...)   // no create_job
 extract-pst:     extract_pst_item_on_job(..., job_id, ...)
+matter-dedupe:   run_dedupe(matter, job_id, ...)          // no create_job
 ```
 
 Legacy wrappers (`ingest_path`, `extract_pst_item`) still create a job then call `*_on_job` for CLI/tests that do not use the runner.
@@ -100,6 +104,7 @@ Legacy wrappers (`ingest_path`, `extract_pst_item`) still create a job then call
 |---|---|---|
 | `ingest` | on | `ingest-purview` |
 | `extract_pst` | on | `extract-pst` |
+| `dedupe` | on | `matter-dedupe` |
 
 ## Tests
 
