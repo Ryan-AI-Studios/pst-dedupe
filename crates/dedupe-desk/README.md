@@ -224,7 +224,7 @@ and note-editor / privilege-description focus (previous frame) — note / privil
 | Large batch | Multi-item batch, family propagate, or N &gt; 50 → off UI thread + `request_repaint` |
 | Codes in list | Up to 2–3 labels for **visible** viewport rows only (`list_item_codes`; selection always loaded for chips) |
 
-**Privilege code ≠ privilege log:** tagging Privilege records membership only. Full privilege log / export is track **0031**.
+**Privilege code + privilege log (0031):** tagging Privilege applies membership **and** ensures a claim row (withhold default on). Export privilege log writes the standard CSV; protocol notes are informational only (Desk does not issue FRE 502 orders).
 
 #### egui traps (required)
 
