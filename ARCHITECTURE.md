@@ -60,7 +60,18 @@ pst-dedup/                      (Cargo workspace)
 │   │   ├── inspect.rs          Folder tree / counts
 │   │   └── error.rs            Typed CLI errors
 │   │
-│   ├── pst-dedup-gui/          egui application
+│   ├── dedupe-desk/            Dedupe Desk product shell (0020)
+│   │   src/
+│   │   ├── main.rs             eframe entry; window title "Dedupe Desk"
+│   │   ├── app.rs              DeskApp: ProcessRunner, nav, exit shutdown
+│   │   ├── matter_ui.rs        create/open + open_for_read snapshot (WAL)
+│   │   ├── workspace.rs        sources / PSTs / jobs / process actions
+│   │   ├── progress_ui.rs      watch progress + request_repaint_after(100ms)
+│   │   ├── dialogs.rs          off-thread rfd + dialog_open debounce
+│   │   ├── nav.rs / params.rs  pure helpers (unit tested)
+│   │   └── settings.rs         recent matter paths (JSON under APPDATA)
+│   │
+│   ├── pst-dedup-gui/          Legacy scan/dedup wizard (regression)
 │   │   src/
 │   │   ├── main.rs             Entry point, eframe setup
 │   │   ├── app.rs              Top-level App struct, state machine
@@ -116,6 +127,15 @@ pst-dedup/                      (Cargo workspace)
 │       └── handlers/           IngestHandler, ExtractPstHandler (features)
 ```
 
+### Dedupe Desk shell (0020)
+
+Primary product binary: **`dedupe-desk.exe`**. UI thread may only call
+`ProcessRunner::start` / `resume` / `cancel` / `watch_progress` / `shutdown`.
+List refresh uses `Matter::open_for_read` (WAL concurrent with the worker).
+Native dialogs run off-thread with a single `dialog_open` gate. While a job
+is Running, repaint is throttled with `request_repaint_after(100ms)` — never
+free-run `request_repaint()`. See `crates/dedupe-desk/README.md`.
+
 ### Matter on-disk layout (`matter-core`)
 
 Caller-chosen root (e.g. `Matters/<id>/`):
@@ -133,7 +153,8 @@ See `crates/matter-core/README.md` for CAS, audit, Normalized Item (schema v2),
 family graph, and logical_hash v1 contracts. See `crates/extract-pst/README.md`
 for PST extract (blocking thread, native v1, mid-folder resume). See
 `crates/process-runner/README.md` for the single matter-worker runner, watch
-progress, Option C job-id injection, and cancel/Drop join.
+progress, Option C job-id injection, and cancel/Drop join. See
+`crates/dedupe-desk/README.md` for the product shell UI contracts.
 
 ---
 
@@ -598,7 +619,17 @@ The NBT/BBT indexes are smaller (tens of thousands of entries per PST).
 
 ## GUI Design (egui)
 
-### State Machine
+### Dedupe Desk (primary — 0020)
+
+```
+Home (create/open/recent) → Workspace (sources / process / jobs)
+                         ↘ stub nav: Reduce / Review / Produce (later tracks)
+```
+
+Worker ownership: `ProcessRunner` (0019). Progress: `watch` borrow each frame.
+Legacy scan wizard below is retained for engine regression only.
+
+### Legacy wizard state machine (`pst-dedup-gui`)
 
 ```
 FileSelect → Settings → Scanning → Results

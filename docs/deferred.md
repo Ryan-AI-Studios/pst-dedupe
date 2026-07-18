@@ -47,6 +47,14 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | D-0018-05 | — | CLI `extract` subcommand | Optional | future |
 
+## From track 0020-DeskShellUx
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0020-01 | P3 | Human interactive GUI smoke (full click path) | Automated: 17 unit tests + release build + WAL concurrent read; smoke steps in crate README | operator / polish |
+| D-0020-02 | — | Drag-drop / system theme / multi-window | Spec optional / not DoD | later |
+| D-0018-04 | — | Process runner / progress UI | Runner 0019; **Desk UI done in 0020** | — |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

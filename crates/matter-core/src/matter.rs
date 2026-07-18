@@ -535,6 +535,44 @@ impl Matter {
         self.get_source(&id)
     }
 
+    /// List all sources for this matter (oldest first).
+    pub fn list_sources(&self) -> Result<Vec<Source>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, matter_id, path, kind, status, cursor_json, created_at, updated_at \
+             FROM sources WHERE matter_id = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![self.matter_id], map_source_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Count items in the matter (all statuses).
+    pub fn count_items(&self) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM items WHERE matter_id = ?1",
+            params![self.matter_id],
+            |row| row.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// List items with the given `file_category` (e.g. `"pst"` inventory rows).
+    pub fn list_items_by_file_category(&self, file_category: &str) -> Result<Vec<Item>> {
+        let sql = item_select_sql(
+            "WHERE matter_id = ?1 AND file_category = ?2 ORDER BY imported_at ASC, id ASC",
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![self.matter_id, file_category], map_item_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Load a source by id.
     pub fn get_source(&self, source_id: &str) -> Result<Source> {
         self.conn
