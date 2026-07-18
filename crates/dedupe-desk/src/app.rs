@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
 use process_runner::{
-    ExtractPstHandler, IngestHandler, JobParams, MatterDedupeHandler, MatterNearDupHandler,
-    MatterThreadHandler, ProcessRunner, RunnerConfig,
+    ExtractPstHandler, IngestHandler, JobParams, MatterCullHandler, MatterDedupeHandler,
+    MatterNearDupHandler, MatterThreadHandler, ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -51,6 +51,9 @@ pub struct DeskApp {
     last_refresh: Instant,
     /// Job id of the last known active job (for resume).
     last_job_id: Option<String>,
+    /// Selected cull preset for the workspace dropdown.
+    /// Built-ins: bare name (`unique_only`). User presets: `user:<id>`.
+    pub(crate) cull_preset: String,
 }
 
 impl DeskApp {
@@ -61,6 +64,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterDedupeHandler::new()));
         runner.register(Arc::new(MatterThreadHandler::new()));
         runner.register(Arc::new(MatterNearDupHandler::new()));
+        runner.register(Arc::new(MatterCullHandler::new()));
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 
@@ -83,6 +87,7 @@ impl DeskApp {
             last_progress_state: "idle".into(),
             last_refresh: Instant::now() - Duration::from_secs(60),
             last_job_id: None,
+            cull_preset: "unique_only".into(),
         }
     }
 
@@ -146,6 +151,8 @@ impl DeskApp {
         self.screen = Screen::Workspace;
         self.extract_queue.clear();
         self.selected_pst = None;
+        // Reset cull selection so a prior matter's user:<id> cannot leak.
+        self.cull_preset = "unique_only".into();
         self.refresh_matter_lists();
         self.status_msg = Some(format!("Opened matter at {root}"));
     }
@@ -308,6 +315,44 @@ impl DeskApp {
                 self.error_msg = None;
             }
             Err(e) => self.note_start_error(e),
+        }
+    }
+
+    pub(crate) fn start_cull(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params_json = params::cull_params_for_selection(&self.cull_preset);
+        let params = JobParams::new(params_json);
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "cull", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                let display = self.cull_preset_display_name();
+                self.status_msg = Some(format!("Started cull job {job_id} (preset={display})"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Human name for the current cull selection (resolves `user:<id>` via snapshot).
+    pub(crate) fn cull_preset_display_name(&self) -> String {
+        if let Some(id) = self
+            .cull_preset
+            .strip_prefix(params::CULL_USER_PRESET_PREFIX)
+        {
+            self.snapshot
+                .cull_presets
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| id.to_string())
+        } else {
+            self.cull_preset.clone()
         }
     }
 

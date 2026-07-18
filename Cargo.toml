@@ -13,6 +13,7 @@ members = [
     "crates/matter-dedupe",
     "crates/matter-thread",
     "crates/matter-neardup",
+    "crates/matter-cull",
     "crates/dedupe-desk",
 ]
 

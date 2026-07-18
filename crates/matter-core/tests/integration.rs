@@ -376,13 +376,13 @@ fn audit_append_verify_and_detect_broken_chain() {
 }
 
 #[test]
-fn schema_v5_on_create() {
+fn schema_v6_on_create() {
     let (_tmp, base) = utf8_tempdir();
-    let root = base.join("matter-v5");
-    let matter = Matter::create(&root, "V5").expect("create");
-    assert_eq!(SCHEMA_VERSION, 5);
-    assert_eq!(matter.schema_version().expect("ver"), 5);
-    assert_eq!(matter.info().expect("info").schema_version, 5);
+    let root = base.join("matter-v6");
+    let matter = Matter::create(&root, "V6").expect("create");
+    assert_eq!(SCHEMA_VERSION, 6);
+    assert_eq!(matter.schema_version().expect("ver"), 6);
+    assert_eq!(matter.info().expect("info").schema_version, 6);
 }
 
 #[test]
@@ -1332,4 +1332,188 @@ fn near_dup_batch_and_checkpoint_same_transaction() {
     let cleared = matter.get_item(&a.id).expect("get");
     assert!(cleared.near_dup_role.is_none());
     assert!(cleared.near_dup_group_id.is_none());
+}
+
+#[test]
+fn cull_batch_and_checkpoint_same_transaction() {
+    use matter_core::{item_cull_status, item_role, item_status, CullFieldUpdate};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-cull-txn");
+    let matter = Matter::create(&root, "Cull Txn").expect("create");
+    let job = matter.create_job("cull").expect("job");
+
+    let a = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            path: Some("doc-a.txt".into()),
+            size_bytes: Some(10),
+            ..Default::default()
+        })
+        .expect("a");
+
+    let updates = vec![CullFieldUpdate {
+        item_id: a.id.clone(),
+        cull_status: Some(item_cull_status::INCLUDED.into()),
+        cull_reasons_json: Some("[]".into()),
+        cull_preset_id: None,
+        cull_preset_name: Some("unique_only".into()),
+        culled_at: Some("2020-01-01T00:00:00Z".into()),
+        cull_job_id: Some(job.id.clone()),
+    }];
+    matter
+        .apply_cull_batch_with_checkpoint(
+            &job.id,
+            "cull",
+            &updates,
+            r#"{"cursor_index":1,"phase":"items"}"#,
+            1,
+        )
+        .expect("batch");
+
+    let item = matter.get_item(&a.id).expect("get");
+    assert_eq!(
+        item.cull_status.as_deref(),
+        Some(item_cull_status::INCLUDED)
+    );
+    assert_eq!(item.cull_preset_name.as_deref(), Some("unique_only"));
+    assert_eq!(item.cull_job_id.as_deref(), Some(job.id.as_str()));
+
+    let cp = matter
+        .get_checkpoint(&job.id, "cull")
+        .expect("cp")
+        .expect("present");
+    assert_eq!(cp.completed_count, 1);
+
+    let cands = matter.list_cull_candidates(true).expect("cands");
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].id, a.id);
+
+    matter.clear_cull_fields(true).expect("clear");
+    let cleared = matter.get_item(&a.id).expect("get");
+    assert!(cleared.cull_status.is_none());
+    assert!(cleared.cull_reasons_json.is_none());
+}
+
+#[test]
+fn clear_cull_fields_respects_attachment_eligibility() {
+    use matter_core::{item_cull_status, item_role, item_status, CullFieldUpdate};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-cull-clear-eligible");
+    let matter = Matter::create(&root, "Cull Clear Eligible").expect("create");
+    let job = matter.create_job("cull").expect("job");
+
+    let standalone = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            path: Some("doc.txt".into()),
+            size_bytes: Some(10),
+            ..Default::default()
+        })
+        .expect("standalone");
+    // Attachment-role row without parent link (eligibility is role-based only).
+    let attach = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            path: Some("a.bin".into()),
+            size_bytes: Some(1),
+            ..Default::default()
+        })
+        .expect("attach");
+
+    assert_eq!(
+        matter.get_item(&attach.id).unwrap().role.as_deref(),
+        Some(item_role::ATTACHMENT)
+    );
+
+    let stamp = |id: &str| CullFieldUpdate {
+        item_id: id.into(),
+        cull_status: Some(item_cull_status::INCLUDED.into()),
+        cull_reasons_json: Some("[]".into()),
+        cull_preset_id: None,
+        cull_preset_name: Some("unique_only".into()),
+        culled_at: Some("2020-01-01T00:00:00Z".into()),
+        cull_job_id: Some(job.id.clone()),
+    };
+    matter
+        .apply_cull_batch_with_checkpoint(
+            &job.id,
+            "cull",
+            &[stamp(&standalone.id), stamp(&attach.id)],
+            r#"{"cursor_index":2}"#,
+            2,
+        )
+        .expect("stamp");
+
+    // process_attachments=false → clear only non-attachments.
+    let n = matter.clear_cull_fields(false).expect("clear");
+    assert_eq!(n, 1, "should clear standalone only");
+    assert!(matter
+        .get_item(&standalone.id)
+        .unwrap()
+        .cull_status
+        .is_none());
+    assert_eq!(
+        matter.get_item(&attach.id).unwrap().cull_status.as_deref(),
+        Some(item_cull_status::INCLUDED),
+        "attachment cull fields must survive when process_attachments=false"
+    );
+
+    // process_attachments=true → eligible set includes attachments (SQLite
+    // UPDATE rowcount may include already-null standalone rows).
+    let n2 = matter.clear_cull_fields(true).expect("clear all eligible");
+    assert!(n2 >= 1, "should touch attachment row, got {n2}");
+    assert!(matter.get_item(&attach.id).unwrap().cull_status.is_none());
+    assert!(matter
+        .get_item(&standalone.id)
+        .unwrap()
+        .cull_status
+        .is_none());
+}
+
+#[test]
+fn cull_preset_crud() {
+    use matter_core::CullPresetInput;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-cull-preset");
+    let matter = Matter::create(&root, "Cull Preset").expect("create");
+
+    let created = matter
+        .upsert_cull_preset(CullPresetInput {
+            id: None,
+            name: "my_window".into(),
+            description: Some("test".into()),
+            rules_json: r#"{"version":1,"exclude_exact_duplicates":true}"#.into(),
+            created_by: Some("tester".into()),
+        })
+        .expect("insert");
+    assert_eq!(created.name, "my_window");
+    assert!(!created.id.is_empty());
+
+    let listed = matter.list_cull_presets().expect("list");
+    assert_eq!(listed.len(), 1);
+
+    let got = matter.get_cull_preset(&created.id).expect("get");
+    assert_eq!(got.rules_json, created.rules_json);
+
+    let updated = matter
+        .upsert_cull_preset(CullPresetInput {
+            id: Some(created.id.clone()),
+            name: "my_window".into(),
+            description: Some("updated".into()),
+            rules_json: r#"{"version":1,"exclude_exact_duplicates":false}"#.into(),
+            created_by: None,
+        })
+        .expect("update");
+    assert_eq!(updated.description.as_deref(), Some("updated"));
+    assert!(updated.rules_json.contains("false"));
+
+    matter.delete_cull_preset(&created.id).expect("delete");
+    assert!(matter.list_cull_presets().expect("list").is_empty());
+    // Item cull fields are independent — delete does not require items.
 }

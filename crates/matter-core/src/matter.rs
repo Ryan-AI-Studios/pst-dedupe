@@ -85,6 +85,14 @@ pub mod item_near_dup_role {
     pub const SKIPPED: &str = "skipped";
 }
 
+/// Cull / data-reduction disposition on items (schema v6 / track 0024).
+///
+/// Flag-only: never deletes items or CAS blobs.
+pub mod item_cull_status {
+    pub const INCLUDED: &str = "included";
+    pub const CULLED: &str = "culled";
+}
+
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Metadata row for the matter itself.
@@ -119,7 +127,7 @@ pub struct ItemFamily {
     pub created_at: String,
 }
 
-/// Normalized item row (schema v2 P0 + v3 dedupe + v4 thread + v5 near-dup fields).
+/// Normalized item row (schema v2–v6: P0 + dedupe + thread + near-dup + cull).
 ///
 /// `PartialEq` only (not `Eq`) because `near_dup_similarity` is `f64`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -183,6 +191,13 @@ pub struct Item {
     pub near_dup_method: Option<String>,
     pub near_duped_at: Option<String>,
     pub near_dup_job_id: Option<String>,
+    // --- schema v6 (cull) ---
+    pub cull_status: Option<String>,
+    pub cull_reasons_json: Option<String>,
+    pub cull_preset_id: Option<String>,
+    pub cull_preset_name: Option<String>,
+    pub culled_at: Option<String>,
+    pub cull_job_id: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -247,6 +262,13 @@ pub struct ItemInput {
     pub near_dup_method: Option<String>,
     pub near_duped_at: Option<String>,
     pub near_dup_job_id: Option<String>,
+    // --- schema v6 (cull) — usually left null on insert; set by cull job ---
+    pub cull_status: Option<String>,
+    pub cull_reasons_json: Option<String>,
+    pub cull_preset_id: Option<String>,
+    pub cull_preset_name: Option<String>,
+    pub culled_at: Option<String>,
+    pub cull_job_id: Option<String>,
 }
 
 /// Thin row for matter-level email parent dedupe (no body text).
@@ -347,6 +369,68 @@ pub struct NearDupFieldUpdate {
     pub near_dup_job_id: Option<String>,
 }
 
+/// Thin row for cull evaluation (no body text).
+///
+/// Filter + family columns only — safe for large-matter streaming / paging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CullCandidate {
+    pub id: String,
+    pub parent_item_id: Option<String>,
+    pub family_id: Option<String>,
+    pub dedup_role: Option<String>,
+    pub near_dup_role: Option<String>,
+    pub sent_at: Option<String>,
+    pub received_at: Option<String>,
+    pub created_at: Option<String>,
+    pub modified_at: Option<String>,
+    pub path: Option<String>,
+    pub custodian: Option<String>,
+    pub file_category: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: Option<i64>,
+    pub status: String,
+    pub native_sha256: Option<String>,
+    pub text_sha256: Option<String>,
+    pub role: Option<String>,
+    pub imported_at: String,
+}
+
+/// One item's cull field assignment for transactional batch write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CullFieldUpdate {
+    pub item_id: String,
+    pub cull_status: Option<String>,
+    pub cull_reasons_json: Option<String>,
+    pub cull_preset_id: Option<String>,
+    pub cull_preset_name: Option<String>,
+    pub culled_at: Option<String>,
+    pub cull_job_id: Option<String>,
+}
+
+/// Named cull preset stored per matter (schema v6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CullPreset {
+    pub id: String,
+    pub matter_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub rules_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by: Option<String>,
+}
+
+/// Input for inserting or updating a cull preset.
+#[derive(Debug, Clone)]
+pub struct CullPresetInput {
+    /// When `Some`, update that id; when `None`, insert a new row.
+    pub id: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
+    pub rules_json: String,
+    pub created_by: Option<String>,
+}
+
 /// Partial update for an existing item.
 ///
 /// Nested-`Option` contract (matches README / `apply_opt2`):
@@ -415,6 +499,13 @@ pub struct ItemUpdate {
     pub near_dup_method: Option<Option<String>>,
     pub near_duped_at: Option<Option<String>>,
     pub near_dup_job_id: Option<Option<String>>,
+    // --- schema v6 (cull) ---
+    pub cull_status: Option<Option<String>>,
+    pub cull_reasons_json: Option<Option<String>>,
+    pub cull_preset_id: Option<Option<String>>,
+    pub cull_preset_name: Option<Option<String>>,
+    pub culled_at: Option<Option<String>>,
+    pub cull_job_id: Option<Option<String>>,
 }
 
 /// An open matter: directory layout + SQLite connection + CAS handle.
@@ -864,14 +955,17 @@ impl Matter {
                 in_reply_to, references_json, conversation_topic, conversation_index_hex, \
                 thread_id, thread_root_item_id, thread_method, threaded_at, thread_job_id, \
                 near_dup_group_id, near_dup_role, near_dup_similarity, near_dup_pivot_item_id, \
-                near_dup_method, near_duped_at, near_dup_job_id\
+                near_dup_method, near_duped_at, near_dup_job_id, \
+                cull_status, cull_reasons_json, cull_preset_id, cull_preset_name, \
+                culled_at, cull_job_id\
              ) VALUES (\
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, \
                 ?26, ?27, ?28, ?29, ?30, ?31, ?32, \
                 ?33, ?34, ?35, ?36, ?37, ?38, \
                 ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, \
-                ?48, ?49, ?50, ?51, ?52, ?53, ?54\
+                ?48, ?49, ?50, ?51, ?52, ?53, ?54, \
+                ?55, ?56, ?57, ?58, ?59, ?60\
              )",
             params![
                 id,
@@ -928,6 +1022,12 @@ impl Matter {
                 input.near_dup_method,
                 input.near_duped_at,
                 input.near_dup_job_id,
+                input.cull_status,
+                input.cull_reasons_json,
+                input.cull_preset_id,
+                input.cull_preset_name,
+                input.culled_at,
+                input.cull_job_id,
             ],
         )?;
 
@@ -1007,6 +1107,12 @@ impl Matter {
         let near_dup_method = apply_opt2(update.near_dup_method, current.near_dup_method);
         let near_duped_at = apply_opt2(update.near_duped_at, current.near_duped_at);
         let near_dup_job_id = apply_opt2(update.near_dup_job_id, current.near_dup_job_id);
+        let cull_status = apply_opt2(update.cull_status, current.cull_status);
+        let cull_reasons_json = apply_opt2(update.cull_reasons_json, current.cull_reasons_json);
+        let cull_preset_id = apply_opt2(update.cull_preset_id, current.cull_preset_id);
+        let cull_preset_name = apply_opt2(update.cull_preset_name, current.cull_preset_name);
+        let culled_at = apply_opt2(update.culled_at, current.culled_at);
+        let cull_job_id = apply_opt2(update.cull_job_id, current.cull_job_id);
 
         let mut family_id = family_id;
         if let Some(ref parent_id) = parent_item_id {
@@ -1050,8 +1156,10 @@ impl Matter {
                 thread_method = ?42, threaded_at = ?43, thread_job_id = ?44, \
                 near_dup_group_id = ?45, near_dup_role = ?46, near_dup_similarity = ?47, \
                 near_dup_pivot_item_id = ?48, near_dup_method = ?49, near_duped_at = ?50, \
-                near_dup_job_id = ?51 \
-             WHERE id = ?52",
+                near_dup_job_id = ?51, \
+                cull_status = ?52, cull_reasons_json = ?53, cull_preset_id = ?54, \
+                cull_preset_name = ?55, culled_at = ?56, cull_job_id = ?57 \
+             WHERE id = ?58",
             params![
                 source_id,
                 family_id,
@@ -1104,6 +1212,12 @@ impl Matter {
                 near_dup_method,
                 near_duped_at,
                 near_dup_job_id,
+                cull_status,
+                cull_reasons_json,
+                cull_preset_id,
+                cull_preset_name,
+                culled_at,
+                cull_job_id,
                 item_id,
             ],
         )?;
@@ -1808,6 +1922,258 @@ impl Matter {
         })
     }
 
+    // --- Cull / data reduction (schema v6) ---
+
+    /// Eligible items for cull evaluation, ordered by stable order:
+    /// `imported_at ASC, path ASC, id ASC`.
+    ///
+    /// When `process_attachments` is false, attachment-role rows are excluded.
+    /// Status is not pre-filtered here — rules may gate on `statuses.include`.
+    pub fn list_cull_candidates(&self, process_attachments: bool) -> Result<Vec<CullCandidate>> {
+        self.list_cull_candidates_range(process_attachments, 0, u64::MAX)
+    }
+
+    /// Paged cull candidates (same order/filter as [`Self::list_cull_candidates`]).
+    pub fn list_cull_candidates_range(
+        &self,
+        process_attachments: bool,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<CullCandidate>> {
+        let attach_clause = if process_attachments {
+            ""
+        } else {
+            " AND IFNULL(role, '') != 'attachment' "
+        };
+        let sql = format!(
+            "SELECT id, parent_item_id, family_id, dedup_role, near_dup_role, \
+                    sent_at, received_at, created_at, modified_at, path, custodian, \
+                    file_category, mime_type, size_bytes, status, native_sha256, \
+                    text_sha256, role, imported_at \
+             FROM items \
+             WHERE matter_id = ?1 \
+               {attach_clause} \
+             ORDER BY imported_at ASC, path ASC, id ASC \
+             LIMIT ?2 OFFSET ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let limit_i = if limit == u64::MAX {
+            i64::MAX
+        } else {
+            limit as i64
+        };
+        let rows = stmt.query_map(
+            params![self.matter_id, limit_i, offset as i64],
+            map_cull_candidate_row,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Count of cull candidates under the same filter as list.
+    pub fn count_cull_candidates(&self, process_attachments: bool) -> Result<u64> {
+        let attach_clause = if process_attachments {
+            ""
+        } else {
+            " AND IFNULL(role, '') != 'attachment' "
+        };
+        let sql = format!("SELECT COUNT(*) FROM items WHERE matter_id = ?1 {attach_clause}");
+        let n: i64 = self
+            .conn
+            .query_row(&sql, params![self.matter_id], |row| row.get(0))?;
+        Ok(n as u64)
+    }
+
+    /// Clear cull *result* columns for the **eligible** set only — same filter
+    /// as [`Self::list_cull_candidates`] (optional attachment exclusion).
+    ///
+    /// When `process_attachments` is false, attachment-role rows keep prior
+    /// cull fields (they are not re-evaluated by the job).
+    ///
+    /// Returns the number of rows updated.
+    pub fn clear_cull_fields(&self, process_attachments: bool) -> Result<u64> {
+        let matter_id = self.matter_id.clone();
+        let attach_clause = if process_attachments {
+            ""
+        } else {
+            " AND IFNULL(role, '') != 'attachment' "
+        };
+        self.with_transaction(|conn| {
+            let sql = format!(
+                "UPDATE items SET \
+                    cull_status = NULL, cull_reasons_json = NULL, cull_preset_id = NULL, \
+                    cull_preset_name = NULL, culled_at = NULL, cull_job_id = NULL \
+                 WHERE matter_id = ?1 \
+                   {attach_clause}"
+            );
+            let n = conn.execute(&sql, params![matter_id])?;
+            Ok(n as u64)
+        })
+    }
+
+    /// Apply N cull field updates and upsert the job checkpoint in **one**
+    /// SQLite transaction (same pattern as near-dup / dedupe).
+    pub fn apply_cull_batch_with_checkpoint(
+        &self,
+        job_id: &str,
+        stage: &str,
+        updates: &[CullFieldUpdate],
+        cursor_json: &str,
+        completed_count: i64,
+    ) -> Result<()> {
+        let now = now_rfc3339();
+        self.with_transaction(|conn| {
+            for u in updates {
+                conn.execute(
+                    "UPDATE items SET \
+                        cull_status = ?1, cull_reasons_json = ?2, cull_preset_id = ?3, \
+                        cull_preset_name = ?4, culled_at = ?5, cull_job_id = ?6 \
+                     WHERE id = ?7",
+                    params![
+                        u.cull_status,
+                        u.cull_reasons_json,
+                        u.cull_preset_id,
+                        u.cull_preset_name,
+                        u.culled_at,
+                        u.cull_job_id,
+                        u.item_id,
+                    ],
+                )?;
+            }
+            jobs::put_checkpoint(conn, job_id, stage, cursor_json, completed_count, &now)?;
+            Ok(())
+        })
+    }
+
+    /// List all cull presets for this matter, ordered by name.
+    pub fn list_cull_presets(&self) -> Result<Vec<CullPreset>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, matter_id, name, description, rules_json, created_at, updated_at, created_by \
+             FROM cull_presets WHERE matter_id = ?1 ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map(params![self.matter_id], map_cull_preset_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Load a cull preset by id.
+    pub fn get_cull_preset(&self, preset_id: &str) -> Result<CullPreset> {
+        self.conn
+            .query_row(
+                "SELECT id, matter_id, name, description, rules_json, created_at, updated_at, created_by \
+                 FROM cull_presets WHERE id = ?1",
+                params![preset_id],
+                map_cull_preset_row,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::Other(format!("cull preset not found: {preset_id}"))
+                }
+                other => Error::Sqlite(other),
+            })
+    }
+
+    /// Insert or update a cull preset. Name uniqueness is app-enforced per matter.
+    pub fn upsert_cull_preset(&self, input: CullPresetInput) -> Result<CullPreset> {
+        let now = now_rfc3339();
+        let name = input.name.trim();
+        if name.is_empty() {
+            return Err(Error::Other("cull preset name cannot be empty".into()));
+        }
+        if input.rules_json.trim().is_empty() {
+            return Err(Error::Other(
+                "cull preset rules_json cannot be empty".into(),
+            ));
+        }
+
+        if let Some(ref id) = input.id {
+            // Update existing.
+            let existing = self.get_cull_preset(id)?;
+            if existing.matter_id != self.matter_id {
+                return Err(Error::Other(format!(
+                    "cull preset {id} belongs to another matter"
+                )));
+            }
+            // Name collision with a different row.
+            let clash: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT id FROM cull_presets WHERE matter_id = ?1 AND name = ?2 AND id != ?3",
+                    params![self.matter_id, name, id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if clash.is_some() {
+                return Err(Error::Other(format!(
+                    "cull preset name already exists in matter: {name}"
+                )));
+            }
+            self.conn.execute(
+                "UPDATE cull_presets SET name = ?1, description = ?2, rules_json = ?3, \
+                 updated_at = ?4, created_by = COALESCE(?5, created_by) WHERE id = ?6",
+                params![
+                    name,
+                    input.description,
+                    input.rules_json,
+                    now,
+                    input.created_by,
+                    id
+                ],
+            )?;
+            return self.get_cull_preset(id);
+        }
+
+        // Insert new — reject name collision.
+        let clash: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM cull_presets WHERE matter_id = ?1 AND name = ?2",
+                params![self.matter_id, name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if clash.is_some() {
+            return Err(Error::Other(format!(
+                "cull preset name already exists in matter: {name}"
+            )));
+        }
+        let id = new_id("cpr");
+        self.conn.execute(
+            "INSERT INTO cull_presets (id, matter_id, name, description, rules_json, \
+             created_at, updated_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                self.matter_id,
+                name,
+                input.description,
+                input.rules_json,
+                now,
+                now,
+                input.created_by
+            ],
+        )?;
+        self.get_cull_preset(&id)
+    }
+
+    /// Delete a cull preset row. Does **not** clear item cull fields.
+    pub fn delete_cull_preset(&self, preset_id: &str) -> Result<()> {
+        let existing = self.get_cull_preset(preset_id)?;
+        if existing.matter_id != self.matter_id {
+            return Err(Error::Other(format!(
+                "cull preset {preset_id} belongs to another matter"
+            )));
+        }
+        self.conn
+            .execute("DELETE FROM cull_presets WHERE id = ?1", params![preset_id])?;
+        Ok(())
+    }
+
     fn recompute_attachment_count(&self, parent_id: &str) -> Result<()> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM items WHERE parent_item_id = ?1",
@@ -1930,7 +2296,9 @@ const ITEM_COLUMNS: &str =
     in_reply_to, references_json, conversation_topic, conversation_index_hex, \
     thread_id, thread_root_item_id, thread_method, threaded_at, thread_job_id, \
     near_dup_group_id, near_dup_role, near_dup_similarity, near_dup_pivot_item_id, \
-    near_dup_method, near_duped_at, near_dup_job_id";
+    near_dup_method, near_duped_at, near_dup_job_id, \
+    cull_status, cull_reasons_json, cull_preset_id, cull_preset_name, \
+    culled_at, cull_job_id";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -1992,6 +2360,49 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         near_dup_method: row.get(51)?,
         near_duped_at: row.get(52)?,
         near_dup_job_id: row.get(53)?,
+        cull_status: row.get(54)?,
+        cull_reasons_json: row.get(55)?,
+        cull_preset_id: row.get(56)?,
+        cull_preset_name: row.get(57)?,
+        culled_at: row.get(58)?,
+        cull_job_id: row.get(59)?,
+    })
+}
+
+fn map_cull_candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CullCandidate> {
+    Ok(CullCandidate {
+        id: row.get(0)?,
+        parent_item_id: row.get(1)?,
+        family_id: row.get(2)?,
+        dedup_role: row.get(3)?,
+        near_dup_role: row.get(4)?,
+        sent_at: row.get(5)?,
+        received_at: row.get(6)?,
+        created_at: row.get(7)?,
+        modified_at: row.get(8)?,
+        path: row.get(9)?,
+        custodian: row.get(10)?,
+        file_category: row.get(11)?,
+        mime_type: row.get(12)?,
+        size_bytes: row.get(13)?,
+        status: row.get(14)?,
+        native_sha256: row.get(15)?,
+        text_sha256: row.get(16)?,
+        role: row.get(17)?,
+        imported_at: row.get(18)?,
+    })
+}
+
+fn map_cull_preset_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CullPreset> {
+    Ok(CullPreset {
+        id: row.get(0)?,
+        matter_id: row.get(1)?,
+        name: row.get(2)?,
+        description: row.get(3)?,
+        rules_json: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+        created_by: row.get(7)?,
     })
 }
 

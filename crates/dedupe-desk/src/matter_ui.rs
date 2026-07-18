@@ -42,6 +42,15 @@ pub struct MatterSnapshot {
     pub dedup_unique: u64,
     /// Items with `dedup_role = duplicate`.
     pub dedup_duplicate: u64,
+    /// Matter-saved user cull presets (`cull_presets` table).
+    pub cull_presets: Vec<CullPresetRow>,
+}
+
+/// Compact cull preset row for the desk dropdown (id + display name).
+#[derive(Debug, Clone)]
+pub struct CullPresetRow {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +131,15 @@ pub fn refresh_snapshot(matter_root: &Utf8Path) -> Result<MatterSnapshot, String
 
     let item_count = matter.count_items().map_err(|e| e.to_string())?;
     let dedup_counts = matter.count_by_dedup_role().map_err(|e| e.to_string())?;
+    let cull_presets = matter
+        .list_cull_presets()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|p| CullPresetRow {
+            id: p.id,
+            name: p.name,
+        })
+        .collect();
 
     Ok(MatterSnapshot {
         matter_name: info.name,
@@ -133,6 +151,7 @@ pub fn refresh_snapshot(matter_root: &Utf8Path) -> Result<MatterSnapshot, String
         journal_mode,
         dedup_unique: dedup_counts.unique,
         dedup_duplicate: dedup_counts.duplicate,
+        cull_presets,
     })
 }
 
@@ -161,6 +180,33 @@ mod tests {
         assert!(snap.sources.is_empty());
         assert_eq!(snap.item_count, 0);
         assert_eq!(snap.journal_mode.to_lowercase(), "wal");
+        assert!(
+            snap.cull_presets.is_empty(),
+            "fresh matter has no user cull presets"
+        );
+    }
+
+    #[test]
+    fn refresh_includes_user_cull_presets() {
+        let (_t, base) = utf8_temp();
+        let root = create_matter(&base, "CullPresetCase").expect("create");
+
+        let matter = Matter::open(&root).expect("open");
+        matter
+            .upsert_cull_preset(matter_core::CullPresetInput {
+                id: None,
+                name: "my_rules".into(),
+                description: Some("desk smoke".into()),
+                rules_json: r#"[{"type":"dedup_unique"}]"#.into(),
+                created_by: None,
+            })
+            .expect("upsert");
+        drop(matter);
+
+        let snap = refresh_snapshot(&root).expect("snap");
+        assert_eq!(snap.cull_presets.len(), 1);
+        assert_eq!(snap.cull_presets[0].name, "my_rules");
+        assert!(!snap.cull_presets[0].id.is_empty());
     }
 
     #[test]

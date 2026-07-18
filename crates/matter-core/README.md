@@ -7,12 +7,13 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v5**) + family graph
+6. **Normalized Item** model (schema **v6**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
+10. **Cull** result columns + named presets + transactional batch helpers (0024)
 
-Schema version: **5** (`SCHEMA_VERSION`) — includes near-dup result columns (`near_dup_*`).
+Schema version: **6** (`SCHEMA_VERSION`) — includes cull result columns (`cull_*`) and `cull_presets`.
 
 ## Layout
 
@@ -176,6 +177,36 @@ Near-dup results are flag-only (never suppress as exact). Engine: `crates/matter
 | `count_neardup_candidates` | Eligible count |
 | `clear_near_dup_fields` | Reset near-dup result columns (transactional) |
 | `apply_near_dup_batch_with_checkpoint` | **N result updates + checkpoint in one commit** |
+
+## Schema v6 — Cull / data reduction (0024)
+
+Nullable columns on `items` (flag-only; never deletes items or CAS blobs):
+
+| Field | Kind | Notes |
+|---|---|---|
+| `cull_status` | **Result** | `included` \| `culled` \| NULL — constants in `item_cull_status` |
+| `cull_reasons_json` | **Result** | JSON array of reason codes |
+| `cull_preset_id` | **Result** | Preset id that last wrote this row |
+| `cull_preset_name` | **Result** | Denormalized preset name |
+| `culled_at` | **Result** | RFC3339 when last assigned |
+| `cull_job_id` | **Result** | Last job that wrote the result |
+
+**Indexes (v6):** `idx_items_cull_status`, `idx_items_cull_preset`.
+
+Table **`cull_presets`**: matter-scoped named rule sets (`list` / `get` / `upsert` / `delete`).
+Deleting a preset does **not** clear item cull fields.
+
+### Cull helpers
+
+| API | Purpose |
+|---|---|
+| `list_cull_candidates` / `_range` | Thin ordered candidates (`CullCandidate`) |
+| `count_cull_candidates` | Candidate count |
+| `clear_cull_fields(process_attachments)` | Reset cull result columns on the eligible set only (same attachment filter as list; transactional) |
+| `apply_cull_batch_with_checkpoint` | **N result updates + checkpoint in one commit** |
+| `list_cull_presets` / `get_cull_preset` / `upsert_cull_preset` / `delete_cull_preset` | Preset CRUD |
+
+Engine: `crates/matter-cull`. **0025 promote** should prefer `cull_status=included` when any cull has run; else unique-only.
 
 ### Address storage (JSON decision)
 

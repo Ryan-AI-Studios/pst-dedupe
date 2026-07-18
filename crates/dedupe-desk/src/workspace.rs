@@ -4,6 +4,7 @@ use eframe::egui;
 
 use crate::app::DeskApp;
 use crate::matter_ui::MatterSnapshot;
+use crate::params;
 use crate::progress_ui;
 
 pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
@@ -101,6 +102,45 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
             .clicked()
         {
             app.start_neardup();
+        }
+
+        ui.separator();
+
+        // Cull preset pick + Run cull (flag-only data reduction).
+        // Clone user presets so the combo can mutably borrow `cull_preset`.
+        let user_cull_presets: Vec<(String, String)> = app
+            .snapshot
+            .cull_presets
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect();
+        let cull_selected_text = app.cull_preset_display_name();
+        egui::ComboBox::from_id_salt("cull_preset")
+            .selected_text(cull_selected_text)
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                ui.label(egui::RichText::new("Built-in").strong().small());
+                for name in params::CULL_BUILTIN_PRESETS {
+                    ui.selectable_value(&mut app.cull_preset, (*name).to_string(), *name);
+                }
+                if !user_cull_presets.is_empty() {
+                    ui.separator();
+                    ui.label(egui::RichText::new("User presets").strong().small());
+                    for (id, name) in &user_cull_presets {
+                        let value = format!("{}{}", params::CULL_USER_PRESET_PREFIX, id);
+                        ui.selectable_value(&mut app.cull_preset, value, name);
+                    }
+                }
+            });
+        if ui
+            .add_enabled(!busy, egui::Button::new("Run cull"))
+            .on_hover_text(
+                "Flag-only data reduction: built-in or matter-saved user preset \
+                 (included vs culled + reasons)",
+            )
+            .clicked()
+        {
+            app.start_cull();
         }
 
         ui.separator();

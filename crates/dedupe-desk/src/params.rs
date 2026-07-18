@@ -73,6 +73,54 @@ pub fn neardup_default_params() -> String {
     .to_string()
 }
 
+/// Built-in cull preset names shown in the desk dropdown.
+///
+/// `date_window` is intentionally omitted: it needs operator-filled start/end
+/// bounds (offset-aware RFC3339). Operators can still use it via JSON params
+/// or a user preset that supplies bounds — see `matter-cull` README.
+pub const CULL_BUILTIN_PRESETS: &[&str] = &["unique_only", "unique_plus_family", "noise_light"];
+
+/// Selection encoding prefix for matter-saved user presets (`user:<id>`).
+pub const CULL_USER_PRESET_PREFIX: &str = "user:";
+
+/// Cull params for a built-in (or named) preset (`kind = "cull"`).
+///
+/// Default desk selection is `"unique_only"`.
+pub fn cull_params_for_preset(preset_name: &str) -> String {
+    serde_json::json!({
+        "preset_name": preset_name,
+        "reset": true,
+        "batch_size": 500
+    })
+    .to_string()
+}
+
+/// Cull params for a dropdown selection encoding.
+///
+/// - Built-ins use bare name (`unique_only`) → `{ "preset_name", ... }`
+/// - User presets use `user:<id>` → `{ "preset_id", ... }`
+pub fn cull_params_for_selection(sel: &str) -> String {
+    if let Some(id) = sel.strip_prefix(CULL_USER_PRESET_PREFIX) {
+        serde_json::json!({
+            "preset_id": id,
+            "reset": true,
+            "batch_size": 500
+        })
+        .to_string()
+    } else {
+        cull_params_for_preset(sel)
+    }
+}
+
+/// Default params for matter-level cull (`unique_only`).
+///
+/// Kept as the stable default JSON shape; desk `start_cull` uses
+/// [`cull_params_for_selection`] with the dropdown value.
+#[allow(dead_code)]
+pub fn cull_default_params() -> String {
+    cull_params_for_preset("unique_only")
+}
+
 /// True when `path` looks like a PST (case-insensitive `.pst` extension).
 pub fn looks_like_pst(path: &str) -> bool {
     Path::new(path)
@@ -195,6 +243,40 @@ mod tests {
         assert_eq!(v["batch_size"], 200);
         assert_eq!(v["include_attachments"], true);
         assert_eq!(v["strip_email_quotes"], false);
+    }
+
+    #[test]
+    fn cull_default_json_shape() {
+        let j = cull_default_params();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["preset_name"], "unique_only");
+        assert_eq!(v["reset"], true);
+        assert_eq!(v["batch_size"], 500);
+        assert_eq!(CULL_BUILTIN_PRESETS[0], "unique_only");
+    }
+
+    #[test]
+    fn cull_params_for_selection_builtin() {
+        let j = cull_params_for_selection("noise_light");
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["preset_name"], "noise_light");
+        assert!(v.get("preset_id").is_none());
+        assert_eq!(v["reset"], true);
+        assert_eq!(v["batch_size"], 500);
+    }
+
+    #[test]
+    fn cull_params_for_selection_user_id() {
+        let j = cull_params_for_selection("user:abc-123-def");
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["preset_id"], "abc-123-def");
+        assert!(v.get("preset_name").is_none());
+        assert_eq!(v["reset"], true);
+        assert_eq!(v["batch_size"], 500);
+        assert!(
+            "user:abc-123-def".starts_with(CULL_USER_PRESET_PREFIX),
+            "user selection encoding uses the user: prefix"
+        );
     }
 
     #[test]
