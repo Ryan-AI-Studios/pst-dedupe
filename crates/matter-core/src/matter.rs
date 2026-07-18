@@ -1,5 +1,6 @@
 //! Matter directory layout and high-level store API.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -493,6 +494,78 @@ pub struct ReviewListRow {
     pub family_id: Option<String>,
 }
 
+/// Code definition (matter-scoped catalog, schema v8 / track 0027).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeDef {
+    pub id: String,
+    pub matter_id: String,
+    pub key: String,
+    pub label: String,
+    pub group_key: String,
+    /// `single` (mutual exclusion within group) or `multi`.
+    pub cardinality: String,
+    pub color: Option<String>,
+    pub sort_order: i64,
+    /// 0/1 — inactive hidden from apply UI; historical membership still loads.
+    pub is_active: i64,
+    pub created_at: String,
+}
+
+/// Input for inserting or updating a code definition.
+#[derive(Debug, Clone)]
+pub struct CodeDefInput {
+    /// When `Some`, update that id; when `None`, insert (key from label slug if omitted).
+    pub id: Option<String>,
+    /// Stable machine key. When `None` on insert, derived from `label` via slug.
+    pub key: Option<String>,
+    pub label: String,
+    pub group_key: String,
+    /// `single` or `multi`. Defaults to `multi` when empty on insert.
+    pub cardinality: String,
+    pub color: Option<String>,
+    pub sort_order: i64,
+    pub is_active: bool,
+}
+
+/// Membership of a code on an item (with catalog metadata for chips).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemCodeInfo {
+    pub code_id: String,
+    pub key: String,
+    pub label: String,
+    pub group_key: String,
+    pub cardinality: String,
+    pub color: Option<String>,
+    pub sort_order: i64,
+    pub is_active: i64,
+    pub set_at: String,
+    pub set_by: String,
+}
+
+/// Input for [`Matter::apply_codes`] — all coding writes go through this path.
+#[derive(Debug, Clone)]
+pub struct ApplyCodesInput {
+    /// Selected item ids (pre-expand).
+    pub item_ids: Vec<String>,
+    /// Code definition ids to add (single-group rules applied per target).
+    pub add_code_ids: Vec<String>,
+    /// Code definition ids to remove.
+    pub remove_code_ids: Vec<String>,
+    /// When true, expand each selection to whole family unit (parent + all children).
+    pub propagate_family: bool,
+    /// Actor written to membership + audit.
+    pub actor: String,
+}
+
+/// Result of a successful [`Matter::apply_codes`] call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyCodesResult {
+    /// Final target ids after optional family expand (sorted).
+    pub target_item_ids: Vec<String>,
+    pub selected_count: usize,
+    pub target_count: usize,
+}
+
 /// Named cull preset stored per matter (schema v6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CullPreset {
@@ -659,6 +732,8 @@ impl Matter {
             matter_id: matter_id.clone(),
         };
         matter.cleanup_workspace_temp()?;
+        // Seed default coding catalog (idempotent).
+        matter.seed_default_codes()?;
 
         // First audit event: matter created.
         let _ = matter.append_audit(AuditEventInput {
@@ -727,6 +802,8 @@ impl Matter {
         };
         if cleanup_temp {
             matter.cleanup_workspace_temp()?;
+            // Seed on writer open/migrate only — avoid writes on open_for_read.
+            matter.seed_default_codes()?;
         }
         Ok(matter)
     }
@@ -2698,6 +2775,477 @@ impl Matter {
         self.get_default_review_set_id()
     }
 
+    // --- Coding / tags (schema v8 / track 0027) ---
+
+    /// Seed the default code catalog. Idempotent insert-if-missing by `key`.
+    pub fn seed_default_codes(&self) -> Result<()> {
+        let now = now_rfc3339();
+        const DEFAULTS: &[(&str, &str, &str, &str, i64)] = &[
+            ("responsive", "Responsive", "responsiveness", "single", 10),
+            (
+                "not_responsive",
+                "Not Responsive",
+                "responsiveness",
+                "single",
+                20,
+            ),
+            (
+                "needs_second_look",
+                "Needs Second Look",
+                "responsiveness",
+                "single",
+                30,
+            ),
+            ("privilege", "Privilege", "privilege", "multi", 40),
+            ("hot", "Hot / Key", "issues", "multi", 50),
+            ("confidential", "Confidential", "issues", "multi", 60),
+        ];
+        for &(key, label, group_key, cardinality, sort_order) in DEFAULTS {
+            let exists: bool = self.conn.query_row(
+                "SELECT COUNT(*) > 0 FROM code_definitions \
+                 WHERE matter_id = ?1 AND key = ?2",
+                params![self.matter_id, key],
+                |row| row.get(0),
+            )?;
+            if exists {
+                continue;
+            }
+            let id = new_id("cde");
+            self.conn.execute(
+                "INSERT INTO code_definitions \
+                 (id, matter_id, key, label, group_key, cardinality, color, sort_order, is_active, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, 1, ?8)",
+                params![
+                    id,
+                    self.matter_id,
+                    key,
+                    label,
+                    group_key,
+                    cardinality,
+                    sort_order,
+                    now
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// List all code definitions for this matter (active and inactive), ordered.
+    pub fn list_code_definitions(&self) -> Result<Vec<CodeDef>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, matter_id, key, label, group_key, cardinality, color, sort_order, \
+                    is_active, created_at \
+             FROM code_definitions \
+             WHERE matter_id = ?1 \
+             ORDER BY sort_order ASC, key ASC",
+        )?;
+        let rows = stmt.query_map(params![self.matter_id], map_code_def_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    /// Insert or update a code definition. Returns the definition id.
+    ///
+    /// On insert with no `key`, derives a slug from `label`. Unique on
+    /// `(matter_id, key)`.
+    pub fn upsert_code_definition(&self, input: CodeDefInput) -> Result<String> {
+        let now = now_rfc3339();
+        let label = input.label.trim();
+        if label.is_empty() {
+            return Err(Error::Other("code label cannot be empty".into()));
+        }
+        let group_key = input.group_key.trim();
+        if group_key.is_empty() {
+            return Err(Error::Other("code group_key cannot be empty".into()));
+        }
+        let cardinality = match input.cardinality.trim() {
+            "" => "multi".to_string(),
+            "single" | "multi" => input.cardinality.trim().to_string(),
+            other => {
+                return Err(Error::Other(format!(
+                    "invalid cardinality '{other}' (expected single|multi)"
+                )));
+            }
+        };
+        let is_active: i64 = if input.is_active { 1 } else { 0 };
+
+        if let Some(ref id) = input.id {
+            let existing = self.get_code_definition(id)?;
+            if existing.matter_id != self.matter_id {
+                return Err(Error::Other(format!(
+                    "code definition {id} belongs to another matter"
+                )));
+            }
+            // Key is immutable on update (stable machine key).
+            self.conn.execute(
+                "UPDATE code_definitions SET label = ?1, group_key = ?2, cardinality = ?3, \
+                 color = ?4, sort_order = ?5, is_active = ?6 WHERE id = ?7",
+                params![
+                    label,
+                    group_key,
+                    cardinality,
+                    input.color,
+                    input.sort_order,
+                    is_active,
+                    id
+                ],
+            )?;
+            return Ok(id.clone());
+        }
+
+        let key = match input
+            .key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(k) => slugify_code_key(k),
+            None => slugify_code_key(label),
+        };
+        if key.is_empty() {
+            return Err(Error::Other(
+                "code key cannot be empty after slugify".into(),
+            ));
+        }
+        let clash: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM code_definitions WHERE matter_id = ?1 AND key = ?2",
+                params![self.matter_id, key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if clash.is_some() {
+            return Err(Error::Other(format!(
+                "code key already exists in matter: {key}"
+            )));
+        }
+        let id = new_id("cde");
+        self.conn.execute(
+            "INSERT INTO code_definitions \
+             (id, matter_id, key, label, group_key, cardinality, color, sort_order, is_active, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                id,
+                self.matter_id,
+                key,
+                label,
+                group_key,
+                cardinality,
+                input.color,
+                input.sort_order,
+                is_active,
+                now
+            ],
+        )?;
+        Ok(id)
+    }
+
+    /// Load one code definition by id.
+    pub fn get_code_definition(&self, code_id: &str) -> Result<CodeDef> {
+        self.conn
+            .query_row(
+                "SELECT id, matter_id, key, label, group_key, cardinality, color, sort_order, \
+                        is_active, created_at \
+                 FROM code_definitions WHERE id = ?1",
+                params![code_id],
+                map_code_def_row,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::Other(format!("code definition not found: {code_id}"))
+                }
+                other => Error::Sqlite(other),
+            })
+    }
+
+    /// Batch-load codes for the given item ids. Includes inactive definitions
+    /// that still have membership (historical display).
+    pub fn list_item_codes<S: AsRef<str>>(
+        &self,
+        item_ids: &[S],
+    ) -> Result<HashMap<String, Vec<ItemCodeInfo>>> {
+        let mut out: HashMap<String, Vec<ItemCodeInfo>> = HashMap::new();
+        if item_ids.is_empty() {
+            return Ok(out);
+        }
+        for id in item_ids {
+            out.entry(id.as_ref().to_string()).or_default();
+        }
+        // Chunk IN-lists to stay under SQLite variable limits.
+        const CHUNK: usize = 400;
+        for chunk in item_ids.chunks(CHUNK) {
+            let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT ic.item_id, ic.code_id, cd.key, cd.label, cd.group_key, cd.cardinality, \
+                        cd.color, cd.sort_order, cd.is_active, ic.set_at, ic.set_by \
+                 FROM item_codes ic \
+                 INNER JOIN code_definitions cd ON cd.id = ic.code_id \
+                 WHERE ic.item_id IN ({placeholders}) \
+                 ORDER BY cd.sort_order ASC, cd.key ASC"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let params_iter =
+                rusqlite::params_from_iter(chunk.iter().map(|s| s.as_ref().to_string()));
+            let rows = stmt.query_map(params_iter, |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    ItemCodeInfo {
+                        code_id: row.get(1)?,
+                        key: row.get(2)?,
+                        label: row.get(3)?,
+                        group_key: row.get(4)?,
+                        cardinality: row.get(5)?,
+                        color: row.get(6)?,
+                        sort_order: row.get(7)?,
+                        is_active: row.get(8)?,
+                        set_at: row.get(9)?,
+                        set_by: row.get(10)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (item_id, info) = row?;
+                out.entry(item_id).or_default().push(info);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Apply add/remove coding ops to selected items (optional whole-family expand).
+    ///
+    /// Single `BEGIN IMMEDIATE` transaction: membership writes + `coding.apply`
+    /// audit with the **complete** sorted `item_ids` of final targets (never
+    /// hashed or sampled). Failed batch leaves no partial membership.
+    pub fn apply_codes(&self, input: ApplyCodesInput) -> Result<ApplyCodesResult> {
+        if input.item_ids.is_empty() {
+            return Err(Error::Other(
+                "apply_codes requires at least one item_id".into(),
+            ));
+        }
+        if input.add_code_ids.is_empty() && input.remove_code_ids.is_empty() {
+            return Err(Error::Other(
+                "apply_codes requires at least one add or remove code id".into(),
+            ));
+        }
+        let actor = {
+            let t = input.actor.trim();
+            if t.is_empty() {
+                "desk".to_string()
+            } else {
+                t.to_string()
+            }
+        };
+
+        // Resolve definitions once (validate existence).
+        let mut add_defs: Vec<CodeDef> = Vec::with_capacity(input.add_code_ids.len());
+        for cid in &input.add_code_ids {
+            let def = self.get_code_definition(cid)?;
+            if def.matter_id != self.matter_id {
+                return Err(Error::Other(format!(
+                    "code definition {cid} belongs to another matter"
+                )));
+            }
+            add_defs.push(def);
+        }
+        let mut remove_defs: Vec<CodeDef> = Vec::with_capacity(input.remove_code_ids.len());
+        for cid in &input.remove_code_ids {
+            let def = self.get_code_definition(cid)?;
+            if def.matter_id != self.matter_id {
+                return Err(Error::Other(format!(
+                    "code definition {cid} belongs to another matter"
+                )));
+            }
+            remove_defs.push(def);
+        }
+
+        // Reject conflicting single-group adds in one batch (do not silently
+        // pick one via iteration order). Check before any membership/audit write.
+        {
+            use std::collections::BTreeMap;
+            let mut by_group: BTreeMap<&str, Vec<&CodeDef>> = BTreeMap::new();
+            for def in &add_defs {
+                if def.cardinality == "single" {
+                    let entry = by_group.entry(def.group_key.as_str()).or_default();
+                    if !entry.iter().any(|d| d.id == def.id) {
+                        entry.push(def);
+                    }
+                }
+            }
+            for (group_key, defs) in by_group {
+                if defs.len() >= 2 {
+                    let mut keys: Vec<&str> = defs.iter().map(|d| d.key.as_str()).collect();
+                    keys.sort_unstable();
+                    return Err(Error::Other(format!(
+                        "conflicting single-group codes in one apply for group '{group_key}': {} \
+                         (cardinality=single allows only one code per group)",
+                        keys.join(", ")
+                    )));
+                }
+            }
+        }
+
+        // Stable order for multi-group adds (non-conflicting).
+        add_defs.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.key.cmp(&b.key))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        remove_defs.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.key.cmp(&b.key))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        // Validate selected items exist in this matter.
+        for iid in &input.item_ids {
+            let ok: bool = self.conn.query_row(
+                "SELECT COUNT(*) > 0 FROM items WHERE id = ?1 AND matter_id = ?2",
+                params![iid, self.matter_id],
+                |row| row.get(0),
+            )?;
+            if !ok {
+                return Err(Error::ItemNotFound(iid.clone()));
+            }
+        }
+
+        let selected_count = input.item_ids.len();
+        let mut targets: Vec<String> = if input.propagate_family {
+            self.expand_family_units(&input.item_ids)?
+        } else {
+            input.item_ids.clone()
+        };
+        // Stable sorted unique list for audit + apply.
+        targets.sort();
+        targets.dedup();
+        let target_count = targets.len();
+
+        let add_keys: Vec<String> = add_defs.iter().map(|d| d.key.clone()).collect();
+        let remove_keys: Vec<String> = remove_defs.iter().map(|d| d.key.clone()).collect();
+        let now = now_rfc3339();
+        let entity = if target_count == 1 {
+            format!("item:{}", targets[0])
+        } else {
+            "batch".to_string()
+        };
+        let params_json = serde_json::json!({
+            "item_ids": targets,
+            "add": add_keys,
+            "remove": remove_keys,
+            "propagate_family": input.propagate_family,
+            "selected_count": selected_count,
+            "target_count": target_count,
+        })
+        .to_string();
+
+        self.with_transaction(|conn| {
+            for item_id in &targets {
+                // Adds first (with single-group clear), then removes — per spec §3.3.2.
+                for def in &add_defs {
+                    if def.cardinality == "single" {
+                        // Remove other codes in the same group_key on this item.
+                        conn.execute(
+                            "DELETE FROM item_codes \
+                             WHERE item_id = ?1 AND code_id IN ( \
+                                 SELECT id FROM code_definitions \
+                                 WHERE matter_id = ?2 AND group_key = ?3 AND id != ?4 \
+                             )",
+                            params![item_id, self.matter_id, def.group_key, def.id],
+                        )?;
+                    }
+                    conn.execute(
+                        "INSERT INTO item_codes (item_id, code_id, set_at, set_by) \
+                         VALUES (?1, ?2, ?3, ?4) \
+                         ON CONFLICT(item_id, code_id) DO UPDATE SET set_at = excluded.set_at, \
+                         set_by = excluded.set_by",
+                        params![item_id, def.id, now, actor],
+                    )?;
+                }
+                for def in &remove_defs {
+                    conn.execute(
+                        "DELETE FROM item_codes WHERE item_id = ?1 AND code_id = ?2",
+                        params![item_id, def.id],
+                    )?;
+                }
+            }
+
+            audit::append_event(
+                conn,
+                &AuditEventInput {
+                    actor: actor.clone(),
+                    action: "coding.apply".into(),
+                    entity: entity.clone(),
+                    params_json: params_json.clone(),
+                    tool_version: env!("CARGO_PKG_VERSION").into(),
+                },
+                &now,
+            )?;
+            Ok(())
+        })?;
+
+        Ok(ApplyCodesResult {
+            target_item_ids: targets,
+            selected_count,
+            target_count,
+        })
+    }
+
+    /// Expand selected item ids to whole family units (parent + all direct
+    /// children + same non-null `family_id` members). Does **not** expand
+    /// near-dup groups or full threads.
+    fn expand_family_units(&self, item_ids: &[String]) -> Result<Vec<String>> {
+        let mut out: HashSet<String> = HashSet::new();
+        for iid in item_ids {
+            let (parent_item_id, family_id): (Option<String>, Option<String>) =
+                self.conn.query_row(
+                    "SELECT parent_item_id, family_id FROM items \
+                     WHERE id = ?1 AND matter_id = ?2",
+                    params![iid, self.matter_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+            let parent = parent_item_id.unwrap_or_else(|| iid.clone());
+            out.insert(parent.clone());
+
+            // All direct children of the parent.
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM items WHERE matter_id = ?1 AND parent_item_id = ?2")?;
+            let children = stmt.query_map(params![self.matter_id, parent], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for c in children {
+                out.insert(c?);
+            }
+
+            // Prefer also including members sharing the parent's non-null family_id.
+            let parent_family: Option<String> = if family_id.is_some() && parent == *iid {
+                family_id
+            } else {
+                self.conn
+                    .query_row(
+                        "SELECT family_id FROM items WHERE id = ?1 AND matter_id = ?2",
+                        params![parent, self.matter_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten()
+            };
+            if let Some(fid) = parent_family {
+                let mut stmt = self
+                    .conn
+                    .prepare("SELECT id FROM items WHERE matter_id = ?1 AND family_id = ?2")?;
+                let members =
+                    stmt.query_map(params![self.matter_id, fid], |row| row.get::<_, String>(0))?;
+                for m in members {
+                    out.insert(m?);
+                }
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
     fn recompute_attachment_count(&self, parent_id: &str) -> Result<()> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM items WHERE parent_item_id = ?1",
@@ -3039,6 +3587,40 @@ fn apply_opt2<T>(update: Option<Option<T>>, current: Option<T>) -> Option<T> {
         None => current,
         Some(v) => v,
     }
+}
+
+fn map_code_def_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeDef> {
+    Ok(CodeDef {
+        id: row.get(0)?,
+        matter_id: row.get(1)?,
+        key: row.get(2)?,
+        label: row.get(3)?,
+        group_key: row.get(4)?,
+        cardinality: row.get(5)?,
+        color: row.get(6)?,
+        sort_order: row.get(7)?,
+        is_active: row.get(8)?,
+        created_at: row.get(9)?,
+    })
+}
+
+/// Stable machine key from a display label (or explicit key string).
+fn slugify_code_key(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_us = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_us = false;
+        } else if !prev_us && !out.is_empty() {
+            out.push('_');
+            prev_us = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    out
 }
 
 fn now_rfc3339() -> String {

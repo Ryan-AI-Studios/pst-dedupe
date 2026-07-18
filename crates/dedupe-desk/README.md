@@ -121,14 +121,16 @@ Flag-only membership (`in_review` / `review_order`); never deletes items or CAS.
 Bidirectional family expand is on by default. Reuses progress / cancel / resume.
 See `crates/matter-promote/README.md`.
 
-### Review screen (0026)
+### Review screen (0026) + coding (0027)
 
 Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 
 | Region | Behavior |
 |---|---|
-| Corpus list | Thin rows only (`list_review_thin`), ordered by `review_order` |
+| Corpus list | Thin rows only (`list_review_thin`), ordered by `review_order`; multi-select ☑ column (fixed `ROW_HEIGHT` 22.0) |
 | Header | Subject, From, To/Cc (selection-time fetch), dates, path, mime, size, role chips |
+| Code chips | Current-item codes; click chip to **remove** (no confirm) |
+| Coding panel | Active code buttons toggle current item; batch **Add** / **Remove** mode; family checkbox; Apply |
 | Body | CAS text (`text_sha256` preferred, else `html_sha256` with block-aware strip) |
 | Family strip | Same-`family_id` members in the loaded list; click to open |
 
@@ -141,19 +143,36 @@ Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 | Next | `]` or `Alt+N` or **Next** button |
 | Previous | `[` or `Alt+P` or **Prev** button |
 | Open selected | click list row or **Enter** |
+| Toggle code 1–9 | Digits `1`–`9` map first 9 **active** codes on **current** item |
 
 No wrap at ends. Focus gate: `ctx.memory(\|m\| m.focused().is_none())` (egui 0.34).
+
+#### Coding / batch (0027)
+
+| Step | Behavior |
+|---|---|
+| Multi-select | Checkbox strip on each fixed-height list row |
+| Current item | Panel buttons toggle; chips remove; digits 1–9; **no** confirm |
+| Batch | Choose **Add** or **Remove** mode → check codes → **Apply to N selected** → confirm dialog (`N` selected, family-expanded `~M`) |
+| Family | ☑ **Apply to family** (default **unchecked**) — whole unit: parent + all direct children (siblings) |
+| Actor | `DeskSettings.reviewer_name` (Home “Reviewer (actor)” field; empty → `"desk"`) |
+| Add code… | Coding panel creates custom def (label → slug key; group `custom`/`issues`; multi) |
+| Large batch | Multi-item batch, family propagate, or N &gt; 50 → off UI thread + `request_repaint` |
+| Codes in list | Up to 2–3 labels for **visible** viewport rows only (`list_item_codes`; selection always loaded for chips) |
+
+**Privilege code ≠ privilege log:** tagging Privilege records membership only. Full privilege log / export is track **0031**.
 
 #### egui traps (required)
 
 | Trap | Desk mitigation |
 |---|---|
-| Variable-height list rows kill FPS on large corpora | Fixed `ROW_HEIGHT` (22.0) + `ScrollArea::show_rows`; single-line truncate |
+| Variable-height list rows kill FPS on large corpora | Fixed `ROW_HEIGHT` (22.0) + `ScrollArea::show_rows`; single-line truncate; multi-select must not change height |
 | Async body stays on “Loading…” until mouse moves | Worker clones `egui::Context`, sends channel payload, then **`ctx.request_repaint()`** |
-| Shortcuts steal from future search boxes | Handle next/prev only when `focused().is_none()` |
+| Shortcuts steal from future search boxes | Handle next/prev/digits only when `focused().is_none()` |
 | Full corpus bodies in RAM | List never loads bodies; body load is selection-scoped + 2 MiB display cap |
+| Huge batch freezes UI | Off-thread `apply_codes` when N &gt; ~50 |
 
-**Load policy:** if `count_in_review ≤ 50_000`, load all thin rows; else first page of 500. Coding UI is a read-only placeholder (**0027**).
+**Load policy:** if `count_in_review ≤ 50_000`, load all thin rows; else first page of 500.
 
 ## Tests
 

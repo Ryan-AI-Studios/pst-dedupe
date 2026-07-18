@@ -17,6 +17,9 @@ pub struct DeskSettings {
     /// Last parent directory used for Create Matter.
     #[serde(default)]
     pub last_parent_dir: Option<String>,
+    /// Reviewer name used as coding audit actor (0027). Empty → `"desk"`.
+    #[serde(default)]
+    pub reviewer_name: String,
 }
 
 impl DeskSettings {
@@ -42,6 +45,16 @@ impl DeskSettings {
         self.recent_matters.retain(|p| p != root);
         self.recent_matters.insert(0, root.to_string());
         self.recent_matters.truncate(MAX_RECENT);
+    }
+
+    /// Coding / audit actor: trimmed `reviewer_name`, or `"desk"` when empty.
+    pub fn actor(&self) -> &str {
+        let t = self.reviewer_name.trim();
+        if t.is_empty() {
+            "desk"
+        } else {
+            t
+        }
     }
 }
 
@@ -74,5 +87,15 @@ mod tests {
         s.remember_matter("m5");
         assert_eq!(s.recent_matters[0], "m5");
         assert_eq!(s.recent_matters.iter().filter(|p| *p == "m5").count(), 1);
+    }
+
+    #[test]
+    fn actor_defaults_to_desk_when_empty() {
+        let mut s = DeskSettings::default();
+        assert_eq!(s.actor(), "desk");
+        s.reviewer_name = "  ".into();
+        assert_eq!(s.actor(), "desk");
+        s.reviewer_name = "  alice  ".into();
+        assert_eq!(s.actor(), "alice");
     }
 }

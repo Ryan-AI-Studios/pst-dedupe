@@ -641,6 +641,30 @@ impl DeskApp {
         }
 
         ui.add_space(12.0);
+        ui.heading("Settings");
+        ui.horizontal(|ui| {
+            ui.label("Reviewer (actor):");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.settings.reviewer_name)
+                    .desired_width(160.0)
+                    .hint_text("desk"),
+            );
+            if response.changed() || response.lost_focus() {
+                self.settings.save();
+            }
+            ui.label(
+                egui::RichText::new(format!("audit as \"{}\"", self.settings.actor()))
+                    .weak()
+                    .small(),
+            );
+        });
+        ui.label(
+            egui::RichText::new("Used as coding audit actor on Review (empty → desk).")
+                .weak()
+                .small(),
+        );
+
+        ui.add_space(12.0);
         ui.heading("Recent");
         if self.settings.recent_matters.is_empty() {
             ui.label("No recent matters.");
@@ -768,7 +792,8 @@ impl eframe::App for DeskApp {
             Screen::StubReduce => self.show_stub(ui, "Reduce"),
             Screen::Review => {
                 if let Some(root) = self.matter_root.clone() {
-                    review_ui::show(ui, &mut self.review, &root);
+                    let actor = self.settings.actor().to_string();
+                    review_ui::show(ui, &mut self.review, &root, &actor);
                 } else {
                     ui.label("Open a matter to review.");
                 }
