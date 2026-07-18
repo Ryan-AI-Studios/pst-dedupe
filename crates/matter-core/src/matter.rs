@@ -567,6 +567,103 @@ pub struct ApplyCodesResult {
     pub target_count: usize,
 }
 
+/// Max UTF-8 byte length for a note body (P0).
+pub const NOTE_BODY_MAX_BYTES: usize = 64 * 1024;
+/// Max UTF-8 byte length for a stored highlight exact_quote.
+pub const HIGHLIGHT_QUOTE_MAX_BYTES: usize = 4 * 1024;
+/// Context chars captured for prefix/suffix re-resolve.
+pub const HIGHLIGHT_CONTEXT_CHARS: usize = 40;
+/// Default highlight paint color (yellow).
+pub const HIGHLIGHT_DEFAULT_COLOR: &str = "#FFF59D";
+
+/// Highlight status vocabulary (schema v11 / track 0030).
+pub mod highlight_status {
+    pub const ACTIVE: &str = "active";
+    pub const STALE: &str = "stale";
+}
+
+/// Document or passage note (schema v11 / track 0030).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemNote {
+    pub id: String,
+    pub item_id: String,
+    pub matter_id: String,
+    pub body: String,
+    /// When set, note is attached to a highlight (passage note).
+    pub highlight_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by: String,
+    pub updated_by: String,
+}
+
+/// Input for [`Matter::upsert_note`].
+#[derive(Debug, Clone)]
+pub struct UpsertNoteInput {
+    /// When `Some`, update that note's body; when `None`, create.
+    pub id: Option<String>,
+    /// Required on create; on update must match existing (if provided).
+    pub item_id: String,
+    pub body: String,
+    /// Optional passage link on create only (ignored on update).
+    pub highlight_id: Option<String>,
+    pub actor: String,
+}
+
+/// Stand-off text highlight on Review display text (schema v11 / track 0030).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemHighlight {
+    pub id: String,
+    pub item_id: String,
+    pub matter_id: String,
+    /// Inclusive UTF-8 **char** index into display body at create (or last resolve).
+    pub start_utf8: i64,
+    /// Exclusive UTF-8 char index; `end > start`.
+    pub end_utf8: i64,
+    /// Raw substring of display body at create (not re-normalized on store).
+    pub exact_quote: String,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
+    /// Digest of display text used when created (`text_sha256` or synthetic).
+    pub body_digest: String,
+    pub color: String,
+    /// `active` or `stale`.
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by: String,
+}
+
+/// Input for [`Matter::create_highlight`].
+#[derive(Debug, Clone)]
+pub struct CreateHighlightInput {
+    pub item_id: String,
+    /// Inclusive UTF-8 char index into [`Self::display_body`].
+    pub start_utf8: i64,
+    /// Exclusive UTF-8 char index.
+    pub end_utf8: i64,
+    /// Must equal the char-slice of `display_body` at `[start, end)`.
+    pub exact_quote: String,
+    /// Full display body currently shown (for validation + prefix/suffix).
+    pub display_body: String,
+    /// Digest of the display body (prefer item `text_sha256`, else synthetic).
+    pub body_digest: String,
+    pub color: Option<String>,
+    pub actor: String,
+}
+
+/// Paint-ready range after digest check / whitespace re-resolve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHighlight {
+    pub highlight_id: String,
+    pub start_utf8: i64,
+    pub end_utf8: i64,
+    /// Effective status for paint (`active` | `stale`).
+    pub status: String,
+    /// True when re-resolve found a range different from stored offsets.
+    pub remapped: bool,
+}
+
 /// Named cull preset stored per matter (schema v6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CullPreset {
@@ -3810,6 +3907,476 @@ impl Matter {
         })
     }
 
+    // --- Notes / highlights (schema v11 / track 0030) ---
+
+    /// List notes for an item (newest `updated_at` first).
+    pub fn list_notes(&self, item_id: &str) -> Result<Vec<ItemNote>> {
+        self.ensure_item_in_matter(item_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, item_id, matter_id, body, highlight_id, created_at, updated_at, \
+                    created_by, updated_by \
+             FROM item_notes \
+             WHERE item_id = ?1 AND matter_id = ?2 \
+             ORDER BY updated_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![item_id, self.matter_id], map_note_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    /// Create or update a note body. Rejects blank / oversize bodies.
+    ///
+    /// Single SQLite transaction + `note.upsert` audit (full body in payload).
+    pub fn upsert_note(&self, input: UpsertNoteInput) -> Result<ItemNote> {
+        let actor = normalize_actor(&input.actor);
+        let body = input.body.trim();
+        if body.is_empty() {
+            return Err(Error::Other(
+                "note body cannot be empty or whitespace-only".into(),
+            ));
+        }
+        if body.len() > NOTE_BODY_MAX_BYTES {
+            return Err(Error::Other(format!(
+                "note body exceeds max size of {NOTE_BODY_MAX_BYTES} bytes (got {})",
+                body.len()
+            )));
+        }
+        let now = now_rfc3339();
+
+        if let Some(ref id) = input.id {
+            // Update path.
+            let existing = self.get_note(id)?;
+            if existing.matter_id != self.matter_id {
+                return Err(Error::Other(format!("note {id} belongs to another matter")));
+            }
+            if !input.item_id.is_empty() && input.item_id != existing.item_id {
+                return Err(Error::Other(format!(
+                    "note {id} belongs to item {}, not {}",
+                    existing.item_id, input.item_id
+                )));
+            }
+            let item_id = existing.item_id.clone();
+            let params_json = serde_json::json!({
+                "note_id": id,
+                "item_id": item_id,
+                "op": "update",
+                "highlight_id": existing.highlight_id,
+                "body": body,
+            })
+            .to_string();
+            self.with_transaction(|conn| {
+                conn.execute(
+                    "UPDATE item_notes SET body = ?1, updated_at = ?2, updated_by = ?3 \
+                     WHERE id = ?4",
+                    params![body, now, actor, id],
+                )?;
+                audit::append_event(
+                    conn,
+                    &AuditEventInput {
+                        actor: actor.clone(),
+                        action: "note.upsert".into(),
+                        entity: format!("note:{id}"),
+                        params_json: params_json.clone(),
+                        tool_version: env!("CARGO_PKG_VERSION").into(),
+                    },
+                    &now,
+                )?;
+                Ok(())
+            })?;
+            return self.get_note(id);
+        }
+
+        // Create path.
+        self.ensure_item_in_matter(&input.item_id)?;
+        if let Some(ref hid) = input.highlight_id {
+            let hl = self.get_highlight(hid)?;
+            if hl.item_id != input.item_id {
+                return Err(Error::Other(format!(
+                    "highlight {hid} belongs to a different item"
+                )));
+            }
+        }
+        let id = new_id("note");
+        let item_id = input.item_id.clone();
+        let highlight_id = input.highlight_id.clone();
+        let params_json = serde_json::json!({
+            "note_id": id,
+            "item_id": item_id,
+            "op": "create",
+            "highlight_id": highlight_id,
+            "body": body,
+        })
+        .to_string();
+        self.with_transaction(|conn| {
+            conn.execute(
+                "INSERT INTO item_notes \
+                 (id, item_id, matter_id, body, highlight_id, created_at, updated_at, \
+                  created_by, updated_by) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    id,
+                    item_id,
+                    self.matter_id,
+                    body,
+                    highlight_id,
+                    now,
+                    now,
+                    actor,
+                    actor
+                ],
+            )?;
+            conn.execute(
+                "UPDATE items SET note_count = note_count + 1 \
+                 WHERE id = ?1 AND matter_id = ?2",
+                params![item_id, self.matter_id],
+            )?;
+            audit::append_event(
+                conn,
+                &AuditEventInput {
+                    actor: actor.clone(),
+                    action: "note.upsert".into(),
+                    entity: format!("note:{id}"),
+                    params_json: params_json.clone(),
+                    tool_version: env!("CARGO_PKG_VERSION").into(),
+                },
+                &now,
+            )?;
+            Ok(())
+        })?;
+        self.get_note(&id)
+    }
+
+    /// Hard-delete a note. Audit retains body snapshot + `highlight_id` when set.
+    pub fn delete_note(&self, note_id: &str, actor: &str) -> Result<()> {
+        let actor = normalize_actor(actor);
+        let existing = self.get_note(note_id)?;
+        if existing.matter_id != self.matter_id {
+            return Err(Error::Other(format!(
+                "note {note_id} belongs to another matter"
+            )));
+        }
+        let now = now_rfc3339();
+        let params_json = serde_json::json!({
+            "note_id": note_id,
+            "item_id": existing.item_id,
+            "body": existing.body,
+            "highlight_id": existing.highlight_id,
+        })
+        .to_string();
+        self.with_transaction(|conn| {
+            conn.execute("DELETE FROM item_notes WHERE id = ?1", params![note_id])?;
+            conn.execute(
+                "UPDATE items SET note_count = MAX(0, note_count - 1) \
+                 WHERE id = ?1 AND matter_id = ?2",
+                params![existing.item_id, self.matter_id],
+            )?;
+            audit::append_event(
+                conn,
+                &AuditEventInput {
+                    actor: actor.clone(),
+                    action: "note.delete".into(),
+                    entity: format!("note:{note_id}"),
+                    params_json: params_json.clone(),
+                    tool_version: env!("CARGO_PKG_VERSION").into(),
+                },
+                &now,
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Load one note by id.
+    pub fn get_note(&self, note_id: &str) -> Result<ItemNote> {
+        self.conn
+            .query_row(
+                "SELECT id, item_id, matter_id, body, highlight_id, created_at, updated_at, \
+                        created_by, updated_by \
+                 FROM item_notes WHERE id = ?1",
+                params![note_id],
+                map_note_row,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::Other(format!("note not found: {note_id}"))
+                }
+                other => Error::Sqlite(other),
+            })
+    }
+
+    /// List highlights for an item (creation order).
+    pub fn list_highlights(&self, item_id: &str) -> Result<Vec<ItemHighlight>> {
+        self.ensure_item_in_matter(item_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, item_id, matter_id, start_utf8, end_utf8, exact_quote, prefix, suffix, \
+                    body_digest, color, status, created_at, updated_at, created_by \
+             FROM item_highlights \
+             WHERE item_id = ?1 AND matter_id = ?2 \
+             ORDER BY start_utf8 ASC, created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![item_id, self.matter_id], map_highlight_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    /// Create a stand-off highlight. Validates range + quote match against display body.
+    pub fn create_highlight(&self, input: CreateHighlightInput) -> Result<ItemHighlight> {
+        let actor = normalize_actor(&input.actor);
+        self.ensure_item_in_matter(&input.item_id)?;
+
+        if input.end_utf8 <= input.start_utf8 {
+            return Err(Error::Other(format!(
+                "highlight range invalid: end ({}) must be > start ({})",
+                input.end_utf8, input.start_utf8
+            )));
+        }
+        if input.start_utf8 < 0 {
+            return Err(Error::Other("highlight start_utf8 must be >= 0".into()));
+        }
+        let start = input.start_utf8 as usize;
+        let end = input.end_utf8 as usize;
+        let body_chars = input.display_body.chars().count();
+        if end > body_chars {
+            return Err(Error::Other(format!(
+                "highlight end_utf8 ({end}) exceeds display body char length ({body_chars})"
+            )));
+        }
+        let slice = match utf8_char_slice(&input.display_body, start, end) {
+            Some(s) => s,
+            None => {
+                return Err(Error::Other(
+                    "highlight range does not map to a valid char slice".into(),
+                ));
+            }
+        };
+        if slice != input.exact_quote {
+            return Err(Error::Other(
+                "exact_quote does not match display body at [start_utf8, end_utf8)".into(),
+            ));
+        }
+        if input.exact_quote.len() > HIGHLIGHT_QUOTE_MAX_BYTES {
+            return Err(Error::Other(format!(
+                "exact_quote exceeds max size of {HIGHLIGHT_QUOTE_MAX_BYTES} bytes"
+            )));
+        }
+        if input.body_digest.trim().is_empty() {
+            return Err(Error::Other("body_digest cannot be empty".into()));
+        }
+        let color = input
+            .color
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(HIGHLIGHT_DEFAULT_COLOR)
+            .to_string();
+        let prefix = utf8_char_slice(
+            &input.display_body,
+            start.saturating_sub(HIGHLIGHT_CONTEXT_CHARS),
+            start,
+        )
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+        let suffix = utf8_char_slice(
+            &input.display_body,
+            end,
+            (end + HIGHLIGHT_CONTEXT_CHARS).min(body_chars),
+        )
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+        let id = new_id("hlt");
+        let now = now_rfc3339();
+        let quote_for_audit = truncate_for_audit(&input.exact_quote, 512);
+        let params_json = serde_json::json!({
+            "highlight_id": id,
+            "item_id": input.item_id,
+            "start_utf8": input.start_utf8,
+            "end_utf8": input.end_utf8,
+            "quote": quote_for_audit,
+            "color": color,
+        })
+        .to_string();
+
+        self.with_transaction(|conn| {
+            conn.execute(
+                "INSERT INTO item_highlights \
+                 (id, item_id, matter_id, start_utf8, end_utf8, exact_quote, prefix, suffix, \
+                  body_digest, color, status, created_at, updated_at, created_by) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    id,
+                    input.item_id,
+                    self.matter_id,
+                    input.start_utf8,
+                    input.end_utf8,
+                    input.exact_quote,
+                    prefix,
+                    suffix,
+                    input.body_digest,
+                    color,
+                    highlight_status::ACTIVE,
+                    now,
+                    now,
+                    actor
+                ],
+            )?;
+            conn.execute(
+                "UPDATE items SET highlight_count = highlight_count + 1 \
+                 WHERE id = ?1 AND matter_id = ?2",
+                params![input.item_id, self.matter_id],
+            )?;
+            audit::append_event(
+                conn,
+                &AuditEventInput {
+                    actor: actor.clone(),
+                    action: "highlight.create".into(),
+                    entity: format!("highlight:{id}"),
+                    params_json: params_json.clone(),
+                    tool_version: env!("CARGO_PKG_VERSION").into(),
+                },
+                &now,
+            )?;
+            Ok(())
+        })?;
+        self.get_highlight(&id)
+    }
+
+    /// Delete a highlight and **unlink** notes (`highlight_id` → NULL). Does not
+    /// delete note bodies.
+    pub fn delete_highlight(&self, highlight_id: &str, actor: &str) -> Result<()> {
+        let actor = normalize_actor(actor);
+        let existing = self.get_highlight(highlight_id)?;
+        if existing.matter_id != self.matter_id {
+            return Err(Error::Other(format!(
+                "highlight {highlight_id} belongs to another matter"
+            )));
+        }
+        let now = now_rfc3339();
+
+        // Collect linked note ids for optional audit context.
+        let mut linked: Vec<String> = Vec::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM item_notes WHERE highlight_id = ?1 AND matter_id = ?2")?;
+            let rows = stmt.query_map(params![highlight_id, self.matter_id], |row| {
+                row.get::<_, String>(0)
+            })?;
+            for r in rows {
+                linked.push(r?);
+            }
+        }
+
+        let params_json = serde_json::json!({
+            "highlight_id": highlight_id,
+            "item_id": existing.item_id,
+            "start_utf8": existing.start_utf8,
+            "end_utf8": existing.end_utf8,
+            "quote": truncate_for_audit(&existing.exact_quote, 512),
+            "color": existing.color,
+            "unlinked_note_ids": linked,
+        })
+        .to_string();
+
+        self.with_transaction(|conn| {
+            conn.execute(
+                "UPDATE item_notes SET highlight_id = NULL, updated_at = ?1, updated_by = ?2 \
+                 WHERE highlight_id = ?3 AND matter_id = ?4",
+                params![now, actor, highlight_id, self.matter_id],
+            )?;
+            conn.execute(
+                "DELETE FROM item_highlights WHERE id = ?1",
+                params![highlight_id],
+            )?;
+            conn.execute(
+                "UPDATE items SET highlight_count = MAX(0, highlight_count - 1) \
+                 WHERE id = ?1 AND matter_id = ?2",
+                params![existing.item_id, self.matter_id],
+            )?;
+            audit::append_event(
+                conn,
+                &AuditEventInput {
+                    actor: actor.clone(),
+                    action: "highlight.delete".into(),
+                    entity: format!("highlight:{highlight_id}"),
+                    params_json: params_json.clone(),
+                    tool_version: env!("CARGO_PKG_VERSION").into(),
+                },
+                &now,
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Load one highlight by id.
+    pub fn get_highlight(&self, highlight_id: &str) -> Result<ItemHighlight> {
+        self.conn
+            .query_row(
+                "SELECT id, item_id, matter_id, start_utf8, end_utf8, exact_quote, prefix, suffix, \
+                        body_digest, color, status, created_at, updated_at, created_by \
+                 FROM item_highlights WHERE id = ?1",
+                params![highlight_id],
+                map_highlight_row,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::Other(format!("highlight not found: {highlight_id}"))
+                }
+                other => Error::Sqlite(other),
+            })
+    }
+
+    /// Resolve highlights for paint against the current display body.
+    ///
+    /// When `body_digest` matches, uses stored offsets (fast path). On mismatch,
+    /// applies whitespace-normalized quote re-resolve (§3.5.1). Optionally
+    /// persists `status=stale` when re-resolve fails (`persist_stale`).
+    pub fn resolve_highlights(
+        &self,
+        item_id: &str,
+        display_body: &str,
+        display_digest: &str,
+        persist_stale: bool,
+    ) -> Result<Vec<ResolvedHighlight>> {
+        let highlights = self.list_highlights(item_id)?;
+        let mut out = Vec::with_capacity(highlights.len());
+        let mut stale_ids: Vec<String> = Vec::new();
+        for hl in highlights {
+            let resolved = resolve_highlight_against_body(&hl, display_body, display_digest);
+            if resolved.status == highlight_status::STALE
+                && hl.status != highlight_status::STALE
+                && persist_stale
+            {
+                stale_ids.push(hl.id.clone());
+            }
+            out.push(resolved);
+        }
+        if persist_stale && !stale_ids.is_empty() {
+            let now = now_rfc3339();
+            self.with_transaction(|conn| {
+                for id in &stale_ids {
+                    conn.execute(
+                        "UPDATE item_highlights SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                        params![highlight_status::STALE, now, id],
+                    )?;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(out)
+    }
+
+    fn ensure_item_in_matter(&self, item_id: &str) -> Result<()> {
+        let ok: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM items WHERE id = ?1 AND matter_id = ?2",
+            params![item_id, self.matter_id],
+            |row| row.get(0),
+        )?;
+        if !ok {
+            return Err(Error::ItemNotFound(item_id.to_string()));
+        }
+        Ok(())
+    }
+
     /// Expand selected item ids to whole family units (parent + all direct
     /// children + same non-null `family_id` members). Does **not** expand
     /// near-dup groups or full threads.
@@ -4316,4 +4883,271 @@ fn new_id(prefix: &str) -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{prefix}_{nanos:x}_{n:x}")
+}
+
+fn normalize_actor(actor: &str) -> String {
+    let t = actor.trim();
+    if t.is_empty() {
+        "desk".to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+fn truncate_for_audit(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    // Truncate on a char boundary.
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+fn map_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemNote> {
+    Ok(ItemNote {
+        id: row.get(0)?,
+        item_id: row.get(1)?,
+        matter_id: row.get(2)?,
+        body: row.get(3)?,
+        highlight_id: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+        created_by: row.get(7)?,
+        updated_by: row.get(8)?,
+    })
+}
+
+fn map_highlight_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemHighlight> {
+    Ok(ItemHighlight {
+        id: row.get(0)?,
+        item_id: row.get(1)?,
+        matter_id: row.get(2)?,
+        start_utf8: row.get(3)?,
+        end_utf8: row.get(4)?,
+        exact_quote: row.get(5)?,
+        prefix: row.get(6)?,
+        suffix: row.get(7)?,
+        body_digest: row.get(8)?,
+        color: row.get(9)?,
+        status: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+        created_by: row.get(13)?,
+    })
+}
+
+/// SHA-256 hex digest of display body bytes (synthetic when no `text_sha256`).
+pub fn display_body_digest(display_body: &str) -> String {
+    crate::cas::sha256_hex(display_body.as_bytes())
+}
+
+/// Collapse every run of Unicode whitespace to a single ASCII space.
+pub fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_ws = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !in_ws {
+                out.push(' ');
+                in_ws = true;
+            }
+        } else {
+            out.push(c);
+            in_ws = false;
+        }
+    }
+    out
+}
+
+/// Whitespace-normalized form used for quote match (collapse + trim ends).
+pub fn normalize_for_quote_match(s: &str) -> String {
+    collapse_whitespace(s).trim().to_string()
+}
+
+/// Slice `s` by UTF-8 **char** indices `[start, end)` (end exclusive).
+pub fn utf8_char_slice(s: &str, start: usize, end: usize) -> Option<&str> {
+    if end < start {
+        return None;
+    }
+    let mut start_byte = None;
+    let mut end_byte = None;
+    for (i, (byte_idx, _)) in s.char_indices().enumerate() {
+        if i == start {
+            start_byte = Some(byte_idx);
+        }
+        if i == end {
+            end_byte = Some(byte_idx);
+            break;
+        }
+    }
+    let char_count = s.chars().count();
+    if end == char_count {
+        end_byte = Some(s.len());
+    }
+    if start == char_count && end == char_count {
+        return Some("");
+    }
+    let sb = start_byte?;
+    let eb = end_byte?;
+    s.get(sb..eb)
+}
+
+/// Build whitespace-collapsed body + map from normalized char index → raw char index.
+///
+/// `raw_at[i]` is the raw char index of the i-th normalized char;
+/// `raw_at[norm_chars]` is `raw.chars().count()` (end sentinel).
+fn build_whitespace_norm_map(raw: &str) -> (String, Vec<usize>) {
+    let mut norm = String::with_capacity(raw.len());
+    let mut raw_at: Vec<usize> = Vec::new();
+    let mut raw_i = 0usize;
+    let mut in_ws = false;
+    for c in raw.chars() {
+        if c.is_whitespace() {
+            if !in_ws {
+                raw_at.push(raw_i);
+                norm.push(' ');
+                in_ws = true;
+            }
+        } else {
+            raw_at.push(raw_i);
+            norm.push(c);
+            in_ws = false;
+        }
+        raw_i += 1;
+    }
+    raw_at.push(raw_i);
+    (norm, raw_at)
+}
+
+fn byte_to_char_index(s: &str, byte: usize) -> usize {
+    s.get(..byte).map(|p| p.chars().count()).unwrap_or(0)
+}
+
+/// Resolve one highlight against current display text (fast path + §3.5.1).
+pub fn resolve_highlight_against_body(
+    hl: &ItemHighlight,
+    display_body: &str,
+    display_digest: &str,
+) -> ResolvedHighlight {
+    // Fast path: digest matches → prefer stored offsets.
+    if hl.body_digest == display_digest {
+        let start = hl.start_utf8;
+        let end = hl.end_utf8;
+        let body_chars = display_body.chars().count() as i64;
+        if start >= 0 && end > start && end <= body_chars {
+            if let Some(slice) = utf8_char_slice(display_body, start as usize, end as usize) {
+                if slice == hl.exact_quote {
+                    return ResolvedHighlight {
+                        highlight_id: hl.id.clone(),
+                        start_utf8: start,
+                        end_utf8: end,
+                        status: highlight_status::ACTIVE.to_string(),
+                        remapped: false,
+                    };
+                }
+            }
+        }
+        // Digest matches but offsets/quote disagree — try re-resolve as repair.
+    }
+
+    match re_resolve_whitespace_normalized(hl, display_body) {
+        Some((start, end)) => ResolvedHighlight {
+            highlight_id: hl.id.clone(),
+            start_utf8: start,
+            end_utf8: end,
+            status: highlight_status::ACTIVE.to_string(),
+            remapped: true,
+        },
+        None => ResolvedHighlight {
+            highlight_id: hl.id.clone(),
+            start_utf8: hl.start_utf8,
+            end_utf8: hl.end_utf8,
+            status: highlight_status::STALE.to_string(),
+            remapped: false,
+        },
+    }
+}
+
+/// Whitespace-normalized TextQuoteSelector-style re-resolve.
+///
+/// Returns raw char range on success.
+pub fn re_resolve_whitespace_normalized(
+    hl: &ItemHighlight,
+    display_body: &str,
+) -> Option<(i64, i64)> {
+    let quote_n = normalize_for_quote_match(&hl.exact_quote);
+    if quote_n.is_empty() {
+        return None;
+    }
+    let (norm_body, raw_at) = build_whitespace_norm_map(display_body);
+    let prefix_n = hl
+        .prefix
+        .as_deref()
+        .map(normalize_for_quote_match)
+        .filter(|s| !s.is_empty());
+    let suffix_n = hl
+        .suffix
+        .as_deref()
+        .map(normalize_for_quote_match)
+        .filter(|s| !s.is_empty());
+
+    let mut hits: Vec<usize> = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(rel) = norm_body.get(search_from..).and_then(|s| s.find(&quote_n)) {
+        let abs = search_from + rel;
+        hits.push(abs);
+        search_from = abs + quote_n.len().max(1);
+        if search_from > norm_body.len() {
+            break;
+        }
+    }
+    if hits.is_empty() {
+        return None;
+    }
+
+    let filtered: Vec<usize> = hits
+        .into_iter()
+        .filter(|&byte_start| {
+            let ok_prefix = match &prefix_n {
+                None => true,
+                Some(p) => {
+                    if byte_start < p.len() {
+                        false
+                    } else {
+                        norm_body.get(byte_start - p.len()..byte_start) == Some(p.as_str())
+                    }
+                }
+            };
+            let ok_suffix = match &suffix_n {
+                None => true,
+                Some(s) => {
+                    let after = byte_start + quote_n.len();
+                    norm_body.get(after..after + s.len()) == Some(s.as_str())
+                }
+            };
+            ok_prefix && ok_suffix
+        })
+        .collect();
+
+    // Zero or ambiguous after disambiguation → stale.
+    if filtered.len() != 1 {
+        return None;
+    }
+    let byte_start = filtered[0];
+    let byte_end = byte_start + quote_n.len();
+    let norm_char_start = byte_to_char_index(&norm_body, byte_start);
+    let norm_char_end = byte_to_char_index(&norm_body, byte_end);
+    if norm_char_start >= raw_at.len() || norm_char_end >= raw_at.len() {
+        return None;
+    }
+    let raw_start = raw_at[norm_char_start] as i64;
+    // Exclusive end: next unit's raw index (or body end sentinel).
+    let raw_end = raw_at[norm_char_end] as i64;
+    if raw_end <= raw_start {
+        return None;
+    }
+    Some((raw_start, raw_end))
 }

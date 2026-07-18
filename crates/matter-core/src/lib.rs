@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v10**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v11**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -18,6 +18,7 @@
 //! - **Coding** catalog + item membership + batch apply/remove with audit (0027)
 //! - **Metadata filters** + `saved_searches` + paged filtered review list (0028)
 //! - **FTS bookkeeping** (`fts_*` columns) + filtered-in-ids for Tantivy compose (0029)
+//! - **Notes / highlights** stand-off work-product annotations (0030)
 //!
 //! ## Layout
 //!
@@ -74,14 +75,19 @@ pub use logical_hash::{
     LogicalAttachment, NonEmailLogicalInput, LOGICAL_HASH_VERSION,
 };
 pub use matter::{
-    item_cull_status, item_dedup_role, item_dedup_tier, item_near_dup_role, item_role, item_status,
-    item_thread_method, ApplyCodesInput, ApplyCodesResult, CodeDef, CodeDefInput, CullCandidate,
-    CullFieldUpdate, CullPreset, CullPresetInput, DedupRoleCounts, DedupRoleUpdate,
-    DedupeCandidate, FtsCandidate, FtsFieldUpdate, Item, ItemCodeInfo, ItemFamily, ItemInput,
-    ItemUpdate, Matter, MatterInfo, NearDupCandidate, NearDupFieldUpdate, PromoteCandidate,
-    PromoteFieldUpdate, ReviewListRow, ReviewSet, SavedSearch, SavedSearchInput, Source,
-    ThreadCandidate, ThreadFieldUpdate, DB_FILE, DEFAULT_REVIEW_SET_NAME, EXPORTS_DIR,
-    FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR, LOGS_DIR, WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
+    collapse_whitespace, display_body_digest, highlight_status, item_cull_status, item_dedup_role,
+    item_dedup_tier, item_near_dup_role, item_role, item_status, item_thread_method,
+    normalize_for_quote_match, re_resolve_whitespace_normalized, resolve_highlight_against_body,
+    utf8_char_slice, ApplyCodesInput, ApplyCodesResult, CodeDef, CodeDefInput,
+    CreateHighlightInput, CullCandidate, CullFieldUpdate, CullPreset, CullPresetInput,
+    DedupRoleCounts, DedupRoleUpdate, DedupeCandidate, FtsCandidate, FtsFieldUpdate, Item,
+    ItemCodeInfo, ItemFamily, ItemHighlight, ItemInput, ItemNote, ItemUpdate, Matter, MatterInfo,
+    NearDupCandidate, NearDupFieldUpdate, PromoteCandidate, PromoteFieldUpdate, ResolvedHighlight,
+    ReviewListRow, ReviewSet, SavedSearch, SavedSearchInput, Source, ThreadCandidate,
+    ThreadFieldUpdate, UpsertNoteInput, DB_FILE, DEFAULT_REVIEW_SET_NAME, EXPORTS_DIR,
+    FAMILY_KIND_EMAIL_ATTACHMENTS, HIGHLIGHT_CONTEXT_CHARS, HIGHLIGHT_DEFAULT_COLOR,
+    HIGHLIGHT_QUOTE_MAX_BYTES, INDEX_DIR, LOGS_DIR, NOTE_BODY_MAX_BYTES, WORKSPACE_DIR,
+    WORKSPACE_TEMP_DIR,
 };
 pub use schema::SCHEMA_VERSION;
 pub use thread_headers::{

@@ -141,6 +141,36 @@ impl FilterSpec {
         }
     }
 
+    /// Quick chip: items with at least one note (track 0030).
+    pub fn preset_has_notes() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "has_notes".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
+    /// Quick chip: items with at least one highlight (track 0030).
+    pub fn preset_has_highlights() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "has_highlights".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
     /// True when no conditions and default family flag (still may have scope).
     pub fn is_empty_conditions(&self) -> bool {
         self.conditions.is_empty() && !self.include_family
@@ -531,6 +561,38 @@ fn push_condition(
             } else {
                 where_parts.push(format!("{alias}.text_sha256 IS NULL"));
             }
+        }
+        ("has_notes", "eq") => {
+            let want = bool_value(cond, "has_notes")?;
+            // Prefer denormalized count (schema v11); EXISTS is equivalent if counts lag.
+            if want {
+                where_parts.push(format!("{alias}.note_count > 0"));
+            } else {
+                where_parts.push(format!(
+                    "({alias}.note_count = 0 OR {alias}.note_count IS NULL)"
+                ));
+            }
+        }
+        ("has_highlights", "eq") => {
+            let want = bool_value(cond, "has_highlights")?;
+            if want {
+                where_parts.push(format!("{alias}.highlight_count > 0"));
+            } else {
+                where_parts.push(format!(
+                    "({alias}.highlight_count = 0 OR {alias}.highlight_count IS NULL)"
+                ));
+            }
+        }
+        ("note_text", "contains") => {
+            let v = require_string_value(cond, "note_text")?;
+            let pattern = format!("%{}%", escape_like_pattern(&v.to_lowercase()));
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_notes n \
+                 WHERE n.item_id = {alias}.id AND n.matter_id = ? \
+                 AND LOWER(n.body) LIKE ? ESCAPE '\\')"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            params.push(Value::Text(pattern));
         }
         _ => {
             return Err(Error::Other(format!(

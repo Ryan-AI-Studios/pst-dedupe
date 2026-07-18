@@ -7,7 +7,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v10**) + family graph
+6. **Normalized Item** model (schema **v11**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
@@ -16,8 +16,9 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 12. **Coding** catalog + `item_codes` membership + batch apply/remove with audit (0027)
 13. **Metadata filters** + `saved_searches` + paged filtered review list (0028)
 14. **FTS bookkeeping** (`fts_*`) + filtered-in-ids for Tantivy compose (0029)
+15. **Notes / highlights** stand-off work-product annotations (0030)
 
-Schema version: **10** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, and optional `saved_searches.keyword`. SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+Schema version: **11** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, optional `saved_searches.keyword`, and notes/highlights. SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
 
 ## Layout
 
@@ -306,6 +307,64 @@ ORDER BY ... LIMIT ? OFFSET ?;
 Audit: `search.save` / `search.delete` only (not every Apply).
 
 Module: `matter_core::filter` (`FilterSpec`, `compile_filter`, presets).
+
+### Annotation filter fields (0030)
+
+| Field | Op | Meaning |
+|---|---|---|
+| `has_notes` | `eq` true/false | `items.note_count > 0` |
+| `has_highlights` | `eq` true/false | `items.highlight_count > 0` |
+| `note_text` | `contains` | EXISTS note whose body matches bound `LIKE` (case-folded) |
+
+`FILTER_SPEC_VERSION` remains **1** (backward compatible). Presets: `FilterSpec::preset_has_notes()`, `preset_has_highlights()`.
+
+## Schema v11 — Notes / highlights (0030)
+
+Stand-off **work-product** annotations. Never rewrite CAS body text. Notes are
+strategy-sensitive — matter-local; production export (**0040**) is opt-in later.
+
+### Tables
+
+| Table | Purpose |
+|---|---|
+| `item_notes` | Document or passage notes (`highlight_id` nullable); hard delete OK |
+| `item_highlights` | UTF-8 **char** ranges + `exact_quote` / prefix / suffix / `body_digest` |
+
+Denormalized on `items`: `note_count`, `highlight_count` (maintained in the same txn as mutations).
+
+### Limits
+
+| Limit | Value |
+|---|---|
+| Note body | max **64 KiB** UTF-8 (`NOTE_BODY_MAX_BYTES`) |
+| Highlight quote | max **4 KiB** |
+| Default color | `#FFF59D` (yellow) |
+| Status | `active` \| `stale` |
+
+### Anchoring (§3.5 / §3.5.1)
+
+| Field | Role |
+|---|---|
+| `start_utf8` / `end_utf8` | Fast paint when `body_digest` matches (char indices, end exclusive) |
+| `exact_quote` | Stored **raw**; re-matched with whitespace collapse when digest changes |
+| `prefix` / `suffix` | ~40 chars context for disambiguation |
+| `body_digest` | Prefer item `text_sha256`; else `display_body_digest(display_body)` |
+
+**Re-resolve:** collapse Unicode whitespace runs to a single ASCII space on quote,
+prefix/suffix, and body; trim quote ends; find on normalized body; map hit back to
+**raw** char range for paint. Prefer offsets when digest matches. True missing quote → `stale`.
+
+### API
+
+| Method | Behavior |
+|---|---|
+| `list_notes` / `upsert_note` / `delete_note` | CRUD; empty/oversize rejected |
+| `list_highlights` / `create_highlight` / `delete_highlight` | Create validates quote==slice; delete **unlinks** notes (`highlight_id` NULL) |
+| `resolve_highlights` | In-memory status + optional persist `stale` |
+
+Audit (full body / range snapshots): `note.upsert`, `note.delete` (**includes `highlight_id` when passage-linked**), `highlight.create`, `highlight.delete`.
+
+Helpers: `resolve_highlight_against_body`, `re_resolve_whitespace_normalized`, `utf8_char_slice`, `collapse_whitespace`.
 
 ## Schema v8 — Coding / tags (0027)
 
