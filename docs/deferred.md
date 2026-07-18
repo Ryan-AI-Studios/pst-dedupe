@@ -138,19 +138,21 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0028-01 | P3 | Keyset/cursor pagination if deep OFFSET still slow | P0: LIMIT/OFFSET + partial `idx_items_review_list_order`; Codex residual | residual scale |
 | D-0028-02 | — | Nested saved-search-as-condition / deep OR builder | P0: flat AND only (Relativity nesting timeout risk) | residual |
 | D-0028-03 | P3 | Full GUI smoke for filter bar / saved search / Load more | Automated matter-core + desk unit/integration; operator smoke local | operator / polish |
-| D-0028-04 | — | Body keyword in FilterSpec | Metadata only; **0029 Ready** owns Tantivy keyword | **0029** |
+| D-0028-04 | — | Body keyword in FilterSpec | **Done in 0029** (Tantivy keyword box + compose; not FilterSpec SQL) | — |
 | D-0026-01 | P3 | Large corpus paging | **Improved in 0028**: filtered count + Load more + compound list index; unfiltered Load more too | residual if multi-million |
 
-## From track 0029-KeywordFtsSearch (planned)
+## From track 0029-KeywordFtsSearch
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0029-plan | — | CJK tokenizers (jieba/lindera) | P0 Latin default; pin lag vs tantivy 0.26 | **0054** |
-| D-0029-plan | — | Fuzzy / proximity dtSearch parity | P0 Boolean + phrases only | residual |
-| D-0029-plan | — | Snippet highlight UI | Optional SnippetGenerator; full UI → **0030** | residual / **0030** |
-| D-0029-plan | — | SQLite FTS5 primary | Forbidden by plan §4.7 | never |
-| D-0029-plan | — | Crash left duplicate Tantivy docs | Spec: delete-before-add + HashSet de-dupe | **0029** implements |
-| D-0029-plan | — | Windows mmap rebuild Access Denied | Spec: drop all readers before remove_dir_all | **0029** implements |
+| D-0029-01 | P3 | FTS hit window capped at 50k unique ids before filter intersect | Documented `DEFAULT_FTS_FETCH_LIMIT`; keyset/streaming deferred (Codex residual) | residual scale |
+| D-0029-02 | — | CJK tokenizers (jieba/lindera) | P0 Latin `default` tokenizer only | **0054** |
+| D-0029-03 | — | Fuzzy / proximity dtSearch parity | P0 Boolean + phrases only | residual |
+| D-0029-04 | — | Snippet highlight UI | Optional SnippetGenerator; full UI → **0030** | residual / **0030** |
+| D-0029-05 | — | SQLite FTS5 primary | Forbidden by plan §4.7 | never |
+| D-0029-06 | — | Crash left duplicate Tantivy docs | **Done in 0029**: delete-before-add + HashSet de-dupe | — |
+| D-0029-07 | — | Windows mmap rebuild Access Denied | **Done in 0029**: drop readers + desk busy gate before rebuild | — |
+| D-0029-08 | P3 | Full GUI smoke for keyword / Update / Rebuild | Automated matter-search + desk unit; operator smoke local | operator / polish |
 
 ## Hygiene
 
