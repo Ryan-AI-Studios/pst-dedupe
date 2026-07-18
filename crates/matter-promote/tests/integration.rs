@@ -623,3 +623,141 @@ fn require_dedupe_fails_when_none() {
         "{err}"
     );
 }
+
+/// Resume from checkpoint phase=`done`/`snapshot` with stale review_sets meta
+/// must repair item_count/policy (Codex final-gate P2).
+#[test]
+fn resume_from_done_repairs_stale_review_set_snapshot() {
+    let (_tmp, matter) = temp_matter("resume-snapshot");
+    let job = matter.create_job(JOB_KIND_PROMOTE).expect("job");
+
+    let a = insert(
+        &matter,
+        "a.eml",
+        item_status::EXTRACTED,
+        ItemInput {
+            dedup_role: Some(item_dedup_role::UNIQUE.into()),
+            ..Default::default()
+        },
+    );
+    let b = insert(
+        &matter,
+        "b.eml",
+        item_status::EXTRACTED,
+        ItemInput {
+            dedup_role: Some(item_dedup_role::UNIQUE.into()),
+            ..Default::default()
+        },
+    );
+
+    let params = PromoteParams {
+        policy: POLICY_UNIQUE_ONLY.into(),
+        expand_families: false,
+        ..Default::default()
+    };
+    let outcome = run_with(&matter, &job.id, &params);
+    match &outcome {
+        PromoteOutcome::Succeeded(s) => assert_eq!(s.promoted_count, 2),
+        other => panic!("first run {other:?}"),
+    }
+    assert!(in_review(&matter, &a));
+    assert!(in_review(&matter, &b));
+
+    let set = matter
+        .ensure_default_review_set(matter_core::DEFAULT_REVIEW_SET_NAME)
+        .expect("set");
+    assert_eq!(set.item_count, 2);
+    assert_eq!(set.policy.as_deref(), Some(POLICY_UNIQUE_ONLY));
+
+    // Simulate crash after membership write: corrupt review_sets meta and leave
+    // checkpoint at phase=done (legacy) or snapshot (new).
+    matter
+        .update_review_set_snapshot(&set.id, "stale_policy", Some("{}"), 0)
+        .expect("corrupt");
+    let stale = matter.get_review_set(&set.id).expect("get");
+    assert_eq!(stale.item_count, 0);
+
+    let mut cp = matter
+        .get_checkpoint(&job.id, PROMOTE_STAGE)
+        .expect("cp")
+        .expect("present");
+    // Force phase=done with correct membership counts (stale meta only).
+    let mut cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor json");
+    cursor["phase"] = serde_json::json!("done");
+    cursor["promoted_count"] = serde_json::json!(2);
+    cursor["completed_count"] = serde_json::json!(2);
+    let repaired = cursor.to_string();
+    matter
+        .put_checkpoint(&job.id, PROMOTE_STAGE, &repaired, 2)
+        .expect("put cp");
+    let _ = &mut cp;
+
+    let outcome2 = run_promote(&matter, &job.id, &params, None, |_| {}).expect("resume");
+    match outcome2 {
+        PromoteOutcome::Succeeded(s) => {
+            assert_eq!(s.promoted_count, 2);
+            assert_eq!(s.resolved_policy, POLICY_UNIQUE_ONLY);
+        }
+        other => panic!("resume {other:?}"),
+    }
+
+    let fixed = matter.get_review_set(&set.id).expect("fixed");
+    assert_eq!(
+        fixed.item_count, 2,
+        "snapshot item_count repaired on resume"
+    );
+    assert_eq!(
+        fixed.policy.as_deref(),
+        Some(POLICY_UNIQUE_ONLY),
+        "snapshot policy repaired on resume"
+    );
+    assert!(in_review(&matter, &a));
+    assert!(in_review(&matter, &b));
+}
+
+/// Resume from phase=`snapshot` (post-write, pre-meta) repairs review_sets.
+#[test]
+fn resume_from_snapshot_phase_repairs_meta() {
+    let (_tmp, matter) = temp_matter("resume-snapshot-phase");
+    let job = matter.create_job(JOB_KIND_PROMOTE).expect("job");
+    let a = insert(
+        &matter,
+        "a.eml",
+        item_status::EXTRACTED,
+        ItemInput {
+            dedup_role: Some(item_dedup_role::UNIQUE.into()),
+            ..Default::default()
+        },
+    );
+
+    let params = PromoteParams {
+        policy: POLICY_UNIQUE_ONLY.into(),
+        expand_families: false,
+        ..Default::default()
+    };
+    let _ = run_with(&matter, &job.id, &params);
+    assert!(in_review(&matter, &a));
+
+    let set = matter
+        .ensure_default_review_set(matter_core::DEFAULT_REVIEW_SET_NAME)
+        .expect("set");
+    matter
+        .update_review_set_snapshot(&set.id, "broken", None, 99)
+        .expect("corrupt");
+
+    let cp = matter
+        .get_checkpoint(&job.id, PROMOTE_STAGE)
+        .expect("cp")
+        .expect("present");
+    let mut cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor");
+    cursor["phase"] = serde_json::json!("snapshot");
+    matter
+        .put_checkpoint(&job.id, PROMOTE_STAGE, &cursor.to_string(), 1)
+        .expect("put");
+
+    let outcome = run_promote(&matter, &job.id, &params, None, |_| {}).expect("resume");
+    assert!(matches!(outcome, PromoteOutcome::Succeeded(_)));
+    let fixed = matter.get_review_set(&set.id).expect("fixed");
+    assert_eq!(fixed.item_count, 1);
+    assert_eq!(fixed.policy.as_deref(), Some(POLICY_UNIQUE_ONLY));
+}

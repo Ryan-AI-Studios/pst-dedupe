@@ -44,7 +44,11 @@ pub enum PromoteOutcome {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CheckpointCursor {
-    /// `write` | `done`
+    /// `write` | `snapshot` | `done`
+    ///
+    /// After the last membership batch commits, phase becomes `snapshot` so a
+    /// crash before `review_sets` meta update is recoverable. `done` is written
+    /// only after the snapshot succeeds.
     #[serde(default = "default_phase_write")]
     phase: String,
     /// Index into the ordered membership stream (0-based).
@@ -272,8 +276,19 @@ fn run_promote_inner(
         cursor.promoted_count = cursor.ordered_ids.len() as u64;
     }
 
-    if cursor.phase == "done" {
-        return Ok(PromoteOutcome::Succeeded(summary_from_cursor(&cursor)));
+    // Resume after membership writes completed: always reconcile review_sets
+    // snapshot (idempotent). Avoids success-with-stale-meta if a prior run
+    // crashed after the final write batch but before snapshot.
+    if cursor.phase == "done" || cursor.phase == "snapshot" {
+        return finalize_promote(
+            matter,
+            job_id,
+            params,
+            resolved_policy,
+            params_json,
+            &review_set.id,
+            &mut cursor,
+        );
     }
 
     if params.fail_if_empty && cursor.ordered_ids.is_empty() {
@@ -325,8 +340,10 @@ fn run_promote_inner(
 
         cursor.cursor_index = end as u64;
         cursor.completed_count = end as u64;
+        // After last membership batch, enter `snapshot` (not `done`) so a crash
+        // before review_sets meta update is recoverable on resume.
         if end == total {
-            cursor.phase = "done".into();
+            cursor.phase = "snapshot".into();
         }
 
         let cursor_json = serde_json::to_string(&cursor)
@@ -342,16 +359,57 @@ fn run_promote_inner(
         offset = end;
     }
 
-    // Snapshot review set meta after full write.
+    // Empty membership: still need snapshot + done without write loop.
+    if total == 0 {
+        cursor.phase = "snapshot".into();
+        cursor.cursor_index = 0;
+        cursor.completed_count = 0;
+        let cursor_json = serde_json::to_string(&cursor)
+            .map_err(|e| PromoteError::Other(format!("checkpoint serialize: {e}")))?;
+        matter.apply_promote_batch_with_checkpoint(job_id, PROMOTE_STAGE, &[], &cursor_json, 0)?;
+    }
+
+    finalize_promote(
+        matter,
+        job_id,
+        params,
+        resolved_policy,
+        params_json,
+        &review_set.id,
+        &mut cursor,
+    )
+}
+
+/// Apply review_sets snapshot, mark checkpoint `done`, optional empty warning.
+fn finalize_promote(
+    matter: &Matter,
+    job_id: &str,
+    params: &PromoteParams,
+    resolved_policy: &str,
+    params_json: &serde_json::Value,
+    review_set_id: &str,
+    cursor: &mut CheckpointCursor,
+) -> Result<PromoteOutcome> {
     let policy_json = params_json.to_string();
     matter.update_review_set_snapshot(
-        &review_set.id,
+        review_set_id,
         resolved_policy,
         Some(&policy_json),
         cursor.promoted_count as i64,
     )?;
 
-    // Audit warning field for empty set (still Succeeded).
+    // Mark done only after snapshot so resume always re-applies if needed.
+    cursor.phase = "done".into();
+    let cursor_json = serde_json::to_string(cursor)
+        .map_err(|e| PromoteError::Other(format!("checkpoint serialize: {e}")))?;
+    matter.apply_promote_batch_with_checkpoint(
+        job_id,
+        PROMOTE_STAGE,
+        &[],
+        &cursor_json,
+        cursor.completed_count as i64,
+    )?;
+
     if cursor.promoted_count == 0 {
         let _ = matter.append_audit(AuditEventInput {
             actor: "system".into(),
@@ -368,7 +426,7 @@ fn run_promote_inner(
     }
 
     let _ = POLICY_AUTO; // silence if unused in some builds
-    Ok(PromoteOutcome::Succeeded(summary_from_cursor(&cursor)))
+    Ok(PromoteOutcome::Succeeded(summary_from_cursor(cursor)))
 }
 
 fn summary_from_cursor(cursor: &CheckpointCursor) -> PromoteSummary {
