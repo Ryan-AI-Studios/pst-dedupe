@@ -165,6 +165,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
         {
             app.start_promote();
         }
+        if ui
+            .button("Open Review")
+            .on_hover_text("Open the Review corpus list and body viewer")
+            .clicked()
+        {
+            app.open_review();
+        }
 
         ui.separator();
 

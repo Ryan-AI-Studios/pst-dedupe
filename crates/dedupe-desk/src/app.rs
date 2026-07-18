@@ -19,6 +19,7 @@ use crate::matter_ui::{self, MatterSnapshot};
 use crate::nav::{self, Screen};
 use crate::params::{self, format_runner_error, is_transient_sqlite_lock};
 use crate::progress_ui;
+use crate::review_ui::{self, ReviewState};
 use crate::settings::DeskSettings;
 use crate::workspace;
 
@@ -56,6 +57,8 @@ pub struct DeskApp {
     pub(crate) cull_preset: String,
     /// Selected promote policy for the workspace dropdown (`auto` + named).
     pub(crate) promote_policy: String,
+    /// Review screen state (thin list + body loader).
+    pub(crate) review: ReviewState,
 }
 
 impl DeskApp {
@@ -92,6 +95,7 @@ impl DeskApp {
             last_job_id: None,
             cull_preset: "unique_only".into(),
             promote_policy: "auto".into(),
+            review: ReviewState::default(),
         }
     }
 
@@ -157,8 +161,19 @@ impl DeskApp {
         self.selected_pst = None;
         // Reset cull selection so a prior matter's user:<id> cannot leak.
         self.cull_preset = "unique_only".into();
+        // Clear review corpus state for the previous matter.
+        self.review.clear_for_matter_change();
         self.refresh_matter_lists();
         self.status_msg = Some(format!("Opened matter at {root}"));
+    }
+
+    /// Navigate to Review and force a thin-list reload.
+    pub(crate) fn open_review(&mut self) {
+        if self.matter_root.is_none() {
+            return;
+        }
+        self.review.request_reload();
+        self.screen = Screen::Review;
     }
 
     fn create_matter_at(&mut self, parent: PathBuf) {
@@ -667,7 +682,7 @@ impl DeskApp {
                 Screen::Home,
                 Screen::Workspace,
                 Screen::StubReduce,
-                Screen::StubReview,
+                Screen::Review,
                 Screen::StubProduce,
             ] {
                 let selected = self.screen == target;
@@ -681,7 +696,11 @@ impl DeskApp {
                     .add_enabled(enabled, egui::Button::selectable(selected, label))
                     .clicked()
                 {
-                    self.screen = nav::resolve_nav(self.screen, target, has_matter);
+                    let next = nav::resolve_nav(self.screen, target, has_matter);
+                    if next == Screen::Review && self.screen != Screen::Review {
+                        self.review.request_reload();
+                    }
+                    self.screen = next;
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -747,7 +766,13 @@ impl eframe::App for DeskApp {
             Screen::Home => self.show_home(ui),
             Screen::Workspace => workspace::show(ui, self),
             Screen::StubReduce => self.show_stub(ui, "Reduce"),
-            Screen::StubReview => self.show_stub(ui, "Review"),
+            Screen::Review => {
+                if let Some(root) = self.matter_root.clone() {
+                    review_ui::show(ui, &mut self.review, &root);
+                } else {
+                    ui.label("Open a matter to review.");
+                }
+            }
             Screen::StubProduce => self.show_stub(ui, "Produce"),
         });
 

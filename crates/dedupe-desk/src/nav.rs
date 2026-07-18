@@ -9,7 +9,9 @@ pub enum Screen {
     Workspace,
     /// Placeholder for later tracks.
     StubReduce,
-    StubReview,
+    /// Review corpus list + body viewer (track 0026).
+    Review,
+    /// Placeholder for later tracks.
     StubProduce,
 }
 
@@ -19,16 +21,13 @@ impl Screen {
             Self::Home => "Home",
             Self::Workspace => "Workspace",
             Self::StubReduce => "Reduce",
-            Self::StubReview => "Review",
+            Self::Review => "Review",
             Self::StubProduce => "Produce",
         }
     }
 
     pub fn is_stub(self) -> bool {
-        matches!(
-            self,
-            Self::StubReduce | Self::StubReview | Self::StubProduce
-        )
+        matches!(self, Self::StubReduce | Self::StubProduce)
     }
 
     /// Whether this screen requires an open matter root.
@@ -76,14 +75,21 @@ mod tests {
     }
 
     #[test]
-    fn stubs_need_matter() {
+    fn review_needs_matter_and_is_not_stub() {
+        assert!(!Screen::Review.is_stub());
+        assert_eq!(Screen::Review.label(), "Review");
         assert_eq!(
-            resolve_nav(Screen::Home, Screen::StubReview, false),
+            resolve_nav(Screen::Home, Screen::Review, false),
             Screen::Home
         );
         assert_eq!(
-            resolve_nav(Screen::Workspace, Screen::StubReview, true),
-            Screen::StubReview
+            resolve_nav(Screen::Workspace, Screen::Review, true),
+            Screen::Review
         );
+    }
+
+    #[test]
+    fn reduce_still_stub() {
+        assert!(Screen::StubReduce.is_stub());
     }
 }

@@ -1,7 +1,8 @@
 # dedupe-desk
 
 **Dedupe Desk** — single-exe Windows shell for matter create/open, source ingest,
-PST extract, and matter-level **tiered dedupe** with live progress (tracks **0020**, **0021**).
+PST extract, matter-level process jobs, and a **Review** surface for the promoted
+corpus (tracks **0020**–**0026**).
 
 ## Build / run
 
@@ -118,7 +119,40 @@ Workspace **promote policy** dropdown + **Promote to review** starts
 
 Flag-only membership (`in_review` / `review_order`); never deletes items or CAS.
 Bidirectional family expand is on by default. Reuses progress / cancel / resume.
-See `crates/matter-promote/README.md`. Linear review list is **0026**.
+See `crates/matter-promote/README.md`.
+
+### Review screen (0026)
+
+Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
+
+| Region | Behavior |
+|---|---|
+| Corpus list | Thin rows only (`list_review_thin`), ordered by `review_order` |
+| Header | Subject, from, dates, path, mime, size, role chips |
+| Body | CAS text (`text_sha256` preferred, else `html_sha256` with block-aware strip) |
+| Family strip | Same-`family_id` members in the loaded list; click to open |
+
+**Prerequisite:** run **Promote to review** on Workspace first. Empty state points operators there.
+
+**Keyboard (only when no widget has focus):**
+
+| Action | Binding |
+|---|---|
+| Next | `]` or `Alt+N` or **Next** button |
+| Previous | `[` or `Alt+P` or **Prev** button |
+
+No wrap at ends. Focus gate: `ctx.memory(\|m\| m.focused().is_none())` (egui 0.34).
+
+#### egui traps (required)
+
+| Trap | Desk mitigation |
+|---|---|
+| Variable-height list rows kill FPS on large corpora | Fixed `ROW_HEIGHT` (22.0) + `ScrollArea::show_rows`; single-line truncate |
+| Async body stays on “Loading…” until mouse moves | Worker clones `egui::Context`, sends channel payload, then **`ctx.request_repaint()`** |
+| Shortcuts steal from future search boxes | Handle next/prev only when `focused().is_none()` |
+| Full corpus bodies in RAM | List never loads bodies; body load is selection-scoped + 2 MiB display cap |
+
+**Load policy:** if `count_in_review ≤ 50_000`, load all thin rows; else first page of 500. Coding UI is a read-only placeholder (**0027**).
 
 ## Tests
 
@@ -126,4 +160,6 @@ See `crates/matter-promote/README.md`. Linear review list is **0026**.
 cargo test -p dedupe-desk
 ```
 
-Pure helpers cover nav, params JSON, settings, WAL refresh snapshot, and dialog debounce. Full GUI interaction is manual (see above).
+Pure helpers cover nav, params JSON, settings, WAL refresh snapshot, dialog debounce,
+HTML strip, review nav clamp, and tempfile list+body load. Full GUI interaction is
+manual (see above).
