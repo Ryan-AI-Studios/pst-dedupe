@@ -267,7 +267,7 @@ keyword / FTS is **0029** (Tantivy) — not SQLite FTS5 and not this track.
 |---|---|
 | AND only | Flat `conditions` list (no nested OR builder in P0) |
 | Parameterized SQL | User strings → `?` binds only (`filter::compile_filter`) |
-| Date bounds | RFC3339 **with offset or Z** required; start inclusive, end exclusive for `between` |
+| Date bounds | RFC3339 **with offset or Z** required; start inclusive, end exclusive for `between`. Compared as **UTC epoch milliseconds** via `desk_utc_epoch_ms` (subseconds preserved; offset-bearing stored TEXT normalized). |
 | `scope=review_corpus` | `in_review = 1` + default review set (same as `list_review_thin`) |
 | `scope=entire_matter` | Status in `extracted` / `partial` / `normalized` |
 | `include_family` | Conditions apply **only** in a `hits` CTE; outer SELECT is membership-by-family (parent + direct children / `family_id`). Outer still requires scope (e.g. still `in_review = 1`). |

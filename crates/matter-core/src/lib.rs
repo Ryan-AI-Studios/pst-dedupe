@@ -59,8 +59,9 @@ pub use cas::{sha256_hex, Cas, PUT_READER_BUF_SIZE};
 pub use error::{Error, Result};
 pub use filter::{
     compile_filter, normalize_stored_instant_for_compare, parse_bound_instant, parse_item_instant,
-    register_filter_functions, CompiledFilter, FilterCondition, FilterSpec, DESK_UTC_TS_FN,
-    FILTER_SPEC_VERSION, SCOPE_ENTIRE_MATTER, SCOPE_REVIEW_CORPUS,
+    register_filter_functions, stored_instant_to_epoch_ms, CompiledFilter, FilterCondition,
+    FilterSpec, DESK_UTC_EPOCH_MS_FN, FILTER_SPEC_VERSION, SCOPE_ENTIRE_MATTER,
+    SCOPE_REVIEW_CORPUS,
 };
 pub use item_errors::{ItemError, ItemErrorInput};
 pub use jobs::{Job, JobCheckpoint, JobState};

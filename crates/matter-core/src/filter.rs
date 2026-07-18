@@ -22,12 +22,12 @@
 //!
 //! ## Date comparison
 //!
-//! Filter bounds are always compiled to **UTC Z** RFC3339 (`…Z`). Item
+//! Filter bounds are compiled to **UTC epoch milliseconds** (`i64`). Item
 //! `sent_at` / `received_at` may be stored as offset-bearing RFC3339 (or
 //! legacy naive-as-UTC). SQL comparisons wrap item expressions with the
-//! connection UDF [`DESK_UTC_TS_FN`] (`desk_utc_ts`) so both sides compare
-//! as normalized UTC Z text. Extract-pst writes Z form; the UDF is defense
-//! for offset-bearing and legacy values.
+//! connection UDF [`DESK_UTC_EPOCH_MS_FN`] (`desk_utc_epoch_ms`) so both
+//! sides compare as integers (subsecond precision preserved). Extract-pst
+//! writes Z form; the UDF is defense for offset-bearing and legacy values.
 
 use chrono::{DateTime, FixedOffset, Utc};
 use rusqlite::functions::FunctionFlags;
@@ -38,10 +38,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::matter::item_status;
 
-/// SQLite scalar UDF name: normalize a stored instant TEXT to UTC Z RFC3339.
+/// SQLite scalar UDF name: stored instant TEXT → Unix epoch milliseconds (UTC).
 ///
 /// Registered on every matter connection via [`register_filter_functions`].
-pub const DESK_UTC_TS_FN: &str = "desk_utc_ts";
+/// Returns SQL NULL for empty/unparseable values.
+pub const DESK_UTC_EPOCH_MS_FN: &str = "desk_utc_epoch_ms";
 
 /// Current `FilterSpec` document version.
 pub const FILTER_SPEC_VERSION: u32 = 1;
@@ -548,15 +549,15 @@ fn push_date_condition(
     where_parts: &mut Vec<String>,
     params: &mut Vec<Value>,
 ) -> Result<()> {
-    // Normalize item timestamps to UTC Z via desk_utc_ts so offset-bearing
-    // stored values compare correctly against bound UTC Z strings.
+    // Normalize item timestamps to UTC epoch ms via desk_utc_epoch_ms so
+    // offset-bearing stored values and subseconds compare correctly.
     // best_effort_date: first usable of sent_at / received_at after normalize.
     let expr = match field {
         "best_effort_date" => format!(
             "COALESCE({fn}({alias}.sent_at), {fn}({alias}.received_at))",
-            fn = DESK_UTC_TS_FN
+            fn = DESK_UTC_EPOCH_MS_FN
         ),
-        "sent_at" | "received_at" => format!("{DESK_UTC_TS_FN}({alias}.{field})"),
+        "sent_at" | "received_at" => format!("{DESK_UTC_EPOCH_MS_FN}({alias}.{field})"),
         _ => unreachable!(),
     };
     match op {
@@ -568,7 +569,7 @@ fn push_date_condition(
                 "start",
             )?;
             where_parts.push(format!("{expr} >= ?"));
-            params.push(Value::Text(start));
+            params.push(Value::Integer(start));
         }
         "lte" => {
             // Inclusive upper bound for lte alone (between uses exclusive end).
@@ -579,15 +580,15 @@ fn push_date_condition(
                 "end",
             )?;
             where_parts.push(format!("{expr} <= ?"));
-            params.push(Value::Text(end));
+            params.push(Value::Integer(end));
         }
         "between" => {
             let start = require_date_bound(cond.start.as_deref(), "start")?;
             let end = require_date_bound(cond.end.as_deref(), "end")?;
             // Start inclusive, end exclusive (match cull 0024).
             where_parts.push(format!("{expr} >= ? AND {expr} < ?"));
-            params.push(Value::Text(start));
-            params.push(Value::Text(end));
+            params.push(Value::Integer(start));
+            params.push(Value::Integer(end));
         }
         _ => {
             return Err(Error::Other(format!(
@@ -604,14 +605,14 @@ fn push_date_condition(
 /// path can evaluate compiled date filters.
 pub fn register_filter_functions(conn: &Connection) -> Result<()> {
     conn.create_scalar_function(
-        DESK_UTC_TS_FN,
+        DESK_UTC_EPOCH_MS_FN,
         1,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx| {
             let raw: Option<String> = ctx.get(0)?;
             match raw {
-                None => Ok(None::<String>),
-                Some(s) => Ok(normalize_stored_instant_for_compare(&s)),
+                None => Ok(None::<i64>),
+                Some(s) => Ok(stored_instant_to_epoch_ms(&s)),
             }
         },
     )?;
@@ -663,21 +664,28 @@ pub fn parse_item_instant(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-/// Normalize a stored item timestamp to UTC Z RFC3339 (seconds) for SQL text compare.
+/// Convert a stored item timestamp to Unix epoch milliseconds (UTC) for SQL compare.
 ///
 /// Returns `None` for empty/unparseable values (SQL NULL → no match).
-pub fn normalize_stored_instant_for_compare(s: &str) -> Option<String> {
-    parse_item_instant(s).map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+/// Preserves subsecond precision (millis).
+pub fn stored_instant_to_epoch_ms(s: &str) -> Option<i64> {
+    parse_item_instant(s).map(|dt| dt.timestamp_millis())
 }
 
-fn require_date_bound(raw: Option<&str>, label: &str) -> Result<String> {
+/// Alias retained for callers that used the pre-epoch-ms text normalizer name.
+#[inline]
+pub fn normalize_stored_instant_for_compare(s: &str) -> Option<i64> {
+    stored_instant_to_epoch_ms(s)
+}
+
+fn require_date_bound(raw: Option<&str>, label: &str) -> Result<i64> {
     let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Err(Error::Other(format!(
             "date condition missing {label} bound (RFC3339 with offset required)"
         )));
     };
     let dt = parse_bound_instant(s)?;
-    Ok(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    Ok(dt.timestamp_millis())
 }
 
 fn is_naive_datetime(s: &str) -> bool {
@@ -867,31 +875,48 @@ mod tests {
     }
 
     #[test]
-    fn normalize_stored_instant_converts_offset_to_z() {
+    fn stored_instant_to_epoch_ms_converts_offset() {
         // 00:00-05:00 == 05:00Z
+        let expected = parse_bound_instant("2023-01-01T05:00:00Z")
+            .unwrap()
+            .timestamp_millis();
         assert_eq!(
-            normalize_stored_instant_for_compare("2023-01-01T00:00:00-05:00").as_deref(),
-            Some("2023-01-01T05:00:00Z")
+            stored_instant_to_epoch_ms("2023-01-01T00:00:00-05:00"),
+            Some(expected)
         );
         assert_eq!(
-            normalize_stored_instant_for_compare("2023-01-01T05:00:00Z").as_deref(),
-            Some("2023-01-01T05:00:00Z")
+            stored_instant_to_epoch_ms("2023-01-01T05:00:00Z"),
+            Some(expected)
         );
         // Naive treated as UTC (item fields only).
         assert_eq!(
-            normalize_stored_instant_for_compare("2023-01-01T05:00:00").as_deref(),
-            Some("2023-01-01T05:00:00Z")
+            stored_instant_to_epoch_ms("2023-01-01T05:00:00"),
+            Some(expected)
         );
-        assert!(normalize_stored_instant_for_compare("not-a-date").is_none());
+        // Subseconds preserved.
+        let with_frac = parse_bound_instant("2023-01-01T00:00:00.100Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(
+            stored_instant_to_epoch_ms("2023-01-01T00:00:00.100Z"),
+            Some(with_frac)
+        );
+        assert_ne!(
+            stored_instant_to_epoch_ms("2023-01-01T00:00:00.100Z"),
+            stored_instant_to_epoch_ms("2023-01-01T00:00:00.500Z")
+        );
+        assert!(stored_instant_to_epoch_ms("not-a-date").is_none());
     }
 
     #[test]
-    fn compile_date_wraps_desk_utc_ts() {
+    fn compile_date_wraps_desk_utc_epoch_ms() {
+        let bound = "2023-01-01T00:00:00Z";
+        let expected_ms = parse_bound_instant(bound).unwrap().timestamp_millis();
         let spec = FilterSpec {
             conditions: vec![FilterCondition {
                 field: "sent_at".into(),
                 op: "gte".into(),
-                value: Some(serde_json::json!("2023-01-01T00:00:00Z")),
+                value: Some(serde_json::json!(bound)),
                 values: None,
                 start: None,
                 end: None,
@@ -900,16 +925,16 @@ mod tests {
         };
         let compiled = compile_filter(&spec, "mat1", None).expect("compile");
         assert!(
-            compiled.list_sql.contains(DESK_UTC_TS_FN),
-            "expected {DESK_UTC_TS_FN} in SQL: {}",
+            compiled.list_sql.contains(DESK_UTC_EPOCH_MS_FN),
+            "expected {DESK_UTC_EPOCH_MS_FN} in SQL: {}",
             compiled.list_sql
         );
         assert!(
-            compiled.params.iter().any(|p| matches!(
-                p,
-                Value::Text(t) if t == "2023-01-01T00:00:00Z"
-            )),
-            "bound must be UTC Z: {:?}",
+            compiled
+                .params
+                .iter()
+                .any(|p| matches!(p, Value::Integer(ms) if *ms == expected_ms)),
+            "bound must be epoch millis {expected_ms}: {:?}",
             compiled.params
         );
     }

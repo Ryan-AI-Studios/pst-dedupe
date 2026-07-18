@@ -273,6 +273,119 @@ fn filter_date_offset_bearing_stored_ts_compares_as_utc() {
     assert_eq!(rows[0].id, offset_item.id);
 }
 
+/// Subsecond precision must be preserved on date filter compare.
+///
+/// Prior `SecondsFormat::Secs` text normalize collapsed `.100Z` and `.500Z`
+/// to the same second, causing false matches. Epoch-ms compare must not.
+#[test]
+fn filter_date_subsecond_precision_preserved() {
+    let (_tmp, _root, matter, set_id) = setup_review_matter("filter-date-subsec");
+    let early_frac = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            sent_at: Some("2023-01-01T00:00:00.100Z".into()),
+            subject: Some("early frac".into()),
+            ..Default::default()
+        })
+        .expect("early frac");
+    let late_frac = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            sent_at: Some("2023-01-01T00:00:00.600Z".into()),
+            subject: Some("late frac".into()),
+            ..Default::default()
+        })
+        .expect("late frac");
+    promote_item(&matter, &early_frac.id, &set_id, 1).unwrap();
+    promote_item(&matter, &late_frac.id, &set_id, 2).unwrap();
+
+    // gte .500Z: only .600Z; .100Z must be excluded (false match under Secs truncate).
+    let gte_500 = FilterSpec {
+        conditions: vec![FilterCondition {
+            field: "sent_at".into(),
+            op: "gte".into(),
+            value: Some(serde_json::json!("2023-01-01T00:00:00.500Z")),
+            values: None,
+            start: None,
+            end: None,
+        }],
+        ..FilterSpec::default()
+    };
+    let rows = matter
+        .list_items_filtered_thin(&gte_500, 100, 0)
+        .expect("gte .500");
+    assert_eq!(
+        rows.len(),
+        1,
+        "only .600Z should match gte .500Z; got {:?}",
+        rows
+    );
+    assert_eq!(rows[0].id, late_frac.id);
+
+    // gte .000Z: both items included.
+    let gte_000 = FilterSpec {
+        conditions: vec![FilterCondition {
+            field: "sent_at".into(),
+            op: "gte".into(),
+            value: Some(serde_json::json!("2023-01-01T00:00:00.000Z")),
+            values: None,
+            start: None,
+            end: None,
+        }],
+        ..FilterSpec::default()
+    };
+    let rows = matter
+        .list_items_filtered_thin(&gte_000, 100, 0)
+        .expect("gte .000");
+    let ids: Vec<_> = rows.iter().map(|r| r.id.as_str()).collect();
+    assert!(ids.contains(&early_frac.id.as_str()));
+    assert!(ids.contains(&late_frac.id.as_str()));
+
+    // between [.100Z, .600Z): only early_frac (.100 inclusive, .600 exclusive end).
+    let between = FilterSpec {
+        conditions: vec![FilterCondition {
+            field: "sent_at".into(),
+            op: "between".into(),
+            value: None,
+            values: None,
+            start: Some("2023-01-01T00:00:00.100Z".into()),
+            end: Some("2023-01-01T00:00:00.600Z".into()),
+        }],
+        ..FilterSpec::default()
+    };
+    let rows = matter
+        .list_items_filtered_thin(&between, 100, 0)
+        .expect("between subsec");
+    assert_eq!(
+        rows.len(),
+        1,
+        "exclusive end must exclude .600Z; got {:?}",
+        rows
+    );
+    assert_eq!(rows[0].id, early_frac.id);
+
+    // between [.000Z, .100Z): empty (start inclusive would need item < .100).
+    let between_empty = FilterSpec {
+        conditions: vec![FilterCondition {
+            field: "sent_at".into(),
+            op: "between".into(),
+            value: None,
+            values: None,
+            start: Some("2023-01-01T00:00:00.000Z".into()),
+            end: Some("2023-01-01T00:00:00.100Z".into()),
+        }],
+        ..FilterSpec::default()
+    };
+    let rows = matter
+        .list_items_filtered_thin(&between_empty, 100, 0)
+        .expect("between empty end");
+    assert!(
+        rows.is_empty(),
+        "exclusive end at .100Z must exclude item at .100Z; got {:?}",
+        rows
+    );
+}
+
 #[test]
 fn filter_code_any_of_responsive() {
     let (_tmp, _root, matter, set_id) = setup_review_matter("filter-code-any");
