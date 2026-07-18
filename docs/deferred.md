@@ -109,6 +109,17 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0025-03 | — | Interactive saved-search promote | Preset policies only | **0028** |
 | D-0025-04 | P3 | Full GUI smoke for Promote to review click path | Automated handler + unit tests; operator smoke local | operator / polish |
 
+## From track 0026-ReviewListViewer
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0026-01 | P3 | Large corpus (>50k `in_review`) loads first 500 rows only; no page/window nav | Documented threshold; API supports limit/offset; rare for MVP corpora (Codex F-006) | scale polish / **0028** filters |
+| D-0026-02 | P3 | Full GUI smoke for Review list/keyboard/body path | Automated tempfile list+body + unit tests; operator smoke local | operator / polish |
+| D-0026-03 | — | HTML browser engine / image render in body pane | P0: plain text + block-aware strip only | later |
+| D-0026-04 | — | Multi review-set switcher in Review UI | Default set only; schema multi-set exists | D-0025-01 / later |
+| D-0026-05 | — | Persist `last_review_item_id` across app sessions | In-session restore by id after list refresh only | optional polish |
+| D-0025-01 | — | Multiple concurrent review sets | Unchanged; 0026 default set only | later |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

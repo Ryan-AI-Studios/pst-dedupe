@@ -8,11 +8,15 @@
 
 mod app;
 mod dialogs;
+mod html_strip;
 mod matter_ops;
 mod matter_ui;
 mod nav;
 mod params;
 mod progress_ui;
+mod review_body;
+mod review_nav;
+mod review_ui;
 mod settings;
 mod workspace;
 

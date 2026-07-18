@@ -1630,3 +1630,180 @@ fn review_sets_partial_unique_rejects_double_default() {
         "expected unique violation, got {msg}"
     );
 }
+
+#[test]
+fn list_review_thin_respects_in_review_and_order() {
+    use matter_core::{item_role, item_status, PromoteFieldUpdate, DEFAULT_REVIEW_SET_NAME};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-review-list");
+    let matter = Matter::create(&root, "Review List").expect("create");
+    let set = matter
+        .ensure_default_review_set(DEFAULT_REVIEW_SET_NAME)
+        .expect("set");
+
+    let not_review = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            subject: Some("Skip me".into()),
+            path: Some("skip.txt".into()),
+            ..Default::default()
+        })
+        .expect("skip");
+
+    let first = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            subject: Some("Second by order".into()),
+            path: Some("b.txt".into()),
+            text_sha256: None,
+            ..Default::default()
+        })
+        .expect("first insert");
+    let second = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            subject: Some("First by order".into()),
+            path: Some("a.txt".into()),
+            text_sha256: None,
+            ..Default::default()
+        })
+        .expect("second insert");
+
+    // Promote out of insert order: second gets order 1, first gets order 2.
+    let job = matter.create_job("promote").expect("job");
+    matter
+        .apply_promote_batch_with_checkpoint(
+            &job.id,
+            "promote",
+            &[
+                PromoteFieldUpdate {
+                    item_id: second.id.clone(),
+                    in_review: Some(1),
+                    review_set_id: Some(set.id.clone()),
+                    review_order: Some(1),
+                    promoted_at: Some("2020-01-01T00:00:00Z".into()),
+                    promote_job_id: Some(job.id.clone()),
+                    promote_policy: Some("unique_only".into()),
+                },
+                PromoteFieldUpdate {
+                    item_id: first.id.clone(),
+                    in_review: Some(1),
+                    review_set_id: Some(set.id.clone()),
+                    review_order: Some(2),
+                    promoted_at: Some("2020-01-01T00:00:00Z".into()),
+                    promote_job_id: Some(job.id.clone()),
+                    promote_policy: Some("unique_only".into()),
+                },
+            ],
+            r#"{"cursor_index":2}"#,
+            2,
+        )
+        .expect("promote");
+
+    assert_eq!(matter.count_in_review(None).expect("count"), 2);
+    assert_eq!(matter.count_in_review(Some(&set.id)).expect("count set"), 2);
+
+    let rows = matter.list_review_thin(None, 100, 0).expect("list");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, second.id);
+    assert_eq!(rows[0].review_order, Some(1));
+    assert_eq!(rows[0].subject.as_deref(), Some("First by order"));
+    assert_eq!(rows[1].id, first.id);
+    assert_eq!(rows[1].review_order, Some(2));
+    // Missing text_sha256 still lists fine.
+    assert!(rows[0].text_sha256.is_none());
+    assert!(rows[1].text_sha256.is_none());
+    // Non-review item absent.
+    assert!(!rows.iter().any(|r| r.id == not_review.id));
+
+    // Default set id helper.
+    assert_eq!(
+        matter.get_default_review_set_id().expect("id").as_deref(),
+        Some(set.id.as_str())
+    );
+
+    // Paging.
+    let page = matter.list_review_thin(None, 1, 1).expect("page");
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].id, first.id);
+}
+
+#[test]
+fn list_review_thin_family_parent_before_child() {
+    use matter_core::{item_role, item_status, PromoteFieldUpdate, DEFAULT_REVIEW_SET_NAME};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-review-family");
+    let matter = Matter::create(&root, "Review Family").expect("create");
+    let set = matter
+        .ensure_default_review_set(DEFAULT_REVIEW_SET_NAME)
+        .expect("set");
+    let family = matter.insert_family("").expect("family");
+
+    let parent = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::PARENT.into()),
+            family_id: Some(family.id.clone()),
+            subject: Some("Parent mail".into()),
+            path: Some("mail.eml".into()),
+            attachment_count: Some(1),
+            ..Default::default()
+        })
+        .expect("parent");
+    let child = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            family_id: Some(family.id.clone()),
+            parent_item_id: Some(parent.id.clone()),
+            subject: Some("Attach.pdf".into()),
+            path: Some("mail.eml/Attach.pdf".into()),
+            ..Default::default()
+        })
+        .expect("child");
+
+    // Promote with parent before child in review_order (promote contract).
+    let job = matter.create_job("promote").expect("job");
+    matter
+        .apply_promote_batch_with_checkpoint(
+            &job.id,
+            "promote",
+            &[
+                PromoteFieldUpdate {
+                    item_id: parent.id.clone(),
+                    in_review: Some(1),
+                    review_set_id: Some(set.id.clone()),
+                    review_order: Some(1),
+                    promoted_at: Some("2020-01-01T00:00:00Z".into()),
+                    promote_job_id: Some(job.id.clone()),
+                    promote_policy: Some("unique_plus_family".into()),
+                },
+                PromoteFieldUpdate {
+                    item_id: child.id.clone(),
+                    in_review: Some(1),
+                    review_set_id: Some(set.id.clone()),
+                    review_order: Some(2),
+                    promoted_at: Some("2020-01-01T00:00:00Z".into()),
+                    promote_job_id: Some(job.id.clone()),
+                    promote_policy: Some("unique_plus_family".into()),
+                },
+            ],
+            r#"{"cursor_index":2}"#,
+            2,
+        )
+        .expect("promote");
+
+    let rows = matter.list_review_thin(None, 100, 0).expect("list");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, parent.id);
+    assert!(rows[0].parent_item_id.is_none());
+    assert_eq!(rows[0].family_id.as_deref(), Some(family.id.as_str()));
+    assert_eq!(rows[1].id, child.id);
+    assert_eq!(rows[1].parent_item_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(rows[1].family_id.as_deref(), Some(family.id.as_str()));
+}
