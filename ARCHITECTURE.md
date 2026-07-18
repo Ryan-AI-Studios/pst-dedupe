@@ -88,7 +88,7 @@ pst-dedup/                      (Cargo workspace)
 │   │   src/
 │   │   ├── lib.rs              Public API: Matter, CAS, audit, jobs, items, logical_hash
 │   │   ├── matter.rs           Layout create/open + items/family high-level API
-│   │   ├── schema.rs           Versioned SQLite migrations (schema v2)
+│   │   ├── schema.rs           Versioned SQLite migrations (schema v3)
 │   │   ├── logical_hash.rs     Desk logical_hash v1 (length-prefixed; BCC-aware)
 │   │   ├── cas.rs              SHA-256 CAS (put_bytes + streaming put_reader)
 │   │   ├── audit.rs            Append-only audit log + hash chain verify
@@ -118,13 +118,20 @@ pst-dedup/                      (Cargo workspace)
 │   │   ├── limits.rs           ExtractLimits / ExtractSummary
 │   │   └── error.rs            Structured extract codes
 │   │
+│   ├── matter-dedupe/          Matter-level tiered dedupe (0021)
+│   │   src/
+│   │   ├── lib.rs              run_dedupe, DedupeParams, compact keys
+│   │   ├── run.rs              Parent pass + family attach linking
+│   │   ├── keys.rs             Fixed [u8;32] MID / logical_hash map keys
+│   │   └── params.rs / policy  Job JSON + FamilyPolicy
+│   │
 │   └── process-runner/         In-process job runner (0019)
 │       src/
 │       ├── lib.rs              ProcessRunner, CancelToken, watch progress
 │       ├── runner.rs           Single matter worker + Drop join
 │       ├── progress.rs         tokio::sync::watch (+ optional broadcast)
 │       ├── handler.rs          JobHandler trait / JobContext
-│       └── handlers/           IngestHandler, ExtractPstHandler (features)
+│       └── handlers/           Ingest, ExtractPst, MatterDedupe (features)
 ```
 
 ### Dedupe Desk shell (0020)
@@ -149,12 +156,14 @@ logs/                     # optional file logs
 workspace/temp/           # extractor spill; cleaned on Matter open/create
 ```
 
-See `crates/matter-core/README.md` for CAS, audit, Normalized Item (schema v2),
-family graph, and logical_hash v1 contracts. See `crates/extract-pst/README.md`
-for PST extract (blocking thread, native v1, mid-folder resume). See
-`crates/process-runner/README.md` for the single matter-worker runner, watch
-progress, Option C job-id injection, and cancel/Drop join. See
-`crates/dedupe-desk/README.md` for the product shell UI contracts.
+See `crates/matter-core/README.md` for CAS, audit, Normalized Item (schema v3),
+family graph, logical_hash v1, and dedupe result columns. See
+`crates/matter-dedupe/README.md` for tiered MID → logical_hash policy, compact
+keys, family attach linking, and transactional batches. See
+`crates/extract-pst/README.md` for PST extract (blocking thread, native v1,
+mid-folder resume). See `crates/process-runner/README.md` for the single
+matter-worker runner, watch progress, Option C job-id injection, and cancel/Drop
+join. See `crates/dedupe-desk/README.md` for the product shell UI contracts.
 
 ---
 

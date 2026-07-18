@@ -6,9 +6,10 @@ description = "In-process matter job runner: single worker thread, cancel, watch
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["ingest", "extract_pst"]
+default = ["ingest", "extract_pst", "dedupe"]
 ingest = ["dep:ingest-purview"]
 extract_pst = ["dep:extract-pst"]
+dedupe = ["dep:matter-dedupe"]
 
 [dependencies]
 matter-core = { path = "../matter-core" }
@@ -19,6 +20,7 @@ camino = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["sync"] }
 ingest-purview = { path = "../ingest-purview", optional = true }
 extract-pst = { path = "../extract-pst", optional = true }
+matter-dedupe = { path = "../matter-dedupe", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

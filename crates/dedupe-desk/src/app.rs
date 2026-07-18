@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
-use process_runner::{ExtractPstHandler, IngestHandler, JobParams, ProcessRunner, RunnerConfig};
+use process_runner::{
+    ExtractPstHandler, IngestHandler, JobParams, MatterDedupeHandler, ProcessRunner, RunnerConfig,
+};
 use tokio::sync::watch;
 
 use crate::dialogs::{DialogKind, DialogState};
@@ -55,6 +57,7 @@ impl DeskApp {
         let mut runner = ProcessRunner::new(RunnerConfig::default());
         runner.register(Arc::new(IngestHandler::new()));
         runner.register(Arc::new(ExtractPstHandler::new()));
+        runner.register(Arc::new(MatterDedupeHandler::new()));
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 
@@ -246,6 +249,25 @@ impl DeskApp {
             ));
         }
         self.error_msg = Some(format_runner_error(&e));
+    }
+
+    pub(crate) fn start_dedupe(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params = JobParams::new(params::dedupe_default_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "dedupe", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started dedupe job {job_id}"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
     }
 
     pub(crate) fn start_extract_selected(&mut self) {

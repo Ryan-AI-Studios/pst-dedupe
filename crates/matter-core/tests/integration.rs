@@ -376,13 +376,70 @@ fn audit_append_verify_and_detect_broken_chain() {
 }
 
 #[test]
-fn schema_v2_on_create() {
+fn schema_v3_on_create() {
     let (_tmp, base) = utf8_tempdir();
-    let root = base.join("matter-v2");
-    let matter = Matter::create(&root, "V2").expect("create");
-    assert_eq!(SCHEMA_VERSION, 2);
-    assert_eq!(matter.schema_version().expect("ver"), 2);
-    assert_eq!(matter.info().expect("info").schema_version, 2);
+    let root = base.join("matter-v3");
+    let matter = Matter::create(&root, "V3").expect("create");
+    assert_eq!(SCHEMA_VERSION, 3);
+    assert_eq!(matter.schema_version().expect("ver"), 3);
+    assert_eq!(matter.info().expect("info").schema_version, 3);
+}
+
+#[test]
+fn dedupe_batch_and_checkpoint_same_transaction() {
+    use matter_core::{item_dedup_role, item_dedup_tier, item_role, item_status, DedupRoleUpdate};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-dedup-txn");
+    let matter = Matter::create(&root, "Dedup Txn").expect("create");
+    let job = matter.create_job("dedupe").expect("job");
+
+    let a = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::PARENT.into()),
+            file_category: Some("email".into()),
+            path: Some("a".into()),
+            message_id: Some("mid-a@example.com".into()),
+            ..Default::default()
+        })
+        .expect("a");
+
+    let updates = vec![DedupRoleUpdate {
+        item_id: a.id.clone(),
+        dedup_role: Some(item_dedup_role::UNIQUE.into()),
+        duplicate_of_item_id: None,
+        dedup_tier: Some(item_dedup_tier::MESSAGE_ID.into()),
+        dedup_group_id: Some(a.id.clone()),
+        deduped_at: Some("2020-01-01T00:00:00Z".into()),
+        dedup_job_id: Some(job.id.clone()),
+        extra_json: None,
+    }];
+    matter
+        .apply_dedup_batch_with_checkpoint(&job.id, "dedupe", &updates, r#"{"cursor_index":1}"#, 1)
+        .expect("batch");
+
+    let item = matter.get_item(&a.id).expect("get");
+    assert_eq!(item.dedup_role.as_deref(), Some(item_dedup_role::UNIQUE));
+    assert_eq!(
+        item.dedup_tier.as_deref(),
+        Some(item_dedup_tier::MESSAGE_ID)
+    );
+    assert_eq!(item.dedup_job_id.as_deref(), Some(job.id.as_str()));
+
+    let cp = matter
+        .get_checkpoint(&job.id, "dedupe")
+        .expect("cp")
+        .expect("present");
+    assert_eq!(cp.completed_count, 1);
+    assert!(cp.cursor_json.contains("cursor_index"));
+
+    let counts = matter.count_by_dedup_role().expect("counts");
+    assert_eq!(counts.unique, 1);
+
+    let parents = matter.list_email_parents_for_dedupe().expect("parents");
+    assert_eq!(parents.len(), 1);
+    assert_eq!(parents[0].id, a.id);
 }
 
 #[test]
@@ -1016,4 +1073,133 @@ fn list_sources_and_item_counts() {
         reader.list_items_by_file_category("pst").expect("p").len(),
         1
     );
+}
+
+/// `clear_dedupe_fields(include_attachments=true)` must only clear attaches under
+/// eligible email parents — not unrelated parented items (e.g. under standalone).
+#[test]
+fn clear_dedupe_fields_skips_unrelated_attachments() {
+    use matter_core::{
+        item_dedup_role, item_dedup_tier, item_role, item_status, DedupRoleUpdate, Matter,
+    };
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-clear-att");
+    let matter = Matter::create(&root, "ClearAtt").expect("create");
+    let job = matter.create_job("dedupe").expect("job");
+
+    let fam_email = matter.insert_family("").expect("fam_email");
+    let fam_other = matter.insert_family("").expect("fam_other");
+
+    let email_parent = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::PARENT.into()),
+            file_category: Some("email".into()),
+            family_id: Some(fam_email.id.clone()),
+            path: Some("mail/p1".into()),
+            message_id: Some("p1@ex.com".into()),
+            ..Default::default()
+        })
+        .expect("email parent");
+    let email_att = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            file_category: Some("attachment".into()),
+            family_id: Some(fam_email.id.clone()),
+            parent_item_id: Some(email_parent.id.clone()),
+            path: Some("mail/p1/a.pdf".into()),
+            size_bytes: Some(10),
+            ..Default::default()
+        })
+        .expect("email att");
+
+    // Non-email container: standalone + child — not an eligible email parent tree.
+    let other_parent = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            file_category: Some("other".into()),
+            family_id: Some(fam_other.id.clone()),
+            path: Some("bag".into()),
+            ..Default::default()
+        })
+        .expect("other parent");
+    let other_att = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            file_category: Some("attachment".into()),
+            family_id: Some(fam_other.id.clone()),
+            parent_item_id: Some(other_parent.id.clone()),
+            path: Some("bag/x.bin".into()),
+            size_bytes: Some(5),
+            ..Default::default()
+        })
+        .expect("other att");
+
+    let now = "2020-01-01T00:00:00Z";
+    let updates = vec![
+        DedupRoleUpdate {
+            item_id: email_parent.id.clone(),
+            dedup_role: Some(item_dedup_role::UNIQUE.into()),
+            duplicate_of_item_id: None,
+            dedup_tier: Some(item_dedup_tier::MESSAGE_ID.into()),
+            dedup_group_id: Some(email_parent.id.clone()),
+            deduped_at: Some(now.into()),
+            dedup_job_id: Some(job.id.clone()),
+            extra_json: None,
+        },
+        DedupRoleUpdate {
+            item_id: email_att.id.clone(),
+            dedup_role: Some(item_dedup_role::DUPLICATE.into()),
+            duplicate_of_item_id: None,
+            dedup_tier: Some(item_dedup_tier::FAMILY.into()),
+            dedup_group_id: Some(email_parent.id.clone()),
+            deduped_at: Some(now.into()),
+            dedup_job_id: Some(job.id.clone()),
+            extra_json: None,
+        },
+        DedupRoleUpdate {
+            item_id: other_att.id.clone(),
+            dedup_role: Some(item_dedup_role::DUPLICATE.into()),
+            duplicate_of_item_id: None,
+            dedup_tier: Some(item_dedup_tier::FAMILY.into()),
+            dedup_group_id: Some(other_parent.id.clone()),
+            deduped_at: Some(now.into()),
+            dedup_job_id: Some(job.id.clone()),
+            extra_json: None,
+        },
+    ];
+    matter
+        .apply_dedup_batch_with_checkpoint(&job.id, "dedupe", &updates, r#"{"n":1}"#, 1)
+        .expect("seed roles");
+
+    matter
+        .clear_dedupe_fields(true)
+        .expect("clear with attachments");
+
+    let email_parent2 = matter.get_item(&email_parent.id).unwrap();
+    let email_att2 = matter.get_item(&email_att.id).unwrap();
+    let other_att2 = matter.get_item(&other_att.id).unwrap();
+
+    assert!(
+        email_parent2.dedup_role.is_none(),
+        "eligible parent fields cleared"
+    );
+    assert!(
+        email_att2.dedup_role.is_none(),
+        "eligible parent attach fields cleared"
+    );
+    assert_eq!(
+        other_att2.dedup_role.as_deref(),
+        Some(item_dedup_role::DUPLICATE),
+        "unrelated attach must retain dedupe fields"
+    );
+    assert_eq!(
+        other_att2.dedup_tier.as_deref(),
+        Some(item_dedup_tier::FAMILY)
+    );
+    assert_eq!(other_att2.dedup_job_id.as_deref(), Some(job.id.as_str()));
 }

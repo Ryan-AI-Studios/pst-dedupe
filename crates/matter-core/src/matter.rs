@@ -53,6 +53,21 @@ pub mod item_role {
     pub const ATTACHMENT: &str = "attachment";
 }
 
+/// Matter-level dedupe role on items (schema v3 / track 0021).
+pub mod item_dedup_role {
+    pub const UNIQUE: &str = "unique";
+    pub const DUPLICATE: &str = "duplicate";
+    pub const SKIPPED: &str = "skipped";
+}
+
+/// Tier that assigned the dedupe role (schema v3 / track 0021).
+pub mod item_dedup_tier {
+    pub const MESSAGE_ID: &str = "message_id";
+    pub const LOGICAL_HASH: &str = "logical_hash";
+    pub const FAMILY: &str = "family";
+    pub const NONE: &str = "none";
+}
+
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Metadata row for the matter itself.
@@ -87,7 +102,7 @@ pub struct ItemFamily {
     pub created_at: String,
 }
 
-/// Normalized item row (schema v2 P0 fields).
+/// Normalized item row (schema v2 P0 + v3 dedupe fields).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     pub id: String,
@@ -124,6 +139,13 @@ pub struct Item {
     /// Algorithm version used for `logical_hash` (0 = not computed).
     pub logical_hash_version: u32,
     pub extra_json: Option<String>,
+    // --- schema v3 (dedupe) ---
+    pub dedup_role: Option<String>,
+    pub duplicate_of_item_id: Option<String>,
+    pub dedup_tier: Option<String>,
+    pub dedup_group_id: Option<String>,
+    pub deduped_at: Option<String>,
+    pub dedup_job_id: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -163,6 +185,52 @@ pub struct ItemInput {
     pub html_sha256: Option<String>,
     pub logical_hash_version: Option<u32>,
     pub extra_json: Option<String>,
+    // --- schema v3 (dedupe) ---
+    pub dedup_role: Option<String>,
+    pub duplicate_of_item_id: Option<String>,
+    pub dedup_tier: Option<String>,
+    pub dedup_group_id: Option<String>,
+    pub deduped_at: Option<String>,
+    pub dedup_job_id: Option<String>,
+}
+
+/// Thin row for matter-level email parent dedupe (no body text).
+///
+/// Identity columns only — safe for large-matter streaming / paging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DedupeCandidate {
+    pub id: String,
+    pub message_id: Option<String>,
+    pub logical_hash: Option<String>,
+    pub path: Option<String>,
+    pub imported_at: String,
+    pub role: Option<String>,
+    pub file_category: Option<String>,
+    pub status: String,
+    pub dedup_role: Option<String>,
+}
+
+/// Counts of items by `dedup_role` (NULL counted as `null_role`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DedupRoleCounts {
+    pub unique: u64,
+    pub duplicate: u64,
+    pub skipped: u64,
+    pub null_role: u64,
+}
+
+/// One item's dedupe field assignment for transactional batch write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupRoleUpdate {
+    pub item_id: String,
+    pub dedup_role: Option<String>,
+    pub duplicate_of_item_id: Option<String>,
+    pub dedup_tier: Option<String>,
+    pub dedup_group_id: Option<String>,
+    pub deduped_at: Option<String>,
+    pub dedup_job_id: Option<String>,
+    /// When set, replaces `extra_json` for the item (e.g. family_attach_unmatched).
+    pub extra_json: Option<Option<String>>,
 }
 
 /// Partial update for an existing item.
@@ -208,6 +276,13 @@ pub struct ItemUpdate {
     pub html_sha256: Option<Option<String>>,
     pub logical_hash_version: Option<u32>,
     pub extra_json: Option<Option<String>>,
+    // --- schema v3 (dedupe) ---
+    pub dedup_role: Option<Option<String>>,
+    pub duplicate_of_item_id: Option<Option<String>>,
+    pub dedup_tier: Option<Option<String>>,
+    pub dedup_group_id: Option<Option<String>>,
+    pub deduped_at: Option<Option<String>>,
+    pub dedup_job_id: Option<Option<String>>,
 }
 
 /// An open matter: directory layout + SQLite connection + CAS handle.
@@ -651,11 +726,14 @@ impl Matter {
                 role, parent_item_id, mime_type, file_category, custodian, subject, title, \
                 from_addr, to_addrs_json, cc_addrs_json, bcc_addrs_json, author, \
                 sent_at, received_at, attachment_count, text_sha256, html_sha256, \
-                logical_hash_version, extra_json\
+                logical_hash_version, extra_json, \
+                dedup_role, duplicate_of_item_id, dedup_tier, dedup_group_id, \
+                deduped_at, dedup_job_id\
              ) VALUES (\
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, \
-                ?26, ?27, ?28, ?29, ?30, ?31, ?32\
+                ?26, ?27, ?28, ?29, ?30, ?31, ?32, \
+                ?33, ?34, ?35, ?36, ?37, ?38\
              )",
             params![
                 id,
@@ -690,6 +768,12 @@ impl Matter {
                 input.html_sha256,
                 logical_hash_version,
                 input.extra_json,
+                input.dedup_role,
+                input.duplicate_of_item_id,
+                input.dedup_tier,
+                input.dedup_group_id,
+                input.deduped_at,
+                input.dedup_job_id,
             ],
         )?;
 
@@ -738,6 +822,13 @@ impl Matter {
             .logical_hash_version
             .unwrap_or(current.logical_hash_version);
         let extra_json = apply_opt2(update.extra_json, current.extra_json);
+        let dedup_role = apply_opt2(update.dedup_role, current.dedup_role);
+        let duplicate_of_item_id =
+            apply_opt2(update.duplicate_of_item_id, current.duplicate_of_item_id);
+        let dedup_tier = apply_opt2(update.dedup_tier, current.dedup_tier);
+        let dedup_group_id = apply_opt2(update.dedup_group_id, current.dedup_group_id);
+        let deduped_at = apply_opt2(update.deduped_at, current.deduped_at);
+        let dedup_job_id = apply_opt2(update.dedup_job_id, current.dedup_job_id);
 
         let mut family_id = family_id;
         if let Some(ref parent_id) = parent_item_id {
@@ -773,8 +864,10 @@ impl Matter {
                 title = ?17, from_addr = ?18, to_addrs_json = ?19, cc_addrs_json = ?20, \
                 bcc_addrs_json = ?21, author = ?22, sent_at = ?23, received_at = ?24, \
                 attachment_count = ?25, text_sha256 = ?26, html_sha256 = ?27, \
-                logical_hash_version = ?28, extra_json = ?29 \
-             WHERE id = ?30",
+                logical_hash_version = ?28, extra_json = ?29, \
+                dedup_role = ?30, duplicate_of_item_id = ?31, dedup_tier = ?32, \
+                dedup_group_id = ?33, deduped_at = ?34, dedup_job_id = ?35 \
+             WHERE id = ?36",
             params![
                 source_id,
                 family_id,
@@ -805,6 +898,12 @@ impl Matter {
                 html_sha256,
                 logical_hash_version,
                 extra_json,
+                dedup_role,
+                duplicate_of_item_id,
+                dedup_tier,
+                dedup_group_id,
+                deduped_at,
+                dedup_job_id,
                 item_id,
             ],
         )?;
@@ -1037,6 +1136,212 @@ impl Matter {
         }
     }
 
+    // --- Dedupe (schema v3) ---
+
+    /// Eligible email parents for matter-level dedupe, ordered by first-seen wins:
+    /// `imported_at ASC, path ASC, id ASC`.
+    ///
+    /// Thin rows only (no body text). Prefer
+    /// [`Self::list_email_parents_for_dedupe_range`] for large matters.
+    pub fn list_email_parents_for_dedupe(&self) -> Result<Vec<DedupeCandidate>> {
+        self.list_email_parents_for_dedupe_range(0, u64::MAX)
+    }
+
+    /// Paged eligible parents (same order/filter as
+    /// [`Self::list_email_parents_for_dedupe`]).
+    pub fn list_email_parents_for_dedupe_range(
+        &self,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<DedupeCandidate>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, message_id, logical_hash, path, imported_at, role, \
+                    file_category, status, dedup_role \
+             FROM items \
+             WHERE matter_id = ?1 \
+               AND status IN ('extracted', 'partial', 'normalized') \
+               AND ( \
+                     role = 'parent' \
+                     OR (file_category = 'email' AND IFNULL(role, '') != 'attachment') \
+                   ) \
+             ORDER BY imported_at ASC, path ASC, id ASC \
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let limit_i = if limit == u64::MAX {
+            i64::MAX
+        } else {
+            limit as i64
+        };
+        let rows = stmt.query_map(
+            params![self.matter_id, limit_i, offset as i64],
+            map_dedupe_candidate_row,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Count of eligible email parents for dedupe.
+    pub fn count_email_parents_for_dedupe(&self) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM items \
+             WHERE matter_id = ?1 \
+               AND status IN ('extracted', 'partial', 'normalized') \
+               AND ( \
+                     role = 'parent' \
+                     OR (file_category = 'email' AND IFNULL(role, '') != 'attachment') \
+                   )",
+            params![self.matter_id],
+            |row| row.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Aggregate counts by `dedup_role` for this matter.
+    pub fn count_by_dedup_role(&self) -> Result<DedupRoleCounts> {
+        let mut stmt = self.conn.prepare(
+            "SELECT dedup_role, COUNT(*) FROM items WHERE matter_id = ?1 GROUP BY dedup_role",
+        )?;
+        let rows = stmt.query_map(params![self.matter_id], |row| {
+            let role: Option<String> = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((role, count as u64))
+        })?;
+        let mut out = DedupRoleCounts::default();
+        for row in rows {
+            let (role, count) = row?;
+            match role.as_deref() {
+                Some(item_dedup_role::UNIQUE) => out.unique += count,
+                Some(item_dedup_role::DUPLICATE) => out.duplicate += count,
+                Some(item_dedup_role::SKIPPED) => out.skipped += count,
+                _ => out.null_role += count,
+            }
+        }
+        Ok(out)
+    }
+
+    /// Clear dedupe columns for eligible parents (and optionally their direct
+    /// attachments). Single SQLite transaction.
+    ///
+    /// Returns the number of rows updated.
+    pub fn clear_dedupe_fields(&self, include_attachments: bool) -> Result<u64> {
+        let matter_id = self.matter_id.clone();
+        self.with_transaction(|conn| {
+            let n_parents = conn.execute(
+                "UPDATE items SET \
+                    dedup_role = NULL, duplicate_of_item_id = NULL, dedup_tier = NULL, \
+                    dedup_group_id = NULL, deduped_at = NULL, dedup_job_id = NULL \
+                 WHERE matter_id = ?1 \
+                   AND status IN ('extracted', 'partial', 'normalized') \
+                   AND ( \
+                         role = 'parent' \
+                         OR (file_category = 'email' AND IFNULL(role, '') != 'attachment') \
+                       )",
+                params![matter_id],
+            )?;
+            let mut total = n_parents as u64;
+            if include_attachments {
+                // Only clear attaches under eligible email parents — never wipe
+                // dedupe fields on unrelated parented items (non-email trees).
+                let n_att = conn.execute(
+                    "UPDATE items SET \
+                        dedup_role = NULL, duplicate_of_item_id = NULL, dedup_tier = NULL, \
+                        dedup_group_id = NULL, deduped_at = NULL, dedup_job_id = NULL \
+                     WHERE matter_id = ?1 \
+                       AND (role = 'attachment' OR parent_item_id IS NOT NULL) \
+                       AND parent_item_id IN ( \
+                         SELECT id FROM items WHERE matter_id = ?1 \
+                           AND status IN ('extracted', 'partial', 'normalized') \
+                           AND ( \
+                                 role = 'parent' \
+                                 OR (file_category = 'email' AND IFNULL(role, '') != 'attachment') \
+                               ) \
+                       )",
+                    params![matter_id],
+                )?;
+                total += n_att as u64;
+            }
+            Ok(total)
+        })
+    }
+
+    /// Run `f` inside a single `BEGIN IMMEDIATE` … `COMMIT` transaction on the
+    /// matter connection. Rolls back on error.
+    ///
+    /// Use for batch role writes + checkpoint that must commit together (DoD-5).
+    pub fn with_transaction<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        match f(&self.conn) {
+            Ok(v) => {
+                self.conn.execute("COMMIT", [])?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                Err(e)
+            }
+        }
+    }
+
+    /// Apply N dedupe role updates and upsert the job checkpoint in **one**
+    /// SQLite transaction (DoD-5).
+    pub fn apply_dedup_batch_with_checkpoint(
+        &self,
+        job_id: &str,
+        stage: &str,
+        updates: &[DedupRoleUpdate],
+        cursor_json: &str,
+        completed_count: i64,
+    ) -> Result<()> {
+        let now = now_rfc3339();
+        self.with_transaction(|conn| {
+            for u in updates {
+                if let Some(ref extra) = u.extra_json {
+                    conn.execute(
+                        "UPDATE items SET \
+                            dedup_role = ?1, duplicate_of_item_id = ?2, dedup_tier = ?3, \
+                            dedup_group_id = ?4, deduped_at = ?5, dedup_job_id = ?6, \
+                            extra_json = ?7 \
+                         WHERE id = ?8",
+                        params![
+                            u.dedup_role,
+                            u.duplicate_of_item_id,
+                            u.dedup_tier,
+                            u.dedup_group_id,
+                            u.deduped_at,
+                            u.dedup_job_id,
+                            extra,
+                            u.item_id,
+                        ],
+                    )?;
+                } else {
+                    conn.execute(
+                        "UPDATE items SET \
+                            dedup_role = ?1, duplicate_of_item_id = ?2, dedup_tier = ?3, \
+                            dedup_group_id = ?4, deduped_at = ?5, dedup_job_id = ?6 \
+                         WHERE id = ?7",
+                        params![
+                            u.dedup_role,
+                            u.duplicate_of_item_id,
+                            u.dedup_tier,
+                            u.dedup_group_id,
+                            u.deduped_at,
+                            u.dedup_job_id,
+                            u.item_id,
+                        ],
+                    )?;
+                }
+            }
+            jobs::put_checkpoint(conn, job_id, stage, cursor_json, completed_count, &now)?;
+            Ok(())
+        })
+    }
+
     fn recompute_attachment_count(&self, parent_id: &str) -> Result<()> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM items WHERE parent_item_id = ?1",
@@ -1153,7 +1458,9 @@ const ITEM_COLUMNS: &str =
     role, parent_item_id, mime_type, file_category, custodian, subject, title, \
     from_addr, to_addrs_json, cc_addrs_json, bcc_addrs_json, author, \
     sent_at, received_at, attachment_count, text_sha256, html_sha256, \
-    logical_hash_version, extra_json";
+    logical_hash_version, extra_json, \
+    dedup_role, duplicate_of_item_id, dedup_tier, dedup_group_id, \
+    deduped_at, dedup_job_id";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -1193,6 +1500,26 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         html_sha256: row.get(29)?,
         logical_hash_version: row.get::<_, i64>(30)? as u32,
         extra_json: row.get(31)?,
+        dedup_role: row.get(32)?,
+        duplicate_of_item_id: row.get(33)?,
+        dedup_tier: row.get(34)?,
+        dedup_group_id: row.get(35)?,
+        deduped_at: row.get(36)?,
+        dedup_job_id: row.get(37)?,
+    })
+}
+
+fn map_dedupe_candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DedupeCandidate> {
+    Ok(DedupeCandidate {
+        id: row.get(0)?,
+        message_id: row.get(1)?,
+        logical_hash: row.get(2)?,
+        path: row.get(3)?,
+        imported_at: row.get(4)?,
+        role: row.get(5)?,
+        file_category: row.get(6)?,
+        status: row.get(7)?,
+        dedup_role: row.get(8)?,
     })
 }
 

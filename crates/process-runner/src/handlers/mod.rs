@@ -6,8 +6,14 @@ pub mod ingest;
 #[cfg(feature = "extract_pst")]
 pub mod extract_pst;
 
+#[cfg(feature = "dedupe")]
+pub mod dedupe;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
 #[cfg(feature = "extract_pst")]
 pub use extract_pst::ExtractPstHandler;
+
+#[cfg(feature = "dedupe")]
+pub use dedupe::MatterDedupeHandler;

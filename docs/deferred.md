@@ -55,6 +55,18 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0020-02 | — | Drag-drop / system theme / multi-window | Spec optional / not DoD | later |
 | D-0018-04 | — | Process runner / progress UI | Runner 0019; **Desk UI done in 0020** | — |
 
+## From track 0021-MatterDedupeJob
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0021-01 | — | Policy B (logical wins on MID conflict) | P0 is Policy A + `mid_logical_conflicts` | optional later |
+| D-0021-02 | — | Near-duplicate / fuzzy match | Out of scope | **0023** |
+| D-0021-03 | — | Threading (conversation) | Out of scope | **0022** |
+| D-0021-04 | P3 | SQL GROUP BY / page family dup parents (multi-million scale) | Parent pass pages; family pass still lists thin parents then filters dups (Codex/internal P3) | scale polish |
+| D-0021-05 | — | Cross-family attach link by native only when parents unique | Family pass only for duplicate parents | later if needed |
+| D-0021-06 | P3 | Full GUI smoke for Run dedupe click path | Automated handler + unit tests; operator smoke local | operator / polish |
+| D-0017-01 | P3 | Unique index on `items(source_id, path)` | Unchanged; 0021 keys by item id + MID/logical | future polish |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

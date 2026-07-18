@@ -38,6 +38,10 @@ pub struct MatterSnapshot {
     pub jobs: Vec<JobRow>,
     pub item_count: u64,
     pub journal_mode: String,
+    /// Items with `dedup_role = unique` (0 if never run).
+    pub dedup_unique: u64,
+    /// Items with `dedup_role = duplicate`.
+    pub dedup_duplicate: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +121,7 @@ pub fn refresh_snapshot(matter_root: &Utf8Path) -> Result<MatterSnapshot, String
         .collect();
 
     let item_count = matter.count_items().map_err(|e| e.to_string())?;
+    let dedup_counts = matter.count_by_dedup_role().map_err(|e| e.to_string())?;
 
     Ok(MatterSnapshot {
         matter_name: info.name,
@@ -126,6 +131,8 @@ pub fn refresh_snapshot(matter_root: &Utf8Path) -> Result<MatterSnapshot, String
         jobs,
         item_count,
         journal_mode,
+        dedup_unique: dedup_counts.unique,
+        dedup_duplicate: dedup_counts.duplicate,
     })
 }
 
