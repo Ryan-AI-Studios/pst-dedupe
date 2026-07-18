@@ -279,6 +279,7 @@ items/CAS. All writes go through `apply_codes` (single-group rules + audit).
 | Rule | Behavior |
 |---|---|
 | Single-group add | Adding a `cardinality=single` code removes other codes in the same `group_key` on that item first |
+| Conflicting single-group batch | Two or more `cardinality=single` codes with the same `group_key` in one `add_code_ids` are **rejected** (no silent pick) |
 | Multi-group | `hot` + `confidential` both remain |
 | `propagate_family` (default **false**) | Expand each selection to **parent + all direct children** (+ same non-null `family_id`); **not** near-dup or full thread |
 | Audit | `coding.apply` with **complete** sorted `item_ids` of final targets (never hash/sample), plus `add`, `remove`, `propagate_family`, `selected_count`, `target_count` |

@@ -3059,6 +3059,46 @@ impl Matter {
             remove_defs.push(def);
         }
 
+        // Reject conflicting single-group adds in one batch (do not silently
+        // pick one via iteration order). Check before any membership/audit write.
+        {
+            use std::collections::BTreeMap;
+            let mut by_group: BTreeMap<&str, Vec<&CodeDef>> = BTreeMap::new();
+            for def in &add_defs {
+                if def.cardinality == "single" {
+                    let entry = by_group.entry(def.group_key.as_str()).or_default();
+                    if !entry.iter().any(|d| d.id == def.id) {
+                        entry.push(def);
+                    }
+                }
+            }
+            for (group_key, defs) in by_group {
+                if defs.len() >= 2 {
+                    let mut keys: Vec<&str> = defs.iter().map(|d| d.key.as_str()).collect();
+                    keys.sort_unstable();
+                    return Err(Error::Other(format!(
+                        "conflicting single-group codes in one apply for group '{group_key}': {} \
+                         (cardinality=single allows only one code per group)",
+                        keys.join(", ")
+                    )));
+                }
+            }
+        }
+
+        // Stable order for multi-group adds (non-conflicting).
+        add_defs.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.key.cmp(&b.key))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        remove_defs.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.key.cmp(&b.key))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
         // Validate selected items exist in this matter.
         for iid in &input.item_ids {
             let ok: bool = self.conn.query_row(

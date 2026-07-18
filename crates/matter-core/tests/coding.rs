@@ -101,6 +101,74 @@ fn coding_single_group_mutual_exclusion() {
 }
 
 #[test]
+fn coding_rejects_conflicting_single_group_batch_add() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-coding-conflict");
+    let matter = Matter::create(&root, "Coding Conflict").expect("create");
+    let item = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            subject: Some("Doc".into()),
+            ..Default::default()
+        })
+        .expect("item");
+    let by_key = defs_by_key(&matter);
+
+    let audit_before: i64 = matter
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'coding.apply'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("audit count");
+
+    let err = matter
+        .apply_codes(ApplyCodesInput {
+            item_ids: vec![item.id.clone()],
+            add_code_ids: vec![
+                by_key["responsive"].id.clone(),
+                by_key["not_responsive"].id.clone(),
+            ],
+            remove_code_ids: vec![],
+            propagate_family: false,
+            actor: "tester".into(),
+        })
+        .expect_err("must reject conflicting single-group adds");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("conflicting single-group") && msg.contains("responsiveness"),
+        "unexpected error: {msg}"
+    );
+    assert!(
+        msg.contains("not_responsive") && msg.contains("responsive"),
+        "error should list conflicting keys: {msg}"
+    );
+
+    // No membership written.
+    let codes = matter
+        .list_item_codes(std::slice::from_ref(&item.id))
+        .expect("codes");
+    assert!(
+        codes[&item.id].is_empty(),
+        "no membership on conflict reject"
+    );
+
+    // No audit event written.
+    let audit_after: i64 = matter
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'coding.apply'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("audit count after");
+    assert_eq!(audit_before, audit_after, "no coding.apply audit on reject");
+}
+
+#[test]
 fn coding_multi_group_allows_both_issues() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-coding-multi");

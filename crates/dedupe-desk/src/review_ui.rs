@@ -665,6 +665,29 @@ pub fn toggle_selection_set(selected: &mut HashSet<String>, item_id: &str) {
     }
 }
 
+/// Select a code into the batch-selected set for **Add** mode.
+///
+/// When `cardinality` is `single`, removes any other selected batch codes that
+/// share the same `group_key` (last click wins — deterministic UX).
+///
+/// `defs` is the active catalog used to map selected ids → group membership.
+pub fn select_batch_code_for_add(
+    selected: &mut HashSet<String>,
+    code_id: &str,
+    group_key: &str,
+    cardinality: &str,
+    defs: &[CodeDef],
+) {
+    if cardinality == "single" {
+        for def in defs {
+            if def.group_key == group_key && def.id != code_id {
+                selected.remove(&def.id);
+            }
+        }
+    }
+    selected.insert(code_id.to_string());
+}
+
 /// Select a contiguous index range into multi-select by item id (pure helper).
 pub fn select_range_into(
     selected: &mut HashSet<String>,
@@ -1338,9 +1361,31 @@ fn show_coding_panel(
         ui.label(RichText::new("Batch codes:").small());
         for def in &active {
             let mut checked = state.batch_code_ids.contains(&def.id);
-            if ui.checkbox(&mut checked, def.label.as_str()).changed() {
+            let hover = if def.cardinality == "single" {
+                format!(
+                    "{} — single-group '{}': only one batch selection (last click wins)",
+                    def.key, def.group_key
+                )
+            } else {
+                format!("{} ({})", def.key, def.group_key)
+            };
+            if ui
+                .checkbox(&mut checked, def.label.as_str())
+                .on_hover_text(hover)
+                .changed()
+            {
                 if checked {
-                    state.batch_code_ids.insert(def.id.clone());
+                    if state.batch_mode_add {
+                        select_batch_code_for_add(
+                            &mut state.batch_code_ids,
+                            &def.id,
+                            &def.group_key,
+                            &def.cardinality,
+                            &active,
+                        );
+                    } else {
+                        state.batch_code_ids.insert(def.id.clone());
+                    }
                 } else {
                     state.batch_code_ids.remove(&def.id);
                 }
@@ -1827,6 +1872,77 @@ mod tests {
         assert!(should_apply_codes_off_thread(1, true, 50));
         assert!(should_apply_codes_off_thread(51, false, 50));
         assert!(should_apply_codes_off_thread(50, true, 50));
+    }
+
+    #[test]
+    fn select_batch_code_for_add_enforces_single_group() {
+        let defs = vec![
+            CodeDef {
+                id: "c_resp".into(),
+                matter_id: "m".into(),
+                key: "responsive".into(),
+                label: "Responsive".into(),
+                group_key: "responsiveness".into(),
+                cardinality: "single".into(),
+                color: None,
+                sort_order: 0,
+                is_active: 1,
+                created_at: String::new(),
+            },
+            CodeDef {
+                id: "c_not".into(),
+                matter_id: "m".into(),
+                key: "not_responsive".into(),
+                label: "Not Responsive".into(),
+                group_key: "responsiveness".into(),
+                cardinality: "single".into(),
+                color: None,
+                sort_order: 1,
+                is_active: 1,
+                created_at: String::new(),
+            },
+            CodeDef {
+                id: "c_hot".into(),
+                matter_id: "m".into(),
+                key: "hot".into(),
+                label: "Hot".into(),
+                group_key: "issues".into(),
+                cardinality: "multi".into(),
+                color: None,
+                sort_order: 2,
+                is_active: 1,
+                created_at: String::new(),
+            },
+            CodeDef {
+                id: "c_conf".into(),
+                matter_id: "m".into(),
+                key: "confidential".into(),
+                label: "Confidential".into(),
+                group_key: "issues".into(),
+                cardinality: "multi".into(),
+                color: None,
+                sort_order: 3,
+                is_active: 1,
+                created_at: String::new(),
+            },
+        ];
+
+        let mut selected = HashSet::new();
+        select_batch_code_for_add(&mut selected, "c_resp", "responsiveness", "single", &defs);
+        assert!(selected.contains("c_resp"));
+
+        // Last click wins within single group.
+        select_batch_code_for_add(&mut selected, "c_not", "responsiveness", "single", &defs);
+        assert!(!selected.contains("c_resp"));
+        assert!(selected.contains("c_not"));
+
+        // Multi group does not collapse siblings.
+        select_batch_code_for_add(&mut selected, "c_hot", "issues", "multi", &defs);
+        select_batch_code_for_add(&mut selected, "c_conf", "issues", "multi", &defs);
+        assert!(selected.contains("c_not"));
+        assert!(selected.contains("c_hot"));
+        assert!(selected.contains("c_conf"));
+        assert_eq!(selected.len(), 3);
     }
 
     #[test]
