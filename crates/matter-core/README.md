@@ -325,7 +325,7 @@ Module: `matter_core::filter` (`FilterSpec`, `compile_filter`, presets).
 | Field | Op | Meaning |
 |---|---|---|
 | `has_redactions` | `eq` true/false | `items.redaction_count > 0` |
-| `redacted_text_stale` | `eq` true/false | count>0 and artifact missing, or `redacted_source_digest` ≠ `text_sha256` |
+| `redacted_text_stale` | `eq` true/false | count>0 and artifact missing, or source digest ≠ `text_sha256` when set, else ≠ `html_sha256` when text is NULL |
 
 ### Privilege filter fields (0031)
 
@@ -383,8 +383,11 @@ must not contain any redacted `exact_quote` as a contiguous substring.
 | `regenerate_redacted_text` | Resolve → active only → merge → CAS put → set bookkeeping; empty active clears pointer |
 | `invalidate_redacted_artifact` | Explicit NULL of `redacted_*` columns |
 
-**Body digest change:** `update_item` when `text_sha256` changes **NULLs**
-`redacted_text_sha256` / `at` / `source_digest` (defense-in-depth for **0040**).
+**Body digest change:** `update_item` when **`text_sha256` or `html_sha256`**
+changes **NULLs** `redacted_text_sha256` / `at` / `source_digest` (defense-in-depth
+for **0040**). Regenerate prefers full plain-text CAS when `text_sha256` is set
+(truncated Review display cannot poison the produce artifact); HTML-only items
+bookkeep `redacted_source_digest` as `html_sha256` when present.
 
 **Privilege hook:** `reason=privilege` → ensure/upsert claim with
 `status=partial_redaction`, `withhold=1`, `include_on_log=1`.

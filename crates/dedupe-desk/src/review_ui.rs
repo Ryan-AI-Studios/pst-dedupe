@@ -1426,9 +1426,10 @@ impl ReviewState {
         &self,
         item_id: &str,
         text_sha256: Option<&str>,
+        html_sha256: Option<&str>,
     ) -> Option<Vec<ResolvedHighlight>> {
         let body = self.ready_body_for_item(item_id)?;
-        let digest = body_digest_for_item(text_sha256, body);
+        let digest = body_digest_for_item(text_sha256, html_sha256, body);
         Some(resolve_for_paint(&self.item_highlights, body, &digest))
     }
 
@@ -1437,9 +1438,10 @@ impl ReviewState {
         &self,
         item_id: &str,
         text_sha256: Option<&str>,
+        html_sha256: Option<&str>,
     ) -> Option<Vec<ResolvedRedaction>> {
         let body = self.ready_body_for_item(item_id)?;
-        let digest = body_digest_for_item(text_sha256, body);
+        let digest = body_digest_for_item(text_sha256, html_sha256, body);
         Some(resolve_redactions_for_paint(
             &self.item_redactions,
             body,
@@ -1454,6 +1456,7 @@ impl ReviewState {
         matter_root: &Utf8Path,
         item_id: &str,
         text_sha256: Option<&str>,
+        html_sha256: Option<&str>,
     ) {
         if self.item_highlights.is_empty() && self.item_redactions.is_empty() {
             return;
@@ -1461,7 +1464,7 @@ impl ReviewState {
         let Some(body) = self.ready_body_for_item(item_id).map(|s| s.to_string()) else {
             return;
         };
-        let digest = body_digest_for_item(text_sha256, &body);
+        let digest = body_digest_for_item(text_sha256, html_sha256, &body);
         let key = (item_id.to_string(), digest.clone());
         if self.stale_persist_key.as_ref() == Some(&key) {
             return;
@@ -1667,11 +1670,12 @@ impl ReviewState {
                 return;
             }
         };
-        let text_sha = self
+        let (text_sha, html_sha) = self
             .selection
             .and_then(|i| self.rows.get(i))
-            .and_then(|r| r.text_sha256.clone());
-        let digest = body_digest_for_item(text_sha.as_deref(), &body);
+            .map(|r| (r.text_sha256.clone(), r.html_sha256.clone()))
+            .unwrap_or((None, None));
+        let digest = body_digest_for_item(text_sha.as_deref(), html_sha.as_deref(), &body);
         // Reuse only active-after-resolve highlights (not stale offset collisions).
         let resolved = resolve_for_paint(&self.item_highlights, &body, &digest);
 
@@ -1770,11 +1774,12 @@ impl ReviewState {
                 return;
             }
         };
-        let text_sha = self
+        let (text_sha, html_sha) = self
             .selection
             .and_then(|i| self.rows.get(i))
-            .and_then(|r| r.text_sha256.clone());
-        let digest = body_digest_for_item(text_sha.as_deref(), &body);
+            .map(|r| (r.text_sha256.clone(), r.html_sha256.clone()))
+            .unwrap_or((None, None));
+        let digest = body_digest_for_item(text_sha.as_deref(), html_sha.as_deref(), &body);
         let label = if self.redact_label.trim().is_empty() {
             None
         } else {
@@ -3332,14 +3337,25 @@ fn show_viewer(
         show_privilege_panel(ui, state, matter_root, actor, &row.id);
 
         // Align DB stale flags once body is available (cheap; once per item+digest).
-        state.maybe_persist_stale_resolves(matter_root, &row.id, row.text_sha256.as_deref());
+        state.maybe_persist_stale_resolves(
+            matter_root,
+            &row.id,
+            row.text_sha256.as_deref(),
+            row.html_sha256.as_deref(),
+        );
 
         // In-memory re-resolve drives banners / labels / paint (not raw DB alone).
-        let resolved_for_ui =
-            state.resolved_highlights_for_item(&row.id, row.text_sha256.as_deref());
+        let resolved_for_ui = state.resolved_highlights_for_item(
+            &row.id,
+            row.text_sha256.as_deref(),
+            row.html_sha256.as_deref(),
+        );
         let resolved_slice = resolved_for_ui.as_deref();
-        let resolved_red_for_ui =
-            state.resolved_redactions_for_item(&row.id, row.text_sha256.as_deref());
+        let resolved_red_for_ui = state.resolved_redactions_for_item(
+            &row.id,
+            row.text_sha256.as_deref(),
+            row.html_sha256.as_deref(),
+        );
         let resolved_red_slice = resolved_red_for_ui.as_deref();
 
         // Notes / highlights / redactions header counts
