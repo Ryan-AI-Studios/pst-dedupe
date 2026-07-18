@@ -34,8 +34,8 @@ fn schema_v11_on_create() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-v11");
     let matter = Matter::create(&root, "V11").expect("create");
-    assert_eq!(SCHEMA_VERSION, 12);
-    assert_eq!(matter.schema_version().expect("ver"), 12);
+    assert_eq!(SCHEMA_VERSION, 13);
+    assert_eq!(matter.schema_version().expect("ver"), 13);
 
     let (item, _) = insert_text_item(&matter, "hello");
     let note_count: i64 = matter

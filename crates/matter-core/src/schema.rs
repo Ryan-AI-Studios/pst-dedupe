@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -26,6 +26,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (10, MIGRATION_V10),
     (11, MIGRATION_V11),
     (12, MIGRATION_V12),
+    (13, MIGRATION_V13),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -450,6 +451,44 @@ CREATE TABLE privilege_protocol (
 ALTER TABLE items ADD COLUMN privilege_withhold INTEGER NOT NULL DEFAULT 0;
 "#;
 
+/// Schema v13: text redaction regions + redacted produce artifact bookkeeping (track 0032).
+///
+/// Stand-off ranges on Review display text (same coordinate system as highlights).
+/// Separate from `item_highlights` (black vs yellow; produce effect vs work product).
+/// True redacted text is a **new** CAS blob; original `text_sha256` is never rewritten.
+const MIGRATION_V13: &str = r#"
+CREATE TABLE item_redactions (
+    id TEXT PRIMARY KEY NOT NULL,
+    item_id TEXT NOT NULL,
+    matter_id TEXT NOT NULL,
+    start_utf8 INTEGER NOT NULL,
+    end_utf8 INTEGER NOT NULL,
+    exact_quote TEXT NOT NULL,
+    prefix TEXT,
+    suffix TEXT,
+    body_digest TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    label TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT
+);
+
+CREATE INDEX idx_item_redactions_item ON item_redactions(item_id);
+
+CREATE INDEX idx_item_redactions_matter_status
+  ON item_redactions(matter_id, status);
+
+CREATE INDEX idx_item_redactions_matter_reason
+  ON item_redactions(matter_id, reason);
+
+ALTER TABLE items ADD COLUMN redaction_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE items ADD COLUMN redacted_text_sha256 TEXT;
+ALTER TABLE items ADD COLUMN redacted_text_at TEXT;
+ALTER TABLE items ADD COLUMN redacted_source_digest TEXT;
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -546,7 +585,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 12);
+        assert_eq!(v, 13);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v10 FTS bookkeeping columns present
@@ -567,6 +606,23 @@ mod tests {
             )
             .expect("item_notes");
         assert!(has_notes);
+        // v13 redactions
+        let has_redactions: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_redactions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("item_redactions");
+        assert!(has_redactions);
+        let has_redaction_count: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'redaction_count'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_redaction_count, "expected redaction_count on items");
         let has_kw: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('saved_searches') WHERE name = 'keyword'",
@@ -1414,7 +1470,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v7 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 12);
+        assert_eq!(v, 13);
 
         let in_review: Option<i64> = conn
             .query_row(
@@ -1522,7 +1578,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v8 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 12);
+        assert_eq!(v, 13);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1737,7 +1793,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v10 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 12);
+        assert_eq!(v, 13);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1863,9 +1919,9 @@ mod tests {
         )
         .expect("note");
 
-        let v = migrate(&conn).expect("migrate v11 to v12");
+        let v = migrate(&conn).expect("migrate v11 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 12);
+        assert_eq!(v, 13);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1910,9 +1966,128 @@ mod tests {
             .expect("privilege_protocol");
         assert!(has_proto);
 
+        let has_red: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_redactions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("item_redactions");
+        assert!(has_red);
+
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v11'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    /// v12 fixture → migrate to v13 → data intact + redaction tables + bookkeeping.
+    #[test]
+    fn migrate_v12_to_v13_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute_batch(MIGRATION_V3).expect("v3");
+        conn.execute_batch(MIGRATION_V4).expect("v4");
+        conn.execute_batch(MIGRATION_V5).expect("v5");
+        conn.execute_batch(MIGRATION_V6).expect("v6");
+        conn.execute_batch(MIGRATION_V7).expect("v7");
+        conn.execute_batch(MIGRATION_V8).expect("v8");
+        conn.execute_batch(MIGRATION_V9).expect("v9");
+        conn.execute_batch(MIGRATION_V10).expect("v10");
+        conn.execute_batch(MIGRATION_V11).expect("v11");
+        conn.execute_batch(MIGRATION_V12).expect("v12");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (12)", [])
+            .expect("meta v12");
+        assert_eq!(read_schema_version(&conn).expect("read"), 12);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v12', 'V12 Matter', '2020-01-01T00:00:00Z', 12, '/tmp/v12')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, text_sha256, in_review, \
+             fts_text_sha256, note_count, highlight_count, privilege_withhold) \
+             VALUES ('itm_mail', 'mat_v12', NULL, NULL, 'inbox/a.eml', NULL, \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             'mid@example.com', 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'parent', 'email', 1, \
+             'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1, \
+             'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 0, 0, 0)",
+            [],
+        )
+        .expect("item");
+        conn.execute(
+            "INSERT INTO item_privilege (\
+                item_id, matter_id, basis, description, status, withhold, include_on_log, \
+                asserted_at, asserted_by, updated_at, updated_by, extra_json\
+             ) VALUES (\
+                'itm_mail', 'mat_v12', 'attorney_client', 'claim', 'asserted', 1, 1, \
+                '2020-01-01T00:00:02Z', 'alice', '2020-01-01T00:00:02Z', 'alice', NULL)",
+            [],
+        )
+        .expect("privilege");
+
+        let v = migrate(&conn).expect("migrate v12 to v13");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 13);
+
+        let path: Option<String> = conn
+            .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
+                row.get(0)
+            })
+            .expect("path");
+        assert_eq!(path.as_deref(), Some("inbox/a.eml"));
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM item_privilege WHERE item_id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("priv status");
+        assert_eq!(status, "asserted");
+
+        let redaction_count: i64 = conn
+            .query_row(
+                "SELECT redaction_count FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("redaction_count");
+        assert_eq!(redaction_count, 0);
+
+        let redacted_sha: Option<String> = conn
+            .query_row(
+                "SELECT redacted_text_sha256 FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("redacted_text_sha256");
+        assert!(redacted_sha.is_none());
+
+        let has_red: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_redactions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("item_redactions");
+        assert!(has_red);
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v12'",
                 [],
                 |row| row.get(0),
             )

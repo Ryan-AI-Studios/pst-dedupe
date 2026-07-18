@@ -7,7 +7,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v12**) + family graph
+6. **Normalized Item** model (schema **v13**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
@@ -18,8 +18,9 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 14. **FTS bookkeeping** (`fts_*`) + filtered-in-ids for Tantivy compose (0029)
 15. **Notes / highlights** stand-off work-product annotations (0030)
 16. **Privilege** claims + withhold holds + privilege log CSV export (0031)
+17. **Redaction** regions + true redacted text CAS artifact (0032)
 
-Schema version: **12** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, and privilege claims/withhold. SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+Schema version: **13** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, and text redaction. SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
 
 ## Layout
 
@@ -317,7 +318,14 @@ Module: `matter_core::filter` (`FilterSpec`, `compile_filter`, presets).
 | `has_highlights` | `eq` true/false | `items.highlight_count > 0` |
 | `note_text` | `contains` | EXISTS note whose body matches bound `LIKE` (case-folded) |
 
-`FILTER_SPEC_VERSION` remains **1** (backward compatible). Presets: `FilterSpec::preset_has_notes()`, `preset_has_highlights()`, `preset_withheld()`, `preset_privilege_log_incomplete()`.
+`FILTER_SPEC_VERSION` remains **1** (backward compatible). Presets: `FilterSpec::preset_has_notes()`, `preset_has_highlights()`, `preset_has_redactions()`, `preset_redacted_text_stale()`, `preset_withheld()`, `preset_privilege_log_incomplete()`.
+
+### Redaction filter fields (0032)
+
+| Field | Op | Meaning |
+|---|---|---|
+| `has_redactions` | `eq` true/false | `items.redaction_count > 0` |
+| `redacted_text_stale` | `eq` true/false | count>0 and artifact missing, or source digest ≠ `text_sha256` when set, else ≠ `html_sha256` when text is NULL |
 
 ### Privilege filter fields (0031)
 
@@ -326,6 +334,80 @@ Module: `matter_core::filter` (`FilterSpec`, `compile_filter`, presets).
 | `privilege_withhold` | `eq` true/false | Production hold (`items.privilege_withhold` / `item_privilege.withhold`) |
 | `privilege_status` | `any_of` | Status in list (`asserted`, `under_review`, `cleared`, `partial_redaction`) |
 | `privilege_log_ready` | `eq` true | `include_on_log=1` AND `trim(description) != ''`; `eq` false → include_on_log blank description |
+
+## Schema v13 — Text redaction + true redacted CAS (0032)
+
+Stand-off **redaction** regions (black paint in Review) are **separate** from yellow
+`item_highlights`. Original `text_sha256` / native CAS is **never** rewritten.
+Produce-safe output is a **new** CAS blob of redacted UTF-8 text.
+
+### Tables / columns
+
+| Table / column | Purpose |
+|---|---|
+| `item_redactions` | UTF-8 **char** ranges + quote / prefix / suffix / `body_digest` + `reason` / `label` / `status` |
+| `items.redaction_count` | Denormalized region count |
+| `items.redacted_text_sha256` | CAS digest of last successful redacted text (NULL when absent/stale) |
+| `items.redacted_text_at` | RFC3339 timestamp of last regenerate |
+| `items.redacted_source_digest` | Display body digest the artifact was built from |
+
+Indexes: `(item_id)`; `(matter_id, status)`; `(matter_id, reason)`.
+
+### Reasons / status
+
+| Field | Values |
+|---|---|
+| `reason` | `privilege` \| `pii` \| `confidential` \| `other` |
+| `status` | `active` \| `stale` |
+| Produce token | fixed **`[REDACTED]`** (P0 lock; stamp `label` is metadata only) |
+
+### True redact algorithm (**mandatory merge**)
+
+```text
+build_redacted_text(display_body, ranges):
+  1. Collect active [start, end) char intervals
+  2. MERGE (union) overlapping/adjacent intervals  — before any mutation
+  3. Replace each merged span once with [REDACTED]
+```
+
+Unmerged multi-pass replace is **forbidden** (UTF-8 panic / wrong indices). Output
+must not contain any redacted `exact_quote` as a contiguous substring.
+
+### API
+
+| Method | Behavior |
+|---|---|
+| `list_redactions` / `create_redaction` / `delete_redaction` | CRUD; create validates quote==slice; create/delete **NULL** artifact pointer |
+| `resolve_redactions` | In-memory status + optional persist `stale` (whitespace re-resolve like highlights) |
+| `build_redacted_text` / `merge_redaction_intervals` | Pure builders |
+| `regenerate_redacted_text` | Resolve → active only → merge → CAS put → set bookkeeping; empty active clears pointer |
+| `invalidate_redacted_artifact` | Explicit NULL of `redacted_*` columns |
+
+**Body digest change:** `update_item` when **`text_sha256` or `html_sha256`**
+changes **NULLs** `redacted_text_sha256` / `at` / `source_digest` (defense-in-depth
+for **0040**). Regenerate prefers full plain-text CAS when `text_sha256` is set
+(truncated Review display cannot poison the produce artifact); HTML-only items
+bookkeep `redacted_source_digest` as `html_sha256` when present.
+
+**Privilege hook:** `reason=privilege` → ensure/upsert claim with
+`status=partial_redaction`, `withhold=1`, `include_on_log=1`.
+
+Audit: `redaction.create`, `redaction.delete`, `redaction.regenerate`.
+
+### **Production contract for 0040** — normative
+
+```text
+if redaction_count > 0:
+  if redacted_text_sha256 IS NULL:
+    fail closed or force regenerate — do NOT use original text_sha256
+  else:
+    produce path MUST use redacted_text CAS
+  MUST NOT emit original text_sha256 body as the produced text
+if item_is_withheld and no redacted artifact intended:
+  skip/fail natives per 0031
+if withhold=1 AND redacted_text present:
+  0040 may offer "produce redacted text only" (no full native)
+```
 
 ## Schema v12 — Privilege claims + withhold + log export (0031)
 

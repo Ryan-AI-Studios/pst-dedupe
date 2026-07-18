@@ -124,7 +124,7 @@ Flag-only membership (`in_review` / `review_order`); never deletes items or CAS.
 Bidirectional family expand is on by default. Reuses progress / cancel / resume.
 See `crates/matter-promote/README.md`.
 
-### Review screen (0026) + coding (0027) + filters (0028) + notes (0030) + privilege (0031)
+### Review screen (0026) + coding (0027) + filters (0028) + notes (0030) + privilege (0031) + redaction (0032)
 
 Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 
@@ -132,18 +132,20 @@ Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 |---|---|
 | Keyword bar | Keyword box + **Search** / **Clear**; composes FTS hits ∩ metadata filters; status “N keyword hits · M after filters” |
 | Index | **Update index** / **Rebuild index** (`fts_index` job; rebuild uses `reset:true`) |
-| Filter bar | Custodian, codes, date from/to (RFC3339+offset), include family, **Note text contains…**; **Apply** / **Clear**; quick chips Uncoded / Privilege / Responsive / **Has notes** / **Has highlights** / **Withheld** / **Privilege log incomplete** |
+| Filter bar | Custodian, codes, date from/to (RFC3339+offset), include family, **Note text contains…**; **Apply** / **Clear**; quick chips Uncoded / Privilege / Responsive / **Has notes** / **Has highlights** / **Has redactions** / **Redacted text stale** / **Withheld** / **Privilege log incomplete** |
 | Privilege protocol | Collapsible 502(d)/502(e) notes + description_required — **informational only** (Desk does not issue FRE 502 orders) |
 | Saved searches | Dropdown Load / Save (name) / Delete — stores `FilterSpec` JSON + optional `keyword` in `saved_searches` |
 | Corpus list | Thin rows (`list_review_thin`, filtered, or keyword-composed); multi-select ☑; fixed `ROW_HEIGHT` 22.0 |
 | Status | “Showing N of M” + **Load more** when filtered/large count exceeds loaded rows |
-| Header | Subject, From, To/Cc (selection-time fetch), dates, path, mime, size, role chips; **📝 N notes · H highlights** |
+| Header | Subject, From, To/Cc (selection-time fetch), dates, path, mime, size, role chips; **📝 N notes · H highlights · ⬛ R redactions** |
 | Code chips | Current-item codes; click chip to **remove** (no confirm) |
 | Coding panel | Active code buttons toggle current item; batch **Add** / **Remove** mode; family checkbox; Apply |
 | Privilege panel | When Privilege code or claim row present (or **Assert privilege**): basis, status, withhold, include_on_log, description, Save; optional **Draft from note…** (confirm — never auto on export); family split banner |
 | Export | **Export privilege log…** (worker + file dialog) with Review-only checkbox; result shows row / blank-desc / withheld counts |
-| Body | CAS text (`text_sha256` preferred, else `html_sha256` with block-aware strip); yellow paint on active highlights; select text → **Highlight** / **Note on selection** |
+| Body | CAS text (`text_sha256` preferred, else `html_sha256` with block-aware strip); yellow highlights + **black redactions on top**; select text → **Highlight** / **Note on selection**, or **Redact** when Redact mode is on |
+| Redact mode | Toggle + reason ComboBox (`privilege` / `pii` / `confidential` / `other`) + optional stamp label; **Regenerate redacted text** (off-thread) writes true CAS artifact |
 | Notes panel | List newest-first; add document note; edit/delete; stale banner from **in-memory re-resolve** (not raw DB status alone) |
+| Redactions panel | List reason/quote; delete per region; stale banner; “Redacted text outdated — Regenerate” when artifact missing |
 | Family strip | Same-`family_id` members in the loaded list; click to open |
 
 **Work product:** Notes and highlights live in the matter DB only. They are **not**
@@ -171,7 +173,7 @@ must call `item_is_withheld` before production and must not dump cleared
 | Toggle code 1–9 | Digits `1`–`9` map first 9 **active** codes on **current** item |
 
 No wrap at ends. Focus gate: `ctx.memory(\|m\| m.focused().is_none())` (egui 0.34)
-and note-editor / privilege-description focus (previous frame) — note / privilege / filter / keyword `TextEdit` blocks digit coding.
+and note-editor / privilege-description / redact-reason focus (previous frame) — note / privilege / redact / filter / keyword `TextEdit` blocks digit coding.
 
 #### Notes / highlights (0030)
 
@@ -186,7 +188,21 @@ and note-editor / privilege-description focus (previous frame) — note / privil
 | Anchoring | Char indices + quote + digest; whitespace-normalized re-resolve on body drift |
 | Filter | Quick chips **Has notes** / **Has highlights**; **Note text contains…** bound to `FilterDraft.note_text` |
 
-**Residual — dual body widgets (egui 0.34):** Review body uses a painted `Label` (`LayoutJob` highlight backgrounds) **plus** a second multiline `TextEdit` for char-range selection. Unifying paint + selection on one widget is deferred to avoid breaking highlight creation under the current egui version; operators select text in the lower box.
+#### Redaction (0032) — distinct from highlights
+
+| Step | Behavior |
+|---|---|
+| Redact mode | Toggle on → selection creates **redaction** (black), not yellow highlight |
+| Reason | ComboBox: privilege / pii / confidential / other; optional stamp label (metadata only) |
+| Redact | Select in body select box → **Redact**; create **NULLs** redacted artifact pointer |
+| Paint | Black bars **on top of** yellow highlights (`LayoutJob`) |
+| Regenerate | Off-thread: merge active intervals → write CAS with fixed `[REDACTED]` token → set `redacted_text_sha256` |
+| Stale | Missing/outdated artifact while count>0 → “Redacted text outdated — Regenerate”; region re-resolve reuses 0030 whitespace path |
+| Privilege | `reason=privilege` sets claim `partial_redaction` + withhold |
+| Filter | Quick chips **Has redactions** / **Redacted text stale** |
+| Original CAS | Never rewritten — redacted text is a separate produce artifact for **0040** |
+
+**Residual — dual body widgets (egui 0.34):** Review body uses a painted `Label` (`LayoutJob` highlight/redaction backgrounds) **plus** a second multiline `TextEdit` for char-range selection. Unifying paint + selection on one widget is deferred to avoid breaking highlight/redaction creation under the current egui version; operators select text in the lower box.
 
 #### Filters / saved searches (0028)
 

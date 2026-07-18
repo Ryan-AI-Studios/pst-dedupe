@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v12**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v13**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -20,6 +20,7 @@
 //! - **FTS bookkeeping** (`fts_*` columns) + filtered-in-ids for Tantivy compose (0029)
 //! - **Notes / highlights** stand-off work-product annotations (0030)
 //! - **Privilege** claims + withhold holds + privilege log CSV export (0031)
+//! - **Redaction** regions + true redacted text CAS artifact (0032)
 //!
 //! ## Layout
 //!
@@ -53,6 +54,7 @@ pub mod jobs;
 pub mod logical_hash;
 pub mod matter;
 pub mod privilege;
+pub mod redaction;
 pub mod schema;
 pub mod thread_headers;
 
@@ -96,6 +98,11 @@ pub use privilege::{
     privilege_log_format, privilege_status, FamilyPrivilegeConsistency, ItemPrivilege,
     PrivilegeLogExportParams, PrivilegeLogExportResult, PrivilegeProtocol,
     UpsertItemPrivilegeInput, UpsertPrivilegeProtocolInput, PRIVILEGE_LOG_COLUMNS,
+};
+pub use redaction::{
+    build_redacted_text, merge_redaction_intervals, redaction_reason, redaction_status,
+    resolve_redaction_against_body, CreateRedactionInput, ItemRedaction, RedactedTextResult,
+    ResolvedRedaction, REDACTED_TOKEN, REDACTION_CONTEXT_CHARS, REDACTION_QUOTE_MAX_BYTES,
 };
 pub use schema::SCHEMA_VERSION;
 pub use thread_headers::{

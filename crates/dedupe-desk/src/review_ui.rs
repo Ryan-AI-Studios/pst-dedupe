@@ -1,5 +1,5 @@
 //! Review screen: linear corpus list + body viewer + family strip + coding + filters
-//! + notes/highlights (0026/0027/0028/0029/0030).
+//! + notes/highlights + redaction (0026/0027/0028/0029/0030/0032).
 //!
 //! # List virtualization
 //!
@@ -35,6 +35,11 @@
 //!
 //! Claim fields + withhold hold + privilege log export. Panel when Privilege code
 //! or claim row is present (or Assert). Notes never auto-copy into log description.
+//!
+//! # Redaction (0032)
+//!
+//! Stand-off black ranges + true redacted CAS artifact. Separate from yellow
+//! highlights. Redact mode routes selection → redaction; regenerate is off-thread.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -43,15 +48,16 @@ use std::thread;
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense};
 use matter_core::{
-    parse_bound_instant, ApplyCodesInput, ApplyCodesResult, CodeDef, CodeDefInput, FilterCondition,
-    FilterSpec, ItemCodeInfo, ItemHighlight, ItemNote, ItemPrivilege, Matter, ResolvedHighlight,
-    ReviewListRow, SavedSearch, SavedSearchInput, UpsertNoteInput, UpsertPrivilegeProtocolInput,
+    parse_bound_instant, redaction_reason, ApplyCodesInput, ApplyCodesResult, CodeDef,
+    CodeDefInput, FilterCondition, FilterSpec, ItemCodeInfo, ItemHighlight, ItemNote,
+    ItemPrivilege, ItemRedaction, Matter, ResolvedHighlight, ResolvedRedaction, ReviewListRow,
+    SavedSearch, SavedSearchInput, UpsertNoteInput, UpsertPrivilegeProtocolInput,
 };
 
 use crate::review_body::{BodyLoader, BodyPane};
 use crate::review_nav;
 use crate::review_notes::{
-    body_digest_for_item, body_job_for_ui, find_highlight_for_selection, find_resolved,
+    body_digest_for_item, find_highlight_for_selection, find_resolved,
     highlight_input_from_selection, highlight_ui_status, note_upsert_from_draft,
     passage_note_hint_from_quote, resolve_for_paint, selection_from_char_range, stale_count_for_ui,
     BodySelection,
@@ -59,9 +65,16 @@ use crate::review_notes::{
 use crate::review_privilege::{
     assert_privilege_blocking, basis_options, default_privilege_log_path,
     draft_description_from_note, export_privilege_log_blocking, family_split_banner,
-    focus_allows_coding_with_privilege, load_privilege_panel, load_protocol_blocking,
-    log_format_options, normalize_desk_log_format, should_show_privilege_panel, status_options,
-    upsert_privilege_blocking, upsert_protocol_blocking, PrivilegePanelDraft,
+    load_privilege_panel, load_protocol_blocking, log_format_options, normalize_desk_log_format,
+    should_show_privilege_panel, status_options, upsert_privilege_blocking,
+    upsert_protocol_blocking, PrivilegePanelDraft,
+};
+use crate::review_redaction::{
+    body_job_for_ui_with_redactions, find_resolved_redaction, focus_allows_coding_with_redact,
+    redacted_artifact_is_stale, redaction_input_from_selection, redaction_ui_status,
+    refuse_truncated_regenerate, regenerate_status_message, resolve_redactions_for_paint,
+    selection_creates_redaction, stale_redaction_count_for_ui, DEFAULT_REDACTION_REASON,
+    REDACTION_REASON_CHOICES,
 };
 
 /// Fixed list row height (sans item spacing) for `ScrollArea::show_rows`.
@@ -113,6 +126,10 @@ pub struct FilterDraft {
     pub has_notes: bool,
     /// `has_highlights eq true` chip (track 0030).
     pub has_highlights: bool,
+    /// `has_redactions eq true` chip (track 0032).
+    pub has_redactions: bool,
+    /// `redacted_text_stale eq true` chip (track 0032).
+    pub redacted_text_stale: bool,
     /// Withhold hold chip (track 0031).
     pub privilege_withheld: bool,
     /// Privilege log incomplete chip (track 0031).
@@ -178,6 +195,26 @@ impl FilterDraft {
         if self.has_highlights {
             conditions.push(FilterCondition {
                 field: "has_highlights".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        if self.has_redactions {
+            conditions.push(FilterCondition {
+                field: "has_redactions".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        if self.redacted_text_stale {
+            conditions.push(FilterCondition {
+                field: "redacted_text_stale".into(),
                 op: "eq".into(),
                 value: Some(serde_json::Value::Bool(true)),
                 values: None,
@@ -281,6 +318,13 @@ impl FilterDraft {
                 }
                 ("has_highlights", "eq") => {
                     d.has_highlights = c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
+                }
+                ("has_redactions", "eq") => {
+                    d.has_redactions = c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
+                }
+                ("redacted_text_stale", "eq") => {
+                    d.redacted_text_stale =
+                        c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
                 }
                 ("privilege_withhold", "eq") => {
                     d.privilege_withheld =
@@ -391,6 +435,26 @@ pub struct ReviewState {
     item_notes: Vec<ItemNote>,
     /// Highlights for the current selection (stored SQLite rows).
     item_highlights: Vec<ItemHighlight>,
+    /// Redaction regions for the current selection (stored SQLite rows).
+    item_redactions: Vec<ItemRedaction>,
+    /// Bookkeeping from `items` for regenerate / stale banner.
+    item_redaction_count: i64,
+    item_redacted_text_sha256: Option<String>,
+    item_redacted_source_digest: Option<String>,
+    /// When true, selection creates redaction (black) not highlight (yellow).
+    redact_mode: bool,
+    /// Reason for new redactions (ComboBox).
+    redact_reason: String,
+    /// Optional stamp label draft for new redactions.
+    redact_label: String,
+    /// True when redact reason ComboBox / label field had focus last frame.
+    redact_editor_focused: bool,
+    /// Redaction panel status / errors (regenerate etc.).
+    redaction_status: Option<String>,
+    redaction_error: Option<String>,
+    /// Async regenerate in flight.
+    redaction_busy: bool,
+    redaction_rx: Option<Receiver<Result<RedactionMutateResult, String>>>,
     /// `(item_id, display_digest)` for which we already ran
     /// `resolve_highlights(..., persist_stale: true)` this session.
     stale_persist_key: Option<(String, String)>,
@@ -459,6 +523,21 @@ struct NotesMutateResult {
     item_id: String,
     notes: Vec<ItemNote>,
     highlights: Vec<ItemHighlight>,
+    redactions: Vec<ItemRedaction>,
+    redaction_count: i64,
+    redacted_text_sha256: Option<String>,
+    redacted_source_digest: Option<String>,
+    message: String,
+}
+
+/// Result of off-thread redaction regenerate.
+#[derive(Debug)]
+struct RedactionMutateResult {
+    item_id: String,
+    redactions: Vec<ItemRedaction>,
+    redaction_count: i64,
+    redacted_text_sha256: Option<String>,
+    redacted_source_digest: Option<String>,
     message: String,
 }
 
@@ -502,6 +581,18 @@ impl ReviewState {
         self.filter_status = None;
         self.item_notes.clear();
         self.item_highlights.clear();
+        self.item_redactions.clear();
+        self.item_redaction_count = 0;
+        self.item_redacted_text_sha256 = None;
+        self.item_redacted_source_digest = None;
+        self.redact_mode = false;
+        self.redact_reason = DEFAULT_REDACTION_REASON.into();
+        self.redact_label.clear();
+        self.redact_editor_focused = false;
+        self.redaction_status = None;
+        self.redaction_error = None;
+        self.redaction_busy = false;
+        self.redaction_rx = None;
         self.stale_persist_key = None;
         self.note_draft.clear();
         self.pending_highlight_id = None;
@@ -1045,6 +1136,10 @@ impl ReviewState {
     fn clear_notes_for_selection(&mut self) {
         self.item_notes.clear();
         self.item_highlights.clear();
+        self.item_redactions.clear();
+        self.item_redaction_count = 0;
+        self.item_redacted_text_sha256 = None;
+        self.item_redacted_source_digest = None;
         self.stale_persist_key = None;
         self.note_draft.clear();
         self.pending_highlight_id = None;
@@ -1056,6 +1151,8 @@ impl ReviewState {
         self.body_edit_item_id = None;
         self.notes_status = None;
         self.notes_error = None;
+        self.redaction_status = None;
+        self.redaction_error = None;
     }
 
     fn clear_privilege_for_selection(&mut self) {
@@ -1075,10 +1172,9 @@ impl ReviewState {
             self.clear_notes_for_selection();
             return;
         };
-        match load_notes_highlights(matter_root, &item_id) {
-            Ok((notes, highlights)) => {
-                self.item_notes = notes;
-                self.item_highlights = highlights;
+        match load_notes_highlights_redactions(matter_root, &item_id) {
+            Ok(bundle) => {
+                self.apply_annotation_bundle(bundle);
                 // Force re-resolve + optional persist against the current body.
                 self.stale_persist_key = None;
                 self.notes_error = None;
@@ -1086,10 +1182,23 @@ impl ReviewState {
             Err(e) => {
                 self.item_notes.clear();
                 self.item_highlights.clear();
+                self.item_redactions.clear();
+                self.item_redaction_count = 0;
+                self.item_redacted_text_sha256 = None;
+                self.item_redacted_source_digest = None;
                 self.stale_persist_key = None;
                 self.notes_error = Some(e);
             }
         }
+    }
+
+    fn apply_annotation_bundle(&mut self, bundle: AnnotationBundle) {
+        self.item_notes = bundle.notes;
+        self.item_highlights = bundle.highlights;
+        self.item_redactions = bundle.redactions;
+        self.item_redaction_count = bundle.redaction_count;
+        self.item_redacted_text_sha256 = bundle.redacted_text_sha256;
+        self.item_redacted_source_digest = bundle.redacted_source_digest;
     }
 
     fn reload_privilege_for_selection(&mut self, matter_root: &Utf8Path) {
@@ -1317,10 +1426,27 @@ impl ReviewState {
         &self,
         item_id: &str,
         text_sha256: Option<&str>,
+        html_sha256: Option<&str>,
     ) -> Option<Vec<ResolvedHighlight>> {
         let body = self.ready_body_for_item(item_id)?;
-        let digest = body_digest_for_item(text_sha256, body);
+        let digest = body_digest_for_item(text_sha256, html_sha256, body);
         Some(resolve_for_paint(&self.item_highlights, body, &digest))
+    }
+
+    /// In-memory redaction re-resolve against the ready body.
+    fn resolved_redactions_for_item(
+        &self,
+        item_id: &str,
+        text_sha256: Option<&str>,
+        html_sha256: Option<&str>,
+    ) -> Option<Vec<ResolvedRedaction>> {
+        let body = self.ready_body_for_item(item_id)?;
+        let digest = body_digest_for_item(text_sha256, html_sha256, body);
+        Some(resolve_redactions_for_paint(
+            &self.item_redactions,
+            body,
+            &digest,
+        ))
     }
 
     /// Persist `status=stale` in SQLite once per (item, digest) when body is ready.
@@ -1330,34 +1456,34 @@ impl ReviewState {
         matter_root: &Utf8Path,
         item_id: &str,
         text_sha256: Option<&str>,
+        html_sha256: Option<&str>,
     ) {
-        if self.item_highlights.is_empty() {
+        if self.item_highlights.is_empty() && self.item_redactions.is_empty() {
             return;
         }
         let Some(body) = self.ready_body_for_item(item_id).map(|s| s.to_string()) else {
             return;
         };
-        let digest = body_digest_for_item(text_sha256, &body);
+        let digest = body_digest_for_item(text_sha256, html_sha256, &body);
         let key = (item_id.to_string(), digest.clone());
         if self.stale_persist_key.as_ref() == Some(&key) {
             return;
         }
         match Matter::open(matter_root) {
             Ok(matter) => {
-                match matter.resolve_highlights(item_id, &body, &digest, true) {
-                    Ok(_resolved) => {
-                        // Refresh stored rows so status columns match persist.
-                        if let Ok(hls) = matter.list_highlights(item_id) {
-                            self.item_highlights = hls;
-                        }
-                        self.stale_persist_key = Some(key);
-                    }
-                    Err(_) => {
-                        // Non-fatal: banners still use in-memory resolve; avoid
-                        // clobbering an operator-visible notes_error.
-                        self.stale_persist_key = Some(key);
+                if !self.item_highlights.is_empty() {
+                    let _ = matter.resolve_highlights(item_id, &body, &digest, true);
+                    if let Ok(hls) = matter.list_highlights(item_id) {
+                        self.item_highlights = hls;
                     }
                 }
+                if !self.item_redactions.is_empty() {
+                    let _ = matter.resolve_redactions(item_id, &body, &digest, true);
+                    if let Ok(rds) = matter.list_redactions(item_id) {
+                        self.item_redactions = rds;
+                    }
+                }
+                self.stale_persist_key = Some(key);
             }
             Err(_) => {
                 // Matter briefly unreadable — skip; try next frame / reload.
@@ -1376,6 +1502,10 @@ impl ReviewState {
                 if self.current_item_id() == Some(result.item_id.as_str()) {
                     self.item_notes = result.notes;
                     self.item_highlights = result.highlights;
+                    self.item_redactions = result.redactions;
+                    self.item_redaction_count = result.redaction_count;
+                    self.item_redacted_text_sha256 = result.redacted_text_sha256;
+                    self.item_redacted_source_digest = result.redacted_source_digest;
                 } else {
                     self.reload_notes_for_selection(matter_root);
                 }
@@ -1394,6 +1524,43 @@ impl ReviewState {
                 self.notes_busy = false;
                 self.notes_rx = None;
                 self.notes_error = Some("Notes worker ended unexpectedly.".into());
+            }
+        }
+    }
+
+    fn poll_redaction(&mut self, matter_root: &Utf8Path, ctx: &egui::Context) {
+        let Some(rx) = self.redaction_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(result)) => {
+                self.redaction_busy = false;
+                self.redaction_rx = None;
+                if self.current_item_id() == Some(result.item_id.as_str()) {
+                    self.item_redactions = result.redactions;
+                    self.item_redaction_count = result.redaction_count;
+                    self.item_redacted_text_sha256 = result.redacted_text_sha256;
+                    self.item_redacted_source_digest = result.redacted_source_digest;
+                } else {
+                    self.reload_notes_for_selection(matter_root);
+                }
+                self.redaction_status = Some(result.message);
+                self.redaction_error = None;
+                // Privilege may have been hooked — refresh panel.
+                self.reload_privilege_for_selection(matter_root);
+                ctx.request_repaint();
+            }
+            Ok(Err(e)) => {
+                self.redaction_busy = false;
+                self.redaction_rx = None;
+                self.redaction_error = Some(e);
+                self.redaction_status = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.redaction_busy = false;
+                self.redaction_rx = None;
+                self.redaction_error = Some("Redaction worker ended unexpectedly.".into());
             }
         }
     }
@@ -1503,11 +1670,12 @@ impl ReviewState {
                 return;
             }
         };
-        let text_sha = self
+        let (text_sha, html_sha) = self
             .selection
             .and_then(|i| self.rows.get(i))
-            .and_then(|r| r.text_sha256.clone());
-        let digest = body_digest_for_item(text_sha.as_deref(), &body);
+            .map(|r| (r.text_sha256.clone(), r.html_sha256.clone()))
+            .unwrap_or((None, None));
+        let digest = body_digest_for_item(text_sha.as_deref(), html_sha.as_deref(), &body);
         // Reuse only active-after-resolve highlights (not stale offset collisions).
         let resolved = resolve_for_paint(&self.item_highlights, &body, &digest);
 
@@ -1582,7 +1750,156 @@ impl ReviewState {
         });
     }
 
-    /// Run a notes/highlights mutation. Returns `true` only when the write
+    fn create_redaction_from_selection(
+        &mut self,
+        matter_root: &Utf8Path,
+        ctx: &egui::Context,
+        actor: &str,
+    ) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            return;
+        };
+        let Some(sel) = self.body_selection else {
+            self.redaction_error = Some("Select text in the body first.".into());
+            return;
+        };
+        let body = match self.body.pane() {
+            BodyPane::Ready {
+                item_id: bid,
+                text: Ok(t),
+                ..
+            } if bid == &item_id => t.clone(),
+            _ => {
+                self.redaction_error = Some("Body not ready.".into());
+                return;
+            }
+        };
+        let (text_sha, html_sha) = self
+            .selection
+            .and_then(|i| self.rows.get(i))
+            .map(|r| (r.text_sha256.clone(), r.html_sha256.clone()))
+            .unwrap_or((None, None));
+        let digest = body_digest_for_item(text_sha.as_deref(), html_sha.as_deref(), &body);
+        let label = if self.redact_label.trim().is_empty() {
+            None
+        } else {
+            Some(self.redact_label.clone())
+        };
+        let input = match redaction_input_from_selection(
+            &item_id,
+            &body,
+            &digest,
+            sel,
+            &self.redact_reason,
+            label,
+            actor,
+        ) {
+            Ok(i) => i,
+            Err(e) => {
+                self.redaction_error = Some(e);
+                return;
+            }
+        };
+        let is_privilege = input.reason == redaction_reason::PRIVILEGE;
+        let ok = self.run_notes_mutate(matter_root, ctx, item_id, move |matter| {
+            let _r = matter.create_redaction(input)?;
+            Ok("Redaction created (artifact outdated until Regenerate).".into())
+        });
+        if ok {
+            self.redaction_status = Some("Redaction created.".into());
+            self.redaction_error = None;
+            if is_privilege {
+                self.reload_privilege_for_selection(matter_root);
+            }
+        }
+    }
+
+    fn delete_redaction_ui(
+        &mut self,
+        matter_root: &Utf8Path,
+        ctx: &egui::Context,
+        redaction_id: &str,
+        actor: &str,
+    ) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            return;
+        };
+        let redaction_id = redaction_id.to_string();
+        let actor = actor.to_string();
+        self.run_notes_mutate(matter_root, ctx, item_id, move |matter| {
+            matter.delete_redaction(&redaction_id, &actor)?;
+            Ok("Redaction deleted.".into())
+        });
+    }
+
+    fn regenerate_redacted_text_ui(
+        &mut self,
+        matter_root: &Utf8Path,
+        ctx: &egui::Context,
+        actor: &str,
+    ) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            return;
+        };
+        if self.redaction_busy || self.notes_busy {
+            return;
+        }
+        let (body, truncated) = match self.body.pane() {
+            BodyPane::Ready {
+                item_id: bid,
+                text: Ok(t),
+                truncated,
+            } if bid == &item_id => (t.clone(), *truncated),
+            _ => {
+                self.redaction_error = Some("Body not ready for regenerate.".into());
+                return;
+            }
+        };
+        let text_sha256 = self
+            .selection
+            .and_then(|i| self.rows.get(i))
+            .and_then(|r| r.text_sha256.clone());
+        if let Err(msg) = refuse_truncated_regenerate(truncated, text_sha256.as_deref()) {
+            self.redaction_error = Some(msg);
+            return;
+        }
+        let actor = actor.to_string();
+        let root = matter_root.to_owned();
+        let (tx, rx) = mpsc::channel();
+        self.redaction_busy = true;
+        self.redaction_rx = Some(rx);
+        self.redaction_error = None;
+        self.redaction_status = Some("Regenerating redacted text…".into());
+        let ctx = ctx.clone();
+        // Worker: matter-core prefers full text CAS when text_sha256 is set, so a
+        // truncated display pane string is not used as the produce source.
+        thread::spawn(move || {
+            let result = (|| -> Result<RedactionMutateResult, String> {
+                let matter = Matter::open(&root).map_err(|e| e.to_string())?;
+                let res = matter
+                    .regenerate_redacted_text(&item_id, &body, &actor)
+                    .map_err(|e| e.to_string())?;
+                let bundle =
+                    load_notes_highlights_redactions(&root, &item_id).map_err(|e| e.to_string())?;
+                Ok(RedactionMutateResult {
+                    item_id: item_id.clone(),
+                    redactions: bundle.redactions,
+                    redaction_count: bundle.redaction_count,
+                    redacted_text_sha256: res.redacted_text_sha256.clone(),
+                    redacted_source_digest: res.redacted_source_digest.clone(),
+                    message: regenerate_status_message(
+                        res.region_count,
+                        res.stale_count,
+                        res.redacted_text_sha256.as_deref(),
+                    ),
+                })
+            })();
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Run a notes/highlights/redactions mutation. Returns `true` only when the write
     /// succeeded (reload of lists may still surface a secondary error).
     fn run_notes_mutate<F>(
         &mut self,
@@ -1597,15 +1914,14 @@ impl ReviewState {
         if self.notes_busy {
             return false;
         }
-        // Sync path for small single writes (notes/highlights are cheap).
+        // Sync path for small single writes (notes/highlights/redactions are cheap).
         let root = matter_root.to_owned();
         let write_ok = match Matter::open(&root) {
             Ok(matter) => match f(&matter) {
                 Ok(message) => {
-                    match load_notes_highlights(&root, &item_id) {
-                        Ok((notes, highlights)) => {
-                            self.item_notes = notes;
-                            self.item_highlights = highlights;
+                    match load_notes_highlights_redactions(&root, &item_id) {
+                        Ok(bundle) => {
+                            self.apply_annotation_bundle(bundle);
                             self.notes_status = Some(message);
                             self.notes_error = None;
                         }
@@ -1702,7 +2018,10 @@ impl ReviewState {
             if self.selection_detail.is_none() {
                 self.load_selection_detail(matter_root);
             }
-            if self.item_notes.is_empty() && self.item_highlights.is_empty() {
+            if self.item_notes.is_empty()
+                && self.item_highlights.is_empty()
+                && self.item_redactions.is_empty()
+            {
                 self.reload_notes_for_selection(matter_root);
             }
             if self.privilege_draft.item_id.as_deref() != self.current_item_id() {
@@ -2047,14 +2366,33 @@ pub fn apply_codes_blocking(
 }
 
 /// Insert a custom code definition (label → slug key). Returns new definition id.
-fn load_notes_highlights(
+/// Notes + highlights + redactions + item bookkeeping for the Review panel.
+struct AnnotationBundle {
+    notes: Vec<ItemNote>,
+    highlights: Vec<ItemHighlight>,
+    redactions: Vec<ItemRedaction>,
+    redaction_count: i64,
+    redacted_text_sha256: Option<String>,
+    redacted_source_digest: Option<String>,
+}
+
+fn load_notes_highlights_redactions(
     matter_root: &Utf8Path,
     item_id: &str,
-) -> Result<(Vec<ItemNote>, Vec<ItemHighlight>), String> {
+) -> Result<AnnotationBundle, String> {
     let matter = Matter::open(matter_root).map_err(|e| e.to_string())?;
     let notes = matter.list_notes(item_id).map_err(|e| e.to_string())?;
     let highlights = matter.list_highlights(item_id).map_err(|e| e.to_string())?;
-    Ok((notes, highlights))
+    let redactions = matter.list_redactions(item_id).map_err(|e| e.to_string())?;
+    let item = matter.get_item(item_id).map_err(|e| e.to_string())?;
+    Ok(AnnotationBundle {
+        notes,
+        highlights,
+        redactions,
+        redaction_count: item.redaction_count,
+        redacted_text_sha256: item.redacted_text_sha256,
+        redacted_source_digest: item.redacted_source_digest,
+    })
 }
 
 pub fn upsert_code_definition_blocking(
@@ -2161,6 +2499,7 @@ pub fn show(
     state.body.try_take();
     state.poll_coding(matter_root, &ctx);
     state.poll_notes(matter_root, &ctx);
+    state.poll_redaction(matter_root, &ctx);
 
     // Kick body load when we have a selection but body is idle (first paint after reload).
     if state.selection.is_some() && matches!(state.body.pane(), BodyPane::Idle) {
@@ -2255,16 +2594,18 @@ pub fn show(
     }
 
     // Keyboard: only when no widget has focus (egui 0.34: focused()).
-    // Filter / keyword / note / privilege TextEdit steal focus — digit shortcuts must not fire.
+    // Filter / keyword / note / privilege / redact TextEdit steal focus — digit shortcuts must not fire.
     // Focus flags are from the previous frame's TextEdits.
     let no_focus = ctx.memory(|m| m.focused().is_none());
     let note_focus = state.note_editor_focused;
     let priv_focus = state.privilege_editor_focused;
+    let redact_focus = state.redact_editor_focused;
     state.note_editor_focused = false;
     state.privilege_editor_focused = false;
+    state.redact_editor_focused = false;
     state.poll_privilege_export(&ctx);
     if review_nav::focus_allows_shortcuts(no_focus)
-        && focus_allows_coding_with_privilege(no_focus, note_focus, priv_focus)
+        && focus_allows_coding_with_redact(no_focus, note_focus, priv_focus, redact_focus)
     {
         let (want_next, want_prev, want_enter, digit) = ui.input(|i| {
             let next =
@@ -2633,6 +2974,12 @@ fn show_filter_bar(
             if ui.small_button("Has highlights").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_has_highlights());
             }
+            if ui.small_button("Has redactions").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_has_redactions());
+            }
+            if ui.small_button("Redacted text stale").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_redacted_text_stale());
+            }
             if ui.small_button("Withheld").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_withheld());
             }
@@ -2651,6 +2998,20 @@ fn show_filter_bar(
                     RichText::new("active: Has notes")
                         .small()
                         .color(Color32::from_rgb(40, 120, 60)),
+                );
+            }
+            if state.filter_draft.has_redactions {
+                ui.label(
+                    RichText::new("active: Has redactions")
+                        .small()
+                        .color(Color32::from_rgb(40, 120, 60)),
+                );
+            }
+            if state.filter_draft.redacted_text_stale {
+                ui.label(
+                    RichText::new("active: Redacted text stale")
+                        .small()
+                        .color(Color32::from_rgb(180, 100, 20)),
                 );
             }
         });
@@ -2976,22 +3337,40 @@ fn show_viewer(
         show_privilege_panel(ui, state, matter_root, actor, &row.id);
 
         // Align DB stale flags once body is available (cheap; once per item+digest).
-        state.maybe_persist_stale_resolves(matter_root, &row.id, row.text_sha256.as_deref());
+        state.maybe_persist_stale_resolves(
+            matter_root,
+            &row.id,
+            row.text_sha256.as_deref(),
+            row.html_sha256.as_deref(),
+        );
 
         // In-memory re-resolve drives banners / labels / paint (not raw DB alone).
-        let resolved_for_ui =
-            state.resolved_highlights_for_item(&row.id, row.text_sha256.as_deref());
+        let resolved_for_ui = state.resolved_highlights_for_item(
+            &row.id,
+            row.text_sha256.as_deref(),
+            row.html_sha256.as_deref(),
+        );
         let resolved_slice = resolved_for_ui.as_deref();
+        let resolved_red_for_ui = state.resolved_redactions_for_item(
+            &row.id,
+            row.text_sha256.as_deref(),
+            row.html_sha256.as_deref(),
+        );
+        let resolved_red_slice = resolved_red_for_ui.as_deref();
 
-        // Notes / highlights header counts
+        // Notes / highlights / redactions header counts
         let n_notes = state.item_notes.len();
         let n_hl = state.item_highlights.len();
+        let n_rdx = state.item_redactions.len();
         let n_stale = stale_count_for_ui(&state.item_highlights, resolved_slice);
+        let n_rdx_stale = stale_redaction_count_for_ui(&state.item_redactions, resolved_red_slice);
         ui.horizontal_wrapped(|ui| {
             ui.label(
-                RichText::new(format!("📝 {n_notes} notes · {n_hl} highlights"))
-                    .strong()
-                    .small(),
+                RichText::new(format!(
+                    "📝 {n_notes} notes · {n_hl} highlights · ⬛ {n_rdx} redactions"
+                ))
+                .strong()
+                .small(),
             );
             if n_stale > 0 {
                 ui.colored_label(
@@ -2999,7 +3378,25 @@ fn show_viewer(
                     format!("{n_stale} stale highlight(s) — re-resolve failed"),
                 );
             }
+            if n_rdx_stale > 0 {
+                ui.colored_label(
+                    Color32::from_rgb(180, 120, 40),
+                    format!("{n_rdx_stale} stale redaction(s) — re-resolve failed"),
+                );
+            }
         });
+        if redacted_artifact_is_stale(
+            state.item_redaction_count,
+            state.item_redacted_text_sha256.as_deref(),
+            state.item_redacted_source_digest.as_deref(),
+            row.text_sha256.as_deref(),
+            row.html_sha256.as_deref(),
+        ) {
+            ui.colored_label(
+                Color32::from_rgb(180, 80, 40),
+                "Redacted text outdated — Regenerate",
+            );
+        }
         if let Some(st) = state.notes_status.clone() {
             ui.label(
                 RichText::new(st)
@@ -3010,6 +3407,49 @@ fn show_viewer(
         if let Some(err) = state.notes_error.clone() {
             ui.colored_label(Color32::from_rgb(200, 60, 60), err);
         }
+        if let Some(st) = state.redaction_status.clone() {
+            ui.label(
+                RichText::new(st)
+                    .small()
+                    .color(Color32::from_rgb(40, 120, 60)),
+            );
+        }
+        if let Some(err) = state.redaction_error.clone() {
+            ui.colored_label(Color32::from_rgb(200, 60, 60), err);
+        }
+
+        // Redact mode + reason
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut state.redact_mode, "Redact mode")
+                .on_hover_text(
+                    "When on, selection creates a black redaction (not yellow highlight)",
+                );
+            if state.redact_reason.trim().is_empty() {
+                state.redact_reason = DEFAULT_REDACTION_REASON.into();
+            }
+            ui.label("Reason:");
+            let reason_resp = egui::ComboBox::from_id_salt("review_redact_reason")
+                .selected_text(&state.redact_reason)
+                .show_ui(ui, |ui| {
+                    for r in REDACTION_REASON_CHOICES {
+                        ui.selectable_value(&mut state.redact_reason, (*r).to_string(), *r);
+                    }
+                })
+                .response;
+            if reason_resp.has_focus() || reason_resp.gained_focus() {
+                state.redact_editor_focused = true;
+            }
+            ui.label("Label:");
+            let label_resp = ui.add(
+                egui::TextEdit::singleline(&mut state.redact_label)
+                    .id_salt("review_redact_label")
+                    .desired_width(100.0)
+                    .hint_text("optional stamp"),
+            );
+            if label_resp.has_focus() {
+                state.redact_editor_focused = true;
+            }
+        });
 
         ui.separator();
 
@@ -3069,6 +3509,7 @@ fn show_viewer(
                             &row,
                             &text,
                             resolved_for_ui.as_deref().unwrap_or(&[]),
+                            resolved_red_for_ui.as_deref().unwrap_or(&[]),
                         );
                     }
                 }
@@ -3087,11 +3528,17 @@ fn show_viewer(
         // Selection actions
         ui.horizontal(|ui| {
             let has_sel = state.body_selection.map(|s| !s.is_empty()).unwrap_or(false);
-            if ui
-                .add_enabled(
-                    has_sel && !state.notes_busy,
-                    egui::Button::new("Highlight").small(),
-                )
+            let busy = state.notes_busy || state.redaction_busy;
+            if selection_creates_redaction(state.redact_mode) {
+                if ui
+                    .add_enabled(has_sel && !busy, egui::Button::new("Redact").small())
+                    .on_hover_text("Create black stand-off redaction on selection (true redact on Regenerate)")
+                    .clicked()
+                {
+                    state.create_redaction_from_selection(matter_root, ctx, actor);
+                }
+            } else if ui
+                .add_enabled(has_sel && !busy, egui::Button::new("Highlight").small())
                 .on_hover_text("Create yellow stand-off highlight on selection")
                 .clicked()
             {
@@ -3099,7 +3546,7 @@ fn show_viewer(
             }
             if ui
                 .add_enabled(
-                    has_sel && !state.notes_busy,
+                    has_sel && !busy && !state.redact_mode,
                     egui::Button::new("Note on selection").small(),
                 )
                 .on_hover_text(
@@ -3108,6 +3555,16 @@ fn show_viewer(
                 .clicked()
             {
                 state.create_highlight_from_selection(matter_root, ctx, actor, true);
+            }
+            if ui
+                .add_enabled(
+                    state.item_redaction_count > 0 && !busy,
+                    egui::Button::new("Regenerate redacted text").small(),
+                )
+                .on_hover_text("Merge active redactions and write true redacted CAS artifact")
+                .clicked()
+            {
+                state.regenerate_redacted_text_ui(matter_root, ctx, actor);
             }
             if let Some(sel) = state.body_selection {
                 ui.label(
@@ -3132,6 +3589,18 @@ fn show_viewer(
 
         ui.separator();
 
+        // Redactions panel
+        show_redactions_panel(
+            ui,
+            state,
+            matter_root,
+            ctx,
+            actor,
+            resolved_red_for_ui.as_deref(),
+        );
+
+        ui.separator();
+
         // Family / attachment strip
         show_family_strip(ui, state, &row, matter_root, ctx);
     });
@@ -3150,6 +3619,7 @@ fn show_selectable_body(
     row: &ReviewListRow,
     body: &str,
     resolved: &[ResolvedHighlight],
+    resolved_redactions: &[ResolvedRedaction],
 ) {
     // Sync edit buffer when selection/body changes.
     if state.body_edit_item_id.as_deref() != Some(row.id.as_str()) || state.body_edit_buf != body {
@@ -3164,22 +3634,39 @@ fn show_selectable_body(
     }
 
     let wrap_width = ui.available_width();
-    let job = body_job_for_ui(body, resolved, wrap_width);
+    let job = body_job_for_ui_with_redactions(body, resolved, resolved_redactions, wrap_width);
 
-    // Paint highlighted body (read-only layout job).
+    // Paint highlighted / redacted body (read-only layout job).
     // Dual widget residual (egui 0.34): Label paints ranges; TextEdit below captures
-    // selection. Unifying paint+cursor on one widget is deferred — see desk README.
+    // selection. TextEdit uses the same layouter so redacted ranges stay blacked-out
+    // in both views (glyph color == bar color).
     ui.add(egui::Label::new(job).wrap().selectable(true));
 
     // Selection capture via a second pass TextEdit (same text) — frame-less, used for cursor range.
     // Keep buffer in sync; reject mutations so CAS display is never rewritten here.
     let mut buf = state.body_edit_buf.clone();
+    let hint = if state.redact_mode {
+        "Select text here to create a redaction…"
+    } else {
+        "Select text here to create a highlight…"
+    };
+    let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+        let mut job = body_job_for_ui_with_redactions(
+            text.as_str(),
+            resolved,
+            resolved_redactions,
+            wrap_width,
+        );
+        job.wrap.max_width = wrap_width;
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
     let output = egui::TextEdit::multiline(&mut buf)
         .id_salt("review_body_select")
         .font(egui::TextStyle::Monospace)
         .desired_width(ui.available_width())
         .desired_rows(6)
-        .hint_text("Select text here to create a highlight…")
+        .hint_text(hint)
+        .layouter(&mut layouter)
         .show(ui);
     if buf != body {
         // Discard edits — body is CAS-backed work product display only.
@@ -3387,6 +3874,78 @@ fn show_notes_panel(
                 }
             });
         }
+    }
+}
+
+fn show_redactions_panel(
+    ui: &mut egui::Ui,
+    state: &mut ReviewState,
+    matter_root: &Utf8Path,
+    ctx: &egui::Context,
+    actor: &str,
+    resolved: Option<&[ResolvedRedaction]>,
+) {
+    ui.label(RichText::new("Redactions").strong().small());
+    ui.label(
+        RichText::new(
+            "Black paint in Review; produce uses true redacted CAS ([REDACTED] token). \
+             Separate from yellow highlights.",
+        )
+        .weak()
+        .small(),
+    );
+
+    let n_stale = stale_redaction_count_for_ui(&state.item_redactions, resolved);
+    if n_stale > 0 {
+        ui.colored_label(
+            Color32::from_rgb(180, 120, 40),
+            format!("⚠ {n_stale} redaction(s) are stale (body changed; quote not re-found)."),
+        );
+    }
+
+    if state.item_redactions.is_empty() {
+        ui.label(RichText::new("(no redactions)").weak().small());
+        return;
+    }
+
+    let rds: Vec<ItemRedaction> = state.item_redactions.clone();
+    for red in rds {
+        ui.horizontal_wrapped(|ui| {
+            let res = resolved.and_then(|r| find_resolved_redaction(r, &red.id));
+            let status_raw = redaction_ui_status(&red, res);
+            let status = if status_raw == "stale" {
+                "⚠ stale"
+            } else {
+                "active"
+            };
+            let (start, end) = res
+                .map(|r| (r.start_utf8, r.end_utf8))
+                .unwrap_or((red.start_utf8, red.end_utf8));
+            let label = red
+                .label
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| format!(" [{s}]"))
+                .unwrap_or_default();
+            ui.label(
+                RichText::new(format!(
+                    "⬛ [{status}] {}{label} chars {start}..{end} “{}”",
+                    red.reason,
+                    red.exact_quote.chars().take(40).collect::<String>()
+                ))
+                .small()
+                .monospace(),
+            );
+            if ui
+                .add_enabled(
+                    !state.notes_busy && !state.redaction_busy,
+                    egui::Button::new("Delete").small(),
+                )
+                .clicked()
+            {
+                state.delete_redaction_ui(matter_root, ctx, &red.id, actor);
+            }
+        });
     }
 }
 

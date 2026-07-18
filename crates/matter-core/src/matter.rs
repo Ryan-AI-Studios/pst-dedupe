@@ -211,6 +211,14 @@ pub struct Item {
     pub promoted_at: Option<String>,
     pub promote_job_id: Option<String>,
     pub promote_policy: Option<String>,
+    // --- schema v13 (redaction) ---
+    /// Denormalized count of `item_redactions` rows for this item.
+    pub redaction_count: i64,
+    /// CAS digest of last successful redacted text artifact (NULL when stale/absent).
+    pub redacted_text_sha256: Option<String>,
+    pub redacted_text_at: Option<String>,
+    /// Display body digest the redacted artifact was built from.
+    pub redacted_source_digest: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -1404,6 +1412,20 @@ impl Matter {
         let sent_at = apply_opt2(update.sent_at, current.sent_at);
         let received_at = apply_opt2(update.received_at, current.received_at);
         let attachment_count = apply_opt2(update.attachment_count, current.attachment_count);
+        // Defense-in-depth: body digest change severs redacted produce pointer (0032).
+        // Compare before move of current digests into apply_opt2. Plain text **or**
+        // HTML body change invalidates the redacted artifact (Review may display
+        // either CAS).
+        let text_sha256_changed = match &update.text_sha256 {
+            Some(new) => new.as_ref() != current.text_sha256.as_ref(),
+            None => false,
+        };
+        let html_sha256_changed = match &update.html_sha256 {
+            Some(new) => new.as_ref() != current.html_sha256.as_ref(),
+            None => false,
+        };
+        let body_digest_changed = text_sha256_changed || html_sha256_changed;
+
         let text_sha256 = apply_opt2(update.text_sha256, current.text_sha256);
         let html_sha256 = apply_opt2(update.html_sha256, current.html_sha256);
         let logical_hash_version = update
@@ -1500,8 +1522,11 @@ impl Matter {
                 cull_status = ?52, cull_reasons_json = ?53, cull_preset_id = ?54, \
                 cull_preset_name = ?55, culled_at = ?56, cull_job_id = ?57, \
                 in_review = ?58, review_set_id = ?59, review_order = ?60, \
-                promoted_at = ?61, promote_job_id = ?62, promote_policy = ?63 \
-             WHERE id = ?64",
+                promoted_at = ?61, promote_job_id = ?62, promote_policy = ?63, \
+                redacted_text_sha256 = CASE WHEN ?64 THEN NULL ELSE redacted_text_sha256 END, \
+                redacted_text_at = CASE WHEN ?64 THEN NULL ELSE redacted_text_at END, \
+                redacted_source_digest = CASE WHEN ?64 THEN NULL ELSE redacted_source_digest END \
+             WHERE id = ?65",
             params![
                 source_id,
                 family_id,
@@ -1566,6 +1591,7 @@ impl Matter {
                 promoted_at,
                 promote_job_id,
                 promote_policy,
+                body_digest_changed,
                 item_id,
             ],
         )?;
@@ -4592,7 +4618,8 @@ const ITEM_COLUMNS: &str =
     near_dup_method, near_duped_at, near_dup_job_id, \
     cull_status, cull_reasons_json, cull_preset_id, cull_preset_name, \
     culled_at, cull_job_id, \
-    in_review, review_set_id, review_order, promoted_at, promote_job_id, promote_policy";
+    in_review, review_set_id, review_order, promoted_at, promote_job_id, promote_policy, \
+    redaction_count, redacted_text_sha256, redacted_text_at, redacted_source_digest";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -4666,6 +4693,10 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         promoted_at: row.get(63)?,
         promote_job_id: row.get(64)?,
         promote_policy: row.get(65)?,
+        redaction_count: row.get(66)?,
+        redacted_text_sha256: row.get(67)?,
+        redacted_text_at: row.get(68)?,
+        redacted_source_digest: row.get(69)?,
     })
 }
 

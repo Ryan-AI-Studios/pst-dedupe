@@ -71,13 +71,22 @@ pub fn highlight_input_from_selection(
     })
 }
 
-/// Prefer item `text_sha256` as body digest when present; else synthetic of display text.
-pub fn body_digest_for_item(text_sha256: Option<&str>, display_body: &str) -> String {
-    text_sha256
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| display_body_digest(display_body))
+/// Prefer item `text_sha256`, then `html_sha256`, else synthetic digest of display text.
+///
+/// Aligns with redaction regenerate bookkeeping: when plain text CAS is absent,
+/// `redacted_source_digest` is stored as `html_sha256` (track 0032).
+pub fn body_digest_for_item(
+    text_sha256: Option<&str>,
+    html_sha256: Option<&str>,
+    display_body: &str,
+) -> String {
+    if let Some(t) = text_sha256.map(str::trim).filter(|s| !s.is_empty()) {
+        return t.to_string();
+    }
+    if let Some(h) = html_sha256.map(str::trim).filter(|s| !s.is_empty()) {
+        return h.to_string();
+    }
+    display_body_digest(display_body)
 }
 
 /// Build a monospace [`LayoutJob`] with yellow backgrounds on active resolved ranges.
@@ -357,8 +366,15 @@ mod tests {
 
     #[test]
     fn body_digest_prefers_text_sha() {
-        assert_eq!(body_digest_for_item(Some("abc"), "hello"), "abc");
-        let syn = body_digest_for_item(None, "hello");
+        assert_eq!(
+            body_digest_for_item(Some("abc"), Some("html"), "hello"),
+            "abc"
+        );
+        assert_eq!(
+            body_digest_for_item(None, Some("htmlsha"), "hello"),
+            "htmlsha"
+        );
+        let syn = body_digest_for_item(None, None, "hello");
         assert_eq!(syn, display_body_digest("hello"));
     }
 
