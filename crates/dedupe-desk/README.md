@@ -59,8 +59,9 @@ matter-core configures `PRAGMA journal_mode=WAL`. The Counts panel shows the liv
 5. Watch ingest progress; optionally **Cancel** then **Resume**
 6. Select a discovered PST → **Extract selected** (or Extract all)
 7. **Run dedupe** — tiered Message-ID → logical_hash → family attach policy
-8. Confirm jobs table + Counts (unique/duplicate) update; journal_mode shows `wal`
-9. Close the app (worker joins; window may wait briefly if a job is finishing)
+8. **Run threading** — Message-ID graph → subject → ConversationIndex → family inherit
+9. Confirm jobs table + Counts (unique/duplicate) update; journal_mode shows `wal`
+10. Close the app (worker joins; window may wait briefly if a job is finishing)
 
 ### Run dedupe
 
@@ -68,6 +69,14 @@ Workspace **Run dedupe** starts `kind=dedupe` with default params
 (`use_message_id` / `use_logical_hash` / `suppress_children_with_parent` /
 `reset` / `batch_size=500`). Uses the same progress / cancel / resume path as
 ingest and extract. Identity is desk MID + `logical_hash` — not CLI content-hash.
+
+### Run threading
+
+Workspace **Run threading** starts `kind=thread` with default params
+(`use_headers` / `use_subject_fallback` / `use_conversation_index` / `reset` /
+`batch_size=500` / `family_inherit`). Reuses progress / cancel / resume.
+Matters extracted before 0022 need **re-extract** to populate reply headers
+(re-extract refreshes the four header columns on existing message paths).
 
 ## Tests
 

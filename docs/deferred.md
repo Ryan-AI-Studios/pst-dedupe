@@ -61,11 +61,22 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 |---|---|---|---|---|
 | D-0021-01 | — | Policy B (logical wins on MID conflict) | P0 is Policy A + `mid_logical_conflicts` | optional later |
 | D-0021-02 | — | Near-duplicate / fuzzy match | Out of scope | **0023** |
-| D-0021-03 | — | Threading (conversation) | Out of scope | **0022** |
+| D-0021-03 | — | Threading (conversation) | **Done in 0022** (`matter-thread`) | — |
 | D-0021-04 | P3 | SQL GROUP BY / page family dup parents (multi-million scale) | Parent pass pages; family pass still lists thin parents then filters dups (Codex/internal P3) | scale polish |
 | D-0021-05 | — | Cross-family attach link by native only when parents unique | Family pass only for duplicate parents | later if needed |
 | D-0021-06 | P3 | Full GUI smoke for Run dedupe click path | Automated handler + unit tests; operator smoke local | operator / polish |
 | D-0017-01 | P3 | Unique index on `items(source_id, path)` | Unchanged; 0021 keys by item id + MID/logical | future polish |
+
+## From track 0022-EmailThreading
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0022-01 | — | Full JWZ container/message dual objects as review items | Item-centric model only; not needed for P0 | later / **0056** |
+| D-0022-02 | — | Richer Outlook ConversationIndex tree (parse blocks) | Opaque 22-byte / 44-hex prefix only | later / **0056** |
+| D-0022-03 | P3 | Full GUI smoke for Run threading click path | Automated handler + unit tests; operator smoke local | operator / polish |
+| D-0022-04 | — | Optional thread-count badge after job complete | Spec optional; not DoD | later polish |
+| D-0022-05 | P3 | Re-extract still skips body/attachment re-CAS on existing paths | Headers-only refresh by design (0022); full retry-with-update deferred | future extract polish |
+| D-0017-01 | P3 | Unique index on `items(source_id, path)` | Unchanged | future polish |
 
 ## Hygiene
 

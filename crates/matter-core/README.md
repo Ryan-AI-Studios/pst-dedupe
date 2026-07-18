@@ -7,11 +7,12 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v3**) + family graph
+6. **Normalized Item** model (schema **v4**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
+9. Email **threading** header storage + result columns + batch helpers (0022)
 
-Schema version: **3** (`SCHEMA_VERSION`).
+Schema version: **4** (`SCHEMA_VERSION`).
 
 ## Layout
 
@@ -115,6 +116,39 @@ Nullable columns on `items` (does **not** overload `status`):
 | `apply_dedup_batch_with_checkpoint` | **N role updates + checkpoint in one commit** (DoD-5) |
 
 Engine: `crates/matter-dedupe`. Never delete items/blobs; never use CLI content-hash as suppress key.
+
+## Schema v4 — Email threading (0022)
+
+Nullable columns on `items` (does **not** overload `status` or `dedup_*`):
+
+| Field | Kind | Notes |
+|---|---|---|
+| `in_reply_to` | **Header storage** | Normalized In-Reply-To Message-ID (single; empty → NULL) |
+| `references_json` | **Header storage** | JSON array of normalized Message-IDs from References (order preserved) |
+| `conversation_topic` | **Header storage** | Optional Outlook/topic string as extracted |
+| `conversation_index_hex` | **Header storage** | Canonical lowercase hex (MAPI bytes or Base64 Thread-Index) |
+| `thread_id` | **Result** | Stable conversation group id |
+| `thread_root_item_id` | **Result** | Earliest stable-order member chosen as root |
+| `thread_method` | **Result** | `headers` \| `subject` \| `conversation_index` \| `singleton` \| `none` — constants in `item_thread_method` |
+| `threaded_at` | **Result** | RFC3339 when last assigned |
+| `thread_job_id` | **Result** | Last job that wrote the result |
+
+**Indexes (v4):** `idx_items_thread_id`, `idx_items_in_reply_to`.
+
+Header storage is written by extractors (`extract-pst`) and is **not** cleared by the thread job. Result columns are assigned by `matter-thread` and are what `clear_thread_fields` resets.
+
+### Thread helpers
+
+| API | Purpose |
+|---|---|
+| `list_email_parents_for_thread` / `_range` | Thin ordered candidates (`ThreadCandidate` — no body text) |
+| `count_email_parents_for_thread` | Eligible parent count |
+| `clear_thread_fields(include_attachments)` | Reset **result** columns only (`thread_id`, `thread_root_item_id`, `thread_method`, `threaded_at`, `thread_job_id`); leaves header storage intact |
+| `apply_thread_batch_with_checkpoint` | **N result updates + checkpoint in one commit** (same DoD-5 pattern as dedupe) |
+
+Header parse helpers live in `thread_headers` (re-exported from the crate root): `parse_in_reply_to`, `parse_references_header`, `references_to_json` / `parse_references_json`, `normalize_conversation_index_to_hex`, `unfold_header_value`.
+
+Engine: `crates/matter-thread`. Never delete items/blobs; never mutate source PST.
 
 ### Address storage (JSON decision)
 

@@ -376,13 +376,13 @@ fn audit_append_verify_and_detect_broken_chain() {
 }
 
 #[test]
-fn schema_v3_on_create() {
+fn schema_v4_on_create() {
     let (_tmp, base) = utf8_tempdir();
-    let root = base.join("matter-v3");
-    let matter = Matter::create(&root, "V3").expect("create");
-    assert_eq!(SCHEMA_VERSION, 3);
-    assert_eq!(matter.schema_version().expect("ver"), 3);
-    assert_eq!(matter.info().expect("info").schema_version, 3);
+    let root = base.join("matter-v4");
+    let matter = Matter::create(&root, "V4").expect("create");
+    assert_eq!(SCHEMA_VERSION, 4);
+    assert_eq!(matter.schema_version().expect("ver"), 4);
+    assert_eq!(matter.info().expect("info").schema_version, 4);
 }
 
 #[test]
@@ -1202,4 +1202,67 @@ fn clear_dedupe_fields_skips_unrelated_attachments() {
         Some(item_dedup_tier::FAMILY)
     );
     assert_eq!(other_att2.dedup_job_id.as_deref(), Some(job.id.as_str()));
+}
+
+#[test]
+fn thread_batch_and_checkpoint_same_transaction() {
+    use matter_core::{item_role, item_status, item_thread_method, ThreadFieldUpdate};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-thread-txn");
+    let matter = Matter::create(&root, "Thread Txn").expect("create");
+    let job = matter.create_job("thread").expect("job");
+
+    let a = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::PARENT.into()),
+            file_category: Some("email".into()),
+            path: Some("a".into()),
+            message_id: Some("a@ex.com".into()),
+            in_reply_to: Some("b@ex.com".into()),
+            references_json: Some(r#"["b@ex.com"]"#.into()),
+            ..Default::default()
+        })
+        .expect("a");
+
+    let updates = vec![ThreadFieldUpdate {
+        item_id: a.id.clone(),
+        thread_id: Some("tid-1".into()),
+        thread_root_item_id: Some(a.id.clone()),
+        thread_method: Some(item_thread_method::HEADERS.into()),
+        threaded_at: Some("2020-01-01T00:00:00Z".into()),
+        thread_job_id: Some(job.id.clone()),
+    }];
+    matter
+        .apply_thread_batch_with_checkpoint(&job.id, "thread", &updates, r#"{"cursor_index":1}"#, 1)
+        .expect("batch");
+
+    let item = matter.get_item(&a.id).expect("get");
+    assert_eq!(item.thread_id.as_deref(), Some("tid-1"));
+    assert_eq!(
+        item.thread_method.as_deref(),
+        Some(item_thread_method::HEADERS)
+    );
+    assert_eq!(item.in_reply_to.as_deref(), Some("b@ex.com"));
+
+    let cp = matter
+        .get_checkpoint(&job.id, "thread")
+        .expect("cp")
+        .expect("present");
+    assert_eq!(cp.completed_count, 1);
+
+    let parents = matter.list_email_parents_for_thread().expect("parents");
+    assert_eq!(parents.len(), 1);
+    assert_eq!(parents[0].id, a.id);
+    assert_eq!(parents[0].in_reply_to.as_deref(), Some("b@ex.com"));
+
+    matter.clear_thread_fields(false).expect("clear");
+    let cleared = matter.get_item(&a.id).expect("get");
+    assert!(cleared.thread_id.is_none());
+    assert_eq!(
+        cleared.in_reply_to.as_deref(),
+        Some("b@ex.com"),
+        "header storage must not be cleared"
+    );
 }

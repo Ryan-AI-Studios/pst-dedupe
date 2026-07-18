@@ -18,7 +18,7 @@ use crate::handler::{JobContext, JobHandler, JobOutcome, JobParams};
 use crate::progress::{now_rfc3339_approx, JobProgressSnapshot, ProgressEvent, ProgressSink};
 
 /// Stages the runner polls for mid-run `completed_count` (DoD-4).
-const PROGRESS_STAGES: &[&str] = &["expand", "pst_extract", "dedupe"];
+const PROGRESS_STAGES: &[&str] = &["expand", "pst_extract", "dedupe", "thread"];
 
 /// Clone an error for channel delivery (Matter errors become `Other` text).
 fn clone_for_reply(err: &RunnerError) -> RunnerError {
@@ -686,7 +686,7 @@ fn load_resume_params(matter: &Matter, job: &Job) -> String {
     // Restore full frozen params from checkpoint when present (dedupe stores
     // use_message_id / family_policy / batch_size under cursor.params). Fall
     // back to source_id-only for expand/extract cursors.
-    let stages = ["expand", "pst_extract", "dedupe"];
+    let stages = ["expand", "pst_extract", "dedupe", "thread"];
     for stage in stages {
         if let Ok(Some(cp)) = matter.get_checkpoint(&job.id, stage) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cp.cursor_json) {
@@ -695,8 +695,12 @@ fn load_resume_params(matter: &Matter, job: &Job) -> String {
                         return params.to_string();
                     }
                 }
-                // Top-level looks like dedupe params (legacy / flat cursor).
-                if v.get("use_message_id").is_some() || v.get("family_policy").is_some() {
+                // Top-level looks like dedupe / thread params (legacy / flat cursor).
+                if v.get("use_message_id").is_some()
+                    || v.get("family_policy").is_some()
+                    || v.get("use_headers").is_some()
+                    || v.get("use_subject_fallback").is_some()
+                {
                     return v.to_string();
                 }
                 if let Some(sid) = v.get("source_id").and_then(|x| x.as_str()) {

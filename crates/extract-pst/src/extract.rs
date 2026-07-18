@@ -1,11 +1,13 @@
 //! Blocking PST extract → Normalized Items.
 
 use matter_core::{
-    compute_email_logical_hash, item_role, item_status, normalize_body, normalize_message_id,
-    AuditEventInput, EmailLogicalInput, Item, ItemErrorInput, ItemInput, ItemUpdate, JobState,
-    LogicalAttachment, Matter, FAMILY_KIND_EMAIL_ATTACHMENTS, LOGICAL_HASH_VERSION,
+    compute_email_logical_hash, item_role, item_status, normalize_body,
+    normalize_conversation_index_to_hex, normalize_message_id, parse_in_reply_to,
+    parse_references_header, references_to_json, AuditEventInput, ConversationIndexInput,
+    EmailLogicalInput, Item, ItemErrorInput, ItemInput, ItemUpdate, JobState, LogicalAttachment,
+    Matter, FAMILY_KIND_EMAIL_ATTACHMENTS, LOGICAL_HASH_VERSION,
 };
-use pst_reader::{filetime_to_rfc3339, NodeId};
+use pst_reader::{filetime_to_rfc3339, ExtractedMessage, NodeId};
 use serde_json::json;
 
 use crate::checkpoint::{nid_hex, ExtractCursor};
@@ -474,10 +476,14 @@ fn run_extract(
 
             // Never double-insert the same message path on re-extract / resume.
             // Message paths contain "!/"; inventory PST rows do not.
-            // Skip if any prior row exists for (source_id, path): extracted,
-            // partial (with or without hash), error, or other. Retry-with-update
-            // is deferred — insert_item has no unique path key yet.
-            if matter.item_by_source_path(source_id, &msg_path)?.is_some() {
+            // If a prior row exists for (source_id, path): refresh threading
+            // header columns only (no re-CAS, no second insert). Full field
+            // retry-with-update is deferred until unique path upsert exists.
+            if let Some(existing) = matter.item_by_source_path(source_id, &msg_path)? {
+                // Best-effort header refresh; failures leave prior columns as-is.
+                if let Ok(extracted) = opened.pst.read_message_extract(msg_nid) {
+                    let _ = refresh_thread_headers(matter, &existing.id, &extracted);
+                }
                 cursor.last_folder_path = Some(folder.path.clone());
                 cursor.last_message_nid = Some(nid_hex(msg_nid.0));
                 cursor.folder_message_index = Some(mi as i64);
@@ -714,6 +720,9 @@ fn extract_one_message(
         .map(normalize_message_id)
         .filter(|s| !s.is_empty());
 
+    let (in_reply_to, references_json, conversation_topic, conversation_index_hex) =
+        thread_header_fields(&extracted);
+
     // Insert parent shell first so family can link.
     let family = matter.insert_family(FAMILY_KIND_EMAIL_ATTACHMENTS)?;
     let parent = matter.insert_item(ItemInput {
@@ -735,6 +744,10 @@ fn extract_one_message(
         size_bytes: extracted.message_size.map(|s| s as i64),
         text_sha256: text_sha256.clone(),
         html_sha256: html_sha256.clone(),
+        in_reply_to,
+        references_json,
+        conversation_topic,
+        conversation_index_hex,
         extra_json: Some(
             json!({
                 "pst_nid": nid_hex(msg_nid.0),
@@ -979,4 +992,202 @@ fn extract_one_message(
 
     let _ = job_id; // used in error paths
     Ok(())
+}
+
+/// Normalize reply-chain / conversation header fields for parent insert.
+///
+/// Missing props → `None` (never fabricate). Matters extracted before track 0022
+/// lack these columns until re-extract (which refreshes headers on the existing
+/// path skip).
+fn thread_header_fields(
+    extracted: &ExtractedMessage,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let in_reply_to = extracted.in_reply_to.as_deref().and_then(parse_in_reply_to);
+
+    let references_json = extracted.references.as_deref().and_then(|raw| {
+        let refs = parse_references_header(raw);
+        if refs.is_empty() {
+            None
+        } else {
+            Some(references_to_json(&refs))
+        }
+    });
+
+    let conversation_topic = extracted
+        .conversation_topic
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let conversation_index_hex = if let Some(ref bytes) = extracted.conversation_index_bytes {
+        normalize_conversation_index_to_hex(ConversationIndexInput::Bytes(bytes))
+    } else if let Some(ref s) = extracted.conversation_index_string {
+        normalize_conversation_index_to_hex(ConversationIndexInput::Base64(s))
+    } else {
+        None
+    };
+
+    (
+        in_reply_to,
+        references_json,
+        conversation_topic,
+        conversation_index_hex,
+    )
+}
+
+/// Update only the four threading header columns on an existing parent item.
+///
+/// Used on re-extract when `(source_id, path)` already exists: refresh headers
+/// without double-insert or re-CAS of body/attachments. Nested `Some(...)`
+/// always writes (inner `None` → SQL NULL when the prop is absent).
+fn refresh_thread_headers(
+    matter: &Matter,
+    item_id: &str,
+    extracted: &ExtractedMessage,
+) -> Result<()> {
+    let (in_reply_to, references_json, conversation_topic, conversation_index_hex) =
+        thread_header_fields(extracted);
+    matter.update_item(
+        item_id,
+        ItemUpdate {
+            in_reply_to: Some(in_reply_to),
+            references_json: Some(references_json),
+            conversation_topic: Some(conversation_topic),
+            conversation_index_hex: Some(conversation_index_hex),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thread_header_fields_normalize_references_and_index() {
+        let mut msg = ExtractedMessage {
+            nid: NodeId(1),
+            message_id: Some("<a@ex.com>".into()),
+            subject: None,
+            sender_email: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            submit_time: None,
+            delivery_time: None,
+            body_text: None,
+            body_html: None,
+            message_size: None,
+            has_attachments: None,
+            in_reply_to: Some("<Parent@Ex.COM>".into()),
+            references: Some("<one@ex.com>\r\n\t<two@ex.com>".into()),
+            conversation_topic: Some("  Topic  ".into()),
+            conversation_index_bytes: Some(vec![0x01, 0x02, 0x03]),
+            conversation_index_string: None,
+        };
+        let (irt, refs, topic, ci) = thread_header_fields(&msg);
+        assert_eq!(irt.as_deref(), Some("parent@ex.com"));
+        let refs_v: Vec<String> = serde_json::from_str(refs.as_deref().unwrap()).unwrap();
+        assert_eq!(refs_v, vec!["one@ex.com", "two@ex.com"]);
+        assert_eq!(topic.as_deref(), Some("Topic"));
+        assert_eq!(ci.as_deref(), Some("010203"));
+
+        // Base64 path when binary absent
+        msg.conversation_index_bytes = None;
+        // "AQID" is base64 of [1,2,3]
+        msg.conversation_index_string = Some("AQID".into());
+        let (_, _, _, ci2) = thread_header_fields(&msg);
+        assert_eq!(ci2.as_deref(), Some("010203"));
+    }
+
+    #[test]
+    fn thread_header_fields_missing_are_none() {
+        let msg = ExtractedMessage {
+            nid: NodeId(1),
+            message_id: None,
+            subject: None,
+            sender_email: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            submit_time: None,
+            delivery_time: None,
+            body_text: None,
+            body_html: None,
+            message_size: None,
+            has_attachments: None,
+            in_reply_to: None,
+            references: None,
+            conversation_topic: None,
+            conversation_index_bytes: None,
+            conversation_index_string: None,
+        };
+        let (a, b, c, d) = thread_header_fields(&msg);
+        assert!(a.is_none() && b.is_none() && c.is_none() && d.is_none());
+    }
+
+    #[test]
+    fn reextract_refresh_populates_headers_on_existing_parent() {
+        // Simulate: parent inserted without headers → refresh path → headers set.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8");
+        let root = root.join("reextract-headers");
+        let matter = Matter::create(&root, "ReextractHeaders").expect("create");
+        let parent = matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::PARENT.into()),
+                file_category: Some("email".into()),
+                path: Some("mail.pst!/Inbox/abc".into()),
+                message_id: Some("child@ex.com".into()),
+                // No threading headers on first extract (pre-0022 shape).
+                in_reply_to: None,
+                references_json: None,
+                conversation_topic: None,
+                conversation_index_hex: None,
+                ..Default::default()
+            })
+            .expect("insert");
+        assert!(parent.in_reply_to.is_none());
+        assert!(parent.references_json.is_none());
+
+        let extracted = ExtractedMessage {
+            nid: NodeId(1),
+            message_id: Some("<child@ex.com>".into()),
+            subject: Some("Re: Topic".into()),
+            sender_email: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            submit_time: None,
+            delivery_time: None,
+            body_text: None,
+            body_html: None,
+            message_size: None,
+            has_attachments: None,
+            in_reply_to: Some("<Parent@Ex.COM>".into()),
+            references: Some("<root@ex.com> <Parent@Ex.COM>".into()),
+            conversation_topic: Some("Topic".into()),
+            conversation_index_bytes: Some(vec![0xaa, 0xbb]),
+            conversation_index_string: None,
+        };
+        refresh_thread_headers(&matter, &parent.id, &extracted).expect("refresh");
+
+        let updated = matter.get_item(&parent.id).expect("get");
+        assert_eq!(updated.in_reply_to.as_deref(), Some("parent@ex.com"));
+        let refs: Vec<String> =
+            serde_json::from_str(updated.references_json.as_deref().unwrap()).unwrap();
+        assert_eq!(refs, vec!["root@ex.com", "parent@ex.com"]);
+        assert_eq!(updated.conversation_topic.as_deref(), Some("Topic"));
+        assert_eq!(updated.conversation_index_hex.as_deref(), Some("aabb"));
+        // Other fields unchanged
+        assert_eq!(updated.message_id.as_deref(), Some("child@ex.com"));
+        assert_eq!(updated.status, item_status::EXTRACTED);
+    }
 }

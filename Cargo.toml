@@ -11,6 +11,7 @@ members = [
     "crates/extract-pst",
     "crates/process-runner",
     "crates/matter-dedupe",
+    "crates/matter-thread",
     "crates/dedupe-desk",
 ]
 

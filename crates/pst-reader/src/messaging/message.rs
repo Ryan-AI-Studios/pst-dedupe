@@ -65,6 +65,16 @@ pub struct ExtractedMessage {
     pub message_size: Option<i32>,
     /// PidTagHasAttachments.
     pub has_attachments: Option<bool>,
+    /// PidTagInReplyToId (raw; normalize at extract write).
+    pub in_reply_to: Option<String>,
+    /// PidTagInternetReferences (raw; parse at extract write).
+    pub references: Option<String>,
+    /// PidTagConversationTopic (raw/light).
+    pub conversation_topic: Option<String>,
+    /// PidTagConversationIndex raw binary when present.
+    pub conversation_index_bytes: Option<Vec<u8>>,
+    /// PidTagConversationIndex as string (Base64 Thread-Index) when binary absent.
+    pub conversation_index_string: Option<String>,
 }
 
 /// Convert Windows FILETIME (100ns since 1601-01-01) to Unix seconds.
@@ -175,6 +185,17 @@ impl PstFile {
             None => prop_ctx.get_binary(nid::PID_TAG_BODY_HTML)?,
         };
 
+        let in_reply_to = prop_ctx.get_string(nid::PID_TAG_IN_REPLY_TO_ID)?;
+        let references = prop_ctx.get_string(nid::PID_TAG_INTERNET_REFERENCES)?;
+        let conversation_topic = prop_ctx.get_string(nid::PID_TAG_CONVERSATION_TOPIC)?;
+        // ConversationIndex: prefer MAPI binary; fall back to string (Base64).
+        let conversation_index_bytes = prop_ctx.get_binary(nid::PID_TAG_CONVERSATION_INDEX)?;
+        let conversation_index_string = if conversation_index_bytes.is_none() {
+            prop_ctx.get_string(nid::PID_TAG_CONVERSATION_INDEX)?
+        } else {
+            None
+        };
+
         Ok(ExtractedMessage {
             nid: message_nid,
             message_id,
@@ -189,6 +210,11 @@ impl PstFile {
             body_html,
             message_size,
             has_attachments,
+            in_reply_to,
+            references,
+            conversation_topic,
+            conversation_index_bytes,
+            conversation_index_string,
         })
     }
 }
