@@ -25,6 +25,7 @@ const PROGRESS_STAGES: &[&str] = &[
     "thread",
     "neardup",
     "cull",
+    "promote",
 ];
 
 /// Clone an error for channel delivery (Matter errors become `Other` text).
@@ -700,6 +701,7 @@ fn load_resume_params(matter: &Matter, job: &Job) -> String {
         "thread",
         "neardup",
         "cull",
+        "promote",
     ];
     for stage in stages {
         if let Ok(Some(cp)) = matter.get_checkpoint(&job.id, stage) {

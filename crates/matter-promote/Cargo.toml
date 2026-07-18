@@ -1,0 +1,17 @@
+[package]
+name = "matter-promote"
+version = "0.1.0"
+edition = "2021"
+description = "Matter-level promote-to-review: policy selection, bidirectional family expand, review_order"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+matter-core = { path = "../matter-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+camino = { workspace = true }

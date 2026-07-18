@@ -7,13 +7,14 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v6**) + family graph
+6. **Normalized Item** model (schema **v7**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
 10. **Cull** result columns + named presets + transactional batch helpers (0024)
+11. **Promote** review-set membership columns + `review_sets` + batch helpers (0025)
 
-Schema version: **6** (`SCHEMA_VERSION`) — includes cull result columns (`cull_*`) and `cull_presets`.
+Schema version: **7** (`SCHEMA_VERSION`) — includes cull (`cull_*` / `cull_presets`) and promote (`in_review` / `review_sets` with partial unique default).
 
 ## Layout
 
@@ -205,6 +206,28 @@ Deleting a preset does **not** clear item cull fields.
 | `clear_cull_fields(process_attachments)` | Reset cull result columns on the eligible set only (same attachment filter as list; transactional) |
 | `apply_cull_batch_with_checkpoint` | **N result updates + checkpoint in one commit** |
 | `list_cull_presets` / `get_cull_preset` / `upsert_cull_preset` / `delete_cull_preset` | Preset CRUD |
+
+## Schema v7 — Promote / review sets (0025)
+
+| Column / table | Meaning |
+|---|---|
+| `review_sets` | Named review sets (`is_default`, policy snapshot, `item_count`) |
+| `in_review` | 0/1 membership (NULL = never promoted) |
+| `review_set_id` / `review_order` | Set membership + dense linear order for 0026 |
+| `promoted_at` / `promote_job_id` / `promote_policy` | Provenance |
+
+**Partial unique index:** `idx_review_sets_one_default ON review_sets(matter_id) WHERE is_default = 1`.
+
+| API | Notes |
+|---|---|
+| `ensure_default_review_set` | Create/load default set (name default: `Review Corpus`) |
+| `get_review_set` / `list_review_sets` / `update_review_set_snapshot` | Meta |
+| `clear_review_membership_for_set` | Flag-only demote for recompute |
+| `list_promote_candidates` | Thin rows for policy selection |
+| `list_promote_ordered_membership` | **Single-query** family compound order (no N+1) |
+| `list_direct_children_ids` / `list_parent_ids_of` | Bidirectional expand helpers |
+| `apply_promote_batch_with_checkpoint` | **N membership updates + checkpoint in one commit** |
+| `cull_has_run` / `any_dedup_role_present` | Policy resolution helpers |
 
 Engine: `crates/matter-cull`. **0025 promote** should prefer `cull_status=included` when any cull has run; else unique-only.
 

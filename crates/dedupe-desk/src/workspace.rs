@@ -145,6 +145,29 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
 
         ui.separator();
 
+        // Promote policy pick + Promote to review (flag-only membership).
+        egui::ComboBox::from_id_salt("promote_policy")
+            .selected_text(app.promote_policy.as_str())
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                for name in params::PROMOTE_POLICIES {
+                    ui.selectable_value(&mut app.promote_policy, (*name).to_string(), *name);
+                }
+            });
+        if ui
+            .add_enabled(!busy, egui::Button::new("Promote to review"))
+            .on_hover_text(
+                "Build review corpus membership (in_review + review_order). \
+                 policy=auto → cull_included if cull has run, else unique_only. \
+                 Bidirectional family expand on by default.",
+            )
+            .clicked()
+        {
+            app.start_promote();
+        }
+
+        ui.separator();
+
         let job_id = snap.job_id.clone();
         let can_cancel = snap.state == "running" && !job_id.is_empty();
         if ui

@@ -103,8 +103,22 @@ matter-core API (`upsert_cull_preset`) or future UI. `date_window` remains an
 engine built-in but is **not** listed until bounds are filled — operators
 supply `start`/`end` (offset-aware RFC3339) via JSON params or a user preset.
 Flag-only: sets `cull_status` / reasons; never deletes items or CAS. Reuses
-progress / cancel / resume. See `crates/matter-cull/README.md`. **0025 promote**
-should prefer `cull_status=included` when present.
+progress / cancel / resume. See `crates/matter-cull/README.md`.
+
+### Promote to review
+
+Workspace **promote policy** dropdown + **Promote to review** starts
+`kind=promote` with defaults (`policy=auto`, `expand_families=true`,
+`reset=true`, `batch_size=500`, review set **Review Corpus**).
+
+| Policy | Meaning |
+|---|---|
+| `auto` | `cull_included` if any `cull_status` set, else `unique_only` |
+| named | `cull_included`, `unique_only`, `unique_plus_family`, `all_extracted`, `cull_included_plus_family` |
+
+Flag-only membership (`in_review` / `review_order`); never deletes items or CAS.
+Bidirectional family expand is on by default. Reuses progress / cancel / resume.
+See `crates/matter-promote/README.md`. Linear review list is **0026**.
 
 ## Tests
 

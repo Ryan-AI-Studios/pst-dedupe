@@ -1,4 +1,4 @@
-//! Versioned SQLite schema migrations for matter.db.
+﻿//! Versioned SQLite schema migrations for matter.db.
 //!
 //! SQL is private to this crate. Callers interact through the public
 //! [`crate::Matter`] API only.
@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -20,6 +20,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (4, MIGRATION_V4),
     (5, MIGRATION_V5),
     (6, MIGRATION_V6),
+    (7, MIGRATION_V7),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -233,6 +234,44 @@ CREATE TABLE cull_presets (
 CREATE INDEX IF NOT EXISTS idx_cull_presets_matter ON cull_presets(matter_id);
 "#;
 
+/// Schema v7: review-set membership for promote-to-review (track 0025).
+///
+/// Nullable item columns + `review_sets` table. Flag-only membership â€” never
+/// deletes items/CAS. Partial unique index enforces at most one default set
+/// per matter (`is_default = 1`).
+const MIGRATION_V7: &str = r#"
+CREATE TABLE review_sets (
+    id TEXT PRIMARY KEY NOT NULL,
+    matter_id TEXT NOT NULL REFERENCES matters(id),
+    name TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    policy TEXT,
+    policy_json TEXT,
+    item_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_sets_matter ON review_sets(matter_id);
+
+-- At most one default review set per matter (non-default rows unrestricted).
+CREATE UNIQUE INDEX idx_review_sets_one_default
+  ON review_sets(matter_id)
+  WHERE is_default = 1;
+
+ALTER TABLE items ADD COLUMN in_review INTEGER;
+ALTER TABLE items ADD COLUMN review_set_id TEXT;
+ALTER TABLE items ADD COLUMN review_order INTEGER;
+ALTER TABLE items ADD COLUMN promoted_at TEXT;
+ALTER TABLE items ADD COLUMN promote_job_id TEXT;
+ALTER TABLE items ADD COLUMN promote_policy TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_items_in_review ON items(in_review);
+CREATE INDEX IF NOT EXISTS idx_items_review_set_id ON items(review_set_id);
+CREATE INDEX IF NOT EXISTS idx_items_review_set_order ON items(review_set_id, review_order);
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -325,7 +364,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 6);
+        assert_eq!(v, 7);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v2 columns present
@@ -405,6 +444,31 @@ mod tests {
             )
             .expect("pragma");
         assert!(has_cull_presets);
+        // v7 review-set columns + table
+        let has_in_review: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'in_review'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_in_review);
+        let has_review_sets: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='review_sets'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_review_sets);
+        let has_one_default_idx: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='idx_review_sets_one_default'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_one_default_idx);
     }
 
     #[test]
@@ -429,7 +493,7 @@ mod tests {
             .expect("read drifted");
         assert_eq!(drifted, 0);
 
-        // schema_meta already at SCHEMA_VERSION — migrate is a no-op for steps
+        // schema_meta already at SCHEMA_VERSION â€” migrate is a no-op for steps
         // but must still re-sync the denormalized column.
         let v = migrate(&conn).expect("re-migrate");
         assert_eq!(v, SCHEMA_VERSION);
@@ -444,7 +508,7 @@ mod tests {
         assert_eq!(synced, SCHEMA_VERSION);
     }
 
-    /// v1 fixture (0016-style inventory) → migrate to v2 → data intact + new columns.
+    /// v1 fixture (0016-style inventory) â†’ migrate to v2 â†’ data intact + new columns.
     #[test]
     fn migrate_v1_inventory_to_v2_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -499,8 +563,8 @@ mod tests {
             .expect("pragma");
         assert!(!role_exists);
 
-        let v = migrate(&conn).expect("migrate v1→v6");
-        assert_eq!(v, 6);
+        let v = migrate(&conn).expect("migrate v1â†’v6");
+        assert_eq!(v, SCHEMA_VERSION);
 
         // Inventory data intact.
         let (path, status, native, lhv): (String, String, String, i64) = conn
@@ -523,7 +587,7 @@ mod tests {
             .expect("count");
         assert_eq!(count, 2);
 
-        // New nullable columns readable as NULL (pre-v2 inventory; NULL role ≡
+        // New nullable columns readable as NULL (pre-v2 inventory; NULL role â‰¡
         // standalone for consumers until classified).
         let role: Option<String> = conn
             .query_row("SELECT role FROM items WHERE id = 'itm_a'", [], |row| {
@@ -580,7 +644,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 6);
+        assert_eq!(ms, SCHEMA_VERSION);
 
         // v2 + v3 + v4 + v5 + v6 indexes present.
         for idx in [
@@ -607,7 +671,7 @@ mod tests {
         }
     }
 
-    /// v2 fixture → migrate to current → data intact + dedupe/thread columns.
+    /// v2 fixture â†’ migrate to current â†’ data intact + dedupe/thread columns.
     #[test]
     fn migrate_v2_to_v3_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -637,8 +701,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v2→v6");
-        assert_eq!(v, 6);
+        let v = migrate(&conn).expect("migrate v2â†’v6");
+        assert_eq!(v, SCHEMA_VERSION);
 
         let (status, mid, dedup): (String, Option<String>, Option<String>) = conn
             .query_row(
@@ -658,10 +722,10 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 6);
+        assert_eq!(ms, SCHEMA_VERSION);
     }
 
-    /// v3 fixture → migrate to current → data intact + thread columns present.
+    /// v3 fixture â†’ migrate to current â†’ data intact + thread columns present.
     #[test]
     fn migrate_v3_to_v4_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -692,8 +756,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v3→v6");
-        assert_eq!(v, 6);
+        let v = migrate(&conn).expect("migrate v3â†’v6");
+        assert_eq!(v, SCHEMA_VERSION);
 
         let (status, mid, dedup, thread_id, in_reply): (
             String,
@@ -730,7 +794,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 6);
+        assert_eq!(ms, SCHEMA_VERSION);
 
         for idx in ["idx_items_thread_id", "idx_items_in_reply_to"] {
             let exists: bool = conn
@@ -744,7 +808,7 @@ mod tests {
         }
     }
 
-    /// v4 fixture → migrate to v5 → data intact + near-dup columns present.
+    /// v4 fixture â†’ migrate to v5 â†’ data intact + near-dup columns present.
     #[test]
     fn migrate_v4_to_v5_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -776,8 +840,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v4→v6");
-        assert_eq!(v, 6);
+        let v = migrate(&conn).expect("migrate v4â†’v6");
+        assert_eq!(v, SCHEMA_VERSION);
 
         let status: String = conn
             .query_row(
@@ -835,7 +899,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 6);
+        assert_eq!(ms, SCHEMA_VERSION);
 
         for idx in ["idx_items_near_dup_group", "idx_items_near_dup_role"] {
             let exists: bool = conn
@@ -849,7 +913,7 @@ mod tests {
         }
     }
 
-    /// v5 fixture → migrate to v6 → data intact + cull columns + cull_presets table.
+    /// v5 fixture â†’ migrate to v6 â†’ data intact + cull columns + cull_presets table.
     #[test]
     fn migrate_v5_to_v6_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -882,8 +946,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v5→v6");
-        assert_eq!(v, 6);
+        let v = migrate(&conn).expect("migrate v5â†’current");
+        assert_eq!(v, SCHEMA_VERSION);
 
         let near_role: Option<String> = conn
             .query_row(
@@ -919,9 +983,134 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 6);
+        assert_eq!(ms, SCHEMA_VERSION);
 
         for idx in ["idx_items_cull_status", "idx_items_cull_preset"] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name = ?1",
+                    [idx],
+                    |row| row.get(0),
+                )
+                .expect("sqlite_master");
+            assert!(exists, "expected index {idx}");
+        }
+    }
+
+    /// v6 fixture â†’ migrate to v7 â†’ data intact + review columns + review_sets.
+    #[test]
+    fn migrate_v6_to_v7_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute_batch(MIGRATION_V3).expect("v3");
+        conn.execute_batch(MIGRATION_V4).expect("v4");
+        conn.execute_batch(MIGRATION_V5).expect("v5");
+        conn.execute_batch(MIGRATION_V6).expect("v6");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (6)", [])
+            .expect("meta v6");
+        assert_eq!(read_schema_version(&conn).expect("read"), 6);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v6', 'V6 Matter', '2020-01-01T00:00:00Z', 6, '/tmp/v6')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, dedup_role, thread_id, near_dup_role, \
+             cull_status, cull_preset_name) \
+             VALUES ('itm_mail', 'mat_v6', NULL, NULL, 'inbox/a.eml', NULL, \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             'mid@example.com', 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'parent', 'email', 1, 'unique', 'tid-1', 'unique', 'included', 'unique_only')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v6â†’v7");
+        assert_eq!(v, 7);
+
+        let cull_status: Option<String> = conn
+            .query_row(
+                "SELECT cull_status FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("cull_status");
+        assert_eq!(cull_status.as_deref(), Some("included"));
+
+        let in_review: Option<i64> = conn
+            .query_row(
+                "SELECT in_review FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("in_review");
+        assert!(in_review.is_none());
+
+        let has_review_sets: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='review_sets'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("review_sets table");
+        assert!(has_review_sets);
+
+        // Partial unique index rejects two defaults for the same matter.
+        conn.execute(
+            "INSERT INTO review_sets (id, matter_id, name, is_default, policy, policy_json, \
+             item_count, created_at, updated_at, created_by) \
+             VALUES ('rs1', 'mat_v6', 'Review Corpus', 1, NULL, NULL, 0, \
+             '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', NULL)",
+            [],
+        )
+        .expect("first default");
+        let err = conn
+            .execute(
+                "INSERT INTO review_sets (id, matter_id, name, is_default, policy, policy_json, \
+                 item_count, created_at, updated_at, created_by) \
+                 VALUES ('rs2', 'mat_v6', 'Other', 1, NULL, NULL, 0, \
+                 '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', NULL)",
+                [],
+            )
+            .expect_err("second default must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UNIQUE") || msg.contains("unique"),
+            "expected unique violation, got: {msg}"
+        );
+
+        // Multiple non-default sets are allowed.
+        conn.execute(
+            "INSERT INTO review_sets (id, matter_id, name, is_default, policy, policy_json, \
+             item_count, created_at, updated_at, created_by) \
+             VALUES ('rs3', 'mat_v6', 'Secondary', 0, NULL, NULL, 0, \
+             '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', NULL)",
+            [],
+        )
+        .expect("non-default ok");
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v6'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, 7);
+
+        for idx in [
+            "idx_review_sets_one_default",
+            "idx_items_in_review",
+            "idx_items_review_set_id",
+            "idx_items_review_set_order",
+        ] {
             let exists: bool = conn
                 .query_row(
                     "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name = ?1",
@@ -940,14 +1129,14 @@ mod tests {
         let conn = Connection::open_in_memory().expect("open");
         configure_connection(&conn).expect("configure");
 
-        // Apply v1 only, then remaining via migrate — version and columns must agree.
+        // Apply v1 only, then remaining via migrate â€” version and columns must agree.
         conn.execute_batch(MIGRATION_V1).expect("v1");
         conn.execute("INSERT INTO schema_meta (version) VALUES (1)", [])
             .expect("meta v1");
 
         let v = migrate(&conn).expect("migrate");
-        assert_eq!(v, 6);
-        assert_eq!(read_schema_version(&conn).expect("read"), 6);
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         let has_role: bool = conn
             .query_row(

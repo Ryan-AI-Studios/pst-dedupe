@@ -1059,6 +1059,88 @@ fn cull_via_runner_one_job_row() {
     assert!(cp.completed_count >= 2);
 }
 
+#[cfg(feature = "promote")]
+#[test]
+fn promote_via_runner_one_job_row() {
+    use matter_core::{item_dedup_role, item_role, item_status, ItemInput};
+    use process_runner::MatterPromoteHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-promote");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                path: Some("unique.eml".into()),
+                dedup_role: Some(item_dedup_role::UNIQUE.into()),
+                size_bytes: Some(10),
+                ..Default::default()
+            })
+            .expect("u");
+        matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                path: Some("dup.eml".into()),
+                dedup_role: Some(item_dedup_role::DUPLICATE.into()),
+                size_bytes: Some(10),
+                ..Default::default()
+            })
+            .expect("d");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterPromoteHandler::new()));
+
+    let params = JobParams::new(
+        serde_json::json!({
+            "policy": "unique_only",
+            "expand_families": false,
+            "reset": true,
+            "batch_size": 10
+        })
+        .to_string(),
+    );
+    let job_id = runner
+        .start(&root, "promote", params)
+        .expect("start promote");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let jobs = matter.list_jobs().expect("list");
+    assert_eq!(jobs.len(), 1, "Option C: exactly one job row");
+    assert_eq!(jobs[0].id, job_id);
+    assert_eq!(jobs[0].kind, "promote");
+    assert_eq!(jobs[0].state, JobState::Succeeded);
+
+    let cands = matter.list_promote_candidates().expect("cands");
+    assert_eq!(cands.len(), 2);
+    let u = cands
+        .iter()
+        .find(|c| c.path.as_deref() == Some("unique.eml"))
+        .unwrap();
+    let d = cands
+        .iter()
+        .find(|c| c.path.as_deref() == Some("dup.eml"))
+        .unwrap();
+    assert_eq!(matter.get_item(&u.id).unwrap().in_review, Some(1));
+    assert_ne!(matter.get_item(&d.id).unwrap().in_review, Some(1));
+
+    let cp = matter
+        .get_checkpoint(&job_id, "promote")
+        .expect("cp")
+        .expect("promote checkpoint");
+    assert!(cp.completed_count >= 1);
+
+    let sets = matter.list_review_sets().expect("sets");
+    assert_eq!(sets.len(), 1);
+    assert!(sets[0].is_default);
+    assert_eq!(sets[0].item_count, 1);
+}
+
 /// Resume must restore full nested `params` from the checkpoint cursor (not just
 /// `source_id` / empty object), so non-default dedupe settings survive cancel.
 #[test]

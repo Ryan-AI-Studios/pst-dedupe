@@ -93,6 +93,9 @@ pub mod item_cull_status {
     pub const CULLED: &str = "culled";
 }
 
+/// Default review-set display name (schema v7 / track 0025).
+pub const DEFAULT_REVIEW_SET_NAME: &str = "Review Corpus";
+
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Metadata row for the matter itself.
@@ -127,7 +130,7 @@ pub struct ItemFamily {
     pub created_at: String,
 }
 
-/// Normalized item row (schema v2–v6: P0 + dedupe + thread + near-dup + cull).
+/// Normalized item row (schema v2–v7: P0 + dedupe + thread + near-dup + cull + promote).
 ///
 /// `PartialEq` only (not `Eq`) because `near_dup_similarity` is `f64`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -198,6 +201,14 @@ pub struct Item {
     pub cull_preset_name: Option<String>,
     pub culled_at: Option<String>,
     pub cull_job_id: Option<String>,
+    // --- schema v7 (promote / review set) ---
+    /// 0/1 membership flag; NULL = never promoted.
+    pub in_review: Option<i64>,
+    pub review_set_id: Option<String>,
+    pub review_order: Option<i64>,
+    pub promoted_at: Option<String>,
+    pub promote_job_id: Option<String>,
+    pub promote_policy: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -269,6 +280,13 @@ pub struct ItemInput {
     pub cull_preset_name: Option<String>,
     pub culled_at: Option<String>,
     pub cull_job_id: Option<String>,
+    // --- schema v7 (promote) — usually left null on insert; set by promote job ---
+    pub in_review: Option<i64>,
+    pub review_set_id: Option<String>,
+    pub review_order: Option<i64>,
+    pub promoted_at: Option<String>,
+    pub promote_job_id: Option<String>,
+    pub promote_policy: Option<String>,
 }
 
 /// Thin row for matter-level email parent dedupe (no body text).
@@ -407,6 +425,48 @@ pub struct CullFieldUpdate {
     pub cull_job_id: Option<String>,
 }
 
+/// Thin row for promote selection / family-aware ordering (no body text).
+///
+/// Columns needed for policy filters and the single-pass compound `ORDER BY`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromoteCandidate {
+    pub id: String,
+    pub parent_item_id: Option<String>,
+    pub path: Option<String>,
+    pub status: String,
+    pub dedup_role: Option<String>,
+    pub cull_status: Option<String>,
+    pub role: Option<String>,
+}
+
+/// One item's promote / review-set membership assignment for batch write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromoteFieldUpdate {
+    pub item_id: String,
+    /// 0 = not in review, 1 = in review.
+    pub in_review: Option<i64>,
+    pub review_set_id: Option<String>,
+    pub review_order: Option<i64>,
+    pub promoted_at: Option<String>,
+    pub promote_job_id: Option<String>,
+    pub promote_policy: Option<String>,
+}
+
+/// Named review set (schema v7 / track 0025).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewSet {
+    pub id: String,
+    pub matter_id: String,
+    pub name: String,
+    pub is_default: bool,
+    pub policy: Option<String>,
+    pub policy_json: Option<String>,
+    pub item_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by: Option<String>,
+}
+
 /// Named cull preset stored per matter (schema v6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CullPreset {
@@ -506,6 +566,13 @@ pub struct ItemUpdate {
     pub cull_preset_name: Option<Option<String>>,
     pub culled_at: Option<Option<String>>,
     pub cull_job_id: Option<Option<String>>,
+    // --- schema v7 (promote) ---
+    pub in_review: Option<Option<i64>>,
+    pub review_set_id: Option<Option<String>>,
+    pub review_order: Option<Option<i64>>,
+    pub promoted_at: Option<Option<String>>,
+    pub promote_job_id: Option<Option<String>>,
+    pub promote_policy: Option<Option<String>>,
 }
 
 /// An open matter: directory layout + SQLite connection + CAS handle.
@@ -957,7 +1024,8 @@ impl Matter {
                 near_dup_group_id, near_dup_role, near_dup_similarity, near_dup_pivot_item_id, \
                 near_dup_method, near_duped_at, near_dup_job_id, \
                 cull_status, cull_reasons_json, cull_preset_id, cull_preset_name, \
-                culled_at, cull_job_id\
+                culled_at, cull_job_id, \
+                in_review, review_set_id, review_order, promoted_at, promote_job_id, promote_policy\
              ) VALUES (\
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, \
@@ -965,7 +1033,8 @@ impl Matter {
                 ?33, ?34, ?35, ?36, ?37, ?38, \
                 ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, \
                 ?48, ?49, ?50, ?51, ?52, ?53, ?54, \
-                ?55, ?56, ?57, ?58, ?59, ?60\
+                ?55, ?56, ?57, ?58, ?59, ?60, \
+                ?61, ?62, ?63, ?64, ?65, ?66\
              )",
             params![
                 id,
@@ -1028,6 +1097,12 @@ impl Matter {
                 input.cull_preset_name,
                 input.culled_at,
                 input.cull_job_id,
+                input.in_review,
+                input.review_set_id,
+                input.review_order,
+                input.promoted_at,
+                input.promote_job_id,
+                input.promote_policy,
             ],
         )?;
 
@@ -1113,6 +1188,12 @@ impl Matter {
         let cull_preset_name = apply_opt2(update.cull_preset_name, current.cull_preset_name);
         let culled_at = apply_opt2(update.culled_at, current.culled_at);
         let cull_job_id = apply_opt2(update.cull_job_id, current.cull_job_id);
+        let in_review = apply_opt2(update.in_review, current.in_review);
+        let review_set_id = apply_opt2(update.review_set_id, current.review_set_id);
+        let review_order = apply_opt2(update.review_order, current.review_order);
+        let promoted_at = apply_opt2(update.promoted_at, current.promoted_at);
+        let promote_job_id = apply_opt2(update.promote_job_id, current.promote_job_id);
+        let promote_policy = apply_opt2(update.promote_policy, current.promote_policy);
 
         let mut family_id = family_id;
         if let Some(ref parent_id) = parent_item_id {
@@ -1158,8 +1239,10 @@ impl Matter {
                 near_dup_pivot_item_id = ?48, near_dup_method = ?49, near_duped_at = ?50, \
                 near_dup_job_id = ?51, \
                 cull_status = ?52, cull_reasons_json = ?53, cull_preset_id = ?54, \
-                cull_preset_name = ?55, culled_at = ?56, cull_job_id = ?57 \
-             WHERE id = ?58",
+                cull_preset_name = ?55, culled_at = ?56, cull_job_id = ?57, \
+                in_review = ?58, review_set_id = ?59, review_order = ?60, \
+                promoted_at = ?61, promote_job_id = ?62, promote_policy = ?63 \
+             WHERE id = ?64",
             params![
                 source_id,
                 family_id,
@@ -1218,6 +1301,12 @@ impl Matter {
                 cull_preset_name,
                 culled_at,
                 cull_job_id,
+                in_review,
+                review_set_id,
+                review_order,
+                promoted_at,
+                promote_job_id,
+                promote_policy,
                 item_id,
             ],
         )?;
@@ -2174,6 +2263,315 @@ impl Matter {
         Ok(())
     }
 
+    // --- Promote / review sets (schema v7) ---
+
+    /// True when any item has a non-null `cull_status` (cull has run).
+    pub fn cull_has_run(&self) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM items WHERE matter_id = ?1 AND cull_status IS NOT NULL)",
+            params![self.matter_id],
+            |row| row.get(0),
+        )?;
+        Ok(n != 0)
+    }
+
+    /// True when any item has a non-null `dedup_role` (dedupe has run).
+    pub fn any_dedup_role_present(&self) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM items WHERE matter_id = ?1 AND dedup_role IS NOT NULL)",
+            params![self.matter_id],
+            |row| row.get(0),
+        )?;
+        Ok(n != 0)
+    }
+
+    /// Ensure a default review set exists for this matter.
+    ///
+    /// If a default already exists, returns it (name is not changed).
+    /// Otherwise inserts `name` (default [`DEFAULT_REVIEW_SET_NAME`]) with
+    /// `is_default = 1`. The partial unique index prevents double-default races.
+    pub fn ensure_default_review_set(&self, name: &str) -> Result<ReviewSet> {
+        if let Some(existing) = self.get_default_review_set()? {
+            return Ok(existing);
+        }
+        let name = if name.trim().is_empty() {
+            DEFAULT_REVIEW_SET_NAME
+        } else {
+            name.trim()
+        };
+        let id = new_id("rset");
+        let now = now_rfc3339();
+        match self.conn.execute(
+            "INSERT INTO review_sets (id, matter_id, name, is_default, policy, policy_json, \
+             item_count, created_at, updated_at, created_by) \
+             VALUES (?1, ?2, ?3, 1, NULL, NULL, 0, ?4, ?4, NULL)",
+            params![id, self.matter_id, name, now],
+        ) {
+            Ok(_) => self.get_review_set(&id),
+            Err(e) => {
+                // Race: another writer may have created the default first.
+                if let Some(existing) = self.get_default_review_set()? {
+                    return Ok(existing);
+                }
+                Err(Error::Sqlite(e))
+            }
+        }
+    }
+
+    /// Load the default review set for this matter, if any.
+    pub fn get_default_review_set(&self) -> Result<Option<ReviewSet>> {
+        self.conn
+            .query_row(
+                "SELECT id, matter_id, name, is_default, policy, policy_json, item_count, \
+                 created_at, updated_at, created_by \
+                 FROM review_sets WHERE matter_id = ?1 AND is_default = 1",
+                params![self.matter_id],
+                map_review_set_row,
+            )
+            .optional()
+            .map_err(Error::from)
+    }
+
+    /// Load a review set by id.
+    pub fn get_review_set(&self, set_id: &str) -> Result<ReviewSet> {
+        self.conn
+            .query_row(
+                "SELECT id, matter_id, name, is_default, policy, policy_json, item_count, \
+                 created_at, updated_at, created_by \
+                 FROM review_sets WHERE id = ?1",
+                params![set_id],
+                map_review_set_row,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::Other(format!("review set not found: {set_id}"))
+                }
+                other => Error::Sqlite(other),
+            })
+    }
+
+    /// List review sets for this matter, default first then by name.
+    pub fn list_review_sets(&self) -> Result<Vec<ReviewSet>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, matter_id, name, is_default, policy, policy_json, item_count, \
+             created_at, updated_at, created_by \
+             FROM review_sets WHERE matter_id = ?1 \
+             ORDER BY is_default DESC, name ASC",
+        )?;
+        let rows = stmt.query_map(params![self.matter_id], map_review_set_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Update policy snapshot + item_count after a successful promote.
+    pub fn update_review_set_snapshot(
+        &self,
+        set_id: &str,
+        policy: &str,
+        policy_json: Option<&str>,
+        item_count: i64,
+    ) -> Result<ReviewSet> {
+        let existing = self.get_review_set(set_id)?;
+        if existing.matter_id != self.matter_id {
+            return Err(Error::Other(format!(
+                "review set {set_id} belongs to another matter"
+            )));
+        }
+        let now = now_rfc3339();
+        self.conn.execute(
+            "UPDATE review_sets SET policy = ?1, policy_json = ?2, item_count = ?3, \
+             updated_at = ?4 WHERE id = ?5",
+            params![policy, policy_json, item_count, now, set_id],
+        )?;
+        self.get_review_set(set_id)
+    }
+
+    /// Clear promote membership columns for items in `set_id` (this matter).
+    ///
+    /// Returns the number of rows updated. Does **not** delete items or CAS.
+    pub fn clear_review_membership_for_set(&self, set_id: &str) -> Result<u64> {
+        let matter_id = self.matter_id.clone();
+        self.with_transaction(|conn| {
+            let n = conn.execute(
+                "UPDATE items SET \
+                    in_review = 0, review_set_id = NULL, review_order = NULL, \
+                    promoted_at = NULL, promote_job_id = NULL, promote_policy = NULL \
+                 WHERE matter_id = ?1 AND review_set_id = ?2",
+                params![matter_id, set_id],
+            )?;
+            // Also clear any rows still flagged in_review without a set id
+            // (defensive) when this is the default set's full recompute.
+            let n2 = conn.execute(
+                "UPDATE items SET \
+                    in_review = 0, review_order = NULL, \
+                    promoted_at = NULL, promote_job_id = NULL, promote_policy = NULL \
+                 WHERE matter_id = ?1 AND in_review = 1 AND (review_set_id IS NULL OR review_set_id = ?2)",
+                params![matter_id, set_id],
+            )?;
+            Ok((n + n2) as u64)
+        })
+    }
+
+    /// Thin candidates for promote policy selection (all items in the matter).
+    pub fn list_promote_candidates(&self) -> Result<Vec<PromoteCandidate>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_item_id, path, status, dedup_role, cull_status, role \
+             FROM items WHERE matter_id = ?1 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![self.matter_id], map_promote_candidate_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Single-pass family-aware order over membership ids.
+    ///
+    /// Uses a temp table so ordering is **one** SQL query (no N+1 per parent).
+    /// Returns thin rows ordered by:
+    /// `COALESCE(parent_item_id, id), parent-first, path, id`.
+    pub fn list_promote_ordered_membership(
+        &self,
+        member_ids: &[String],
+    ) -> Result<Vec<PromoteCandidate>> {
+        if member_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_transaction(|conn| {
+            conn.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS _promote_members (id TEXT PRIMARY KEY NOT NULL);
+                 DELETE FROM _promote_members;",
+            )?;
+            {
+                let mut ins =
+                    conn.prepare("INSERT OR IGNORE INTO _promote_members (id) VALUES (?1)")?;
+                for id in member_ids {
+                    ins.execute(params![id])?;
+                }
+            }
+            let mut stmt = conn.prepare(
+                "SELECT i.id, i.parent_item_id, i.path, i.status, i.dedup_role, i.cull_status, i.role \
+                 FROM items i \
+                 INNER JOIN _promote_members m ON m.id = i.id \
+                 ORDER BY \
+                   COALESCE(i.parent_item_id, i.id) ASC, \
+                   CASE WHEN i.parent_item_id IS NULL THEN 0 ELSE 1 END ASC, \
+                   i.path ASC, \
+                   i.id ASC",
+            )?;
+            let rows = stmt.query_map([], map_promote_candidate_row)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            // Drop so next call is clean even if connection is long-lived.
+            conn.execute_batch("DROP TABLE IF EXISTS _promote_members;")?;
+            Ok(out)
+        })
+    }
+
+    /// Direct children of the given parent ids (any matter item).
+    pub fn list_direct_children_ids(&self, parent_ids: &[String]) -> Result<Vec<String>> {
+        if parent_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_transaction(|conn| {
+            conn.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS _promote_parents (id TEXT PRIMARY KEY NOT NULL);
+                 DELETE FROM _promote_parents;",
+            )?;
+            {
+                let mut ins =
+                    conn.prepare("INSERT OR IGNORE INTO _promote_parents (id) VALUES (?1)")?;
+                for id in parent_ids {
+                    ins.execute(params![id])?;
+                }
+            }
+            let mut stmt = conn.prepare(
+                "SELECT i.id FROM items i \
+                 INNER JOIN _promote_parents p ON p.id = i.parent_item_id \
+                 WHERE i.matter_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![self.matter_id], |row| row.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            conn.execute_batch("DROP TABLE IF EXISTS _promote_parents;")?;
+            Ok(out)
+        })
+    }
+
+    /// Distinct parent_item_id values for the given child ids (non-null only).
+    pub fn list_parent_ids_of(&self, child_ids: &[String]) -> Result<Vec<String>> {
+        if child_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_transaction(|conn| {
+            conn.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS _promote_children (id TEXT PRIMARY KEY NOT NULL);
+                 DELETE FROM _promote_children;",
+            )?;
+            {
+                let mut ins =
+                    conn.prepare("INSERT OR IGNORE INTO _promote_children (id) VALUES (?1)")?;
+                for id in child_ids {
+                    ins.execute(params![id])?;
+                }
+            }
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT i.parent_item_id FROM items i \
+                 INNER JOIN _promote_children c ON c.id = i.id \
+                 WHERE i.matter_id = ?1 AND i.parent_item_id IS NOT NULL",
+            )?;
+            let rows = stmt.query_map(params![self.matter_id], |row| row.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            conn.execute_batch("DROP TABLE IF EXISTS _promote_children;")?;
+            Ok(out)
+        })
+    }
+
+    /// Apply N promote membership updates and upsert the job checkpoint in **one**
+    /// SQLite transaction (same pattern as cull / near-dup / dedupe).
+    pub fn apply_promote_batch_with_checkpoint(
+        &self,
+        job_id: &str,
+        stage: &str,
+        updates: &[PromoteFieldUpdate],
+        cursor_json: &str,
+        completed_count: i64,
+    ) -> Result<()> {
+        let now = now_rfc3339();
+        self.with_transaction(|conn| {
+            for u in updates {
+                conn.execute(
+                    "UPDATE items SET \
+                        in_review = ?1, review_set_id = ?2, review_order = ?3, \
+                        promoted_at = ?4, promote_job_id = ?5, promote_policy = ?6 \
+                     WHERE id = ?7",
+                    params![
+                        u.in_review,
+                        u.review_set_id,
+                        u.review_order,
+                        u.promoted_at,
+                        u.promote_job_id,
+                        u.promote_policy,
+                        u.item_id,
+                    ],
+                )?;
+            }
+            jobs::put_checkpoint(conn, job_id, stage, cursor_json, completed_count, &now)?;
+            Ok(())
+        })
+    }
+
     fn recompute_attachment_count(&self, parent_id: &str) -> Result<()> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM items WHERE parent_item_id = ?1",
@@ -2298,7 +2696,8 @@ const ITEM_COLUMNS: &str =
     near_dup_group_id, near_dup_role, near_dup_similarity, near_dup_pivot_item_id, \
     near_dup_method, near_duped_at, near_dup_job_id, \
     cull_status, cull_reasons_json, cull_preset_id, cull_preset_name, \
-    culled_at, cull_job_id";
+    culled_at, cull_job_id, \
+    in_review, review_set_id, review_order, promoted_at, promote_job_id, promote_policy";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -2366,6 +2765,40 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         cull_preset_name: row.get(57)?,
         culled_at: row.get(58)?,
         cull_job_id: row.get(59)?,
+        in_review: row.get(60)?,
+        review_set_id: row.get(61)?,
+        review_order: row.get(62)?,
+        promoted_at: row.get(63)?,
+        promote_job_id: row.get(64)?,
+        promote_policy: row.get(65)?,
+    })
+}
+
+fn map_promote_candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromoteCandidate> {
+    Ok(PromoteCandidate {
+        id: row.get(0)?,
+        parent_item_id: row.get(1)?,
+        path: row.get(2)?,
+        status: row.get(3)?,
+        dedup_role: row.get(4)?,
+        cull_status: row.get(5)?,
+        role: row.get(6)?,
+    })
+}
+
+fn map_review_set_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewSet> {
+    let is_default_i: i64 = row.get(3)?;
+    Ok(ReviewSet {
+        id: row.get(0)?,
+        matter_id: row.get(1)?,
+        name: row.get(2)?,
+        is_default: is_default_i != 0,
+        policy: row.get(4)?,
+        policy_json: row.get(5)?,
+        item_count: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        created_by: row.get(9)?,
     })
 }
 

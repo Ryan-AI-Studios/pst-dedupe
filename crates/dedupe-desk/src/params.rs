@@ -121,6 +121,37 @@ pub fn cull_default_params() -> String {
     cull_params_for_preset("unique_only")
 }
 
+/// Promote policies shown in the desk dropdown.
+pub const PROMOTE_POLICIES: &[&str] = &[
+    "auto",
+    "cull_included",
+    "unique_only",
+    "unique_plus_family",
+    "all_extracted",
+    "cull_included_plus_family",
+];
+
+/// Default params for promote-to-review (`kind = "promote"`).
+///
+/// Desk `start_promote` uses [`promote_params_for_policy`] with the dropdown value.
+#[allow(dead_code)]
+pub fn promote_default_params() -> String {
+    promote_params_for_policy("auto")
+}
+
+/// Promote params for a named policy (or `auto`).
+pub fn promote_params_for_policy(policy: &str) -> String {
+    serde_json::json!({
+        "policy": policy,
+        "review_set_name": "Review Corpus",
+        "expand_families": true,
+        "reset": true,
+        "batch_size": 500,
+        "require_dedupe": false
+    })
+    .to_string()
+}
+
 /// True when `path` looks like a PST (case-insensitive `.pst` extension).
 pub fn looks_like_pst(path: &str) -> bool {
     Path::new(path)
@@ -253,6 +284,19 @@ mod tests {
         assert_eq!(v["reset"], true);
         assert_eq!(v["batch_size"], 500);
         assert_eq!(CULL_BUILTIN_PRESETS[0], "unique_only");
+    }
+
+    #[test]
+    fn promote_default_json_shape() {
+        let j = promote_default_params();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["policy"], "auto");
+        assert_eq!(v["review_set_name"], "Review Corpus");
+        assert_eq!(v["expand_families"], true);
+        assert_eq!(v["reset"], true);
+        assert_eq!(v["batch_size"], 500);
+        assert_eq!(v["require_dedupe"], false);
+        assert_eq!(PROMOTE_POLICIES[0], "auto");
     }
 
     #[test]

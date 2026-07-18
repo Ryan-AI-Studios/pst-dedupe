@@ -18,6 +18,9 @@ pub mod neardup;
 #[cfg(feature = "cull")]
 pub mod cull;
 
+#[cfg(feature = "promote")]
+pub mod promote;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
@@ -35,3 +38,6 @@ pub use neardup::MatterNearDupHandler;
 
 #[cfg(feature = "cull")]
 pub use cull::MatterCullHandler;
+
+#[cfg(feature = "promote")]
+pub use promote::MatterPromoteHandler;
