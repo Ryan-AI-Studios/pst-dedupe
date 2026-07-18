@@ -51,12 +51,12 @@ Detect “cull has run”: `EXISTS (SELECT 1 FROM items WHERE cull_status IS NOT
 
 When `expand_families: true` (or a `*_plus_family` policy):
 
-1. Base set **S** from policy  
-2. **Down:** add direct children of S  
-3. **Up:** add parents of S (`parent_item_id`)  
-4. Repeat until fixed point (P0: ≤2 iterations, depth ≤2)  
-5. Expanded members get `in_review=1` even if base policy would exclude them  
-6. Does **not** expand threads  
+1. Base set **S** from policy
+2. **Down:** add direct children of S
+3. **Up:** add parents of S (`parent_item_id`)
+4. Repeat until fixed point (P0: ≤2 iterations, depth ≤2)
+5. Expanded members get `in_review=1` even if base policy would exclude them
+6. Does **not** expand threads
 
 ## Ordering (`review_order`) — single SQL, no N+1
 
