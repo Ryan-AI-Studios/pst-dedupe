@@ -125,11 +125,21 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0027-01 | — | Privilege log export / 502(d) workflow | P0: Privilege **code** only (membership); not full log | **0031** |
-| D-0027-02 | — | Filter list / saved search by code | Chips + catalog in 0027; no list filter | **0028** |
+| D-0027-02 | — | Filter list / saved search by code | **Done in 0028** (code any_of/none_of/missing + desk chips) | — |
 | D-0027-03 | — | Auto-propagate to near-dup / full thread | Never default; family = parent+all children only | residual / **0056** |
 | D-0027-04 | — | QC sampling reports / multi-reviewer lock | Single-desk P0 | later / **0058** |
 | D-0027-05 | P3 | Full GUI smoke for coding panel / batch / digits path | Automated matter-core + desk unit/integration tests; operator smoke local | operator / polish |
 | D-0027-06 | — | Production export of coded subsets | Membership only in 0027 | **0040** |
+
+## From track 0028-FiltersSavedSearch
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0028-01 | P3 | Keyset/cursor pagination if deep OFFSET still slow | P0: LIMIT/OFFSET + partial `idx_items_review_list_order`; Codex residual | residual scale |
+| D-0028-02 | — | Nested saved-search-as-condition / deep OR builder | P0: flat AND only (Relativity nesting timeout risk) | residual |
+| D-0028-03 | P3 | Full GUI smoke for filter bar / saved search / Load more | Automated matter-core + desk unit/integration; operator smoke local | operator / polish |
+| D-0028-04 | — | Body keyword in FilterSpec | Metadata only; FTS → **0029** | **0029** |
+| D-0026-01 | P3 | Large corpus paging | **Improved in 0028**: filtered count + Load more + compound list index; unfiltered Load more too | residual if multi-million |
 
 ## Hygiene
 
