@@ -122,11 +122,12 @@ Small Aspose/sample fixtures live under `fixtures/` (see `fixtures/README.md`). 
 | `pst-dedup-cli` | CLI surface: inspect / scan / dups (JSON + CSV) |
 | `pst-dedup-gui` | egui app and background scan worker |
 | `pst-writer` | Experimental/fixture PST writing and EML import helpers |
-| `matter-core` | Matter layout + SQLite (schema v6: Normalized Item + dedupe/thread/neardup/cull result cols + `cull_presets`) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + logical_hash v1 + `workspace/temp/` |
+| `matter-core` | Matter layout + SQLite (schema v7: Normalized Item + dedupe/thread/neardup/cull/promote result cols + `cull_presets` + `review_sets`) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + logical_hash v1 + `workspace/temp/` |
 | `ingest-purview` | Purview/package/ZIP detect + safe expand + resumable inventory (blocking worker API; `*_on_job` for runner) |
 | `extract-pst` | PST → Normalized Items + families + logical_hash; `pst-native-message-v1` native (not EML); mid-folder resume (blocking; `*_on_job` for runner) |
 | `process-runner` | In-process job runner: single matter worker, cancel, watch progress, Option C job-id authority |
 | `matter-cull` | Flag-only data reduction: built-in + user presets, family fixpoint, `cull_*` result columns (never deletes items/CAS) |
+| `matter-promote` | Flag-only promote-to-review: policies + bidirectional family expand + single-pass `review_order` (never deletes items/CAS) |
 
 **Matter layout** (Desk foundation): `matter.db`, `blobs/sha256/<aa>/<hex>`, reserved `index/` / `exports/` / `logs/`, `workspace/temp/`.  
 See [`crates/matter-core/README.md`](crates/matter-core/README.md), [`crates/ingest-purview/README.md`](crates/ingest-purview/README.md), [`crates/extract-pst/README.md`](crates/extract-pst/README.md), [`crates/process-runner/README.md`](crates/process-runner/README.md), and [`ARCHITECTURE.md`](ARCHITECTURE.md).

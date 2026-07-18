@@ -98,7 +98,16 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0024-03 | — | MD5/SHA-1 native digests for legacy DeNIST | Desk identity is SHA-256; fail closed on MD5-looking lists | residual if ever needed |
 | D-0024-04 | P3 | Full GUI smoke for Run cull click path | Automated handler + unit tests; operator smoke local | operator / polish |
 | D-0024-05 | P3 | Dedicated family-phase mid-write cancel integration test | Items-phase cancel/resume proven; family cancel covered in engine path | polish |
-| (promote) | — | 0025 unique-only without cull | Allowed; prefer `cull_status=included` when 0024 has run | **0025** |
+| (promote) | — | 0025 unique-only without cull | **Closed in 0025**: `auto` → `unique_only` when cull never run; `require_dedupe` optional fail | **0025** |
+
+## From track 0025-PromoteToReview
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0025-01 | — | Multiple concurrent review sets / batch checkout | P0: one default `Review Corpus`; schema supports multi-set | later |
+| D-0025-02 | — | Expand full email threads into review set | P0: **bidirectional family** only; threads → **0056** | **0056** |
+| D-0025-03 | — | Interactive saved-search promote | Preset policies only | **0028** |
+| D-0025-04 | P3 | Full GUI smoke for Promote to review click path | Automated handler + unit tests; operator smoke local | operator / polish |
 
 ## Hygiene
 

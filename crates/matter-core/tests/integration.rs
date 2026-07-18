@@ -376,13 +376,13 @@ fn audit_append_verify_and_detect_broken_chain() {
 }
 
 #[test]
-fn schema_v6_on_create() {
+fn schema_v7_on_create() {
     let (_tmp, base) = utf8_tempdir();
-    let root = base.join("matter-v6");
-    let matter = Matter::create(&root, "V6").expect("create");
-    assert_eq!(SCHEMA_VERSION, 6);
-    assert_eq!(matter.schema_version().expect("ver"), 6);
-    assert_eq!(matter.info().expect("info").schema_version, 6);
+    let root = base.join("matter-v7");
+    let matter = Matter::create(&root, "V7").expect("create");
+    assert_eq!(SCHEMA_VERSION, 7);
+    assert_eq!(matter.schema_version().expect("ver"), 7);
+    assert_eq!(matter.info().expect("info").schema_version, 7);
 }
 
 #[test]
@@ -1516,4 +1516,117 @@ fn cull_preset_crud() {
     matter.delete_cull_preset(&created.id).expect("delete");
     assert!(matter.list_cull_presets().expect("list").is_empty());
     // Item cull fields are independent — delete does not require items.
+}
+
+#[test]
+fn promote_batch_and_checkpoint_same_transaction() {
+    use matter_core::{item_role, item_status, PromoteFieldUpdate, DEFAULT_REVIEW_SET_NAME};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-promote-txn");
+    let matter = Matter::create(&root, "Promote Txn").expect("create");
+    let job = matter.create_job("promote").expect("job");
+
+    let set = matter
+        .ensure_default_review_set(DEFAULT_REVIEW_SET_NAME)
+        .expect("set");
+    assert!(set.is_default);
+    assert_eq!(set.name, DEFAULT_REVIEW_SET_NAME);
+
+    // Idempotent ensure.
+    let set2 = matter
+        .ensure_default_review_set(DEFAULT_REVIEW_SET_NAME)
+        .expect("set2");
+    assert_eq!(set.id, set2.id);
+
+    let a = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            path: Some("doc-a.txt".into()),
+            size_bytes: Some(10),
+            ..Default::default()
+        })
+        .expect("a");
+
+    let updates = vec![PromoteFieldUpdate {
+        item_id: a.id.clone(),
+        in_review: Some(1),
+        review_set_id: Some(set.id.clone()),
+        review_order: Some(1),
+        promoted_at: Some("2020-01-01T00:00:00Z".into()),
+        promote_job_id: Some(job.id.clone()),
+        promote_policy: Some("unique_only".into()),
+    }];
+    matter
+        .apply_promote_batch_with_checkpoint(
+            &job.id,
+            "promote",
+            &updates,
+            r#"{"cursor_index":1}"#,
+            1,
+        )
+        .expect("batch");
+
+    let item = matter.get_item(&a.id).expect("get");
+    assert_eq!(item.in_review, Some(1));
+    assert_eq!(item.review_set_id.as_deref(), Some(set.id.as_str()));
+    assert_eq!(item.review_order, Some(1));
+    assert_eq!(item.promote_policy.as_deref(), Some("unique_only"));
+
+    let cp = matter
+        .get_checkpoint(&job.id, "promote")
+        .expect("cp")
+        .expect("present");
+    assert_eq!(cp.completed_count, 1);
+
+    matter
+        .update_review_set_snapshot(&set.id, "unique_only", Some("{}"), 1)
+        .expect("snap");
+    let set3 = matter.get_review_set(&set.id).expect("get set");
+    assert_eq!(set3.item_count, 1);
+    assert_eq!(set3.policy.as_deref(), Some("unique_only"));
+
+    matter
+        .clear_review_membership_for_set(&set.id)
+        .expect("clear");
+    let cleared = matter.get_item(&a.id).expect("get");
+    assert_eq!(cleared.in_review, Some(0));
+    assert!(cleared.review_set_id.is_none());
+    assert!(cleared.review_order.is_none());
+}
+
+#[test]
+fn review_sets_partial_unique_rejects_double_default() {
+    use matter_core::{DB_FILE, DEFAULT_REVIEW_SET_NAME};
+    use rusqlite::Connection;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-review-unique");
+    let matter = Matter::create(&root, "Review Unique").expect("create");
+    let matter_id = matter.info().unwrap().id;
+
+    let a = matter
+        .ensure_default_review_set(DEFAULT_REVIEW_SET_NAME)
+        .expect("default");
+    assert!(a.is_default);
+    drop(matter);
+
+    // Raw insert of a second default must fail at the DB layer.
+    let db = root.join(DB_FILE);
+    let conn = Connection::open(db.as_std_path()).expect("open db");
+    let err = conn
+        .execute(
+            "INSERT INTO review_sets (id, matter_id, name, is_default, policy, policy_json, \
+             item_count, created_at, updated_at, created_by) \
+             VALUES ('rset_evil', ?1, 'Evil', 1, NULL, NULL, 0, \
+             '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', NULL)",
+            rusqlite::params![matter_id],
+        )
+        .expect_err("second default");
+    let msg = err.to_string();
+    assert!(
+        msg.to_lowercase().contains("unique"),
+        "expected unique violation, got {msg}"
+    );
 }

@@ -9,7 +9,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
 use process_runner::{
     ExtractPstHandler, IngestHandler, JobParams, MatterCullHandler, MatterDedupeHandler,
-    MatterNearDupHandler, MatterThreadHandler, ProcessRunner, RunnerConfig,
+    MatterNearDupHandler, MatterPromoteHandler, MatterThreadHandler, ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -54,6 +54,8 @@ pub struct DeskApp {
     /// Selected cull preset for the workspace dropdown.
     /// Built-ins: bare name (`unique_only`). User presets: `user:<id>`.
     pub(crate) cull_preset: String,
+    /// Selected promote policy for the workspace dropdown (`auto` + named).
+    pub(crate) promote_policy: String,
 }
 
 impl DeskApp {
@@ -65,6 +67,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterThreadHandler::new()));
         runner.register(Arc::new(MatterNearDupHandler::new()));
         runner.register(Arc::new(MatterCullHandler::new()));
+        runner.register(Arc::new(MatterPromoteHandler::new()));
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 
@@ -88,6 +91,7 @@ impl DeskApp {
             last_refresh: Instant::now() - Duration::from_secs(60),
             last_job_id: None,
             cull_preset: "unique_only".into(),
+            promote_policy: "auto".into(),
         }
     }
 
@@ -333,6 +337,29 @@ impl DeskApp {
                 self.last_job_id = Some(job_id.clone());
                 let display = self.cull_preset_display_name();
                 self.status_msg = Some(format!("Started cull job {job_id} (preset={display})"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    pub(crate) fn start_promote(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let policy = self.promote_policy.as_str();
+        let params_json = params::promote_params_for_policy(policy);
+        let params = JobParams::new(params_json);
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "promote", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!(
+                    "Started promote job {job_id} (policy={policy}; auto resolves at run)"
+                ));
                 self.error_msg = None;
             }
             Err(e) => self.note_start_error(e),

@@ -51,3 +51,6 @@ pub use handlers::MatterNearDupHandler;
 
 #[cfg(feature = "cull")]
 pub use handlers::MatterCullHandler;
+
+#[cfg(feature = "promote")]
+pub use handlers::MatterPromoteHandler;
