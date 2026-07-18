@@ -45,7 +45,12 @@ Unique **and** duplicate parents are threaded (conversation structure ≠ suppre
 
 ## Memory posture
 
-- Thin `ThreadCandidate` rows only (no body text).
+- Thin `ThreadCandidate` rows only (no body text / no full `Item`).
+- Candidates are loaded via **paged** `list_email_parents_for_thread_range`
+  (page size 500). Phase A union-find still holds the full **thin** set so
+  header components can be built; that is intentional and still far smaller
+  than materializing full Normalized Items.
+- Assignment writes and family inherit commit in **batches** (`batch_size`).
 - Union-find / maps use **`[u8; 32]`** keys (SHA-256 of normalized MID / subject / CI prefix).
 - Reverse MID strings kept only for matter members as needed for `thread_id`.
 

@@ -246,8 +246,10 @@ fn run_thread_inner(
         matter.clear_thread_fields(params.family_inherit)?;
     }
 
-    // Load thin candidates (identity + headers only — no bodies).
-    let candidates = matter.list_email_parents_for_thread()?;
+    // Load thin candidates via paged SQL (identity + headers only — no bodies).
+    // Phase A union-find needs the full thin set in memory; paging avoids a
+    // single unbounded result and matches the §3.8 posture (no full `Item`).
+    let candidates = load_thread_candidates_paged(matter)?;
     let assignments = compute_assignments(&candidates, params);
 
     // Count methods for summary (on full plan).
@@ -371,6 +373,26 @@ fn recount_prefix(assignments: &[Assignment], through: usize, cursor: &mut Check
     cursor.index_linked = index;
     cursor.singleton = singleton;
     cursor.thread_count = threads.len() as u64;
+}
+
+/// Page size for loading thin thread candidates from SQLite.
+const CANDIDATE_PAGE: u64 = 500;
+
+/// Stream thin parent rows via `list_email_parents_for_thread_range` until exhausted.
+fn load_thread_candidates_paged(matter: &Matter) -> Result<Vec<ThreadCandidate>> {
+    let total = matter.count_email_parents_for_thread()?;
+    let mut out = Vec::with_capacity(total.min(1_000_000) as usize);
+    let mut offset = 0u64;
+    while offset < total {
+        let limit = (total - offset).min(CANDIDATE_PAGE);
+        let page = matter.list_email_parents_for_thread_range(offset, limit)?;
+        if page.is_empty() {
+            break;
+        }
+        offset += page.len() as u64;
+        out.extend(page);
+    }
+    Ok(out)
 }
 
 /// Compute all parent assignments in memory from thin rows.
