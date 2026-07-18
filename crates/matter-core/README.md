@@ -7,7 +7,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v11**) + family graph
+6. **Normalized Item** model (schema **v12**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
@@ -17,8 +17,9 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 13. **Metadata filters** + `saved_searches` + paged filtered review list (0028)
 14. **FTS bookkeeping** (`fts_*`) + filtered-in-ids for Tantivy compose (0029)
 15. **Notes / highlights** stand-off work-product annotations (0030)
+16. **Privilege** claims + withhold holds + privilege log CSV export (0031)
 
-Schema version: **11** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, optional `saved_searches.keyword`, and notes/highlights. SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+Schema version: **12** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, and privilege claims/withhold. SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
 
 ## Layout
 
@@ -316,7 +317,64 @@ Module: `matter_core::filter` (`FilterSpec`, `compile_filter`, presets).
 | `has_highlights` | `eq` true/false | `items.highlight_count > 0` |
 | `note_text` | `contains` | EXISTS note whose body matches bound `LIKE` (case-folded) |
 
-`FILTER_SPEC_VERSION` remains **1** (backward compatible). Presets: `FilterSpec::preset_has_notes()`, `preset_has_highlights()`.
+`FILTER_SPEC_VERSION` remains **1** (backward compatible). Presets: `FilterSpec::preset_has_notes()`, `preset_has_highlights()`, `preset_withheld()`, `preset_privilege_log_incomplete()`.
+
+### Privilege filter fields (0031)
+
+| Field | Op | Meaning |
+|---|---|---|
+| `privilege_withhold` | `eq` true/false | Production hold (`items.privilege_withhold` / `item_privilege.withhold`) |
+| `privilege_status` | `any_of` | Status in list (`asserted`, `under_review`, `cleared`, `partial_redaction`) |
+| `privilege_log_ready` | `eq` true | `include_on_log=1` AND `trim(description) != ''`; `eq` false → include_on_log blank description |
+
+## Schema v12 — Privilege claims + withhold + log export (0031)
+
+Structured privilege workflow on top of the seed **Privilege** code (0027). Soft-clear only (no hard-delete of claim rows by default).
+
+### Tables
+
+| Table | Purpose |
+|---|---|
+| `item_privilege` | 1:1 claim: `basis`, `description`, `status`, `withhold`, `include_on_log`, asserted/updated metadata |
+| `privilege_protocol` | Matter stub: `log_format`, `fre_502d_note`, `fre_502e_note`, `description_required` (informational — **not** a court order) |
+
+Denormalized on `items`: `privilege_withhold` INTEGER NOT NULL DEFAULT 0 (maintained with privilege writes).
+
+### Basis vocabulary
+
+| Key | Log / UI label |
+|---|---|
+| `attorney_client` | Attorney-Client Privilege |
+| `work_product` | Work Product |
+| `attorney_client_work_product` | Attorney-Client and Work Product |
+| `common_interest` | Common Interest |
+| `other` | Other (see description) |
+
+Default on ensure (Privilege code apply / Assert): `status=asserted`, `withhold=1`, `include_on_log=1`, `basis=attorney_client`, empty description OK.
+
+Soft-clear (Privilege code remove): `status=cleared`, `withhold=0`, `include_on_log=0`, **retain description** for internal audit / re-open.
+
+### **Withhold contract for production (0040)** — normative
+
+```text
+item_is_withheld(item) := EXISTS item_privilege WHERE item_id AND withhold = 1
+```
+
+| Rule | Requirement |
+|---|---|
+| **0040 gate** | Production natives / load file **must** skip or fail-closed on `item_is_withheld` / `list_withheld_item_ids` |
+| **Soft-clear description** | Retained `item_privilege.description` after `status=cleared` is **internal audit only**. Privilege log CSV **never** includes cleared rows. Production load-file / natives metadata **must not** emit `item_privilege.description` (or basis narrative) for cleared rows, and should default-exclude privilege description fields entirely |
+| Override | Operator may set `withhold=0` while still asserted (rare; audited) |
+
+### Privilege log CSV columns (standard P0)
+
+`ControlNumber`, `ParentControlNumber`, `FamilyId`, `Custodian`, `DocDate`, `From`, `To`, `Cc`, `Bcc`, `Subject`, `FileName`, `FileType`, `PrivilegeType`, `Description`, `Status`, `Withhold`, `HasPrivilegeCode`, `MatterId`, `ExportedAt`
+
+Eligibility: `include_on_log=1` AND status ∈ `asserted` / `under_review` / `partial_redaction`. Blank descriptions export with warning count (not hard-fail). **Attachment inheritance:** empty From/To/Cc/Bcc/Subject/DocDate filled from parent email when `parent_item_id` set; FileName remains child basename. Notes body is **never** auto-copied into Description.
+
+API: `ensure_item_privilege`, `upsert_item_privilege`, `clear_item_privilege`, `get_item_privilege` / `list_item_privilege`, `get_privilege_protocol` / `upsert_privilege_protocol`, `item_is_withheld` / `list_withheld_item_ids`, `family_privilege_consistency`, `export_privilege_log`.
+
+Audit: `privilege.upsert`, `privilege.clear`, `privilege.protocol_upsert`, `privilege.log_export`. Coding apply/remove Privilege hooks ensure/soft-clear in the same transaction with separate privilege audit events (full sorted item ids).
 
 ## Schema v11 — Notes / highlights (0030)
 

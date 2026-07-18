@@ -124,7 +124,7 @@ Flag-only membership (`in_review` / `review_order`); never deletes items or CAS.
 Bidirectional family expand is on by default. Reuses progress / cancel / resume.
 See `crates/matter-promote/README.md`.
 
-### Review screen (0026) + coding (0027) + filters (0028) + notes (0030)
+### Review screen (0026) + coding (0027) + filters (0028) + notes (0030) + privilege (0031)
 
 Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 
@@ -132,20 +132,30 @@ Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 |---|---|
 | Keyword bar | Keyword box + **Search** / **Clear**; composes FTS hits ∩ metadata filters; status “N keyword hits · M after filters” |
 | Index | **Update index** / **Rebuild index** (`fts_index` job; rebuild uses `reset:true`) |
-| Filter bar | Custodian, codes, date from/to (RFC3339+offset), include family, **Note text contains…**; **Apply** / **Clear**; quick chips Uncoded / Privilege / Responsive / **Has notes** / **Has highlights** |
+| Filter bar | Custodian, codes, date from/to (RFC3339+offset), include family, **Note text contains…**; **Apply** / **Clear**; quick chips Uncoded / Privilege / Responsive / **Has notes** / **Has highlights** / **Withheld** / **Privilege log incomplete** |
+| Privilege protocol | Collapsible 502(d)/502(e) notes + description_required — **informational only** (Desk does not issue FRE 502 orders) |
 | Saved searches | Dropdown Load / Save (name) / Delete — stores `FilterSpec` JSON + optional `keyword` in `saved_searches` |
 | Corpus list | Thin rows (`list_review_thin`, filtered, or keyword-composed); multi-select ☑; fixed `ROW_HEIGHT` 22.0 |
 | Status | “Showing N of M” + **Load more** when filtered/large count exceeds loaded rows |
 | Header | Subject, From, To/Cc (selection-time fetch), dates, path, mime, size, role chips; **📝 N notes · H highlights** |
 | Code chips | Current-item codes; click chip to **remove** (no confirm) |
 | Coding panel | Active code buttons toggle current item; batch **Add** / **Remove** mode; family checkbox; Apply |
+| Privilege panel | When Privilege code or claim row present (or **Assert privilege**): basis, status, withhold, include_on_log, description, Save; optional **Draft from note…** (confirm — never auto on export); family split banner |
+| Export | **Export privilege log…** (worker + file dialog) with Review-only checkbox; result shows row / blank-desc / withheld counts |
 | Body | CAS text (`text_sha256` preferred, else `html_sha256` with block-aware strip); yellow paint on active highlights; select text → **Highlight** / **Note on selection** |
 | Notes panel | List newest-first; add document note; edit/delete; stale banner from **in-memory re-resolve** (not raw DB status alone) |
 | Family strip | Same-`family_id` members in the loaded list; click to open |
 
 **Work product:** Notes and highlights live in the matter DB only. They are **not**
 rewritten into CAS and are **not** included in production/load-file export by
-default (opt-in later in **0040**).
+default (opt-in later in **0040**). Privilege log descriptions are separate from
+notes — never auto-copied into the log.
+
+**Privilege / withhold (0031):** Applying the Privilege code ensures a claim row
+(`withhold=1` by default). Soft-clear on code remove retains description for
+internal audit only; cleared rows never appear on the privilege log. **0040**
+must call `item_is_withheld` before production and must not dump cleared
+`item_privilege.description` into load-file metadata.
 
 **Prerequisite:** run **Promote to review** on Workspace first. Empty state points operators there.
 
@@ -161,7 +171,7 @@ default (opt-in later in **0040**).
 | Toggle code 1–9 | Digits `1`–`9` map first 9 **active** codes on **current** item |
 
 No wrap at ends. Focus gate: `ctx.memory(\|m\| m.focused().is_none())` (egui 0.34)
-and note-editor focus (previous frame) — note / filter / keyword `TextEdit` blocks digit coding.
+and note-editor / privilege-description focus (previous frame) — note / privilege / filter / keyword `TextEdit` blocks digit coding.
 
 #### Notes / highlights (0030)
 

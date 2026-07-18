@@ -171,6 +171,46 @@ impl FilterSpec {
         }
     }
 
+    /// Quick chip: production withhold hold (track 0031).
+    pub fn preset_withheld() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "privilege_withhold".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
+    /// Quick chip: asserted privilege with blank log description (track 0031).
+    pub fn preset_privilege_log_incomplete() -> Self {
+        Self {
+            conditions: vec![
+                FilterCondition {
+                    field: "privilege_status".into(),
+                    op: "any_of".into(),
+                    value: None,
+                    values: Some(vec!["asserted".into()]),
+                    start: None,
+                    end: None,
+                },
+                FilterCondition {
+                    field: "privilege_log_ready".into(),
+                    op: "eq".into(),
+                    value: Some(serde_json::Value::Bool(false)),
+                    values: None,
+                    start: None,
+                    end: None,
+                },
+            ],
+            ..Self::default()
+        }
+    }
+
     /// True when no conditions and default family flag (still may have scope).
     pub fn is_empty_conditions(&self) -> bool {
         self.conditions.is_empty() && !self.include_family
@@ -593,6 +633,62 @@ fn push_condition(
             ));
             params.push(Value::Text(matter_id.to_string()));
             params.push(Value::Text(pattern));
+        }
+        ("privilege_withhold", "eq") => {
+            let want = bool_value(cond, "privilege_withhold")?;
+            // Prefer denormalized cache (schema v12); EXISTS as equivalent fallback.
+            if want {
+                where_parts.push(format!(
+                    "({alias}.privilege_withhold = 1 OR EXISTS (\
+                     SELECT 1 FROM item_privilege ip \
+                     WHERE ip.item_id = {alias}.id AND ip.matter_id = ? AND ip.withhold = 1))"
+                ));
+                params.push(Value::Text(matter_id.to_string()));
+            } else {
+                where_parts.push(format!(
+                    "({alias}.privilege_withhold = 0 OR {alias}.privilege_withhold IS NULL) \
+                     AND NOT EXISTS (\
+                     SELECT 1 FROM item_privilege ip \
+                     WHERE ip.item_id = {alias}.id AND ip.matter_id = ? AND ip.withhold = 1)"
+                ));
+                params.push(Value::Text(matter_id.to_string()));
+            }
+        }
+        ("privilege_status", "any_of") => {
+            let keys = require_values(cond, "privilege_status any_of")?;
+            let placeholders = sql_placeholders(keys.len());
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_privilege ip \
+                 WHERE ip.item_id = {alias}.id AND ip.matter_id = ? \
+                 AND ip.status IN ({placeholders}))"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            for k in keys {
+                params.push(Value::Text(k));
+            }
+        }
+        ("privilege_log_ready", "eq") => {
+            let want = bool_value(cond, "privilege_log_ready")?;
+            // Ready: include_on_log=1 AND trim(description) != ''.
+            if want {
+                where_parts.push(format!(
+                    "EXISTS (SELECT 1 FROM item_privilege ip \
+                     WHERE ip.item_id = {alias}.id AND ip.matter_id = ? \
+                     AND ip.include_on_log = 1 \
+                     AND TRIM(ip.description) != '')"
+                ));
+            } else {
+                // Incomplete / not ready: has privilege row that is include_on_log
+                // with blank description, OR no ready row (for asserted incomplete chip
+                // combine with privilege_status).
+                where_parts.push(format!(
+                    "EXISTS (SELECT 1 FROM item_privilege ip \
+                     WHERE ip.item_id = {alias}.id AND ip.matter_id = ? \
+                     AND ip.include_on_log = 1 \
+                     AND TRIM(ip.description) = '')"
+                ));
+            }
+            params.push(Value::Text(matter_id.to_string()));
         }
         _ => {
             return Err(Error::Other(format!(
