@@ -228,6 +228,12 @@ Deleting a preset does **not** clear item cull fields.
 | `list_direct_children_ids` / `list_parent_ids_of` | Bidirectional expand helpers |
 | `apply_promote_batch_with_checkpoint` | **N membership updates + checkpoint in one commit** |
 | `cull_has_run` / `any_dedup_role_present` | Policy resolution helpers |
+| `count_in_review` / `list_review_thin` | Thin review corpus list for desk **0026** (ordered by `review_order`) |
+| `get_default_review_set_id` | Default set id helper for list filter |
+
+`ReviewListRow` is a thin projection (no body text / participant JSON). When
+`set_id` is `None`, list/count use the default review set if present, else all
+`in_review = 1`.
 
 Engine: `crates/matter-cull`. **0025 promote** should prefer `cull_status=included` when any cull has run; else unique-only.
 

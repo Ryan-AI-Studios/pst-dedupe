@@ -467,6 +467,32 @@ pub struct ReviewSet {
     pub created_by: Option<String>,
 }
 
+/// Thin review-list row for the desk Review surface (0026).
+///
+/// Intentionally excludes body text and large participant JSON so list loads
+/// stay cheap for virtualized scrolling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewListRow {
+    pub id: String,
+    pub review_order: Option<i64>,
+    pub role: Option<String>,
+    pub parent_item_id: Option<String>,
+    pub subject: Option<String>,
+    pub from_addr: Option<String>,
+    pub sent_at: Option<String>,
+    pub received_at: Option<String>,
+    pub path: Option<String>,
+    pub file_category: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: Option<i64>,
+    pub text_sha256: Option<String>,
+    pub html_sha256: Option<String>,
+    pub dedup_role: Option<String>,
+    pub cull_status: Option<String>,
+    pub attachment_count: Option<i64>,
+    pub family_id: Option<String>,
+}
+
 /// Named cull preset stored per matter (schema v6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CullPreset {
@@ -2572,6 +2598,106 @@ impl Matter {
         })
     }
 
+    // --- Review list helpers (schema v7 / track 0026) ---
+
+    /// Id of the default review set, if any.
+    pub fn get_default_review_set_id(&self) -> Result<Option<String>> {
+        Ok(self.get_default_review_set()?.map(|s| s.id))
+    }
+
+    /// Count of items in the review corpus.
+    ///
+    /// - `set_id = Some(id)` → items with `in_review = 1` in that set
+    /// - `set_id = None` → default set if present, else all `in_review = 1`
+    pub fn count_in_review(&self, set_id: Option<&str>) -> Result<u64> {
+        let resolved = self.resolve_review_set_filter(set_id)?;
+        let n: i64 = match resolved.as_deref() {
+            Some(sid) => self.conn.query_row(
+                "SELECT COUNT(*) FROM items \
+                 WHERE matter_id = ?1 AND in_review = 1 AND review_set_id = ?2",
+                params![self.matter_id, sid],
+                |row| row.get(0),
+            )?,
+            None => self.conn.query_row(
+                "SELECT COUNT(*) FROM items \
+                 WHERE matter_id = ?1 AND in_review = 1",
+                params![self.matter_id],
+                |row| row.get(0),
+            )?,
+        };
+        Ok(n as u64)
+    }
+
+    /// Thin review rows ordered by `review_order ASC` (then `id` for stability).
+    ///
+    /// Does **not** load body text or large participant JSON. See
+    /// [`ReviewListRow`].
+    ///
+    /// Set filter semantics match [`Self::count_in_review`].
+    pub fn list_review_thin(
+        &self,
+        set_id: Option<&str>,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<ReviewListRow>> {
+        let resolved = self.resolve_review_set_filter(set_id)?;
+        let limit_i = if limit == u64::MAX {
+            i64::MAX
+        } else {
+            limit as i64
+        };
+        let offset_i = offset as i64;
+        let sql = match resolved.as_deref() {
+            Some(_) => {
+                "SELECT id, review_order, role, parent_item_id, subject, from_addr, \
+                        sent_at, received_at, path, file_category, mime_type, size_bytes, \
+                        text_sha256, html_sha256, dedup_role, cull_status, attachment_count, \
+                        family_id \
+                 FROM items \
+                 WHERE matter_id = ?1 AND in_review = 1 AND review_set_id = ?2 \
+                 ORDER BY review_order ASC, id ASC \
+                 LIMIT ?3 OFFSET ?4"
+            }
+            None => {
+                "SELECT id, review_order, role, parent_item_id, subject, from_addr, \
+                        sent_at, received_at, path, file_category, mime_type, size_bytes, \
+                        text_sha256, html_sha256, dedup_role, cull_status, attachment_count, \
+                        family_id \
+                 FROM items \
+                 WHERE matter_id = ?1 AND in_review = 1 \
+                 ORDER BY review_order ASC, id ASC \
+                 LIMIT ?2 OFFSET ?3"
+            }
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = match resolved.as_deref() {
+            Some(sid) => {
+                let mapped = stmt.query_map(
+                    params![self.matter_id, sid, limit_i, offset_i],
+                    map_review_list_row,
+                )?;
+                mapped.collect::<std::result::Result<Vec<_>, _>>()?
+            }
+            None => {
+                let mapped = stmt.query_map(
+                    params![self.matter_id, limit_i, offset_i],
+                    map_review_list_row,
+                )?;
+                mapped.collect::<std::result::Result<Vec<_>, _>>()?
+            }
+        };
+        Ok(rows)
+    }
+
+    /// Resolve optional set filter: explicit id, else default set id, else None
+    /// (meaning "all `in_review = 1`").
+    fn resolve_review_set_filter(&self, set_id: Option<&str>) -> Result<Option<String>> {
+        if let Some(sid) = set_id {
+            return Ok(Some(sid.to_string()));
+        }
+        self.get_default_review_set_id()
+    }
+
     fn recompute_attachment_count(&self, parent_id: &str) -> Result<()> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM items WHERE parent_item_id = ?1",
@@ -2783,6 +2909,29 @@ fn map_promote_candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Promot
         dedup_role: row.get(4)?,
         cull_status: row.get(5)?,
         role: row.get(6)?,
+    })
+}
+
+fn map_review_list_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewListRow> {
+    Ok(ReviewListRow {
+        id: row.get(0)?,
+        review_order: row.get(1)?,
+        role: row.get(2)?,
+        parent_item_id: row.get(3)?,
+        subject: row.get(4)?,
+        from_addr: row.get(5)?,
+        sent_at: row.get(6)?,
+        received_at: row.get(7)?,
+        path: row.get(8)?,
+        file_category: row.get(9)?,
+        mime_type: row.get(10)?,
+        size_bytes: row.get(11)?,
+        text_sha256: row.get(12)?,
+        html_sha256: row.get(13)?,
+        dedup_role: row.get(14)?,
+        cull_status: row.get(15)?,
+        attachment_count: row.get(16)?,
+        family_id: row.get(17)?,
     })
 }
 

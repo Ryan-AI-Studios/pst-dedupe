@@ -14,6 +14,7 @@
 //! - **Near-duplicate** result columns + transactional batch helpers (0023)
 //! - **Cull** result columns + named presets + transactional batch helpers (0024)
 //! - **Promote** review-set membership columns + transactional batch helpers (0025)
+//! - **Review list** thin projections for the desk Review surface (0026)
 //!
 //! ## Layout
 //!
@@ -66,9 +67,9 @@ pub use matter::{
     item_thread_method, CullCandidate, CullFieldUpdate, CullPreset, CullPresetInput,
     DedupRoleCounts, DedupRoleUpdate, DedupeCandidate, Item, ItemFamily, ItemInput, ItemUpdate,
     Matter, MatterInfo, NearDupCandidate, NearDupFieldUpdate, PromoteCandidate, PromoteFieldUpdate,
-    ReviewSet, Source, ThreadCandidate, ThreadFieldUpdate, DB_FILE, DEFAULT_REVIEW_SET_NAME,
-    EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR, LOGS_DIR, WORKSPACE_DIR,
-    WORKSPACE_TEMP_DIR,
+    ReviewListRow, ReviewSet, Source, ThreadCandidate, ThreadFieldUpdate, DB_FILE,
+    DEFAULT_REVIEW_SET_NAME, EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR, LOGS_DIR,
+    WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
 };
 pub use schema::SCHEMA_VERSION;
 pub use thread_headers::{
