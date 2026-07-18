@@ -13,6 +13,11 @@ use crate::error::{Result, SearchError};
 use crate::index::{stored_item_id, MatterIndex};
 use crate::schema::FtsSchema;
 
+/// Default max FTS hit ids fetched for Review compose / large queries.
+///
+/// Beyond this window, results are truncated (documented; streaming deferred).
+pub const DEFAULT_FTS_FETCH_LIMIT: usize = 50_000;
+
 /// Keyword query parameters.
 #[derive(Debug, Clone)]
 pub struct KeywordQuery {
@@ -100,13 +105,14 @@ pub fn search_index(index: &Index, q: &KeywordQuery) -> Result<KeywordHits> {
     }
 
     // Fetch enough docs to cover offset + limit after de-dupe.
-    let fetch = q
-        .limit
-        .saturating_add(q.offset)
-        .saturating_mul(2)
-        .max(q.limit.saturating_add(q.offset).saturating_add(64))
-        .min(10_000);
-    let fetch = fetch.max(1);
+    // Cap at DEFAULT_FTS_FETCH_LIMIT (50k) so Review compose ∩ filter can see
+    // the full requested candidate window — not an undocumented 10k clamp.
+    let need = q.limit.saturating_add(q.offset).max(1);
+    let desired = need.saturating_mul(2).max(need.saturating_add(64));
+    let fetch = desired
+        .min(DEFAULT_FTS_FETCH_LIMIT)
+        .min((num_docs as usize).max(1))
+        .max(1);
     let top = searcher.search(&query, &TopDocs::with_limit(fetch).order_by_score())?;
 
     let mut seen = HashSet::new();
@@ -130,6 +136,7 @@ pub fn search_index(index: &Index, q: &KeywordQuery) -> Result<KeywordHits> {
         }
     }
 
+    // Approximate unique hits in the fetch window (not global count if capped).
     let total_approx = Some(ordered.len() as u64);
     let item_ids = ordered.into_iter().skip(q.offset).take(q.limit).collect();
 

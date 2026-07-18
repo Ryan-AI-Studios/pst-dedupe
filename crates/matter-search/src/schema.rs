@@ -1,6 +1,6 @@
 //! Tantivy schema for per-matter keyword FTS (track 0029).
 
-use tantivy::schema::{Field, Schema, STORED, STRING, TEXT};
+use tantivy::schema::{Field, Schema, FAST, STORED, STRING, TEXT};
 
 /// Named fields in the matter FTS schema.
 #[derive(Debug, Clone)]
@@ -16,13 +16,13 @@ pub struct FtsSchema {
 impl FtsSchema {
     /// Build the P0 FTS schema.
     ///
-    /// - `item_id`: **STRING | STORED** (untokenized) for exact `delete_term`
+    /// - `item_id`: **STRING | STORED | FAST** (untokenized) for exact `delete_term`
     /// - `subject`, `body`, `path`, `attach_names`: **TEXT** (tokenized + positions for phrases)
     /// - Full body is **not** STORED (re-read from CAS in the viewer)
     pub fn build() -> Self {
         let mut builder = Schema::builder();
-        // Untokenized id for exact delete_term + stored for hit recovery.
-        let item_id = builder.add_text_field("item_id", STRING | STORED);
+        // Untokenized id for exact delete_term + stored for hit recovery + FAST column.
+        let item_id = builder.add_text_field("item_id", STRING | STORED | FAST);
         // Default TEXT includes freqs + positions (phrase queries).
         let subject = builder.add_text_field("subject", TEXT);
         let body = builder.add_text_field("body", TEXT);

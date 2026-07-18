@@ -243,10 +243,13 @@ fn reset_rebuild_after_handle_drop() {
     let matter = Matter::create(&root, "Reset").expect("create");
     insert_text_item(&matter, "a.txt", "A", b"rebuildword alpha");
 
-    // Open a reader, then drop via shutdown before reset.
+    // Open a reader, then **explicitly drop the reader** before shutdown/reset.
+    // MatterIndex::shutdown alone does not drop a separately held IndexReader
+    // (Windows mmap lock requirement).
     let handle = MatterIndex::open_or_create(&root).expect("open");
-    let _reader = handle.reader().expect("reader");
-    handle.shutdown(); // drops reader + index
+    let reader = handle.reader().expect("reader");
+    drop(reader);
+    handle.shutdown();
 
     let outcome = run_index(&matter, true);
     assert!(matches!(outcome, FtsOutcome::Succeeded(_)), "{outcome:?}");

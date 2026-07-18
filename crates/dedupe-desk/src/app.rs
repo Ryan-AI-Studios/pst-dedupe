@@ -630,8 +630,16 @@ impl DeskApp {
             // Refresh lists when a job ends or starts.
             if prev == "running" || state == "succeeded" || state == "paused" || state == "failed" {
                 self.refresh_matter_lists();
-                if prev == "running" && (state == "succeeded" || state == "paused") {
-                    self.pump_extract_queue();
+                // After FTS (or any) job terminal state, re-load Review list so
+                // keyword results / index-outdated banners pick up the new index.
+                if prev == "running"
+                    && (state == "succeeded" || state == "paused" || state == "failed")
+                {
+                    self.review.request_reload();
+                    self.review.index_outdated = false;
+                    if state == "succeeded" || state == "paused" {
+                        self.pump_extract_queue();
+                    }
                 }
             }
         }

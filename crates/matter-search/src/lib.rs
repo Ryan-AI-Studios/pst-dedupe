@@ -35,12 +35,12 @@ pub mod query;
 pub mod run;
 pub mod schema;
 
-pub use compose::{compose_keyword_filter, compose_with_hits, DEFAULT_FTS_FETCH_LIMIT};
+pub use compose::{compose_keyword_filter, compose_with_hits};
 pub use error::{Result, SearchError};
 pub use index::{
     delete_then_add, remove_index_dir, MatterIndex, DEFAULT_WRITER_HEAP_BYTES, INDEX_DIR_NAME,
 };
 pub use params::FtsIndexParams;
-pub use query::{search_index, search_keyword, KeywordHits, KeywordQuery};
+pub use query::{search_index, search_keyword, KeywordHits, KeywordQuery, DEFAULT_FTS_FETCH_LIMIT};
 pub use run::{run_fts_index, FtsOutcome, FtsSummary, FTS_STAGE, JOB_KIND_FTS_INDEX};
 pub use schema::FtsSchema;

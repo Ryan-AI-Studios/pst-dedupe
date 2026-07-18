@@ -4,10 +4,7 @@ use camino::Utf8Path;
 use matter_core::{FilterSpec, Matter, ReviewListRow};
 
 use crate::error::Result;
-use crate::query::{search_keyword, KeywordHits, KeywordQuery};
-
-/// Default max FTS hit ids fetched before filter intersection.
-pub const DEFAULT_FTS_FETCH_LIMIT: usize = 50_000;
+use crate::query::{search_keyword, KeywordHits, KeywordQuery, DEFAULT_FTS_FETCH_LIMIT};
 
 /// Compose keyword search with a metadata filter for the Review list.
 ///

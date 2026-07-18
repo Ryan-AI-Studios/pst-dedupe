@@ -1071,13 +1071,11 @@ pub fn load_review_composed(
     offset: u64,
     limit_override: Option<u64>,
 ) -> Result<(u64, Vec<ReviewListRow>, bool, Option<u64>), String> {
-    let kw = keyword.map(str::trim).filter(|s| !s.is_empty());
-    if kw.is_none() {
+    let Some(kw) = keyword.map(str::trim).filter(|s| !s.is_empty()) else {
         let (count, rows, has_more) =
             load_review_filtered(matter_root, spec, offset, limit_override)?;
         return Ok((count, rows, has_more, None));
-    }
-    let kw = kw.unwrap();
+    };
 
     let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
 
