@@ -9,3 +9,16 @@ review.md
 # Local scratch / generated
 output/
 
+# Conductor track docs (local / not published with this repo)
+/conductor/
+
+# Local matters / operator evidence (never commit client mail)
+evidence/
+Matters/
+matters/
+
+# Accidental drops of large case PSTs at repo root (fixtures/ samples are already tracked)
+/INC*.pst
+/*.pst
+# If you must place a local sample at repo root for smoke, use output/ or Desktop instead.
+

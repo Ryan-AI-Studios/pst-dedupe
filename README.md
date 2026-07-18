@@ -111,7 +111,7 @@ Integration tests in `pst-reader` require Unicode PST files in `fixtures/`:
 cargo test -p pst-reader --test integration
 ```
 
-Small Aspose/sample fixtures live under `fixtures/`. Real multi-mailbox PSTs are useful for manual CLI smoke tests; keep sensitive mail out of git and public logs.
+Small Aspose/sample fixtures live under `fixtures/` (see `fixtures/README.md`). Real multi-mailbox PSTs are useful for **manual** CLI/Desk smoke on a **local path only** — never commit case evidence. Implementation track docs live under local `conductor/` (gitignored; not published with this repo).
 
 ## Architecture
 
