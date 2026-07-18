@@ -1061,6 +1061,9 @@ pub fn load_review_filtered(
 /// Load list composing optional keyword FTS with metadata filter.
 ///
 /// Returns `(count, rows, has_more, fts_hit_count_approx)`.
+///
+/// Performs **one** Tantivy open/search, then intersects hits with FilterSpec
+/// (avoids triple index open on Apply/reload).
 pub fn load_review_composed(
     matter_root: &Utf8Path,
     keyword: Option<&str>,
@@ -1078,8 +1081,8 @@ pub fn load_review_composed(
 
     let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
 
-    // Probe FTS hit count for status line (unique ids before filter).
-    let fts_hits = matter_search::search_keyword(
+    // Single FTS open: hit count for status + id set for filter intersection.
+    let hits = matter_search::search_keyword(
         matter_root,
         &matter_search::KeywordQuery {
             query: kw.to_string(),
@@ -1087,22 +1090,18 @@ pub fn load_review_composed(
             offset: 0,
         },
     )
-    .map(|h| h.item_ids.len() as u64)
     .map_err(|e| e.to_string())?;
-
-    // First page-sized compose to get count (compose returns total count).
-    let (count, first_rows) = matter_search::compose_keyword_filter(
-        &matter,
-        matter_root,
-        Some(kw),
-        spec,
-        limit_override.unwrap_or(THIN_PAGE_SIZE),
-        offset,
-    )
-    .map_err(|e| e.to_string())?;
-
-    if count == 0 {
+    let fts_hits = hits.item_ids.len() as u64;
+    if hits.item_ids.is_empty() {
         return Ok((0, Vec::new(), false, Some(0)));
+    }
+
+    // Count first (cheap TEMP join) so we can choose load-all vs page size.
+    let count = matter
+        .count_items_filtered_in_ids(spec, &hits.item_ids)
+        .map_err(|e| e.to_string())?;
+    if count == 0 {
+        return Ok((0, Vec::new(), false, Some(fts_hits)));
     }
 
     let limit = if let Some(l) = limit_override {
@@ -1113,13 +1112,9 @@ pub fn load_review_composed(
         THIN_PAGE_SIZE
     };
 
-    let rows = if limit_override.is_none() && offset == 0 && count <= THIN_LOAD_ALL_THRESHOLD {
-        matter_search::compose_keyword_filter(&matter, matter_root, Some(kw), spec, limit, offset)
-            .map(|(_, r)| r)
-            .map_err(|e| e.to_string())?
-    } else {
-        first_rows
-    };
+    let rows = matter
+        .list_items_filtered_thin_in_ids(spec, &hits.item_ids, limit, offset)
+        .map_err(|e| e.to_string())?;
 
     let loaded = rows.len() as u64;
     let has_more = offset + loaded < count;
@@ -1310,16 +1305,24 @@ pub enum FtsUiRequest {
 ///
 /// When the operator clicks index buttons, `fts_request` is set for the app to
 /// start `fts_index` on the process-runner worker.
+///
+/// `index_job_busy`: when true (runner writing / FTS rebuild), skip Tantivy
+/// open on the UI thread and disable Search / Update / Rebuild to avoid
+/// Windows mmap races with `remove_dir_all(index/)`.
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut ReviewState,
     matter_root: &Utf8Path,
     actor: &str,
     fts_request: &mut Option<FtsUiRequest>,
+    index_job_busy: bool,
 ) {
     let ctx = ui.ctx().clone();
 
-    state.ensure_loaded(matter_root);
+    // Avoid mmap'ing index/ while the worker may be deleting it.
+    if !index_job_busy {
+        state.ensure_loaded(matter_root);
+    }
     state.body.try_take();
     state.poll_coding(matter_root, &ctx);
 
@@ -1358,7 +1361,7 @@ pub fn show(
     ui.add_space(4.0);
 
     // Keyword + filter bar always available — including when list_error is set.
-    show_keyword_bar(ui, state, matter_root, fts_request);
+    show_keyword_bar(ui, state, matter_root, fts_request, index_job_busy);
     ui.add_space(2.0);
     show_filter_bar(ui, state, matter_root, actor);
     ui.add_space(4.0);
@@ -1637,6 +1640,7 @@ fn show_keyword_bar(
     state: &mut ReviewState,
     matter_root: &Utf8Path,
     fts_request: &mut Option<FtsUiRequest>,
+    index_job_busy: bool,
 ) {
     ui.group(|ui| {
         ui.horizontal(|ui| {
@@ -1646,31 +1650,49 @@ fn show_keyword_bar(
                     .desired_width(280.0)
                     .hint_text("Boolean / phrase…"),
             );
-            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            if !index_job_busy && resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 state.apply_keyword(matter_root);
             }
-            if ui.button("Search").clicked() {
+            if ui
+                .add_enabled(!index_job_busy, egui::Button::new("Search"))
+                .on_hover_text(if index_job_busy {
+                    "Wait for the index job to finish"
+                } else {
+                    "Run keyword search (intersects metadata filter)"
+                })
+                .clicked()
+            {
                 state.apply_keyword(matter_root);
             }
-            if ui.button("Clear keyword").clicked() {
+            if ui
+                .add_enabled(!index_job_busy, egui::Button::new("Clear keyword"))
+                .clicked()
+            {
                 state.clear_keyword(matter_root);
             }
             ui.separator();
             if ui
-                .small_button("Update index")
+                .add_enabled(!index_job_busy, egui::Button::new("Update index").small())
                 .on_hover_text("Incremental FTS index (reset:false)")
                 .clicked()
             {
                 *fts_request = Some(FtsUiRequest::UpdateIndex);
             }
             if ui
-                .small_button("Rebuild index")
+                .add_enabled(!index_job_busy, egui::Button::new("Rebuild index").small())
                 .on_hover_text("Full rebuild after dropping index handles (reset:true)")
                 .clicked()
             {
                 *fts_request = Some(FtsUiRequest::RebuildIndex);
             }
         });
+        if index_job_busy {
+            ui.label(
+                RichText::new("Index job running — keyword search paused until complete.")
+                    .small()
+                    .color(Color32::from_rgb(180, 100, 20)),
+            );
+        }
 
         if let Some(hits) = state.keyword_hit_count {
             ui.label(

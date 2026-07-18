@@ -130,9 +130,11 @@ Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 
 | Region | Behavior |
 |---|---|
+| Keyword bar | Keyword box + **Search** / **Clear**; composes FTS hits ∩ metadata filters; status “N keyword hits · M after filters” |
+| Index | **Update index** / **Rebuild index** (`fts_index` job; rebuild uses `reset:true`) |
 | Filter bar | Custodian, codes, date from/to (RFC3339+offset), include family; **Apply** / **Clear**; quick chips Uncoded / Privilege / Responsive |
-| Saved searches | Dropdown Load / Save (name) / Delete — stores `FilterSpec` JSON in `saved_searches` |
-| Corpus list | Thin rows (`list_review_thin` or `list_items_filtered_thin`); multi-select ☑; fixed `ROW_HEIGHT` 22.0 |
+| Saved searches | Dropdown Load / Save (name) / Delete — stores `FilterSpec` JSON + optional `keyword` in `saved_searches` |
+| Corpus list | Thin rows (`list_review_thin`, filtered, or keyword-composed); multi-select ☑; fixed `ROW_HEIGHT` 22.0 |
 | Status | “Showing N of M” + **Load more** when filtered/large count exceeds loaded rows |
 | Header | Subject, From, To/Cc (selection-time fetch), dates, path, mime, size, role chips |
 | Code chips | Current-item codes; click chip to **remove** (no confirm) |
@@ -142,9 +144,9 @@ Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 
 **Prerequisite:** run **Promote to review** on Workspace first. Empty state points operators there.
 
-**Not body FTS:** the filter bar is **metadata only** (custodian, codes, dates, path fields via API, etc.). Full-text body keyword search is track **0029** (Tantivy) and will compose later.
+**Keyword FTS (0029):** separate keyword box (Tantivy under `index/`) composes with the metadata filter bar. Metadata conditions stay SQL-only; body text is never FilterSpec SQL. Empty keyword restores metadata-only list. Digits 1–9 still require unfocused widgets (keyword box steals focus like filter fields).
 
-**Keyboard (only when no widget has focus — filter text fields steal focus):**
+**Keyboard (only when no widget has focus — filter / keyword text fields steal focus):**
 
 | Action | Binding |
 |---|---|
@@ -166,8 +168,17 @@ No wrap at ends. Focus gate: `ctx.memory(\|m\| m.focused().is_none())` (egui 0.3
 | Save / Load | Named row in `saved_searches`; Load replaces draft + Apply |
 | Batch coding | Still **current multi-selection within the filtered list** — not auto-select-all-filtered |
 | Paging | Load more appends next `LIMIT/OFFSET` page (compound partial index on matter DB) |
+| Keyword + filter | FTS hit ids ∩ FilterSpec (family expand **after** intersect when include_family) |
 
-Handoff **0029:** body keyword predicates / id-set post-filter will compose with this metadata FilterSpec.
+#### Keyword FTS (0029)
+
+| Step | Behavior |
+|---|---|
+| Search | Enter / **Search** → Tantivy QueryParser (Boolean/phrase, default AND) → unique item ids → compose with active FilterSpec |
+| Clear keyword | Drops keyword; list reloads metadata-only (filter still applied if active) |
+| Update index | Job `fts_index` incremental via `fts_text_sha256` bookkeeping |
+| Rebuild index | `reset:true` after dropping any readers; recreates `index/` + clears fts_* columns |
+| Save / Load | Optional `saved_searches.keyword` restored with FilterSpec |
 
 #### Coding / batch (0027)
 

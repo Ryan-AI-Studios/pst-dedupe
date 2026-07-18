@@ -840,7 +840,15 @@ impl eframe::App for DeskApp {
                 if let Some(root) = self.matter_root.clone() {
                     let actor = self.settings.actor().to_string();
                     let mut fts_req = None;
-                    review_ui::show(ui, &mut self.review, &root, &actor, &mut fts_req);
+                    let index_job_busy = self.job_may_be_writing();
+                    review_ui::show(
+                        ui,
+                        &mut self.review,
+                        &root,
+                        &actor,
+                        &mut fts_req,
+                        index_job_busy,
+                    );
                     match fts_req {
                         Some(review_ui::FtsUiRequest::UpdateIndex) => self.start_fts_index(),
                         Some(review_ui::FtsUiRequest::RebuildIndex) => self.start_fts_rebuild(),
