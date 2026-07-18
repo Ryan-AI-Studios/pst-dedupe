@@ -20,10 +20,11 @@
 //! Add/Remove with optional whole-family propagate. Digits 1–9 toggle the first
 //! nine active codes on the current item when the focus gate is clear.
 //!
-//! # Filters (0028)
+//! # Filters (0028) + keyword FTS (0029)
 //!
-//! Metadata [`FilterSpec`] only (no body FTS — that is **0029**). Filter text
-//! fields steal focus; digit shortcuts respect `focus().is_none()`.
+//! Metadata [`FilterSpec`] composes with optional Tantivy keyword via
+//! `compose_keyword_filter`. Keyword / filter text fields steal focus; digit
+//! shortcuts respect `focus().is_none()`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -255,6 +256,16 @@ pub struct ReviewState {
     pub applied_filter: Option<FilterSpec>,
     /// True when an Apply was used with non-empty conditions or include_family.
     pub filter_active: bool,
+    /// Draft keyword box text.
+    pub keyword_draft: String,
+    /// Applied keyword (None / empty = metadata-only list).
+    pub applied_keyword: Option<String>,
+    /// Approx FTS hit count before filter intersection (when keyword active).
+    pub keyword_hit_count: Option<u64>,
+    /// Index status banner / search errors.
+    pub keyword_error: Option<String>,
+    /// True when index is missing/stale (banner).
+    pub index_outdated: bool,
     /// Saved searches for the open matter.
     saved_searches: Vec<SavedSearch>,
     /// Filter validation / save errors.
@@ -293,6 +304,11 @@ impl ReviewState {
         self.filter_draft.clear();
         self.applied_filter = None;
         self.filter_active = false;
+        self.keyword_draft.clear();
+        self.applied_keyword = None;
+        self.keyword_hit_count = None;
+        self.keyword_error = None;
+        self.index_outdated = false;
         self.saved_searches.clear();
         self.filter_error = None;
         self.filter_status = None;
@@ -332,21 +348,31 @@ impl ReviewState {
     fn reload_list(&mut self, matter_root: &Utf8Path) {
         self.needs_reload = false;
         self.list_error = None;
+        self.keyword_error = None;
         // Always drop in-flight / stale body + parties: selection may change after
         // re-promote (item demoted/removed). Leaving Ready/Loading with an old
         // item_id would show permanent "Loading…" because spawn only runs on Idle.
         self.body.clear();
         self.selection_detail = None;
-        let load = if self.filter_active {
+        let kw = self
+            .applied_keyword
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let keyword_active = kw.is_some();
+        let load = if keyword_active || self.filter_active {
             let spec = self.applied_filter.clone().unwrap_or_default();
-            load_review_filtered(matter_root, &spec, 0, None)
+            // When only keyword is active, still use FilterSpec default (review_corpus).
+            load_review_composed(matter_root, kw, &spec, 0, None)
         } else {
-            load_review_thin(matter_root).map(|(c, r)| (c, r, false))
+            load_review_thin(matter_root).map(|(c, r)| (c, r, false, None))
         };
         match load {
-            Ok((count, rows, _more)) => {
+            Ok((count, rows, _more, fts_hits)) => {
                 self.count = count;
                 self.rows = rows;
+                self.keyword_hit_count = fts_hits;
+                self.index_outdated = false;
                 self.loaded_root = Some(matter_root.to_owned());
                 // Viewport unknown until next paint; fallback window used for first load.
                 self.visible_row_range = 0..0;
@@ -371,10 +397,15 @@ impl ReviewState {
                 self.reload_saved_searches(matter_root);
             }
             Err(e) => {
-                // Filter compile/load failures: surface on filter bar so Clear stays usable.
+                let el = e.to_ascii_lowercase();
+                if el.contains("index") || el.contains("build") || el.contains("outdated") {
+                    self.index_outdated = true;
+                    self.keyword_error = Some(e.clone());
+                }
+                // Filter/keyword load failures: surface so Clear stays usable.
                 // Keep previous rows when possible so the list is not blanked on a bad Apply.
-                if self.filter_active {
-                    self.filter_error = Some(format!("Filter list load: {e}"));
+                if self.filter_active || keyword_active {
+                    self.filter_error = Some(format!("List load: {e}"));
                     if self.rows.is_empty() {
                         self.list_error = Some(e);
                         self.count = 0;
@@ -392,6 +423,30 @@ impl ReviewState {
                 self.visible_row_range = 0..0;
             }
         }
+    }
+
+    /// Apply keyword draft and reload (Enter / Search button).
+    pub fn apply_keyword(&mut self, matter_root: &Utf8Path) {
+        let kw = self.keyword_draft.trim().to_string();
+        if kw.is_empty() {
+            self.clear_keyword(matter_root);
+            return;
+        }
+        self.applied_keyword = Some(kw);
+        self.keyword_error = None;
+        self.needs_reload = true;
+        self.ensure_loaded(matter_root);
+    }
+
+    /// Clear keyword; restore metadata-only (or unfiltered corpus).
+    pub fn clear_keyword(&mut self, matter_root: &Utf8Path) {
+        self.keyword_draft.clear();
+        self.applied_keyword = None;
+        self.keyword_hit_count = None;
+        self.keyword_error = None;
+        self.index_outdated = false;
+        self.needs_reload = true;
+        self.ensure_loaded(matter_root);
     }
 
     fn reload_saved_searches(&mut self, matter_root: &Utf8Path) {
@@ -454,9 +509,15 @@ impl ReviewState {
             return;
         }
         let offset = self.rows.len() as u64;
-        let result = if self.filter_active {
+        let kw = self
+            .applied_keyword
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let result = if kw.is_some() || self.filter_active {
             let spec = self.applied_filter.clone().unwrap_or_default();
-            load_review_filtered(matter_root, &spec, offset, Some(THIN_PAGE_SIZE))
+            load_review_composed(matter_root, kw, &spec, offset, Some(THIN_PAGE_SIZE))
+                .map(|(c, r, more, _)| (c, r, more))
         } else {
             load_review_page(matter_root, offset, THIN_PAGE_SIZE).map(|(c, r)| {
                 let n = r.len() as u64;
@@ -522,6 +583,14 @@ impl ReviewState {
             .iter()
             .find(|s| s.name == name)
             .map(|s| s.id.clone());
+        let keyword = self.applied_keyword.clone().or_else(|| {
+            let t = self.keyword_draft.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        });
         match upsert_saved_search(
             matter_root,
             SavedSearchInput {
@@ -529,6 +598,7 @@ impl ReviewState {
                 name,
                 description: None,
                 filter_json,
+                keyword,
                 created_by: Some(actor.to_string()),
             },
         ) {
@@ -537,6 +607,10 @@ impl ReviewState {
                 let active = !spec.conditions.is_empty() || spec.include_family;
                 self.applied_filter = Some(spec);
                 self.filter_active = active;
+                if let Some(ref kw) = saved.keyword {
+                    self.keyword_draft = kw.clone();
+                    self.applied_keyword = Some(kw.clone());
+                }
                 self.filter_draft.selected_saved_id = Some(saved.id.clone());
                 self.filter_draft.save_name = saved.name.clone();
                 self.filter_status = Some(format!("Saved “{}”.", saved.name));
@@ -563,8 +637,17 @@ impl ReviewState {
                 self.filter_draft = FilterDraft::from_filter_spec(&spec);
                 self.filter_draft.selected_saved_id = Some(ss.id);
                 self.filter_draft.save_name = ss.name.clone();
-                self.applied_filter = Some(spec);
-                self.filter_active = true;
+                self.applied_filter = Some(spec.clone());
+                self.filter_active = !spec.conditions.is_empty() || spec.include_family;
+                // Restore keyword from saved search (schema v10).
+                if let Some(ref kw) = ss.keyword {
+                    self.keyword_draft = kw.clone();
+                    self.applied_keyword = Some(kw.clone());
+                } else {
+                    self.keyword_draft.clear();
+                    self.applied_keyword = None;
+                    self.keyword_hit_count = None;
+                }
                 self.filter_error = None;
                 self.filter_status = Some(format!("Loaded “{}”.", ss.name));
                 self.needs_reload = true;
@@ -975,6 +1058,74 @@ pub fn load_review_filtered(
     Ok((count, rows, has_more))
 }
 
+/// Load list composing optional keyword FTS with metadata filter.
+///
+/// Returns `(count, rows, has_more, fts_hit_count_approx)`.
+pub fn load_review_composed(
+    matter_root: &Utf8Path,
+    keyword: Option<&str>,
+    spec: &FilterSpec,
+    offset: u64,
+    limit_override: Option<u64>,
+) -> Result<(u64, Vec<ReviewListRow>, bool, Option<u64>), String> {
+    let kw = keyword.map(str::trim).filter(|s| !s.is_empty());
+    if kw.is_none() {
+        let (count, rows, has_more) =
+            load_review_filtered(matter_root, spec, offset, limit_override)?;
+        return Ok((count, rows, has_more, None));
+    }
+    let kw = kw.unwrap();
+
+    let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
+
+    // Probe FTS hit count for status line (unique ids before filter).
+    let fts_hits = matter_search::search_keyword(
+        matter_root,
+        &matter_search::KeywordQuery {
+            query: kw.to_string(),
+            limit: matter_search::DEFAULT_FTS_FETCH_LIMIT,
+            offset: 0,
+        },
+    )
+    .map(|h| h.item_ids.len() as u64)
+    .map_err(|e| e.to_string())?;
+
+    // First page-sized compose to get count (compose returns total count).
+    let (count, first_rows) = matter_search::compose_keyword_filter(
+        &matter,
+        matter_root,
+        Some(kw),
+        spec,
+        limit_override.unwrap_or(THIN_PAGE_SIZE),
+        offset,
+    )
+    .map_err(|e| e.to_string())?;
+
+    if count == 0 {
+        return Ok((0, Vec::new(), false, Some(0)));
+    }
+
+    let limit = if let Some(l) = limit_override {
+        l
+    } else if offset == 0 && count <= THIN_LOAD_ALL_THRESHOLD {
+        count
+    } else {
+        THIN_PAGE_SIZE
+    };
+
+    let rows = if limit_override.is_none() && offset == 0 && count <= THIN_LOAD_ALL_THRESHOLD {
+        matter_search::compose_keyword_filter(&matter, matter_root, Some(kw), spec, limit, offset)
+            .map(|(_, r)| r)
+            .map_err(|e| e.to_string())?
+    } else {
+        first_rows
+    };
+
+    let loaded = rows.len() as u64;
+    let has_more = offset + loaded < count;
+    Ok((count, rows, has_more, Some(fts_hits)))
+}
+
 /// List saved searches for the matter.
 pub fn load_saved_searches(matter_root: &Utf8Path) -> Result<Vec<SavedSearch>, String> {
     let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
@@ -1146,8 +1297,26 @@ pub fn select_range_into(
     }
 }
 
+/// Operator request from the Review keyword bar (FTS index jobs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FtsUiRequest {
+    /// Incremental build/update (`reset: false`).
+    UpdateIndex,
+    /// Full rebuild (`reset: true`).
+    RebuildIndex,
+}
+
 /// Paint the Review screen.
-pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path, actor: &str) {
+///
+/// When the operator clicks index buttons, `fts_request` is set for the app to
+/// start `fts_index` on the process-runner worker.
+pub fn show(
+    ui: &mut egui::Ui,
+    state: &mut ReviewState,
+    matter_root: &Utf8Path,
+    actor: &str,
+    fts_request: &mut Option<FtsUiRequest>,
+) {
     let ctx = ui.ctx().clone();
 
     state.ensure_loaded(matter_root);
@@ -1161,8 +1330,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path, 
 
     ui.horizontal(|ui| {
         ui.heading("Review");
-        if state.filter_active {
-            ui.label("— Filtered subset (metadata; not body FTS)");
+        let kw_on = state
+            .applied_keyword
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty());
+        if kw_on && state.filter_active {
+            ui.label("— Keyword + metadata filter");
+        } else if kw_on {
+            ui.label("— Keyword search");
+        } else if state.filter_active {
+            ui.label("— Filtered subset (metadata)");
         } else {
             ui.label("— Review Corpus (in_review)");
         }
@@ -1179,8 +1357,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path, 
     });
     ui.add_space(4.0);
 
-    // Filter bar always available — including when list_error is set — so Clear
-    // remains reachable after a failed Apply (e.g. historical load errors).
+    // Keyword + filter bar always available — including when list_error is set.
+    show_keyword_bar(ui, state, matter_root, fts_request);
+    ui.add_space(2.0);
     show_filter_bar(ui, state, matter_root, actor);
     ui.add_space(4.0);
 
@@ -1452,6 +1631,83 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path, 
     });
 }
 
+/// Keyword search bar (0029) + index actions.
+fn show_keyword_bar(
+    ui: &mut egui::Ui,
+    state: &mut ReviewState,
+    matter_root: &Utf8Path,
+    fts_request: &mut Option<FtsUiRequest>,
+) {
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Keyword").strong());
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut state.keyword_draft)
+                    .desired_width(280.0)
+                    .hint_text("Boolean / phrase…"),
+            );
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                state.apply_keyword(matter_root);
+            }
+            if ui.button("Search").clicked() {
+                state.apply_keyword(matter_root);
+            }
+            if ui.button("Clear keyword").clicked() {
+                state.clear_keyword(matter_root);
+            }
+            ui.separator();
+            if ui
+                .small_button("Update index")
+                .on_hover_text("Incremental FTS index (reset:false)")
+                .clicked()
+            {
+                *fts_request = Some(FtsUiRequest::UpdateIndex);
+            }
+            if ui
+                .small_button("Rebuild index")
+                .on_hover_text("Full rebuild after dropping index handles (reset:true)")
+                .clicked()
+            {
+                *fts_request = Some(FtsUiRequest::RebuildIndex);
+            }
+        });
+
+        if let Some(hits) = state.keyword_hit_count {
+            ui.label(
+                RichText::new(format!(
+                    "{hits} keyword hits · {} after filters",
+                    state.count
+                ))
+                .small()
+                .color(Color32::from_rgb(40, 80, 140)),
+            );
+        } else if state
+            .applied_keyword
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty())
+        {
+            ui.label(
+                RichText::new(format!("{} after filters", state.count))
+                    .small()
+                    .color(Color32::from_rgb(40, 80, 140)),
+            );
+        }
+
+        if state.index_outdated {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    Color32::from_rgb(180, 100, 20),
+                    "Search index outdated — Update index",
+                );
+            });
+        }
+        if let Some(err) = state.keyword_error.clone() {
+            ui.colored_label(Color32::from_rgb(200, 60, 60), format!("Keyword: {err}"));
+        }
+    });
+}
+
 /// Filter bar: draft fields, quick chips, Apply/Clear, saved search CRUD.
 fn show_filter_bar(
     ui: &mut egui::Ui,
@@ -1463,7 +1719,7 @@ fn show_filter_bar(
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Filter").strong());
             ui.label(
-                RichText::new("(metadata only — body search is 0029)")
+                RichText::new("(metadata; intersects keyword when active)")
                     .weak()
                     .small(),
             );

@@ -54,3 +54,6 @@ pub use handlers::MatterCullHandler;
 
 #[cfg(feature = "promote")]
 pub use handlers::MatterPromoteHandler;
+
+#[cfg(feature = "fts")]
+pub use handlers::MatterFtsIndexHandler;

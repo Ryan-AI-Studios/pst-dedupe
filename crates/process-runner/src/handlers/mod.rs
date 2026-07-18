@@ -21,6 +21,9 @@ pub mod cull;
 #[cfg(feature = "promote")]
 pub mod promote;
 
+#[cfg(feature = "fts")]
+pub mod fts;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
@@ -41,3 +44,6 @@ pub use cull::MatterCullHandler;
 
 #[cfg(feature = "promote")]
 pub use promote::MatterPromoteHandler;
+
+#[cfg(feature = "fts")]
+pub use fts::MatterFtsIndexHandler;

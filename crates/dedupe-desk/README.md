@@ -2,7 +2,10 @@
 
 **Dedupe Desk** — single-exe Windows shell for matter create/open, source ingest,
 PST extract, matter-level process jobs, and a **Review** surface for the promoted
-corpus (tracks **0020**–**0026**).
+corpus (tracks **0020**–**0029**).
+
+Keyword FTS (0029): Review keyword box composes with metadata filters; Workspace
+has **Build / Update search index** and **Rebuild search index** (`fts_index`).
 
 ## Build / run
 

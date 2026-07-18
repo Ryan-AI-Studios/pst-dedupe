@@ -9,7 +9,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
 use process_runner::{
     ExtractPstHandler, IngestHandler, JobParams, MatterCullHandler, MatterDedupeHandler,
-    MatterNearDupHandler, MatterPromoteHandler, MatterThreadHandler, ProcessRunner, RunnerConfig,
+    MatterFtsIndexHandler, MatterNearDupHandler, MatterPromoteHandler, MatterThreadHandler,
+    ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -71,6 +72,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterNearDupHandler::new()));
         runner.register(Arc::new(MatterCullHandler::new()));
         runner.register(Arc::new(MatterPromoteHandler::new()));
+        runner.register(Arc::new(MatterFtsIndexHandler::new()));
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 
@@ -375,6 +377,50 @@ impl DeskApp {
                 self.status_msg = Some(format!(
                     "Started promote job {job_id} (policy={policy}; auto resolves at run)"
                 ));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Incremental FTS index build/update (`reset: false`).
+    pub(crate) fn start_fts_index(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params = JobParams::new(params::fts_index_default_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "fts_index", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started FTS index job {job_id}"));
+                self.error_msg = None;
+                self.review.index_outdated = false;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Full FTS rebuild (`reset: true`). Drops any cached reader state first.
+    pub(crate) fn start_fts_rebuild(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        // Desk does not hold live MatterIndex Arcs; clear keyword banner state.
+        self.review.keyword_error = None;
+        self.review.index_outdated = false;
+        let params = JobParams::new(params::fts_index_reset_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "fts_index", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started FTS rebuild job {job_id} (reset:true)"));
                 self.error_msg = None;
             }
             Err(e) => self.note_start_error(e),
@@ -793,7 +839,13 @@ impl eframe::App for DeskApp {
             Screen::Review => {
                 if let Some(root) = self.matter_root.clone() {
                     let actor = self.settings.actor().to_string();
-                    review_ui::show(ui, &mut self.review, &root, &actor);
+                    let mut fts_req = None;
+                    review_ui::show(ui, &mut self.review, &root, &actor, &mut fts_req);
+                    match fts_req {
+                        Some(review_ui::FtsUiRequest::UpdateIndex) => self.start_fts_index(),
+                        Some(review_ui::FtsUiRequest::RebuildIndex) => self.start_fts_rebuild(),
+                        None => {}
+                    }
                 } else {
                     ui.label("Open a matter to review.");
                 }
