@@ -55,12 +55,12 @@ from a single digest pair.
 | Script run | Detection | Tokenization |
 |---|---|---|
 | **CJK** | Han U+4E00–9FFF / Ext-A U+3400–4DBF, Hiragana U+3040–309F, Katakana U+30A0–30FF, Hangul U+AC00–D7AF, Compat U+F900–FAFF | Character n-grams (`cjk_char_n`, default **2**). Each n-gram is a shingle. |
-| **Space-delimited** | Remainder | Split on whitespace + simple punctuation → word tokens → word *k*-shingles (`shingle_k`, default **5**), joined with U+001F. |
+| **Space-delimited** | Remainder | Split on whitespace + simple punctuation → word tokens → word *k*-shingles (`shingle_k`, default **5**), joined with U+001F. Runs with **fewer than `shingle_k` words contribute zero shingles** (no 1-word fallback). |
 
 Shingle set = **set** (unique) for Jaccard. Prep: lowercase + collapse whitespace;
 optional `ignore_numbers` drops pure-digit **word** tokens only.
 
-Empty shingles after prep → role `skipped`.
+Empty shingles after prep → role `skipped` (includes Latin docs with `< shingle_k` words even when `min_chars` is met).
 
 ### Clustering / pivot
 

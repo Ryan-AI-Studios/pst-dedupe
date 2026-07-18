@@ -223,6 +223,33 @@ fn below_min_chars_skipped() {
     );
 }
 
+/// Spec §3.4.2 / Codex P2: Latin runs with fewer than `shingle_k` words yield
+/// empty shingles (no 1-word fallback) → `skipped` even when `min_chars` is met.
+#[test]
+fn latin_fewer_than_shingle_k_words_skipped() {
+    let (_tmp, matter) = temp_matter("few-words");
+    let job = matter.create_job(JOB_KIND_NEARDUP).expect("job");
+    // ≥80 chars, only 4 whitespace-separated words (k=5).
+    let body = format!(
+        "{} {} {} {}",
+        "a".repeat(25),
+        "b".repeat(25),
+        "c".repeat(25),
+        "d".repeat(25)
+    );
+    assert!(body.len() >= 80);
+    let id = insert_doc(&matter, "few.txt", &body, None);
+
+    let _ = run_default(&matter, &job.id);
+    let got = matter.get_item(&id).unwrap();
+    assert_eq!(
+        got.near_dup_role.as_deref(),
+        Some(item_near_dup_role::SKIPPED),
+        "expected skipped for <shingle_k Latin words; got {:?}",
+        got.near_dup_role
+    );
+}
+
 #[test]
 fn pivot_is_longer_token_count() {
     let (_tmp, matter) = temp_matter("pivot-len");

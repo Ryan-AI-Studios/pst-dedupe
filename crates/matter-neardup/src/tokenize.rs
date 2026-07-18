@@ -212,13 +212,10 @@ pub fn build_shingles(tokens: &[String], shingle_k: usize, cjk_char_n: usize) ->
             buf.clear();
             return;
         }
-        if buf.len() < shingle_k {
-            // Too few words for a k-shingle — emit each word as a 1-element
-            // shingle so short Latin docs are not empty (still gated by min_chars).
-            for w in buf.iter() {
-                set.insert((*w).to_string());
-            }
-        } else {
+        // Spec §3.4.2: space-delimited path emits only consecutive word
+        // *k*-shingles. Runs with fewer than `shingle_k` words contribute
+        // **zero** shingles (no 1-word fallback). Empty set → skipped later.
+        if buf.len() >= shingle_k {
             for i in 0..=(buf.len() - shingle_k) {
                 let shingle = buf[i..i + shingle_k].join("\u{1f}");
                 set.insert(shingle);
@@ -291,11 +288,55 @@ mod tests {
 
     #[test]
     fn mixed_script_union() {
-        let text = "hello 合同 world 文件";
+        // Consecutive Latin words form k-shingles; CJK runs add char n-grams.
+        // Isolated single Latin words between CJK contribute zero Latin shingles
+        // when k>1 (spec §3.4.2 — no 1-word fallback).
+        let text = "hello world 合同 文件 extra words";
         let (_, shingles, _) = text_to_shingles(text, 2, 2, true);
-        // CJK bigrams present
-        assert!(shingles.iter().any(|s| s.chars().all(is_cjk_char)));
-        // Latin word-shingles present (k=2 → "hello\u{1f}world")
-        assert!(shingles.iter().any(|s| s.contains("hello")));
+        assert!(
+            shingles.iter().any(|s| s.chars().all(is_cjk_char)),
+            "expected CJK n-gram shingles"
+        );
+        assert!(
+            shingles
+                .iter()
+                .any(|s| s.contains("hello") && s.contains("world")),
+            "expected Latin k=2 shingle hello/world: {shingles:?}"
+        );
+        assert!(
+            shingles
+                .iter()
+                .any(|s| s.contains("extra") && s.contains("words")),
+            "expected Latin k=2 shingle extra/words: {shingles:?}"
+        );
+    }
+
+    #[test]
+    fn latin_fewer_than_k_words_yields_empty_shingles() {
+        // Long enough for min_chars, but only 4 word tokens with default k=5.
+        let long_four = format!(
+            "{} {} {} {}",
+            "a".repeat(25),
+            "b".repeat(25),
+            "c".repeat(25),
+            "d".repeat(25)
+        );
+        assert!(long_four.len() >= 80);
+        let tokens = tokenize(&prep_text(&long_four), 2, true);
+        assert_eq!(tokens.len(), 4, "expected exactly 4 word tokens");
+        let shingles = build_shingles(&tokens, 5, 2);
+        assert!(
+            shingles.is_empty(),
+            "minhash_shingle_v1 must not emit 1-word fallbacks for <k Latin runs: {shingles:?}"
+        );
+    }
+
+    #[test]
+    fn latin_exactly_k_words_emits_one_shingle() {
+        let words: Vec<String> = (0..5).map(|i| format!("word{i}")).collect();
+        let text = words.join(" ");
+        let (_, shingles, _) = text_to_shingles(&text, 5, 2, true);
+        assert_eq!(shingles.len(), 1);
+        assert!(shingles.iter().next().unwrap().contains("word0"));
     }
 }
