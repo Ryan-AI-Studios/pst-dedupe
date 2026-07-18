@@ -7,7 +7,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v4**) + family graph
+6. **Normalized Item** model (schema **v5**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
@@ -149,6 +149,33 @@ Header storage is written by extractors (`extract-pst`) and is **not** cleared b
 Header parse helpers live in `thread_headers` (re-exported from the crate root): `parse_in_reply_to`, `parse_references_header`, `references_to_json` / `parse_references_json`, `normalize_conversation_index_to_hex`, `unfold_header_value`.
 
 Engine: `crates/matter-thread`. Never delete items/blobs; never mutate source PST.
+
+## Schema v5 — Near-duplicate detection (0023)
+
+Nullable columns on `items` (does **not** overload `dedup_*` or `thread_*`):
+
+| Field | Kind | Notes |
+|---|---|---|
+| `near_dup_group_id` | **Result** | Stable group id (`SHA-256` of `near:v1\n{pivot_item_id}`) |
+| `near_dup_role` | **Result** | `pivot` \| `member` \| `unique` \| `skipped` — constants in `item_near_dup_role` |
+| `near_dup_similarity` | **Result** | REAL 0.0–1.0 vs group pivot (`1.0` for pivot); NULL if unique/skipped |
+| `near_dup_pivot_item_id` | **Result** | Pivot item id (self if pivot) |
+| `near_dup_method` | **Result** | Algorithm tag, e.g. `minhash_shingle_v1` |
+| `near_duped_at` | **Result** | RFC3339 when last assigned |
+| `near_dup_job_id` | **Result** | Last job that wrote the result |
+
+**Indexes (v5):** `idx_items_near_dup_group`, `idx_items_near_dup_role`.
+
+Near-dup results are flag-only (never suppress as exact). Engine: `crates/matter-neardup`.
+
+### Near-dup helpers
+
+| API | Purpose |
+|---|---|
+| `list_neardup_candidates` / `_range` | Thin ordered candidates (`NearDupCandidate` — id, text_sha256, dedup_role, order keys) |
+| `count_neardup_candidates` | Eligible count |
+| `clear_near_dup_fields` | Reset near-dup result columns (transactional) |
+| `apply_near_dup_batch_with_checkpoint` | **N result updates + checkpoint in one commit** |
 
 ### Address storage (JSON decision)
 

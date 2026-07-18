@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -18,6 +18,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (2, MIGRATION_V2),
     (3, MIGRATION_V3),
     (4, MIGRATION_V4),
+    (5, MIGRATION_V5),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -186,6 +187,22 @@ CREATE INDEX IF NOT EXISTS idx_items_thread_id ON items(thread_id);
 CREATE INDEX IF NOT EXISTS idx_items_in_reply_to ON items(in_reply_to);
 "#;
 
+/// Schema v5: near-duplicate result columns (track 0023).
+///
+/// Nullable `ADD COLUMN` only. Does not overload `dedup_*` or `thread_*`.
+const MIGRATION_V5: &str = r#"
+ALTER TABLE items ADD COLUMN near_dup_group_id TEXT;
+ALTER TABLE items ADD COLUMN near_dup_role TEXT;
+ALTER TABLE items ADD COLUMN near_dup_similarity REAL;
+ALTER TABLE items ADD COLUMN near_dup_pivot_item_id TEXT;
+ALTER TABLE items ADD COLUMN near_dup_method TEXT;
+ALTER TABLE items ADD COLUMN near_duped_at TEXT;
+ALTER TABLE items ADD COLUMN near_dup_job_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_items_near_dup_group ON items(near_dup_group_id);
+CREATE INDEX IF NOT EXISTS idx_items_near_dup_role ON items(near_dup_role);
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -278,7 +295,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v2 columns present
@@ -324,6 +341,23 @@ mod tests {
             )
             .expect("pragma");
         assert!(has_in_reply_to);
+        // v5 near-dup columns present
+        let has_near_dup_role: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'near_dup_role'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_near_dup_role);
+        let has_near_dup_sim: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'near_dup_similarity'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_near_dup_sim);
     }
 
     #[test]
@@ -418,8 +452,8 @@ mod tests {
             .expect("pragma");
         assert!(!role_exists);
 
-        let v = migrate(&conn).expect("migrate v1→v4");
-        assert_eq!(v, 4);
+        let v = migrate(&conn).expect("migrate v1→v5");
+        assert_eq!(v, 5);
 
         // Inventory data intact.
         let (path, status, native, lhv): (String, String, String, i64) = conn
@@ -461,6 +495,16 @@ mod tests {
             .expect("dedup_role");
         assert!(dedup_role.is_none());
 
+        // v5 near-dup columns present and NULL.
+        let near_dup_role: Option<String> = conn
+            .query_row(
+                "SELECT near_dup_role FROM items WHERE id = 'itm_a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("near_dup_role");
+        assert!(near_dup_role.is_none());
+
         // Existing FKs still work: source_id / family_id.
         let src: String = conn
             .query_row(
@@ -479,9 +523,9 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 4);
+        assert_eq!(ms, 5);
 
-        // v2 + v3 + v4 indexes present.
+        // v2 + v3 + v4 + v5 indexes present.
         for idx in [
             "idx_items_logical_hash",
             "idx_items_message_id",
@@ -490,6 +534,8 @@ mod tests {
             "idx_items_dedup_group",
             "idx_items_thread_id",
             "idx_items_in_reply_to",
+            "idx_items_near_dup_group",
+            "idx_items_near_dup_role",
         ] {
             let exists: bool = conn
                 .query_row(
@@ -532,8 +578,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v2→v4");
-        assert_eq!(v, 4);
+        let v = migrate(&conn).expect("migrate v2→v5");
+        assert_eq!(v, 5);
 
         let (status, mid, dedup): (String, Option<String>, Option<String>) = conn
             .query_row(
@@ -553,10 +599,10 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 4);
+        assert_eq!(ms, 5);
     }
 
-    /// v3 fixture → migrate to v4 → data intact + thread columns present.
+    /// v3 fixture → migrate to current → data intact + thread columns present.
     #[test]
     fn migrate_v3_to_v4_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -587,8 +633,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v3→v4");
-        assert_eq!(v, 4);
+        let v = migrate(&conn).expect("migrate v3→v5");
+        assert_eq!(v, 5);
 
         let (status, mid, dedup, thread_id, in_reply): (
             String,
@@ -625,9 +671,114 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 4);
+        assert_eq!(ms, 5);
 
         for idx in ["idx_items_thread_id", "idx_items_in_reply_to"] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name = ?1",
+                    [idx],
+                    |row| row.get(0),
+                )
+                .expect("sqlite_master");
+            assert!(exists, "expected index {idx}");
+        }
+    }
+
+    /// v4 fixture → migrate to v5 → data intact + near-dup columns present.
+    #[test]
+    fn migrate_v4_to_v5_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute_batch(MIGRATION_V3).expect("v3");
+        conn.execute_batch(MIGRATION_V4).expect("v4");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (4)", [])
+            .expect("meta v4");
+        assert_eq!(read_schema_version(&conn).expect("read"), 4);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v4', 'V4 Matter', '2020-01-01T00:00:00Z', 4, '/tmp/v4')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, dedup_role, thread_id, thread_method) \
+             VALUES ('itm_mail', 'mat_v4', NULL, NULL, 'inbox/a.eml', NULL, \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             'mid@example.com', 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'parent', 'email', 1, 'unique', 'tid-1', 'headers')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v4→v5");
+        assert_eq!(v, 5);
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("status");
+        let mid: Option<String> = conn
+            .query_row(
+                "SELECT message_id FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mid");
+        let dedup: Option<String> = conn
+            .query_row(
+                "SELECT dedup_role FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("dedup");
+        let thread_id: Option<String> = conn
+            .query_row(
+                "SELECT thread_id FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("thread_id");
+        let near_role: Option<String> = conn
+            .query_row(
+                "SELECT near_dup_role FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("near_role");
+        let near_sim: Option<f64> = conn
+            .query_row(
+                "SELECT near_dup_similarity FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("near_sim");
+        assert_eq!(status, "extracted");
+        assert_eq!(mid.as_deref(), Some("mid@example.com"));
+        assert_eq!(dedup.as_deref(), Some("unique"));
+        assert_eq!(thread_id.as_deref(), Some("tid-1"));
+        assert!(near_role.is_none());
+        assert!(near_sim.is_none());
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v4'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, 5);
+
+        for idx in ["idx_items_near_dup_group", "idx_items_near_dup_role"] {
             let exists: bool = conn
                 .query_row(
                     "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name = ?1",
@@ -652,8 +803,8 @@ mod tests {
             .expect("meta v1");
 
         let v = migrate(&conn).expect("migrate");
-        assert_eq!(v, 4);
-        assert_eq!(read_schema_version(&conn).expect("read"), 4);
+        assert_eq!(v, 5);
+        assert_eq!(read_schema_version(&conn).expect("read"), 5);
 
         let has_role: bool = conn
             .query_row(
@@ -679,5 +830,13 @@ mod tests {
             )
             .expect("pragma");
         assert!(has_thread);
+        let has_near: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'near_dup_role'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_near);
     }
 }

@@ -93,6 +93,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
         {
             app.start_thread();
         }
+        if ui
+            .add_enabled(!busy, egui::Button::new("Run near-dup"))
+            .on_hover_text(
+                "Near-duplicate detection: MinHash shingles + LSH clusters (pivot/member roles)",
+            )
+            .clicked()
+        {
+            app.start_neardup();
+        }
 
         ui.separator();
 

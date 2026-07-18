@@ -77,6 +77,14 @@ pub mod item_thread_method {
     pub const NONE: &str = "none";
 }
 
+/// Near-duplicate role on items (schema v5 / track 0023).
+pub mod item_near_dup_role {
+    pub const PIVOT: &str = "pivot";
+    pub const MEMBER: &str = "member";
+    pub const UNIQUE: &str = "unique";
+    pub const SKIPPED: &str = "skipped";
+}
+
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Metadata row for the matter itself.
@@ -111,8 +119,10 @@ pub struct ItemFamily {
     pub created_at: String,
 }
 
-/// Normalized item row (schema v2 P0 + v3 dedupe + v4 thread fields).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Normalized item row (schema v2 P0 + v3 dedupe + v4 thread + v5 near-dup fields).
+///
+/// `PartialEq` only (not `Eq`) because `near_dup_similarity` is `f64`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub id: String,
     pub matter_id: String,
@@ -165,6 +175,14 @@ pub struct Item {
     pub thread_method: Option<String>,
     pub threaded_at: Option<String>,
     pub thread_job_id: Option<String>,
+    // --- schema v5 (near-dup) ---
+    pub near_dup_group_id: Option<String>,
+    pub near_dup_role: Option<String>,
+    pub near_dup_similarity: Option<f64>,
+    pub near_dup_pivot_item_id: Option<String>,
+    pub near_dup_method: Option<String>,
+    pub near_duped_at: Option<String>,
+    pub near_dup_job_id: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -221,6 +239,14 @@ pub struct ItemInput {
     pub thread_method: Option<String>,
     pub threaded_at: Option<String>,
     pub thread_job_id: Option<String>,
+    // --- schema v5 (near-dup) ---
+    pub near_dup_group_id: Option<String>,
+    pub near_dup_role: Option<String>,
+    pub near_dup_similarity: Option<f64>,
+    pub near_dup_pivot_item_id: Option<String>,
+    pub near_dup_method: Option<String>,
+    pub near_duped_at: Option<String>,
+    pub near_dup_job_id: Option<String>,
 }
 
 /// Thin row for matter-level email parent dedupe (no body text).
@@ -293,6 +319,34 @@ pub struct ThreadFieldUpdate {
     pub thread_job_id: Option<String>,
 }
 
+/// Thin row for near-duplicate sketching (no body text).
+///
+/// Identity + text digest + order keys only — safe for large-matter paging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearDupCandidate {
+    pub id: String,
+    pub text_sha256: Option<String>,
+    pub dedup_role: Option<String>,
+    pub path: Option<String>,
+    pub imported_at: String,
+    pub role: Option<String>,
+    pub parent_item_id: Option<String>,
+    pub status: String,
+}
+
+/// One item's near-dup field assignment for transactional batch write.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NearDupFieldUpdate {
+    pub item_id: String,
+    pub near_dup_group_id: Option<String>,
+    pub near_dup_role: Option<String>,
+    pub near_dup_similarity: Option<f64>,
+    pub near_dup_pivot_item_id: Option<String>,
+    pub near_dup_method: Option<String>,
+    pub near_duped_at: Option<String>,
+    pub near_dup_job_id: Option<String>,
+}
+
 /// Partial update for an existing item.
 ///
 /// Nested-`Option` contract (matches README / `apply_opt2`):
@@ -353,6 +407,14 @@ pub struct ItemUpdate {
     pub thread_method: Option<Option<String>>,
     pub threaded_at: Option<Option<String>>,
     pub thread_job_id: Option<Option<String>>,
+    // --- schema v5 (near-dup) ---
+    pub near_dup_group_id: Option<Option<String>>,
+    pub near_dup_role: Option<Option<String>>,
+    pub near_dup_similarity: Option<Option<f64>>,
+    pub near_dup_pivot_item_id: Option<Option<String>>,
+    pub near_dup_method: Option<Option<String>>,
+    pub near_duped_at: Option<Option<String>>,
+    pub near_dup_job_id: Option<Option<String>>,
 }
 
 /// An open matter: directory layout + SQLite connection + CAS handle.
@@ -800,13 +862,16 @@ impl Matter {
                 dedup_role, duplicate_of_item_id, dedup_tier, dedup_group_id, \
                 deduped_at, dedup_job_id, \
                 in_reply_to, references_json, conversation_topic, conversation_index_hex, \
-                thread_id, thread_root_item_id, thread_method, threaded_at, thread_job_id\
+                thread_id, thread_root_item_id, thread_method, threaded_at, thread_job_id, \
+                near_dup_group_id, near_dup_role, near_dup_similarity, near_dup_pivot_item_id, \
+                near_dup_method, near_duped_at, near_dup_job_id\
              ) VALUES (\
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, \
                 ?26, ?27, ?28, ?29, ?30, ?31, ?32, \
                 ?33, ?34, ?35, ?36, ?37, ?38, \
-                ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47\
+                ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, \
+                ?48, ?49, ?50, ?51, ?52, ?53, ?54\
              )",
             params![
                 id,
@@ -856,6 +921,13 @@ impl Matter {
                 input.thread_method,
                 input.threaded_at,
                 input.thread_job_id,
+                input.near_dup_group_id,
+                input.near_dup_role,
+                input.near_dup_similarity,
+                input.near_dup_pivot_item_id,
+                input.near_dup_method,
+                input.near_duped_at,
+                input.near_dup_job_id,
             ],
         )?;
 
@@ -924,6 +996,17 @@ impl Matter {
         let thread_method = apply_opt2(update.thread_method, current.thread_method);
         let threaded_at = apply_opt2(update.threaded_at, current.threaded_at);
         let thread_job_id = apply_opt2(update.thread_job_id, current.thread_job_id);
+        let near_dup_group_id = apply_opt2(update.near_dup_group_id, current.near_dup_group_id);
+        let near_dup_role = apply_opt2(update.near_dup_role, current.near_dup_role);
+        let near_dup_similarity =
+            apply_opt2(update.near_dup_similarity, current.near_dup_similarity);
+        let near_dup_pivot_item_id = apply_opt2(
+            update.near_dup_pivot_item_id,
+            current.near_dup_pivot_item_id,
+        );
+        let near_dup_method = apply_opt2(update.near_dup_method, current.near_dup_method);
+        let near_duped_at = apply_opt2(update.near_duped_at, current.near_duped_at);
+        let near_dup_job_id = apply_opt2(update.near_dup_job_id, current.near_dup_job_id);
 
         let mut family_id = family_id;
         if let Some(ref parent_id) = parent_item_id {
@@ -964,8 +1047,11 @@ impl Matter {
                 dedup_group_id = ?33, deduped_at = ?34, dedup_job_id = ?35, \
                 in_reply_to = ?36, references_json = ?37, conversation_topic = ?38, \
                 conversation_index_hex = ?39, thread_id = ?40, thread_root_item_id = ?41, \
-                thread_method = ?42, threaded_at = ?43, thread_job_id = ?44 \
-             WHERE id = ?45",
+                thread_method = ?42, threaded_at = ?43, thread_job_id = ?44, \
+                near_dup_group_id = ?45, near_dup_role = ?46, near_dup_similarity = ?47, \
+                near_dup_pivot_item_id = ?48, near_dup_method = ?49, near_duped_at = ?50, \
+                near_dup_job_id = ?51 \
+             WHERE id = ?52",
             params![
                 source_id,
                 family_id,
@@ -1011,6 +1097,13 @@ impl Matter {
                 thread_method,
                 threaded_at,
                 thread_job_id,
+                near_dup_group_id,
+                near_dup_role,
+                near_dup_similarity,
+                near_dup_pivot_item_id,
+                near_dup_method,
+                near_duped_at,
+                near_dup_job_id,
                 item_id,
             ],
         )?;
@@ -1588,6 +1681,133 @@ impl Matter {
         })
     }
 
+    // --- Near-duplicate detection (schema v5) ---
+
+    /// Eligible items for near-dup sketching, ordered by stable order:
+    /// `imported_at ASC, path ASC, id ASC`.
+    ///
+    /// Status filter: `extracted` / `partial` / `normalized`. When
+    /// `include_attachments` is false, attachment-role rows are excluded.
+    pub fn list_neardup_candidates(
+        &self,
+        include_attachments: bool,
+    ) -> Result<Vec<NearDupCandidate>> {
+        self.list_neardup_candidates_range(include_attachments, 0, u64::MAX)
+    }
+
+    /// Paged eligible near-dup candidates (same order/filter as
+    /// [`Self::list_neardup_candidates`]).
+    pub fn list_neardup_candidates_range(
+        &self,
+        include_attachments: bool,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<NearDupCandidate>> {
+        let attach_clause = if include_attachments {
+            ""
+        } else {
+            " AND IFNULL(role, '') != 'attachment' "
+        };
+        let sql = format!(
+            "SELECT id, text_sha256, dedup_role, path, imported_at, role, parent_item_id, status \
+             FROM items \
+             WHERE matter_id = ?1 \
+               AND status IN ('extracted', 'partial', 'normalized') \
+               {attach_clause} \
+             ORDER BY imported_at ASC, path ASC, id ASC \
+             LIMIT ?2 OFFSET ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let limit_i = if limit == u64::MAX {
+            i64::MAX
+        } else {
+            limit as i64
+        };
+        let rows = stmt.query_map(
+            params![self.matter_id, limit_i, offset as i64],
+            map_neardup_candidate_row,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Count of eligible near-dup candidates.
+    pub fn count_neardup_candidates(&self, include_attachments: bool) -> Result<u64> {
+        let attach_clause = if include_attachments {
+            ""
+        } else {
+            " AND IFNULL(role, '') != 'attachment' "
+        };
+        let sql = format!(
+            "SELECT COUNT(*) FROM items \
+             WHERE matter_id = ?1 \
+               AND status IN ('extracted', 'partial', 'normalized') \
+               {attach_clause}"
+        );
+        let n: i64 = self
+            .conn
+            .query_row(&sql, params![self.matter_id], |row| row.get(0))?;
+        Ok(n as u64)
+    }
+
+    /// Clear near-dup *result* columns for status-eligible items.
+    ///
+    /// Returns the number of rows updated.
+    pub fn clear_near_dup_fields(&self) -> Result<u64> {
+        let matter_id = self.matter_id.clone();
+        self.with_transaction(|conn| {
+            let n = conn.execute(
+                "UPDATE items SET \
+                    near_dup_group_id = NULL, near_dup_role = NULL, near_dup_similarity = NULL, \
+                    near_dup_pivot_item_id = NULL, near_dup_method = NULL, near_duped_at = NULL, \
+                    near_dup_job_id = NULL \
+                 WHERE matter_id = ?1 \
+                   AND status IN ('extracted', 'partial', 'normalized')",
+                params![matter_id],
+            )?;
+            Ok(n as u64)
+        })
+    }
+
+    /// Apply N near-dup field updates and upsert the job checkpoint in **one**
+    /// SQLite transaction (same pattern as dedupe / thread).
+    pub fn apply_near_dup_batch_with_checkpoint(
+        &self,
+        job_id: &str,
+        stage: &str,
+        updates: &[NearDupFieldUpdate],
+        cursor_json: &str,
+        completed_count: i64,
+    ) -> Result<()> {
+        let now = now_rfc3339();
+        self.with_transaction(|conn| {
+            for u in updates {
+                conn.execute(
+                    "UPDATE items SET \
+                        near_dup_group_id = ?1, near_dup_role = ?2, near_dup_similarity = ?3, \
+                        near_dup_pivot_item_id = ?4, near_dup_method = ?5, near_duped_at = ?6, \
+                        near_dup_job_id = ?7 \
+                     WHERE id = ?8",
+                    params![
+                        u.near_dup_group_id,
+                        u.near_dup_role,
+                        u.near_dup_similarity,
+                        u.near_dup_pivot_item_id,
+                        u.near_dup_method,
+                        u.near_duped_at,
+                        u.near_dup_job_id,
+                        u.item_id,
+                    ],
+                )?;
+            }
+            jobs::put_checkpoint(conn, job_id, stage, cursor_json, completed_count, &now)?;
+            Ok(())
+        })
+    }
+
     fn recompute_attachment_count(&self, parent_id: &str) -> Result<()> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM items WHERE parent_item_id = ?1",
@@ -1708,7 +1928,9 @@ const ITEM_COLUMNS: &str =
     dedup_role, duplicate_of_item_id, dedup_tier, dedup_group_id, \
     deduped_at, dedup_job_id, \
     in_reply_to, references_json, conversation_topic, conversation_index_hex, \
-    thread_id, thread_root_item_id, thread_method, threaded_at, thread_job_id";
+    thread_id, thread_root_item_id, thread_method, threaded_at, thread_job_id, \
+    near_dup_group_id, near_dup_role, near_dup_similarity, near_dup_pivot_item_id, \
+    near_dup_method, near_duped_at, near_dup_job_id";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -1763,6 +1985,13 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         thread_method: row.get(44)?,
         threaded_at: row.get(45)?,
         thread_job_id: row.get(46)?,
+        near_dup_group_id: row.get(47)?,
+        near_dup_role: row.get(48)?,
+        near_dup_similarity: row.get(49)?,
+        near_dup_pivot_item_id: row.get(50)?,
+        near_dup_method: row.get(51)?,
+        near_duped_at: row.get(52)?,
+        near_dup_job_id: row.get(53)?,
     })
 }
 
@@ -1795,6 +2024,19 @@ fn map_thread_candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadC
         status: row.get(10)?,
         thread_id: row.get(11)?,
         parent_item_id: row.get(12)?,
+    })
+}
+
+fn map_neardup_candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NearDupCandidate> {
+    Ok(NearDupCandidate {
+        id: row.get(0)?,
+        text_sha256: row.get(1)?,
+        dedup_role: row.get(2)?,
+        path: row.get(3)?,
+        imported_at: row.get(4)?,
+        role: row.get(5)?,
+        parent_item_id: row.get(6)?,
+        status: row.get(7)?,
     })
 }
 

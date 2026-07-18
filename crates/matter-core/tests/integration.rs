@@ -376,13 +376,13 @@ fn audit_append_verify_and_detect_broken_chain() {
 }
 
 #[test]
-fn schema_v4_on_create() {
+fn schema_v5_on_create() {
     let (_tmp, base) = utf8_tempdir();
-    let root = base.join("matter-v4");
-    let matter = Matter::create(&root, "V4").expect("create");
-    assert_eq!(SCHEMA_VERSION, 4);
-    assert_eq!(matter.schema_version().expect("ver"), 4);
-    assert_eq!(matter.info().expect("info").schema_version, 4);
+    let root = base.join("matter-v5");
+    let matter = Matter::create(&root, "V5").expect("create");
+    assert_eq!(SCHEMA_VERSION, 5);
+    assert_eq!(matter.schema_version().expect("ver"), 5);
+    assert_eq!(matter.info().expect("info").schema_version, 5);
 }
 
 #[test]
@@ -1265,4 +1265,71 @@ fn thread_batch_and_checkpoint_same_transaction() {
         Some("b@ex.com"),
         "header storage must not be cleared"
     );
+}
+
+#[test]
+fn near_dup_batch_and_checkpoint_same_transaction() {
+    use matter_core::{item_near_dup_role, item_role, item_status, NearDupFieldUpdate};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-neardup-txn");
+    let matter = Matter::create(&root, "NearDup Txn").expect("create");
+    let job = matter.create_job("neardup").expect("job");
+
+    let digest = matter
+        .put_bytes(b"hello near-dup body text enough chars")
+        .expect("cas");
+    let a = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            path: Some("doc-a.txt".into()),
+            text_sha256: Some(digest),
+            ..Default::default()
+        })
+        .expect("a");
+
+    let updates = vec![NearDupFieldUpdate {
+        item_id: a.id.clone(),
+        near_dup_group_id: Some("gid-1".into()),
+        near_dup_role: Some(item_near_dup_role::PIVOT.into()),
+        near_dup_similarity: Some(1.0),
+        near_dup_pivot_item_id: Some(a.id.clone()),
+        near_dup_method: Some("minhash_shingle_v1".into()),
+        near_duped_at: Some("2020-01-01T00:00:00Z".into()),
+        near_dup_job_id: Some(job.id.clone()),
+    }];
+    matter
+        .apply_near_dup_batch_with_checkpoint(
+            &job.id,
+            "neardup",
+            &updates,
+            r#"{"phase":"write","cursor_index":1}"#,
+            1,
+        )
+        .expect("batch");
+
+    let item = matter.get_item(&a.id).expect("get");
+    assert_eq!(item.near_dup_group_id.as_deref(), Some("gid-1"));
+    assert_eq!(
+        item.near_dup_role.as_deref(),
+        Some(item_near_dup_role::PIVOT)
+    );
+    assert_eq!(item.near_dup_similarity, Some(1.0));
+    assert_eq!(item.near_dup_method.as_deref(), Some("minhash_shingle_v1"));
+
+    let cp = matter
+        .get_checkpoint(&job.id, "neardup")
+        .expect("cp")
+        .expect("present");
+    assert_eq!(cp.completed_count, 1);
+
+    let cands = matter.list_neardup_candidates(true).expect("cands");
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].id, a.id);
+
+    matter.clear_near_dup_fields().expect("clear");
+    let cleared = matter.get_item(&a.id).expect("get");
+    assert!(cleared.near_dup_role.is_none());
+    assert!(cleared.near_dup_group_id.is_none());
 }
