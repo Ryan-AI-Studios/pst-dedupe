@@ -211,6 +211,36 @@ impl FilterSpec {
         }
     }
 
+    /// Quick chip: items with at least one redaction region (track 0032).
+    pub fn preset_has_redactions() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "has_redactions".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
+    /// Quick chip: redactions present but redacted produce artifact missing/outdated (track 0032).
+    pub fn preset_redacted_text_stale() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "redacted_text_stale".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
     /// True when no conditions and default family flag (still may have scope).
     pub fn is_empty_conditions(&self) -> bool {
         self.conditions.is_empty() && !self.include_family
@@ -621,6 +651,34 @@ fn push_condition(
                 where_parts.push(format!(
                     "({alias}.highlight_count = 0 OR {alias}.highlight_count IS NULL)"
                 ));
+            }
+        }
+        ("has_redactions", "eq") => {
+            let want = bool_value(cond, "has_redactions")?;
+            if want {
+                where_parts.push(format!("{alias}.redaction_count > 0"));
+            } else {
+                where_parts.push(format!(
+                    "({alias}.redaction_count = 0 OR {alias}.redaction_count IS NULL)"
+                ));
+            }
+        }
+        ("redacted_text_stale", "eq") => {
+            let want = bool_value(cond, "redacted_text_stale")?;
+            // Stale when redactions exist and artifact is missing, or source digest
+            // no longer matches item text_sha256 (when both present).
+            let stale_pred = format!(
+                "({alias}.redaction_count > 0 AND (\
+                    {alias}.redacted_text_sha256 IS NULL \
+                    OR ({alias}.redacted_source_digest IS NOT NULL \
+                        AND {alias}.text_sha256 IS NOT NULL \
+                        AND {alias}.redacted_source_digest != {alias}.text_sha256)\
+                ))"
+            );
+            if want {
+                where_parts.push(stale_pred);
+            } else {
+                where_parts.push(format!("NOT {stale_pred}"));
             }
         }
         ("note_text", "contains") => {

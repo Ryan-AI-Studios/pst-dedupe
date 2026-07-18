@@ -381,9 +381,9 @@ fn schema_v12_on_create() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-v12");
     let matter = Matter::create(&root, "V12").expect("create");
-    assert_eq!(SCHEMA_VERSION, 12);
-    assert_eq!(matter.schema_version().expect("ver"), 12);
-    assert_eq!(matter.info().expect("info").schema_version, 12);
+    assert_eq!(SCHEMA_VERSION, 13);
+    assert_eq!(matter.schema_version().expect("ver"), 13);
+    assert_eq!(matter.info().expect("info").schema_version, 13);
     // Default coding catalog seeded on create.
     let defs = matter.list_code_definitions().expect("defs");
     assert_eq!(defs.len(), 6);
