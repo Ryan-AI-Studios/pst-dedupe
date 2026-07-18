@@ -89,8 +89,9 @@ runner.shutdown(); // or drop
 | `cull` | `MatterCullHandler` | `{ "preset_name": "unique_only", "preset_id", "rules", "reset", "batch_size" }` (all optional; defaults apply) | checkpoint `stage=cull` cursor |
 | `promote` | `MatterPromoteHandler` | `{ "policy": "auto", "review_set_name", "expand_families", "reset", "batch_size", "require_dedupe" }` (all optional; defaults apply) | checkpoint `stage=promote` cursor |
 | `fts_index` | `MatterFtsIndexHandler` | `{ "reset": false, "batch_size": 100, "scope": "all_with_text", "writer_heap_bytes" }` (all optional; defaults apply) | checkpoint `stage=fts_index` cursor |
+| `office_extract` | `MatterOfficeExtractHandler` | `{ "force": false, "batch_size": 50, "formats": ["docx","xlsx","pptx"] }` (all optional; defaults apply) | checkpoint `stage=office_extract` cursor |
 
-Register additional handlers with `JobHandler` for future tracks. Feature `fts` is **default-on**.
+Register additional handlers with `JobHandler` for future tracks. Features `fts` and `office` are **default-on**.
 
 ## Option C (job-id injection)
 

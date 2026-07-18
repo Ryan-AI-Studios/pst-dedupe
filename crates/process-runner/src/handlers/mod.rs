@@ -24,6 +24,9 @@ pub mod promote;
 #[cfg(feature = "fts")]
 pub mod fts;
 
+#[cfg(feature = "office")]
+pub mod office;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
@@ -47,3 +50,6 @@ pub use promote::MatterPromoteHandler;
 
 #[cfg(feature = "fts")]
 pub use fts::MatterFtsIndexHandler;
+
+#[cfg(feature = "office")]
+pub use office::MatterOfficeExtractHandler;

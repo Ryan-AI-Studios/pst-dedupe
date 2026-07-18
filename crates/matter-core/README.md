@@ -7,7 +7,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v13**) + family graph
+6. **Normalized Item** model (schema **v14**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
@@ -19,8 +19,9 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 15. **Notes / highlights** stand-off work-product annotations (0030)
 16. **Privilege** claims + withhold holds + privilege log CSV export (0031)
 17. **Redaction** regions + true redacted text CAS artifact (0032)
+18. **Office extract** bookkeeping (`office_*`) for OOXML text fill (0033)
 
-Schema version: **13** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, and text redaction. SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+Schema version: **14** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, text redaction, and office extract bookkeeping. SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
 
 ## Layout
 

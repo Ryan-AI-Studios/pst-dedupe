@@ -211,6 +211,16 @@ impl Cas {
         Ok(File::open(path.as_std_path())?)
     }
 
+    /// Return the on-disk byte length of a blob without reading its contents.
+    pub fn blob_len(&self, digest_hex: &str) -> Result<u64> {
+        let path = self.object_path(digest_hex)?;
+        if !path.as_std_path().exists() {
+            return Err(Error::BlobNotFound(normalize_digest(digest_hex)?));
+        }
+        let meta = fs::metadata(path.as_std_path())?;
+        Ok(meta.len())
+    }
+
     /// Read raw bytes for a digest.
     pub fn get_bytes(&self, digest_hex: &str) -> Result<Vec<u8>> {
         let path = self.object_path(digest_hex)?;
@@ -221,6 +231,21 @@ impl Cas {
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
         Ok(buf)
+    }
+
+    /// Read raw bytes only when the on-disk length is `<= max_bytes`.
+    ///
+    /// Stats the CAS file first so oversized blobs are rejected without a full
+    /// allocation (callers that need a hard memory bound should prefer this over
+    /// [`Cas::get_bytes`]).
+    pub fn get_bytes_capped(&self, digest_hex: &str, max_bytes: u64) -> Result<Vec<u8>> {
+        let len = self.blob_len(digest_hex)?;
+        if len > max_bytes {
+            return Err(Error::Other(format!(
+                "CAS blob size {len} exceeds cap {max_bytes}"
+            )));
+        }
+        self.get_bytes(digest_hex)
     }
 }
 
@@ -314,5 +339,25 @@ mod tests {
             .put_reader(&mut Cursor::new(data.as_slice()))
             .expect("p2");
         assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn blob_len_and_get_bytes_capped() {
+        let dir = tempdir().expect("tempdir");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        let cas = Cas::new(&root);
+        cas.ensure_layout().expect("layout");
+
+        let data = b"capped-payload-bytes";
+        let digest = cas.put_bytes(data).expect("put");
+        assert_eq!(cas.blob_len(&digest).expect("len"), data.len() as u64);
+        let got = cas
+            .get_bytes_capped(&digest, data.len() as u64)
+            .expect("capped ok");
+        assert_eq!(got.as_slice(), data.as_slice());
+        let err = cas
+            .get_bytes_capped(&digest, (data.len() as u64).saturating_sub(1))
+            .expect_err("over cap");
+        assert!(err.to_string().contains("exceeds cap"));
     }
 }

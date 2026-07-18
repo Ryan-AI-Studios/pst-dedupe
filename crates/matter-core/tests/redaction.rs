@@ -61,8 +61,8 @@ fn schema_v13_on_create() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-v13");
     let matter = Matter::create(&root, "V13").expect("create");
-    assert_eq!(SCHEMA_VERSION, 13);
-    assert_eq!(matter.schema_version().expect("ver"), 13);
+    assert_eq!(SCHEMA_VERSION, 14);
+    assert_eq!(matter.schema_version().expect("ver"), 14);
 
     let (item, _) = insert_text_item(&matter, "hello");
     assert_eq!(item.redaction_count, 0);

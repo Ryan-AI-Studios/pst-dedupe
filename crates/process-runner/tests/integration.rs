@@ -1241,3 +1241,69 @@ fn resume_loads_full_params_from_checkpoint() {
     );
     assert_eq!(resumed.get("batch_size").and_then(|v| v.as_u64()), Some(7));
 }
+
+#[cfg(feature = "office")]
+#[test]
+fn office_extract_handler_via_process_runner() {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use matter_core::ItemInput;
+    use process_runner::MatterOfficeExtractHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-office");
+
+    // Load synthetic fixture from workspace fixtures/office.
+    let mut fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fixture.pop(); // crates
+    fixture.pop(); // workspace
+    fixture.push("fixtures");
+    fixture.push("office");
+    fixture.push("minimal.docx");
+    let data = fs::read(&fixture).expect("fixture");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        let native = matter.put_bytes(&data).expect("put");
+        matter
+            .insert_item(ItemInput {
+                path: Some("memo.docx".into()),
+                native_sha256: Some(native),
+                status: "extracted".into(),
+                file_category: Some("attachment".into()),
+                ..Default::default()
+            })
+            .expect("item");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterOfficeExtractHandler::new()));
+
+    let params = JobParams::new(
+        serde_json::json!({ "force": false, "batch_size": 10, "formats": ["docx","xlsx","pptx"] })
+            .to_string(),
+    );
+    let job_id = runner
+        .start(&root, "office_extract", params)
+        .expect("start office_extract");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "err={:?}",
+        job.error_summary
+    );
+    assert_eq!(job.kind, "office_extract");
+
+    let cands = matter
+        .list_office_candidates(0, 10, false)
+        .expect("candidates");
+    assert_eq!(cands.len(), 1);
+    let item = matter.get_item(&cands[0].id).expect("item");
+    assert!(item.text_sha256.is_some(), "handler must write text_sha256");
+    assert_eq!(item.office_extract_status.as_deref(), Some("ok"));
+}
