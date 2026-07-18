@@ -25,7 +25,7 @@ use std::thread;
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense};
 use matter_core::{
-    ApplyCodesInput, ApplyCodesResult, CodeDef, ItemCodeInfo, Matter, ReviewListRow,
+    ApplyCodesInput, ApplyCodesResult, CodeDef, CodeDefInput, ItemCodeInfo, Matter, ReviewListRow,
 };
 
 use crate::review_body::{BodyLoader, BodyPane};
@@ -89,8 +89,10 @@ pub struct ReviewState {
     pub multi_selected: HashSet<String>,
     /// Code catalog for the open matter.
     code_defs: Vec<CodeDef>,
-    /// Codes for loaded/visible item ids.
+    /// Codes for **visible** (and selected) item ids only — not the full thin list.
     row_codes: HashMap<String, Vec<ItemCodeInfo>>,
+    /// Last `ScrollArea::show_rows` viewport range into `rows` (for code load scope).
+    visible_row_range: std::ops::Range<usize>,
     /// Batch panel mode: true = Add, false = Remove.
     batch_mode_add: bool,
     /// Codes checked in the batch panel (definition ids).
@@ -99,6 +101,12 @@ pub struct ReviewState {
     propagate_family: bool,
     /// Open batch confirm dialog.
     batch_confirm: Option<BatchConfirm>,
+    /// Expand “Add code…” form in the coding panel.
+    show_add_code: bool,
+    /// Draft label for new custom code.
+    add_code_label: String,
+    /// Group for new custom code (`custom` or `issues`).
+    add_code_group: String,
     /// Async coding apply in flight.
     coding_busy: bool,
     coding_rx: Option<Receiver<Result<ApplyCodesResult, String>>>,
@@ -121,8 +129,12 @@ impl ReviewState {
         self.multi_selected.clear();
         self.code_defs.clear();
         self.row_codes.clear();
+        self.visible_row_range = 0..0;
         self.batch_code_ids.clear();
         self.batch_confirm = None;
+        self.show_add_code = false;
+        self.add_code_label.clear();
+        self.add_code_group = "custom".into();
         self.coding_busy = false;
         self.coding_rx = None;
         self.coding_status = None;
@@ -175,6 +187,8 @@ impl ReviewState {
                 self.count = count;
                 self.rows = rows;
                 self.loaded_root = Some(matter_root.to_owned());
+                // Viewport unknown until next paint; fallback window used for first load.
+                self.visible_row_range = 0..0;
                 // Drop multi-select ids that are no longer present.
                 let present: HashSet<String> = self.rows.iter().map(|r| r.id.clone()).collect();
                 self.multi_selected.retain(|id| present.contains(id));
@@ -200,6 +214,7 @@ impl ReviewState {
                 self.count = 0;
                 self.selection = None;
                 self.loaded_root = Some(matter_root.to_owned());
+                self.visible_row_range = 0..0;
                 self.code_defs.clear();
                 self.row_codes.clear();
             }
@@ -217,13 +232,27 @@ impl ReviewState {
     }
 
     fn refresh_row_codes(&mut self, matter_root: &Utf8Path) {
-        let ids: Vec<String> = self.rows.iter().map(|r| r.id.clone()).collect();
+        let ids =
+            item_ids_for_code_load(&self.rows, &self.visible_row_range, self.current_item_id());
+        if ids.is_empty() {
+            self.row_codes.clear();
+            return;
+        }
         match load_item_codes(matter_root, &ids) {
             Ok(map) => self.row_codes = map,
             Err(e) => {
                 self.coding_error = Some(format!("Load codes: {e}"));
             }
         }
+    }
+
+    /// Remember viewport from `show_rows` and reload codes when it moves.
+    fn note_visible_row_range(&mut self, matter_root: &Utf8Path, range: std::ops::Range<usize>) {
+        if self.visible_row_range == range {
+            return;
+        }
+        self.visible_row_range = range;
+        self.refresh_row_codes(matter_root);
     }
 
     fn current_item_id(&self) -> Option<&str> {
@@ -283,13 +312,12 @@ impl ReviewState {
         if self.coding_busy {
             return;
         }
-        let n = if input.propagate_family {
-            // Unknown expand size — off-thread when selected is large.
-            input.item_ids.len().max(CODING_OFF_THREAD_THRESHOLD)
-        } else {
-            input.item_ids.len()
-        };
-        if n > CODING_OFF_THREAD_THRESHOLD {
+        // Multi-item batch, family expand (unknown target size), or large N → off UI thread.
+        if should_apply_codes_off_thread(
+            input.item_ids.len(),
+            input.propagate_family,
+            CODING_OFF_THREAD_THRESHOLD,
+        ) {
             self.spawn_apply_codes(matter_root, ctx, input);
         } else {
             match apply_codes_blocking(matter_root, input) {
@@ -409,6 +437,8 @@ impl ReviewState {
         }
         self.selection_detail = None;
         self.load_selection_detail(matter_root);
+        // Keep header chips correct even when selection is off the visible page.
+        self.refresh_row_codes(matter_root);
         self.spawn_body_for_selection(ctx, matter_root);
     }
 
@@ -546,8 +576,52 @@ pub fn load_item_codes(
     matter_root: &Utf8Path,
     item_ids: &[String],
 ) -> Result<HashMap<String, Vec<ItemCodeInfo>>, String> {
+    if item_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
     let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
     matter.list_item_codes(item_ids).map_err(|e| e.to_string())
+}
+
+/// Item ids whose codes should be queried: viewport slice + current selection.
+///
+/// When `visible` is empty (not yet painted), loads a small leading window so the
+/// first frame has list chips without scanning the full thin corpus (up to 50k).
+pub fn item_ids_for_code_load(
+    rows: &[ReviewListRow],
+    visible: &std::ops::Range<usize>,
+    selection_id: Option<&str>,
+) -> Vec<String> {
+    const FALLBACK_WINDOW: usize = 64;
+    let n = rows.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let (start, end) = if visible.start >= visible.end {
+        (0, n.min(FALLBACK_WINDOW))
+    } else {
+        let start = visible.start.min(n);
+        let end = visible.end.min(n).max(start);
+        (start, end)
+    };
+    let mut ids: Vec<String> = rows[start..end].iter().map(|r| r.id.clone()).collect();
+    if let Some(sel) = selection_id {
+        if !ids.iter().any(|id| id == sel) {
+            ids.push(sel.to_string());
+        }
+    }
+    ids
+}
+
+/// Whether `apply_codes` should run off the UI thread.
+///
+/// Off-thread for multi-item batch, any family-propagate apply, or N above threshold.
+pub fn should_apply_codes_off_thread(
+    selected_count: usize,
+    propagate_family: bool,
+    threshold: usize,
+) -> bool {
+    selected_count > 1 || propagate_family || selected_count > threshold
 }
 
 /// Apply codes on a worker / sync path.
@@ -558,6 +632,30 @@ pub fn apply_codes_blocking(
     let matter = Matter::open(matter_root).map_err(|e| e.to_string())?;
     matter.seed_default_codes().map_err(|e| e.to_string())?;
     matter.apply_codes(input).map_err(|e| e.to_string())
+}
+
+/// Insert a custom code definition (label → slug key). Returns new definition id.
+pub fn upsert_code_definition_blocking(
+    matter_root: &Utf8Path,
+    label: &str,
+    group_key: &str,
+) -> Result<String, String> {
+    let matter = Matter::open(matter_root).map_err(|e| e.to_string())?;
+    matter.seed_default_codes().map_err(|e| e.to_string())?;
+    // Place new codes after seed defaults (sort_order 0..5).
+    let sort_order = 100i64;
+    matter
+        .upsert_code_definition(CodeDefInput {
+            id: None,
+            key: None,
+            label: label.to_string(),
+            group_key: group_key.to_string(),
+            cardinality: "multi".into(),
+            color: None,
+            sort_order,
+            is_active: true,
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// Toggle membership of `item_id` in a multi-select set (pure helper for tests).
@@ -748,10 +846,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path, 
                     ui.set_min_width(list_width - 8.0);
                     ui.set_min_height(ui.available_height());
                     ui.label(RichText::new("Corpus").strong());
+                    let mut painted_range: Option<std::ops::Range<usize>> = None;
                     egui::ScrollArea::vertical()
                         .id_salt("review_corpus_list")
                         .auto_shrink([false, false])
                         .show_rows(ui, ROW_HEIGHT, state.rows.len(), |ui, row_range| {
+                            painted_range = Some(row_range.clone());
                             for row_idx in row_range {
                                 let Some(row) = state.rows.get(row_idx).cloned() else {
                                     continue;
@@ -834,6 +934,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path, 
                                 }
                             }
                         });
+                    if let Some(range) = painted_range {
+                        state.note_visible_row_range(matter_root, range);
+                    }
                 });
             },
         );
@@ -1143,6 +1246,72 @@ fn show_coding_panel(
             }
         }
     });
+
+    // P0 “Add code…” — label → slug key; group custom/issues, multi cardinality.
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!state.coding_busy, egui::Button::new("Add code…").small())
+            .on_hover_text("Create a custom catalog entry (label → machine key)")
+            .clicked()
+        {
+            state.show_add_code = !state.show_add_code;
+            if state.show_add_code && state.add_code_group.trim().is_empty() {
+                state.add_code_group = "custom".into();
+            }
+        }
+    });
+    if state.show_add_code {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Label:").small());
+            ui.add(
+                egui::TextEdit::singleline(&mut state.add_code_label)
+                    .desired_width(140.0)
+                    .hint_text("e.g. Trade secret"),
+            );
+            ui.label(RichText::new("Group:").small());
+            if ui
+                .selectable_label(state.add_code_group == "custom", "custom")
+                .clicked()
+            {
+                state.add_code_group = "custom".into();
+            }
+            if ui
+                .selectable_label(state.add_code_group == "issues", "issues")
+                .clicked()
+            {
+                state.add_code_group = "issues".into();
+            }
+            let can_create = !state.add_code_label.trim().is_empty() && !state.coding_busy;
+            if ui
+                .add_enabled(can_create, egui::Button::new("Create").small())
+                .clicked()
+            {
+                let label = state.add_code_label.trim().to_string();
+                let group = if state.add_code_group.trim().is_empty() {
+                    "custom".to_string()
+                } else {
+                    state.add_code_group.trim().to_string()
+                };
+                match upsert_code_definition_blocking(matter_root, &label, &group) {
+                    Ok(_) => {
+                        state.add_code_label.clear();
+                        state.show_add_code = false;
+                        state.coding_error = None;
+                        state.coding_status = Some(format!("Added code “{label}”."));
+                        state.reload_coding_catalog(matter_root);
+                    }
+                    Err(e) => {
+                        state.coding_error = Some(format!("Add code: {e}"));
+                    }
+                }
+            }
+        });
+        ui.label(
+            RichText::new("Key is slugified from the label; cardinality = multi.")
+                .weak()
+                .small(),
+        );
+    }
 
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -1602,5 +1771,109 @@ mod tests {
         assert_eq!(detail.item_id, item.id);
         assert_eq!(detail.to_display.as_deref(), Some("to1@ex.com; to2@ex.com"));
         assert_eq!(detail.cc_display.as_deref(), Some("cc@ex.com"));
+    }
+
+    fn stub_row(id: &str) -> ReviewListRow {
+        ReviewListRow {
+            id: id.into(),
+            review_order: Some(0),
+            role: None,
+            parent_item_id: None,
+            subject: Some(id.into()),
+            from_addr: None,
+            sent_at: None,
+            received_at: None,
+            path: None,
+            file_category: None,
+            mime_type: None,
+            size_bytes: None,
+            text_sha256: None,
+            html_sha256: None,
+            dedup_role: None,
+            cull_status: None,
+            attachment_count: None,
+            family_id: None,
+        }
+    }
+
+    #[test]
+    fn item_ids_for_code_load_visible_page_plus_selection() {
+        let rows: Vec<ReviewListRow> = (0..100).map(|i| stub_row(&format!("r{i}"))).collect();
+        // Empty range → leading fallback window only (not full 100).
+        let ids = item_ids_for_code_load(&rows, &(0..0), None);
+        assert_eq!(ids.len(), 64);
+        assert_eq!(ids[0], "r0");
+        assert_eq!(ids.last().map(String::as_str), Some("r63"));
+
+        // Viewport middle slice.
+        let ids = item_ids_for_code_load(&rows, &(10..15), None);
+        assert_eq!(ids, vec!["r10", "r11", "r12", "r13", "r14"]);
+
+        // Selection off-screen is always included for header chips.
+        let ids = item_ids_for_code_load(&rows, &(10..12), Some("r90"));
+        assert_eq!(ids, vec!["r10", "r11", "r90"]);
+
+        // Selection already in viewport is not duplicated.
+        let ids = item_ids_for_code_load(&rows, &(10..12), Some("r10"));
+        assert_eq!(ids, vec!["r10", "r11"]);
+
+        assert!(item_ids_for_code_load(&[], &(0..10), Some("x")).is_empty());
+    }
+
+    #[test]
+    fn should_apply_codes_off_thread_policy() {
+        assert!(!should_apply_codes_off_thread(1, false, 50));
+        assert!(should_apply_codes_off_thread(2, false, 50));
+        assert!(should_apply_codes_off_thread(1, true, 50));
+        assert!(should_apply_codes_off_thread(51, false, 50));
+        assert!(should_apply_codes_off_thread(50, true, 50));
+    }
+
+    #[test]
+    fn apply_and_upsert_code_via_desk_helpers() {
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = base.join("matter-desk-coding");
+        let matter = Matter::create(&root, "Desk Coding").expect("create");
+        let item = matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                subject: Some("Code me".into()),
+                ..Default::default()
+            })
+            .expect("item");
+        drop(matter);
+
+        let custom_id =
+            upsert_code_definition_blocking(&root, "Trade secret", "custom").expect("upsert");
+        assert!(!custom_id.is_empty());
+        let defs = load_code_definitions(&root).expect("defs");
+        assert!(defs
+            .iter()
+            .any(|d| d.label == "Trade secret" && d.key == "trade_secret"));
+
+        let hot = defs.iter().find(|d| d.key == "hot").expect("hot seed");
+        apply_codes_blocking(
+            &root,
+            ApplyCodesInput {
+                item_ids: vec![item.id.clone()],
+                add_code_ids: vec![hot.id.clone(), custom_id.clone()],
+                remove_code_ids: vec![],
+                propagate_family: false,
+                actor: "desk-test".into(),
+            },
+        )
+        .expect("apply");
+
+        let map = load_item_codes(&root, std::slice::from_ref(&item.id)).expect("codes");
+        let codes = map.get(&item.id).expect("item codes");
+        let keys: HashSet<&str> = codes.iter().map(|c| c.key.as_str()).collect();
+        assert!(keys.contains("hot"));
+        assert!(keys.contains("trade_secret"));
+
+        // Scoped load: only requested ids.
+        let empty = load_item_codes(&root, &[]).expect("empty");
+        assert!(empty.is_empty());
     }
 }

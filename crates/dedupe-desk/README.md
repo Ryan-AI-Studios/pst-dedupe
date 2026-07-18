@@ -155,9 +155,10 @@ No wrap at ends. Focus gate: `ctx.memory(\|m\| m.focused().is_none())` (egui 0.3
 | Current item | Panel buttons toggle; chips remove; digits 1–9; **no** confirm |
 | Batch | Choose **Add** or **Remove** mode → check codes → **Apply to N selected** → confirm dialog (`N` selected, family-expanded `~M`) |
 | Family | ☑ **Apply to family** (default **unchecked**) — whole unit: parent + all direct children (siblings) |
-| Actor | `DeskSettings.reviewer_name` (empty → `"desk"`) |
-| Large batch | N ≳ 50 runs off UI thread + `request_repaint` |
-| Codes in list | Up to 2–3 labels for **visible** rows only (`list_item_codes`) |
+| Actor | `DeskSettings.reviewer_name` (Home “Reviewer (actor)” field; empty → `"desk"`) |
+| Add code… | Coding panel creates custom def (label → slug key; group `custom`/`issues`; multi) |
+| Large batch | Multi-item batch, family propagate, or N &gt; 50 → off UI thread + `request_repaint` |
+| Codes in list | Up to 2–3 labels for **visible** viewport rows only (`list_item_codes`; selection always loaded for chips) |
 
 **Privilege code ≠ privilege log:** tagging Privilege records membership only. Full privilege log / export is track **0031**.
 
