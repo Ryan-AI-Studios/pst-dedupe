@@ -396,6 +396,60 @@ fn ambiguous_normalized_quote_disambiguated_by_prefix() {
 }
 
 #[test]
+fn overlapping_normalized_quote_is_ambiguous() {
+    // "aba" occurs twice overlapping in "ababa" (indices 0..3 and 2..5).
+    // Non-overlapping advance would only see one hit and wrongly paint active.
+    let body = "ababa";
+    let digest_orig = display_body_digest("old body so re-resolve path is used");
+    let digest_new = display_body_digest(body);
+    assert_ne!(digest_orig, digest_new);
+
+    let base = |prefix: Option<&str>, suffix: Option<&str>| ItemHighlight {
+        id: "hlt_overlap".into(),
+        item_id: "itm".into(),
+        matter_id: "mat".into(),
+        start_utf8: 0,
+        end_utf8: 3,
+        exact_quote: "aba".into(),
+        prefix: prefix.map(|s| s.to_string()),
+        suffix: suffix.map(|s| s.to_string()),
+        body_digest: digest_orig.clone(),
+        color: HIGHLIGHT_DEFAULT_COLOR.into(),
+        status: highlight_status::ACTIVE.into(),
+        created_at: "t".into(),
+        updated_at: "t".into(),
+        created_by: "t".into(),
+    };
+
+    // No context → two overlapping hits → ambiguous → None / stale.
+    let no_ctx = base(None, None);
+    assert!(
+        re_resolve_whitespace_normalized(&no_ctx, body).is_none(),
+        "overlapping aba/ababa without context must not resolve"
+    );
+    let stale = resolve_highlight_against_body(&no_ctx, body, &digest_new);
+    assert_eq!(stale.status, highlight_status::STALE);
+
+    // Suffix disambiguates first occurrence (chars after 0..3 are "ba").
+    let first = base(None, Some("ba"));
+    let range = re_resolve_whitespace_normalized(&first, body).expect("first aba");
+    assert_eq!(range, (0, 3));
+    let slice = utf8_char_slice(body, range.0 as usize, range.1 as usize).expect("slice");
+    assert_eq!(slice, "aba");
+    let resolved = resolve_highlight_against_body(&first, body, &digest_new);
+    assert_eq!(resolved.status, highlight_status::ACTIVE);
+    assert!(resolved.remapped);
+    assert_eq!((resolved.start_utf8, resolved.end_utf8), (0, 3));
+
+    // Second overlapping occurrence has no trailing suffix in the body; empty
+    // trailing context cannot uniquely select it via suffix alone. Prefix of
+    // the second hit is "ab" (chars 0..2 before 2..5).
+    let second = base(Some("ab"), None);
+    let range2 = re_resolve_whitespace_normalized(&second, body).expect("second aba");
+    assert_eq!(range2, (2, 5));
+}
+
+#[test]
 fn delete_highlight_unlinks_notes() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-hl-unlink");

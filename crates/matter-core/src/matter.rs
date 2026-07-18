@@ -5096,12 +5096,21 @@ pub fn re_resolve_whitespace_normalized(
         .map(collapse_whitespace)
         .filter(|s| !s.is_empty());
 
+    // Overlapping search: after a hit at index `i`, continue at `i+1` (one
+    // normalized char), not `i + quote_len`. Otherwise quotes like "aba" in
+    // "ababa" only report one hit and skip legitimate ambiguity.
     let mut hits: Vec<usize> = Vec::new();
     let mut search_from = 0usize;
     while let Some(rel) = norm_body.get(search_from..).and_then(|s| s.find(&quote_n)) {
         let abs = search_from + rel;
         hits.push(abs);
-        search_from = abs + quote_n.len().max(1);
+        let step = norm_body[abs..]
+            .chars()
+            .next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1)
+            .max(1);
+        search_from = abs + step;
         if search_from > norm_body.len() {
             break;
         }

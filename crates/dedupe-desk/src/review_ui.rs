@@ -1160,22 +1160,6 @@ impl ReviewState {
             return;
         };
 
-        // Passage-note path: bind draft to an existing matching highlight when
-        // present (no second create), else create highlight first — never
-        // auto-persist synthetic "Note on: …" body text.
-        if with_note {
-            if let Some(existing) = find_highlight_for_selection(&self.item_highlights, sel) {
-                let hid = existing.id.clone();
-                let hint = passage_note_hint_from_quote(&existing.exact_quote);
-                self.pending_highlight_id = Some(hid);
-                self.passage_note_hint = hint;
-                self.notes_status =
-                    Some("Type a passage note and Save (linked to selection highlight).".into());
-                self.notes_error = None;
-                return;
-            }
-        }
-
         let body = match self.body.pane() {
             BodyPane::Ready {
                 item_id: bid,
@@ -1192,6 +1176,27 @@ impl ReviewState {
             .and_then(|i| self.rows.get(i))
             .and_then(|r| r.text_sha256.clone());
         let digest = body_digest_for_item(text_sha.as_deref(), &body);
+        // Reuse only active-after-resolve highlights (not stale offset collisions).
+        let resolved = resolve_for_paint(&self.item_highlights, &body, &digest);
+
+        // Passage-note path: bind draft to an existing matching active highlight
+        // when present (no second create), else create highlight first — never
+        // auto-persist synthetic "Note on: …" body text.
+        if with_note {
+            if let Some(existing) =
+                find_highlight_for_selection(&self.item_highlights, &resolved, sel)
+            {
+                let hid = existing.id.clone();
+                let hint = passage_note_hint_from_quote(&existing.exact_quote);
+                self.pending_highlight_id = Some(hid);
+                self.passage_note_hint = hint;
+                self.notes_status =
+                    Some("Type a passage note and Save (linked to selection highlight).".into());
+                self.notes_error = None;
+                return;
+            }
+        }
+
         let input = match highlight_input_from_selection(&item_id, &body, &digest, sel, actor, None)
         {
             Ok(i) => i,
@@ -1207,7 +1212,11 @@ impl ReviewState {
         });
         if ok && with_note {
             // Bind draft to the just-created (or matching) highlight — user must type body.
-            if let Some(hl) = find_highlight_for_selection(&self.item_highlights, sel) {
+            // Re-resolve after reload so we only attach to active resolved ranges.
+            let resolved_after = resolve_for_paint(&self.item_highlights, &body, &digest);
+            if let Some(hl) =
+                find_highlight_for_selection(&self.item_highlights, &resolved_after, sel)
+            {
                 self.pending_highlight_id = Some(hl.id.clone());
                 self.passage_note_hint = passage_note_hint_from_quote(&quote_for_hint);
                 self.notes_status = Some(

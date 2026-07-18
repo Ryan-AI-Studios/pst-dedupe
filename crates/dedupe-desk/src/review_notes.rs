@@ -273,16 +273,26 @@ pub fn passage_note_hint_from_quote(exact_quote: &str) -> String {
     }
 }
 
-/// Find an existing highlight matching the selection range (char offsets).
-pub fn find_highlight_for_selection(
-    highlights: &[ItemHighlight],
+/// Find an existing highlight for a body selection among **active resolved** ranges.
+///
+/// Reuse is only valid when a highlight resolves `active` against the current
+/// body/digest **and** its resolved range (stored or remapped) equals `sel`.
+/// A stale highlight that still has matching stored offsets must not be reused —
+/// callers should create a new highlight instead.
+pub fn find_highlight_for_selection<'a>(
+    highlights: &'a [ItemHighlight],
+    resolved: &[ResolvedHighlight],
     sel: BodySelection,
-) -> Option<&ItemHighlight> {
+) -> Option<&'a ItemHighlight> {
     let start = sel.start as i64;
     let end = sel.end as i64;
-    highlights
+    let id = resolved
         .iter()
-        .find(|h| h.start_utf8 == start && h.end_utf8 == end)
+        .find(|r| {
+            r.status == highlight_status::ACTIVE && r.start_utf8 == start && r.end_utf8 == end
+        })
+        .map(|r| r.highlight_id.as_str())?;
+    highlights.iter().find(|h| h.id == id)
 }
 
 #[cfg(test)]
@@ -467,17 +477,56 @@ mod tests {
     }
 
     #[test]
-    fn find_highlight_matches_selection_offsets() {
-        let hl = sample_hl("hlt_1", "yellow", "d", highlight_status::ACTIVE);
-        let mut hl = hl;
+    fn find_highlight_matches_active_resolved_selection() {
+        let body = "hello yellow world";
+        let digest = display_body_digest(body);
+        let mut hl = sample_hl("hlt_1", "yellow", &digest, highlight_status::ACTIVE);
         hl.start_utf8 = 6;
         hl.end_utf8 = 12;
+        hl.exact_quote = "yellow".into();
+        let resolved = resolve_for_paint(std::slice::from_ref(&hl), body, &digest);
+        assert_eq!(resolved[0].status, highlight_status::ACTIVE);
         let sel = BodySelection::new(6, 12).expect("sel");
         assert_eq!(
-            find_highlight_for_selection(std::slice::from_ref(&hl), sel).map(|h| h.id.as_str()),
+            find_highlight_for_selection(std::slice::from_ref(&hl), &resolved, sel)
+                .map(|h| h.id.as_str()),
             Some("hlt_1")
         );
         let other = BodySelection::new(0, 5).expect("other");
-        assert!(find_highlight_for_selection(std::slice::from_ref(&hl), other).is_none());
+        assert!(
+            find_highlight_for_selection(std::slice::from_ref(&hl), &resolved, other).is_none()
+        );
+    }
+
+    #[test]
+    fn find_highlight_rejects_stale_offset_collision() {
+        // Body drifted: stored offsets still land on same-length slice, but quote
+        // no longer matches → resolve is stale. Reuse must return None so the
+        // note-on-selection path creates a new highlight.
+        let body_old = "hello yellow world";
+        let body_new = "hello secret world"; // same length at 6..12, different text
+        let mut hl = sample_hl(
+            "hlt_stale",
+            "yellow",
+            &display_body_digest(body_old),
+            highlight_status::ACTIVE, // stored status still active
+        );
+        hl.start_utf8 = 6;
+        hl.end_utf8 = 12;
+        hl.exact_quote = "yellow".into();
+        hl.prefix = Some("hello ".into());
+        hl.suffix = Some(" world".into());
+
+        let digest_new = display_body_digest(body_new);
+        let resolved = resolve_for_paint(std::slice::from_ref(&hl), body_new, &digest_new);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].status, highlight_status::STALE);
+
+        let sel = BodySelection::new(6, 12).expect("sel");
+        // Offset-only match would have returned the stale row; resolved path must not.
+        assert!(
+            find_highlight_for_selection(std::slice::from_ref(&hl), &resolved, sel).is_none(),
+            "stale highlight with matching stored offsets must not be reused"
+        );
     }
 }
