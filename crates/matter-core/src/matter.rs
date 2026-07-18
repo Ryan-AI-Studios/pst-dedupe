@@ -219,6 +219,13 @@ pub struct Item {
     pub redacted_text_at: Option<String>,
     /// Display body digest the redacted artifact was built from.
     pub redacted_source_digest: Option<String>,
+    // --- schema v14 (office extract) ---
+    /// `ok` | `skipped` | `error` | NULL never attempted.
+    pub office_extract_status: Option<String>,
+    pub office_extract_method: Option<String>,
+    pub office_source_native_sha256: Option<String>,
+    pub office_extracted_at: Option<String>,
+    pub office_extract_error: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -4619,7 +4626,9 @@ const ITEM_COLUMNS: &str =
     cull_status, cull_reasons_json, cull_preset_id, cull_preset_name, \
     culled_at, cull_job_id, \
     in_review, review_set_id, review_order, promoted_at, promote_job_id, promote_policy, \
-    redaction_count, redacted_text_sha256, redacted_text_at, redacted_source_digest";
+    redaction_count, redacted_text_sha256, redacted_text_at, redacted_source_digest, \
+    office_extract_status, office_extract_method, office_source_native_sha256, \
+    office_extracted_at, office_extract_error";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -4697,6 +4706,11 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         redacted_text_sha256: row.get(67)?,
         redacted_text_at: row.get(68)?,
         redacted_source_digest: row.get(69)?,
+        office_extract_status: row.get(70)?,
+        office_extract_method: row.get(71)?,
+        office_source_native_sha256: row.get(72)?,
+        office_extracted_at: row.get(73)?,
+        office_extract_error: row.get(74)?,
     })
 }
 

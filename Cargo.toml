@@ -16,6 +16,7 @@ members = [
     "crates/matter-cull",
     "crates/matter-promote",
     "crates/matter-search",
+    "crates/extract-office",
     "crates/dedupe-desk",
 ]
 

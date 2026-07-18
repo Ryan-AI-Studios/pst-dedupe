@@ -104,6 +104,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
             app.start_neardup();
         }
         if ui
+            .add_enabled(!busy, egui::Button::new("Extract Office text"))
+            .on_hover_text(
+                "Extract plain text from DOCX/XLSX/PPTX natives in CAS (kind=office_extract)",
+            )
+            .clicked()
+        {
+            app.start_office_extract();
+        }
+        if ui
             .add_enabled(!busy, egui::Button::new("Build / Update search index"))
             .on_hover_text("Incremental Tantivy FTS index (kind=fts_index, reset:false)")
             .clicked()

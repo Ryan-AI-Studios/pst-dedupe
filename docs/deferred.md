@@ -203,6 +203,22 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0032-13 | — | Stamp text inside produce blackout token | P0 fixed `[REDACTED]`; `label` is UI/list metadata | residual |
 | D-0032-14 | P3 | Privilege hook not same-transaction as redaction create | Region commits then public upsert; rare partial state if hook fails; happy path tested | polish |
 
+## From track 0033-OfficeExtractors (planned — Ready)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0033-01 | — | Legacy OLE .doc/.xls/.ppt binary Office | P0 OOXML only; unsupported error | residual |
+| D-0033-02 | — | Password-encrypted OOXML recovery | Honest `encrypted_office` error only | residual |
+| D-0033-03 | — | Headers/footers/comments/track-changes full fidelity | Body/cells/slides best-effort P0 | residual |
+| D-0033-04 | — | Embedded OLE / images OCR inside Office | Text path only | residual / **0036** |
+| D-0033-05 | — | Native Office redaction (DOCX/XLSX) | Text redaction is 0032; natives untouched | residual (D-0032-02) |
+| D-0033-06 | — | Full Office preview / WYSIWYG | Review shows extracted plain text | residual |
+| D-0033-07 | — | LibreOffice convert sidecar | Forbidden P0 | residual |
+| D-0033-08 | — | Auto-run office_extract after pst extract | Manual/job button P0 | residual |
+| D-0033-09 | P3 | Full GUI smoke for Extract Office text | Automated job + unit; operator smoke | operator / polish |
+| D-0033-10 | — | Macro-enabled .docm/.xlsm execute | Never execute; text extract best-effort only | never |
+| D-0033-11 | — | calamine still may allocate large range matrices internally | P0 mitigates with early text-cap break + native size cap; streaming sheet API if calamine adds one later | residual polish |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

@@ -174,6 +174,16 @@ pub fn fts_index_reset_params() -> String {
     .to_string()
 }
 
+/// Default params for Office OOXML text extract (`kind = "office_extract"`).
+pub fn office_extract_default_params() -> String {
+    serde_json::json!({
+        "force": false,
+        "batch_size": 50,
+        "formats": ["docx", "xlsx", "pptx"]
+    })
+    .to_string()
+}
+
 /// True when `path` looks like a PST (case-insensitive `.pst` extension).
 pub fn looks_like_pst(path: &str) -> bool {
     Path::new(path)
@@ -334,6 +344,17 @@ mod tests {
         let rv: serde_json::Value = serde_json::from_str(&r).unwrap();
         assert_eq!(rv["reset"], true);
         assert_eq!(rv["scope"], "all_with_text");
+    }
+
+    #[test]
+    fn office_extract_params_shape() {
+        let j = office_extract_default_params();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["force"], false);
+        assert_eq!(v["batch_size"], 50);
+        assert_eq!(v["formats"][0], "docx");
+        assert_eq!(v["formats"][1], "xlsx");
+        assert_eq!(v["formats"][2], "pptx");
     }
 
     #[test]

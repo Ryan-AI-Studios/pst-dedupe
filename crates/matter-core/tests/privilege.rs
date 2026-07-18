@@ -46,8 +46,8 @@ fn schema_v12_on_create() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-v12");
     let matter = Matter::create(&root, "V12").expect("create");
-    assert_eq!(SCHEMA_VERSION, 13);
-    assert_eq!(matter.schema_version().expect("ver"), 13);
+    assert_eq!(SCHEMA_VERSION, 14);
+    assert_eq!(matter.schema_version().expect("ver"), 14);
 
     let has: bool = matter
         .connection()

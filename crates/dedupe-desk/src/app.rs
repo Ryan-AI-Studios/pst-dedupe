@@ -9,8 +9,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
 use process_runner::{
     ExtractPstHandler, IngestHandler, JobParams, MatterCullHandler, MatterDedupeHandler,
-    MatterFtsIndexHandler, MatterNearDupHandler, MatterPromoteHandler, MatterThreadHandler,
-    ProcessRunner, RunnerConfig,
+    MatterFtsIndexHandler, MatterNearDupHandler, MatterOfficeExtractHandler, MatterPromoteHandler,
+    MatterThreadHandler, ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -73,6 +73,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterCullHandler::new()));
         runner.register(Arc::new(MatterPromoteHandler::new()));
         runner.register(Arc::new(MatterFtsIndexHandler::new()));
+        runner.register(Arc::new(MatterOfficeExtractHandler::new()));
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 
@@ -421,6 +422,26 @@ impl DeskApp {
             Ok(job_id) => {
                 self.last_job_id = Some(job_id.clone());
                 self.status_msg = Some(format!("Started FTS rebuild job {job_id} (reset:true)"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Extract plain text from OOXML natives (`office_extract`).
+    pub(crate) fn start_office_extract(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params = JobParams::new(params::office_extract_default_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "office_extract", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started office extract job {job_id}"));
                 self.error_msg = None;
             }
             Err(e) => self.note_start_error(e),

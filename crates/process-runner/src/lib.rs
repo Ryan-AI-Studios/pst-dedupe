@@ -57,3 +57,6 @@ pub use handlers::MatterPromoteHandler;
 
 #[cfg(feature = "fts")]
 pub use handlers::MatterFtsIndexHandler;
+
+#[cfg(feature = "office")]
+pub use handlers::MatterOfficeExtractHandler;

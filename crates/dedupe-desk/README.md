@@ -7,6 +7,9 @@ corpus (tracks **0020**–**0029**).
 Keyword FTS (0029): Review keyword box composes with metadata filters; Workspace
 has **Build / Update search index** and **Rebuild search index** (`fts_index`).
 
+Office extract (0033): Workspace **Extract Office text** runs `office_extract`
+(DOCX/XLSX/PPTX natives → `text_sha256`).
+
 ## Build / run
 
 ```powershell
