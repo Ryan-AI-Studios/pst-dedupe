@@ -158,7 +158,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0030-01 | — | Image/PDF box markups & burn-in redaction | Text stand-off highlights only in 0030 | **0032** |
+| D-0030-01 | — | Image/PDF box markups & burn-in redaction | **Text path closed in 0032** (regions + true redacted CAS). Full PDF/image geometric burn-in still deferred | **0034** |
 | D-0030-02 | — | Notes in production load file | Default exclude (work product); opt-in later | **0040** |
 | D-0030-03 | — | Privilege log narrative from notes | **Partial complete in 0031**: optional “draft from note” confirm only; never auto-export notes | — |
 | D-0030-04 | — | Case-wide persistent keyword highlight sets | User highlights only; FTS paint optional | residual |
@@ -174,7 +174,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 |---|---|---|---|---|
 | D-0031-01 | — | Production enforce withhold fail-closed | 0031 stores flag + API only | **0040** |
 | D-0031-01b | — | Soft-clear description must not appear on produced load-file metadata | Retained `item_privilege.description` after `status=cleared` is internal work product; exclude from any custom metadata dump (default exclude all privilege descriptions) | **0040** |
-| D-0031-02 | — | Partial redaction produce + log “produced redacted” | Status enum includes `partial_redaction` | **0032** / **0040** |
+| D-0031-02 | — | Partial redaction produce + log “produced redacted” | **Partial complete in 0032**: `partial_redaction` + redacted text CAS + regenerate; packaging / “produced redacted” load-file still **0040** | **0040** |
 | D-0031-03 | — | Category / thread-collapsed privilege logs | P0 standard document-by-document CSV only | residual |
 | D-0031-04 | — | Name normalization legend for log parties | Metadata as stored | residual |
 | D-0031-05 | — | AI privilege prediction / draft log descriptions | Off by default | Series G |
@@ -183,6 +183,25 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0031-08 | P3 | Full GUI smoke for privilege panel / log export | Automated API + unit; operator smoke local | operator / polish |
 | D-0031-09 | — | Court e-file / load-file Bates on privilege log | ControlNumber = item_id until production | **0040** |
 | D-0031-10 | — | Optional ParentFrom/ParentTo extra CSV columns | P0: in-place inherit into From/To/… is enough | residual |
+
+## From track 0032-RedactionV1 (Completed — Codex luna PASS WITH DEFERRED P3)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0032-01 | — | Full PDF/image geometric redaction + content burn-in | P0 is text-body regions + redacted text CAS only | **0034** / residual |
+| D-0032-02 | — | Native DOCX/XLSX redaction | Text path only | **0033**+ |
+| D-0032-03 | — | Production packaging of redacted text + load file | Artifact API in 0032; NULL sha = fail/regenerate (0032 severs on body change) | **0040** |
+| D-0032-04 | — | QC fail produce if stale redactions / missing artifact | Filters expose stale; engine later | **0041** |
+| D-0032-05 | — | AI suggested redaction ranges | Human-only P0 | Series G |
+| D-0032-06 | — | Metadata header field redaction | Body display text only | residual |
+| D-0032-07 | — | Inverse / full-page redaction tools | Relativity-style | residual |
+| D-0032-08 | P3 | Full GUI smoke for redact mode / regenerate | Automated API + unit; operator smoke | operator / polish |
+| D-0032-09 | — | Fixed-width blackout tokens matching span length | P0 fixed `[REDACTED]` token | residual |
+| D-0032-10 | — | MuPDF / `redactor` crate PDF path | License + native deps review before core Desk | residual / **0034** |
+| D-0032-11 | — | Redact-all-instances of same string in one document | P0 current selection only | residual |
+| D-0032-12 | — | Metadata field redaction + body→metadata match suggestions | Everlaw-style; load-file field redact with **0040** | residual / **0040** |
+| D-0032-13 | — | Stamp text inside produce blackout token | P0 fixed `[REDACTED]`; `label` is UI/list metadata | residual |
+| D-0032-14 | P3 | Privilege hook not same-transaction as redaction create | Region commits then public upsert; rare partial state if hook fails; happy path tested | polish |
 
 ## Hygiene
 
