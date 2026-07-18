@@ -120,6 +120,15 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0026-05 | — | Persist `last_review_item_id` across app sessions | In-session restore by id after list refresh only | optional polish |
 | D-0025-01 | — | Multiple concurrent review sets | Unchanged; 0026 default set only | later |
 
+## From track 0027-CodingAndBatch (planned)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0027-plan | — | Privilege log export / 502(d) workflow | P0: Privilege code only | **0031** |
+| D-0027-plan | — | Filter list by code | Chips only in 0027 | **0028** |
+| D-0027-plan | — | Auto-propagate to near-dup / full thread | Never default; family = parent+all children only | residual / **0056** |
+| D-0027-plan | — | QC sampling reports / multi-reviewer lock | Single-desk P0 | later / **0058** |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

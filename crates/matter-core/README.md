@@ -7,14 +7,15 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v7**) + family graph
+6. **Normalized Item** model (schema **v8**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
 10. **Cull** result columns + named presets + transactional batch helpers (0024)
 11. **Promote** review-set membership columns + `review_sets` + batch helpers (0025)
+12. **Coding** catalog + `item_codes` membership + batch apply/remove with audit (0027)
 
-Schema version: **7** (`SCHEMA_VERSION`) — includes cull (`cull_*` / `cull_presets`) and promote (`in_review` / `review_sets` with partial unique default).
+Schema version: **8** (`SCHEMA_VERSION`) — includes cull, promote/review sets, and coding (`code_definitions` / `item_codes`).
 
 ## Layout
 
@@ -236,6 +237,54 @@ Deleting a preset does **not** clear item cull fields.
 `in_review = 1`.
 
 Engine: `crates/matter-cull`. **0025 promote** should prefer `cull_status=included` when any cull has run; else unique-only.
+
+## Schema v8 — Coding / tags (0027)
+
+Matter-scoped code catalog + item membership. Membership only — never deletes
+items/CAS. All writes go through `apply_codes` (single-group rules + audit).
+
+| Table | Purpose |
+|---|---|
+| `code_definitions` | Catalog: `key`, `label`, `group_key`, `cardinality` (`single`\|`multi`), `color`, `sort_order`, `is_active` |
+| `item_codes` | Membership PK `(item_id, code_id)` + `set_at` / `set_by` |
+
+**Unique:** `(matter_id, key)` on definitions. Indexes: `(matter_id, group_key, sort_order)`, `item_codes(item_id)`, `item_codes(code_id)`.
+
+### Seed catalog (idempotent)
+
+| key | label | group_key | cardinality |
+|---|---|---|---|
+| `responsive` | Responsive | responsiveness | single |
+| `not_responsive` | Not Responsive | responsiveness | single |
+| `needs_second_look` | Needs Second Look | responsiveness | single |
+| `privilege` | Privilege | privilege | multi |
+| `hot` | Hot / Key | issues | multi |
+| `confidential` | Confidential | issues | multi |
+
+`seed_default_codes` runs on `Matter::create` / `Matter::open` (insert-if-missing by key).
+
+### API
+
+| API | Notes |
+|---|---|
+| `seed_default_codes` | Idempotent seed |
+| `list_code_definitions` | All defs (active + inactive), ordered |
+| `upsert_code_definition` | Insert (label→slug key) or update label/group/active |
+| `get_code_definition` | By id |
+| `list_item_codes(item_ids)` | Batch map; includes inactive defs with historical membership |
+| `apply_codes(ApplyCodesInput)` | **Add and/or remove** in one `BEGIN IMMEDIATE` txn |
+
+**`ApplyCodesInput`:** `{ item_ids, add_code_ids, remove_code_ids, propagate_family, actor }`
+
+| Rule | Behavior |
+|---|---|
+| Single-group add | Adding a `cardinality=single` code removes other codes in the same `group_key` on that item first |
+| Multi-group | `hot` + `confidential` both remain |
+| `propagate_family` (default **false**) | Expand each selection to **parent + all direct children** (+ same non-null `family_id`); **not** near-dup or full thread |
+| Audit | `coding.apply` with **complete** sorted `item_ids` of final targets (never hash/sample), plus `add`, `remove`, `propagate_family`, `selected_count`, `target_count` |
+| Failed batch | No partial membership commit |
+
+**Note:** The Privilege **code** is not a privilege log export — that is track **0031**.
 
 ### Address storage (JSON decision)
 
