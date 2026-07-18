@@ -28,6 +28,14 @@ pub const THIN_LOAD_ALL_THRESHOLD: u64 = 50_000;
 /// Page size when corpus exceeds [`THIN_LOAD_ALL_THRESHOLD`].
 pub const THIN_PAGE_SIZE: u64 = 500;
 
+/// Selection-time detail for header parties (not loaded in thin list).
+#[derive(Debug, Clone, Default)]
+pub struct SelectionDetail {
+    pub item_id: String,
+    pub to_display: Option<String>,
+    pub cc_display: Option<String>,
+}
+
 /// Review screen state held by the desk app.
 #[derive(Default)]
 pub struct ReviewState {
@@ -47,6 +55,8 @@ pub struct ReviewState {
     needs_reload: bool,
     /// Last selected item id (for restore after reload).
     last_item_id: Option<String>,
+    /// Cached To/Cc for the current selection (fetched via `get_item`).
+    selection_detail: Option<SelectionDetail>,
 }
 
 impl ReviewState {
@@ -60,6 +70,7 @@ impl ReviewState {
         self.body.clear();
         self.needs_reload = true;
         self.last_item_id = None;
+        self.selection_detail = None;
     }
 
     /// Request a thin-list reload on next show.
@@ -123,13 +134,42 @@ impl ReviewState {
             if matches!(self.body.pane(), BodyPane::Idle) {
                 self.spawn_body_for_selection(ctx, matter_root);
             }
+            if self.selection_detail.is_none() {
+                self.load_selection_detail(matter_root);
+            }
             return;
         }
         self.selection = Some(idx);
         if let Some(row) = self.rows.get(idx) {
             self.last_item_id = Some(row.id.clone());
         }
+        self.selection_detail = None;
+        self.load_selection_detail(matter_root);
         self.spawn_body_for_selection(ctx, matter_root);
+    }
+
+    /// Fetch To/Cc for the selected item (thin list omits participant JSON).
+    fn load_selection_detail(&mut self, matter_root: &Utf8Path) {
+        let Some(i) = self.selection else {
+            self.selection_detail = None;
+            return;
+        };
+        let Some(row) = self.rows.get(i) else {
+            self.selection_detail = None;
+            return;
+        };
+        let item_id = row.id.clone();
+        match load_party_detail(matter_root, &item_id) {
+            Ok(detail) => self.selection_detail = Some(detail),
+            Err(_) => {
+                // Non-fatal: header still shows From from thin row.
+                self.selection_detail = Some(SelectionDetail {
+                    item_id,
+                    to_display: None,
+                    cc_display: None,
+                });
+            }
+        }
     }
 
     fn spawn_body_for_selection(&mut self, ctx: &egui::Context, matter_root: &Utf8Path) {
@@ -172,6 +212,36 @@ impl ReviewState {
             self.select_index(pi, ctx, matter_root);
         }
     }
+}
+
+/// Parse `to_addrs_json` / `cc_addrs_json` (JSON string array) into a truncated display line.
+pub fn format_addrs_json(raw: Option<&str>, max_chars: usize) -> Option<String> {
+    let s = raw?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let list: Vec<String> = serde_json::from_str(s).ok()?;
+    if list.is_empty() {
+        return None;
+    }
+    let joined = list.join("; ");
+    if joined.chars().count() > max_chars {
+        let truncated: String = joined.chars().take(max_chars.saturating_sub(1)).collect();
+        Some(format!("{truncated}…"))
+    } else {
+        Some(joined)
+    }
+}
+
+/// Load To/Cc display strings for one item via [`Matter::open_for_read`].
+pub fn load_party_detail(matter_root: &Utf8Path, item_id: &str) -> Result<SelectionDetail, String> {
+    let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
+    let item = matter.get_item(item_id).map_err(|e| e.to_string())?;
+    Ok(SelectionDetail {
+        item_id: item.id,
+        to_display: format_addrs_json(item.to_addrs_json.as_deref(), 160),
+        cc_display: format_addrs_json(item.cc_addrs_json.as_deref(), 120),
+    })
 }
 
 /// Load count + thin rows via [`Matter::open_for_read`] (WAL-safe).
@@ -236,17 +306,23 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path) 
     // Keyboard: only when no widget has focus (egui 0.34: focused()).
     let no_focus = ctx.memory(|m| m.focused().is_none());
     if review_nav::focus_allows_shortcuts(no_focus) {
-        let (want_next, want_prev) = ui.input(|i| {
+        let (want_next, want_prev, want_enter) = ui.input(|i| {
             let next =
                 i.key_pressed(Key::CloseBracket) || (i.modifiers.alt && i.key_pressed(Key::N));
             let prev =
                 i.key_pressed(Key::OpenBracket) || (i.modifiers.alt && i.key_pressed(Key::P));
-            (next, prev)
+            // Spec §3.4: Enter opens selected (re-ensure body + detail for current row).
+            let enter = i.key_pressed(Key::Enter);
+            (next, prev, enter)
         });
         if want_next {
             state.go_next(&ctx, matter_root);
         } else if want_prev {
             state.go_prev(&ctx, matter_root);
+        } else if want_enter {
+            if let Some(i) = state.selection {
+                state.select_index(i, &ctx, matter_root);
+            }
         }
         // Consume so other widgets do not also see them when we handled.
         if want_next {
@@ -259,6 +335,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState, matter_root: &Utf8Path) 
             ui.input_mut(|i| {
                 let _ = i.consume_key(Modifiers::NONE, Key::OpenBracket);
                 let _ = i.consume_key(Modifiers::ALT, Key::P);
+            });
+        }
+        if want_enter {
+            ui.input_mut(|i| {
+                let _ = i.consume_key(Modifiers::NONE, Key::Enter);
             });
         }
     }
@@ -444,6 +525,19 @@ fn show_viewer(
             if let Some(from) = row.from_addr.as_deref() {
                 ui.label(format!("From: {from}"));
                 ui.separator();
+            }
+            // To/Cc from selection-time detail (thin list omits participant JSON).
+            if let Some(detail) = state.selection_detail.as_ref() {
+                if detail.item_id == row.id {
+                    if let Some(to) = detail.to_display.as_deref() {
+                        ui.label(format!("To: {to}"));
+                        ui.separator();
+                    }
+                    if let Some(cc) = detail.cc_display.as_deref() {
+                        ui.label(format!("Cc: {cc}"));
+                        ui.separator();
+                    }
+                }
             }
             if let Some(sent) = row.sent_at.as_deref() {
                 ui.label(format!("Sent: {sent}"));
@@ -713,5 +807,43 @@ mod tests {
         let (count, rows) = load_review_thin(&root).expect("load");
         assert_eq!(count, 0);
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn format_addrs_json_joins_and_truncates() {
+        let raw = r#"["a@ex.com","b@ex.com"]"#;
+        assert_eq!(
+            format_addrs_json(Some(raw), 160).as_deref(),
+            Some("a@ex.com; b@ex.com")
+        );
+        assert!(format_addrs_json(Some("[]"), 160).is_none());
+        assert!(format_addrs_json(None, 160).is_none());
+        let long = format!(r#"["{}"]"#, "x".repeat(200));
+        let out = format_addrs_json(Some(&long), 40).expect("truncated");
+        assert!(out.ends_with('…'));
+        assert!(out.chars().count() <= 40);
+    }
+
+    #[test]
+    fn load_party_detail_shows_to_cc() {
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = base.join("matter-parties");
+        let matter = Matter::create(&root, "Parties").expect("create");
+        let item = matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                subject: Some("With parties".into()),
+                from_addr: Some("from@ex.com".into()),
+                to_addrs_json: Some(r#"["to1@ex.com","to2@ex.com"]"#.into()),
+                cc_addrs_json: Some(r#"["cc@ex.com"]"#.into()),
+                ..Default::default()
+            })
+            .expect("item");
+        drop(matter);
+        let detail = load_party_detail(&root, &item.id).expect("detail");
+        assert_eq!(detail.item_id, item.id);
+        assert_eq!(detail.to_display.as_deref(), Some("to1@ex.com; to2@ex.com"));
+        assert_eq!(detail.cc_display.as_deref(), Some("cc@ex.com"));
     }
 }

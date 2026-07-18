@@ -128,7 +128,7 @@ Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 | Region | Behavior |
 |---|---|
 | Corpus list | Thin rows only (`list_review_thin`), ordered by `review_order` |
-| Header | Subject, from, dates, path, mime, size, role chips |
+| Header | Subject, From, To/Cc (selection-time fetch), dates, path, mime, size, role chips |
 | Body | CAS text (`text_sha256` preferred, else `html_sha256` with block-aware strip) |
 | Family strip | Same-`family_id` members in the loaded list; click to open |
 
@@ -140,6 +140,7 @@ Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:
 |---|---|
 | Next | `]` or `Alt+N` or **Next** button |
 | Previous | `[` or `Alt+P` or **Prev** button |
+| Open selected | click list row or **Enter** |
 
 No wrap at ends. Focus gate: `ctx.memory(\|m\| m.focused().is_none())` (egui 0.34).
 

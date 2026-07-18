@@ -632,7 +632,7 @@ The NBT/BBT indexes are smaller (tens of thousands of entries per PST).
 
 ```
 Home (create/open/recent) → Workspace (sources / process / jobs)
-                         ↘ stub nav: Reduce / Review / Produce (later tracks)
+                         ↘ Review live (0026 list + body viewer); Reduce / Produce still stubs
 ```
 
 Worker ownership: `ProcessRunner` (0019). Progress: `watch` borrow each frame.
