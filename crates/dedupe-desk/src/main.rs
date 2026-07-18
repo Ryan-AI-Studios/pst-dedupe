@@ -17,6 +17,7 @@ mod progress_ui;
 mod review_body;
 mod review_nav;
 mod review_notes;
+mod review_privilege;
 mod review_ui;
 mod settings;
 mod workspace;

@@ -881,7 +881,7 @@ fn filter_has_notes_and_note_text() {
 
 #[test]
 fn migration_has_review_list_order_index() {
-    assert_eq!(SCHEMA_VERSION, 11);
+    assert_eq!(SCHEMA_VERSION, 12);
     let (_tmp, _root, matter, _set_id) = setup_review_matter("filter-idx");
     let exists: bool = matter
         .connection()

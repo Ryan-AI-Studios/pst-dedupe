@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -25,6 +25,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (9, MIGRATION_V9),
     (10, MIGRATION_V10),
     (11, MIGRATION_V11),
+    (12, MIGRATION_V12),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -405,6 +406,50 @@ ALTER TABLE items ADD COLUMN note_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE items ADD COLUMN highlight_count INTEGER NOT NULL DEFAULT 0;
 "#;
 
+/// Schema v12: privilege claims + withhold holds + matter protocol (track 0031).
+///
+/// `item_privilege` is 1:1 with items when a claim exists (soft-clear retains row).
+/// `privilege_protocol` is 1:1 with the matter (502(d)/502(e) notes are informational).
+/// Denormalized `items.privilege_withhold` keeps list/filter chips fast for **0040**.
+const MIGRATION_V12: &str = r#"
+CREATE TABLE item_privilege (
+    item_id TEXT PRIMARY KEY NOT NULL,
+    matter_id TEXT NOT NULL,
+    basis TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    withhold INTEGER NOT NULL,
+    include_on_log INTEGER NOT NULL,
+    asserted_at TEXT,
+    asserted_by TEXT,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    extra_json TEXT
+);
+
+CREATE INDEX idx_item_privilege_matter_status
+  ON item_privilege(matter_id, status);
+
+CREATE INDEX idx_item_privilege_matter_withhold
+  ON item_privilege(matter_id, withhold)
+  WHERE withhold = 1;
+
+CREATE INDEX idx_item_privilege_matter_log
+  ON item_privilege(matter_id, include_on_log);
+
+CREATE TABLE privilege_protocol (
+    matter_id TEXT PRIMARY KEY NOT NULL,
+    log_format TEXT NOT NULL DEFAULT 'standard',
+    fre_502d_note TEXT,
+    fre_502e_note TEXT,
+    description_required INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL
+);
+
+ALTER TABLE items ADD COLUMN privilege_withhold INTEGER NOT NULL DEFAULT 0;
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -501,7 +546,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 11);
+        assert_eq!(v, 12);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v10 FTS bookkeeping columns present
@@ -1369,7 +1414,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v7 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 11);
+        assert_eq!(v, 12);
 
         let in_review: Option<i64> = conn
             .query_row(
@@ -1477,7 +1522,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v8 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 11);
+        assert_eq!(v, 12);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1690,9 +1735,9 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v10 to v11");
+        let v = migrate(&conn).expect("migrate v10 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 11);
+        assert_eq!(v, 12);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1752,6 +1797,122 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v10'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+
+        let has_priv: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_privilege'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("item_privilege");
+        assert!(has_priv);
+    }
+
+    /// v11 fixture → migrate to v12 → data intact + privilege tables + withhold cache.
+    #[test]
+    fn migrate_v11_to_v12_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute_batch(MIGRATION_V3).expect("v3");
+        conn.execute_batch(MIGRATION_V4).expect("v4");
+        conn.execute_batch(MIGRATION_V5).expect("v5");
+        conn.execute_batch(MIGRATION_V6).expect("v6");
+        conn.execute_batch(MIGRATION_V7).expect("v7");
+        conn.execute_batch(MIGRATION_V8).expect("v8");
+        conn.execute_batch(MIGRATION_V9).expect("v9");
+        conn.execute_batch(MIGRATION_V10).expect("v10");
+        conn.execute_batch(MIGRATION_V11).expect("v11");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (11)", [])
+            .expect("meta v11");
+        assert_eq!(read_schema_version(&conn).expect("read"), 11);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v11', 'V11 Matter', '2020-01-01T00:00:00Z', 11, '/tmp/v11')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, text_sha256, in_review, \
+             fts_text_sha256, note_count, highlight_count) \
+             VALUES ('itm_mail', 'mat_v11', NULL, NULL, 'inbox/a.eml', NULL, \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             'mid@example.com', 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'parent', 'email', 1, \
+             'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1, \
+             'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 0, 0)",
+            [],
+        )
+        .expect("item");
+        conn.execute(
+            "INSERT INTO item_notes (id, item_id, matter_id, body, highlight_id, \
+             created_at, updated_at, created_by, updated_by) \
+             VALUES ('note1', 'itm_mail', 'mat_v11', 'work product', NULL, \
+             '2020-01-01T00:00:02Z', '2020-01-01T00:00:02Z', 'alice', 'alice')",
+            [],
+        )
+        .expect("note");
+
+        let v = migrate(&conn).expect("migrate v11 to v12");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 12);
+
+        let path: Option<String> = conn
+            .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
+                row.get(0)
+            })
+            .expect("path");
+        assert_eq!(path.as_deref(), Some("inbox/a.eml"));
+
+        let body: String = conn
+            .query_row(
+                "SELECT body FROM item_notes WHERE id = 'note1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("note body");
+        assert_eq!(body, "work product");
+
+        let withhold: i64 = conn
+            .query_row(
+                "SELECT privilege_withhold FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("privilege_withhold");
+        assert_eq!(withhold, 0);
+
+        let has_priv: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_privilege'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("item_privilege");
+        assert!(has_priv);
+
+        let has_proto: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='privilege_protocol'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("privilege_protocol");
+        assert!(has_proto);
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v11'",
                 [],
                 |row| row.get(0),
             )

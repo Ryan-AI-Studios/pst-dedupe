@@ -30,6 +30,11 @@
 //!
 //! Stand-off work-product annotations in the matter DB (never CAS). Selectable
 //! body + yellow paint for active ranges; notes panel for document/passage notes.
+//!
+//! # Privilege (0031)
+//!
+//! Claim fields + withhold hold + privilege log export. Panel when Privilege code
+//! or claim row is present (or Assert). Notes never auto-copy into log description.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -39,17 +44,24 @@ use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense};
 use matter_core::{
     parse_bound_instant, ApplyCodesInput, ApplyCodesResult, CodeDef, CodeDefInput, FilterCondition,
-    FilterSpec, ItemCodeInfo, ItemHighlight, ItemNote, Matter, ResolvedHighlight, ReviewListRow,
-    SavedSearch, SavedSearchInput, UpsertNoteInput,
+    FilterSpec, ItemCodeInfo, ItemHighlight, ItemNote, ItemPrivilege, Matter, ResolvedHighlight,
+    ReviewListRow, SavedSearch, SavedSearchInput, UpsertNoteInput, UpsertPrivilegeProtocolInput,
 };
 
 use crate::review_body::{BodyLoader, BodyPane};
 use crate::review_nav;
 use crate::review_notes::{
     body_digest_for_item, body_job_for_ui, find_highlight_for_selection, find_resolved,
-    focus_allows_coding_shortcuts, highlight_input_from_selection, highlight_ui_status,
-    note_upsert_from_draft, passage_note_hint_from_quote, resolve_for_paint,
-    selection_from_char_range, stale_count_for_ui, BodySelection,
+    highlight_input_from_selection, highlight_ui_status, note_upsert_from_draft,
+    passage_note_hint_from_quote, resolve_for_paint, selection_from_char_range, stale_count_for_ui,
+    BodySelection,
+};
+use crate::review_privilege::{
+    assert_privilege_blocking, basis_options, default_privilege_log_path,
+    draft_description_from_note, export_privilege_log_blocking, family_split_banner,
+    focus_allows_coding_with_privilege, load_privilege_panel, load_protocol_blocking,
+    log_format_options, normalize_desk_log_format, should_show_privilege_panel, status_options,
+    upsert_privilege_blocking, upsert_protocol_blocking, PrivilegePanelDraft,
 };
 
 /// Fixed list row height (sans item spacing) for `ScrollArea::show_rows`.
@@ -101,6 +113,10 @@ pub struct FilterDraft {
     pub has_notes: bool,
     /// `has_highlights eq true` chip (track 0030).
     pub has_highlights: bool,
+    /// Withhold hold chip (track 0031).
+    pub privilege_withheld: bool,
+    /// Privilege log incomplete chip (track 0031).
+    pub privilege_log_incomplete: bool,
     /// Optional note body contains (LIKE).
     pub note_text: String,
     /// Name for Save as.
@@ -164,6 +180,34 @@ impl FilterDraft {
                 field: "has_highlights".into(),
                 op: "eq".into(),
                 value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        if self.privilege_withheld {
+            conditions.push(FilterCondition {
+                field: "privilege_withhold".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        if self.privilege_log_incomplete {
+            conditions.push(FilterCondition {
+                field: "privilege_status".into(),
+                op: "any_of".into(),
+                value: None,
+                values: Some(vec!["asserted".into()]),
+                start: None,
+                end: None,
+            });
+            conditions.push(FilterCondition {
+                field: "privilege_log_ready".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(false)),
                 values: None,
                 start: None,
                 end: None,
@@ -237,6 +281,17 @@ impl FilterDraft {
                 }
                 ("has_highlights", "eq") => {
                     d.has_highlights = c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
+                }
+                ("privilege_withhold", "eq") => {
+                    d.privilege_withheld =
+                        c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
+                }
+                ("privilege_log_ready", "eq") => {
+                    // Incomplete chip uses eq false; mark draft when loading incomplete preset.
+                    let ready = c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
+                    if !ready {
+                        d.privilege_log_incomplete = true;
+                    }
                 }
                 ("note_text", "contains") => {
                     if let Some(v) = c.value.as_ref().and_then(|v| v.as_str()) {
@@ -362,6 +417,40 @@ pub struct ReviewState {
     /// Async note/highlight mutate in flight.
     notes_busy: bool,
     notes_rx: Option<Receiver<Result<NotesMutateResult, String>>>,
+    /// Privilege claim for current selection (if any).
+    item_privilege: Option<ItemPrivilege>,
+    /// Privilege panel draft fields.
+    privilege_draft: PrivilegePanelDraft,
+    /// Force-open panel after Assert even if row not yet reloaded.
+    privilege_force_open: bool,
+    /// Family split banner text (when inconsistent).
+    privilege_family_banner: Option<String>,
+    /// Privilege description TextEdit focused last frame (coding focus gate).
+    privilege_editor_focused: bool,
+    /// Privilege panel status / errors.
+    privilege_status_msg: Option<String>,
+    privilege_error: Option<String>,
+    /// Confirm dialog: draft description from latest note.
+    privilege_confirm_note_draft: bool,
+    /// Confirm dialog: set withhold=0 while still asserted.
+    privilege_confirm_clear_withhold: bool,
+    /// Pending withhold=false save after confirm.
+    privilege_pending_save_no_withhold: bool,
+    /// Export progress / result.
+    privilege_export_status: Option<String>,
+    privilege_export_error: Option<String>,
+    privilege_export_busy: bool,
+    privilege_export_rx: Option<Receiver<Result<String, String>>>,
+    /// Export scope: true = review_corpus.
+    privilege_export_review_only: bool,
+    /// Matter protocol draft (thin settings).
+    protocol_draft_502d: String,
+    protocol_draft_502e: String,
+    protocol_description_required: bool,
+    /// Privilege log format draft (`standard` | `automated_metadata`).
+    protocol_draft_log_format: String,
+    protocol_loaded_for: Option<Utf8PathBuf>,
+    protocol_status: Option<String>,
 }
 
 /// Result of an off-thread notes/highlights mutation.
@@ -427,6 +516,27 @@ impl ReviewState {
         self.notes_error = None;
         self.notes_busy = false;
         self.notes_rx = None;
+        self.item_privilege = None;
+        self.privilege_draft = PrivilegePanelDraft::default();
+        self.privilege_force_open = false;
+        self.privilege_family_banner = None;
+        self.privilege_editor_focused = false;
+        self.privilege_status_msg = None;
+        self.privilege_error = None;
+        self.privilege_confirm_note_draft = false;
+        self.privilege_confirm_clear_withhold = false;
+        self.privilege_pending_save_no_withhold = false;
+        self.privilege_export_status = None;
+        self.privilege_export_error = None;
+        self.privilege_export_busy = false;
+        self.privilege_export_rx = None;
+        self.privilege_export_review_only = true;
+        self.protocol_draft_502d.clear();
+        self.protocol_draft_502e.clear();
+        self.protocol_description_required = true;
+        self.protocol_draft_log_format = matter_core::privilege_log_format::STANDARD.into();
+        self.protocol_loaded_for = None;
+        self.protocol_status = None;
     }
 
     /// Request a thin-list reload on next show.
@@ -854,6 +964,7 @@ impl ReviewState {
                 self.coding_status = Some(format!("Coded {} item(s).", result.target_count));
                 self.coding_error = None;
                 self.refresh_row_codes(matter_root);
+                self.reload_privilege_for_selection(matter_root);
                 ctx.request_repaint();
             }
             Ok(Err(e)) => {
@@ -896,6 +1007,7 @@ impl ReviewState {
                     self.coding_status = Some(format!("Coded {} item(s).", result.target_count));
                     self.coding_error = None;
                     self.refresh_row_codes(matter_root);
+                    self.reload_privilege_for_selection(matter_root);
                 }
                 Err(e) => {
                     self.coding_error = Some(e);
@@ -946,6 +1058,18 @@ impl ReviewState {
         self.notes_error = None;
     }
 
+    fn clear_privilege_for_selection(&mut self) {
+        self.item_privilege = None;
+        self.privilege_draft = PrivilegePanelDraft::default();
+        self.privilege_force_open = false;
+        self.privilege_family_banner = None;
+        self.privilege_status_msg = None;
+        self.privilege_error = None;
+        self.privilege_confirm_note_draft = false;
+        self.privilege_confirm_clear_withhold = false;
+        self.privilege_pending_save_no_withhold = false;
+    }
+
     fn reload_notes_for_selection(&mut self, matter_root: &Utf8Path) {
         let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
             self.clear_notes_for_selection();
@@ -964,6 +1088,214 @@ impl ReviewState {
                 self.item_highlights.clear();
                 self.stale_persist_key = None;
                 self.notes_error = Some(e);
+            }
+        }
+    }
+
+    fn reload_privilege_for_selection(&mut self, matter_root: &Utf8Path) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            self.clear_privilege_for_selection();
+            return;
+        };
+        // Preserve dirty draft when same item (e.g. code apply refresh).
+        let keep_dirty = self.privilege_draft.item_id.as_deref() == Some(item_id.as_str())
+            && self.privilege_draft.dirty;
+        let saved_draft = if keep_dirty {
+            Some(self.privilege_draft.clone())
+        } else {
+            None
+        };
+        match load_privilege_panel(matter_root, &item_id) {
+            Ok((row, cons)) => {
+                self.item_privilege = row.clone();
+                if let Some(d) = saved_draft {
+                    self.privilege_draft = d;
+                } else {
+                    self.privilege_draft =
+                        PrivilegePanelDraft::from_privilege(&item_id, row.as_ref());
+                }
+                self.privilege_family_banner = family_split_banner(&cons);
+                self.privilege_error = None;
+            }
+            Err(e) => {
+                self.item_privilege = None;
+                self.privilege_family_banner = None;
+                self.privilege_error = Some(e);
+            }
+        }
+    }
+
+    fn save_privilege_now(&mut self, matter_root: &Utf8Path, actor: &str) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            return;
+        };
+        // Dangerous override: withhold=0 while not cleared → confirm first.
+        if !self.privilege_draft.withhold
+            && self.privilege_draft.status != "cleared"
+            && !self.privilege_pending_save_no_withhold
+        {
+            self.privilege_confirm_clear_withhold = true;
+            return;
+        }
+        self.privilege_pending_save_no_withhold = false;
+        let input = self.privilege_draft.to_upsert_input(&item_id, actor);
+        match upsert_privilege_blocking(matter_root, input) {
+            Ok(row) => {
+                self.item_privilege = Some(row.clone());
+                self.privilege_draft = PrivilegePanelDraft::from_privilege(&item_id, Some(&row));
+                self.privilege_status_msg = Some("Privilege claim saved.".into());
+                self.privilege_error = None;
+                self.privilege_force_open = true;
+                // Refresh family banner.
+                if let Ok((_, cons)) = load_privilege_panel(matter_root, &item_id) {
+                    self.privilege_family_banner = family_split_banner(&cons);
+                }
+            }
+            Err(e) => {
+                self.privilege_error = Some(e);
+                self.privilege_status_msg = None;
+            }
+        }
+    }
+
+    fn assert_privilege_now(&mut self, matter_root: &Utf8Path, actor: &str) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            return;
+        };
+        let code_id = self
+            .code_defs
+            .iter()
+            .find(|d| d.key == "privilege")
+            .map(|d| d.id.clone());
+        match assert_privilege_blocking(matter_root, &item_id, actor, code_id.as_deref()) {
+            Ok(row) => {
+                self.item_privilege = Some(row.clone());
+                self.privilege_draft = PrivilegePanelDraft::from_privilege(&item_id, Some(&row));
+                self.privilege_force_open = true;
+                self.privilege_status_msg = Some("Privilege asserted.".into());
+                self.privilege_error = None;
+                self.refresh_row_codes(matter_root);
+                if let Ok((_, cons)) = load_privilege_panel(matter_root, &item_id) {
+                    self.privilege_family_banner = family_split_banner(&cons);
+                }
+            }
+            Err(e) => {
+                self.privilege_error = Some(e);
+                self.privilege_status_msg = None;
+            }
+        }
+    }
+
+    fn poll_privilege_export(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.privilege_export_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(msg)) => {
+                self.privilege_export_busy = false;
+                self.privilege_export_rx = None;
+                self.privilege_export_status = Some(msg);
+                self.privilege_export_error = None;
+                ctx.request_repaint();
+            }
+            Ok(Err(e)) => {
+                self.privilege_export_busy = false;
+                self.privilege_export_rx = None;
+                self.privilege_export_error = Some(e);
+                self.privilege_export_status = None;
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.privilege_export_busy = false;
+                self.privilege_export_rx = None;
+                self.privilege_export_error =
+                    Some("Privilege export worker ended unexpectedly.".into());
+            }
+        }
+    }
+
+    fn spawn_privilege_export(&mut self, matter_root: &Utf8Path, ctx: &egui::Context) {
+        if self.privilege_export_busy {
+            return;
+        }
+        let root = matter_root.to_owned();
+        let scope_review = self.privilege_export_review_only;
+        let default_path = default_privilege_log_path(matter_root);
+        let ctx = ctx.clone();
+        let (tx, rx) = mpsc::channel();
+        self.privilege_export_rx = Some(rx);
+        self.privilege_export_busy = true;
+        self.privilege_export_status = Some("Exporting privilege log…".into());
+        self.privilege_export_error = None;
+        let _ = thread::Builder::new()
+            .name("desk-privilege-export".into())
+            .spawn(move || {
+                // Prefer operator save dialog; fall back to default path under exports/.
+                let path = rfd::FileDialog::new()
+                    .set_file_name(default_path.file_name().unwrap_or("privilege_log.csv"))
+                    .add_filter("CSV", &["csv"])
+                    .save_file();
+                let result = match path {
+                    Some(p) => match Utf8PathBuf::from_path_buf(p) {
+                        Ok(utf8) => {
+                            export_privilege_log_blocking(&root, scope_review, &utf8).map(|r| {
+                                format!(
+                                    "Exported {} row(s) · blank desc {} · withheld {} → {}",
+                                    r.row_count,
+                                    r.blank_description_count,
+                                    r.withheld_count,
+                                    r.path
+                                )
+                            })
+                        }
+                        Err(_) => Err("Export path is not valid UTF-8.".into()),
+                    },
+                    None => Ok("Export cancelled.".into()),
+                };
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            });
+    }
+
+    fn ensure_protocol_loaded(&mut self, matter_root: &Utf8Path) {
+        if self.protocol_loaded_for.as_deref() == Some(matter_root) {
+            return;
+        }
+        match load_protocol_blocking(matter_root) {
+            Ok(p) => {
+                self.protocol_draft_502d = p.fre_502d_note.unwrap_or_default();
+                self.protocol_draft_502e = p.fre_502e_note.unwrap_or_default();
+                self.protocol_description_required = p.description_required != 0;
+                self.protocol_draft_log_format = normalize_desk_log_format(&p.log_format);
+                self.protocol_loaded_for = Some(matter_root.to_path_buf());
+                self.protocol_status = None;
+            }
+            Err(e) => {
+                self.protocol_status = Some(format!("Protocol load: {e}"));
+            }
+        }
+    }
+
+    fn save_protocol_now(&mut self, matter_root: &Utf8Path, actor: &str) {
+        let log_format = normalize_desk_log_format(&self.protocol_draft_log_format);
+        self.protocol_draft_log_format = log_format.clone();
+        match upsert_protocol_blocking(
+            matter_root,
+            UpsertPrivilegeProtocolInput {
+                log_format,
+                fre_502d_note: Some(self.protocol_draft_502d.clone()),
+                fre_502e_note: Some(self.protocol_draft_502e.clone()),
+                description_required: self.protocol_description_required,
+                actor: actor.to_string(),
+            },
+        ) {
+            Ok(_) => {
+                self.protocol_status = Some("Privilege protocol saved.".into());
+                self.protocol_loaded_for = Some(matter_root.to_path_buf());
+            }
+            Err(e) => {
+                self.protocol_status = Some(format!("Protocol save failed: {e}"));
             }
         }
     }
@@ -1373,6 +1705,9 @@ impl ReviewState {
             if self.item_notes.is_empty() && self.item_highlights.is_empty() {
                 self.reload_notes_for_selection(matter_root);
             }
+            if self.privilege_draft.item_id.as_deref() != self.current_item_id() {
+                self.reload_privilege_for_selection(matter_root);
+            }
             return;
         }
         self.selection = Some(idx);
@@ -1385,6 +1720,8 @@ impl ReviewState {
         self.refresh_row_codes(matter_root);
         self.clear_notes_for_selection();
         self.reload_notes_for_selection(matter_root);
+        self.clear_privilege_for_selection();
+        self.reload_privilege_for_selection(matter_root);
         self.spawn_body_for_selection(ctx, matter_root);
     }
 
@@ -1847,6 +2184,18 @@ pub fn show(
             ui.label("— Review Corpus (in_review)");
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(
+                    !state.privilege_export_busy,
+                    egui::Button::new("Export privilege log…"),
+                )
+                .on_hover_text("CSV privilege log (FRCP 26(b)(5) style columns)")
+                .clicked()
+            {
+                state.spawn_privilege_export(matter_root, &ctx);
+            }
+            ui.checkbox(&mut state.privilege_export_review_only, "Review only")
+                .on_hover_text("When checked, export review corpus only; else entire matter");
             if ui.button("Refresh list").clicked() {
                 // Preserve last_item_id across reload.
                 state.needs_reload = true;
@@ -1857,6 +2206,16 @@ pub fn show(
             }
         });
     });
+    if let Some(st) = state.privilege_export_status.clone() {
+        ui.label(
+            RichText::new(st)
+                .small()
+                .color(Color32::from_rgb(40, 120, 60)),
+        );
+    }
+    if let Some(err) = state.privilege_export_error.clone() {
+        ui.colored_label(Color32::from_rgb(200, 60, 60), err);
+    }
     ui.add_space(4.0);
 
     // Keyword + filter bar always available — including when list_error is set.
@@ -1864,6 +2223,8 @@ pub fn show(
     ui.add_space(2.0);
     show_filter_bar(ui, state, matter_root, actor);
     ui.add_space(4.0);
+    show_privilege_protocol_strip(ui, state, matter_root, actor);
+    ui.add_space(2.0);
 
     if let Some(err) = state.list_error.clone() {
         ui.colored_label(Color32::from_rgb(200, 60, 60), format!("List error: {err}"));
@@ -1894,13 +2255,16 @@ pub fn show(
     }
 
     // Keyboard: only when no widget has focus (egui 0.34: focused()).
-    // Filter / keyword / note TextEdit steal focus — digit shortcuts must not fire then.
-    // `note_editor_focused` is from the previous frame's notes panel TextEdit.
+    // Filter / keyword / note / privilege TextEdit steal focus — digit shortcuts must not fire.
+    // Focus flags are from the previous frame's TextEdits.
     let no_focus = ctx.memory(|m| m.focused().is_none());
     let note_focus = state.note_editor_focused;
+    let priv_focus = state.privilege_editor_focused;
     state.note_editor_focused = false;
+    state.privilege_editor_focused = false;
+    state.poll_privilege_export(&ctx);
     if review_nav::focus_allows_shortcuts(no_focus)
-        && focus_allows_coding_shortcuts(no_focus, note_focus)
+        && focus_allows_coding_with_privilege(no_focus, note_focus, priv_focus)
     {
         let (want_next, want_prev, want_enter, digit) = ui.input(|i| {
             let next =
@@ -2269,6 +2633,12 @@ fn show_filter_bar(
             if ui.small_button("Has highlights").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_has_highlights());
             }
+            if ui.small_button("Withheld").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_withheld());
+            }
+            if ui.small_button("Privilege log incomplete").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_privilege_log_incomplete());
+            }
             if state.filter_draft.code_missing {
                 ui.label(
                     RichText::new("active: Uncoded")
@@ -2601,6 +2971,9 @@ fn show_viewer(
 
         // Coding panel
         show_coding_panel(ui, state, matter_root, ctx, actor, &row.id);
+
+        // Privilege claim panel (0031)
+        show_privilege_panel(ui, state, matter_root, actor, &row.id);
 
         // Align DB stale flags once body is available (cheap; once per item+digest).
         state.maybe_persist_stale_resolves(matter_root, &row.id, row.text_sha256.as_deref());
@@ -3015,6 +3388,273 @@ fn show_notes_panel(
             });
         }
     }
+}
+
+fn show_privilege_protocol_strip(
+    ui: &mut egui::Ui,
+    state: &mut ReviewState,
+    matter_root: &Utf8Path,
+    actor: &str,
+) {
+    state.ensure_protocol_loaded(matter_root);
+    ui.collapsing("Privilege protocol (informational 502 notes)", |ui| {
+        ui.label(
+            RichText::new("FRE 502(d)/502(e) references only — Desk does not issue court orders.")
+                .weak()
+                .small(),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Log format:");
+            if state.protocol_draft_log_format.trim().is_empty() {
+                state.protocol_draft_log_format =
+                    matter_core::privilege_log_format::STANDARD.into();
+            }
+            egui::ComboBox::from_id_salt("priv_log_format")
+                .selected_text({
+                    log_format_options()
+                        .iter()
+                        .find(|(k, _)| *k == state.protocol_draft_log_format)
+                        .map(|(_, l)| *l)
+                        .unwrap_or(state.protocol_draft_log_format.as_str())
+                })
+                .show_ui(ui, |ui| {
+                    for (key, label) in log_format_options() {
+                        if ui
+                            .selectable_label(state.protocol_draft_log_format == *key, *label)
+                            .clicked()
+                        {
+                            state.protocol_draft_log_format = (*key).to_string();
+                        }
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label("502(d):");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.protocol_draft_502d)
+                    .desired_width(280.0)
+                    .hint_text("Order date / docket cite…"),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("502(e):");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.protocol_draft_502e)
+                    .desired_width(280.0)
+                    .hint_text("Clawback agreement ref…"),
+            );
+        });
+        ui.checkbox(
+            &mut state.protocol_description_required,
+            "Description required (warn on blank log rows)",
+        );
+        if ui.small_button("Save protocol").clicked() {
+            state.save_protocol_now(matter_root, actor);
+        }
+        if let Some(st) = state.protocol_status.clone() {
+            ui.label(RichText::new(st).small());
+        }
+    });
+}
+
+fn show_privilege_panel(
+    ui: &mut egui::Ui,
+    state: &mut ReviewState,
+    matter_root: &Utf8Path,
+    actor: &str,
+    current_item_id: &str,
+) {
+    let has_code = state
+        .codes_for(current_item_id)
+        .iter()
+        .any(|c| c.key == "privilege");
+    let has_row = state.item_privilege.is_some();
+    let show = should_show_privilege_panel(has_code, has_row, state.privilege_force_open);
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Privilege").strong().small());
+        if !show
+            && ui
+                .small_button("Assert privilege")
+                .on_hover_text("Apply Privilege code + open claim panel")
+                .clicked()
+        {
+            state.assert_privilege_now(matter_root, actor);
+        }
+    });
+
+    if let Some(banner) = state.privilege_family_banner.clone() {
+        ui.colored_label(Color32::from_rgb(180, 100, 20), format!("⚠ {banner}"));
+    }
+    if let Some(st) = state.privilege_status_msg.clone() {
+        ui.label(
+            RichText::new(st)
+                .small()
+                .color(Color32::from_rgb(40, 120, 60)),
+        );
+    }
+    if let Some(err) = state.privilege_error.clone() {
+        ui.colored_label(Color32::from_rgb(200, 60, 60), err);
+    }
+
+    if !show {
+        return;
+    }
+
+    // Confirm dialogs
+    if state.privilege_confirm_clear_withhold {
+        egui::Window::new("Clear production withhold?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.label(
+                    "You are setting withhold=0 while privilege is still asserted. \
+                     Production (0040) will not hold this item. Continue?",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        state.privilege_confirm_clear_withhold = false;
+                        state.privilege_draft.withhold = true;
+                    }
+                    if ui.button("Confirm clear withhold").clicked() {
+                        state.privilege_confirm_clear_withhold = false;
+                        state.privilege_pending_save_no_withhold = true;
+                        state.save_privilege_now(matter_root, actor);
+                    }
+                });
+            });
+    }
+    if state.privilege_confirm_note_draft {
+        egui::Window::new("Draft description from note?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.label(
+                    "Copy the latest document note into the privilege log description draft. \
+                     This is never automatic on export — review before Save.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        state.privilege_confirm_note_draft = false;
+                    }
+                    if ui.button("Insert draft").clicked() {
+                        state.privilege_confirm_note_draft = false;
+                        let note_body = state
+                            .item_notes
+                            .first()
+                            .map(|n| n.body.as_str())
+                            .unwrap_or("");
+                        state.privilege_draft.description = draft_description_from_note(
+                            &state.privilege_draft.description,
+                            note_body,
+                        );
+                        state.privilege_draft.dirty = true;
+                    }
+                });
+            });
+    }
+
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.label("Basis:");
+            egui::ComboBox::from_id_salt("priv_basis")
+                .selected_text({
+                    basis_options()
+                        .iter()
+                        .find(|(k, _)| *k == state.privilege_draft.basis)
+                        .map(|(_, l)| *l)
+                        .unwrap_or(state.privilege_draft.basis.as_str())
+                })
+                .show_ui(ui, |ui| {
+                    for (key, label) in basis_options() {
+                        if ui
+                            .selectable_label(state.privilege_draft.basis == *key, *label)
+                            .clicked()
+                        {
+                            state.privilege_draft.basis = (*key).to_string();
+                            state.privilege_draft.dirty = true;
+                        }
+                    }
+                });
+            ui.label("Status:");
+            egui::ComboBox::from_id_salt("priv_status")
+                .selected_text({
+                    status_options()
+                        .iter()
+                        .find(|(k, _)| *k == state.privilege_draft.status)
+                        .map(|(_, l)| *l)
+                        .unwrap_or(state.privilege_draft.status.as_str())
+                })
+                .show_ui(ui, |ui| {
+                    for (key, label) in status_options() {
+                        if ui
+                            .selectable_label(state.privilege_draft.status == *key, *label)
+                            .clicked()
+                        {
+                            state.privilege_draft.status = (*key).to_string();
+                            state.privilege_draft.dirty = true;
+                        }
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(
+                    &mut state.privilege_draft.withhold,
+                    "Withhold from production",
+                )
+                .changed()
+            {
+                state.privilege_draft.dirty = true;
+            }
+            if ui
+                .checkbox(
+                    &mut state.privilege_draft.include_on_log,
+                    "Include on privilege log",
+                )
+                .changed()
+            {
+                state.privilege_draft.dirty = true;
+            }
+        });
+        ui.label("Description (subject-matter log text — not privileged body):");
+        let desc_resp = ui.add(
+            egui::TextEdit::multiline(&mut state.privilege_draft.description)
+                .id_salt("privilege_description")
+                .desired_width(ui.available_width())
+                .desired_rows(3)
+                .hint_text("e.g. Legal advice re contract negotiation"),
+        );
+        if desc_resp.has_focus() {
+            state.privilege_editor_focused = true;
+        }
+        if desc_resp.changed() {
+            state.privilege_draft.dirty = true;
+        }
+        ui.horizontal(|ui| {
+            if ui.small_button("Save").clicked() {
+                state.save_privilege_now(matter_root, actor);
+            }
+            if ui
+                .small_button("Draft from note…")
+                .on_hover_text("Optional: copy latest note into description draft (confirm)")
+                .clicked()
+            {
+                state.privilege_confirm_note_draft = true;
+            }
+            if !has_code
+                && ui
+                    .small_button("Assert (apply code)")
+                    .on_hover_text("Apply Privilege code if missing")
+                    .clicked()
+            {
+                state.assert_privilege_now(matter_root, actor);
+            }
+        });
+    });
 }
 
 fn show_coding_panel(

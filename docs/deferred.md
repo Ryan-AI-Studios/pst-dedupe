@@ -124,7 +124,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0027-01 | — | Privilege log export / 502(d) workflow | P0: Privilege **code** only (membership); not full log | **0031** |
+| D-0027-01 | — | Privilege log export / 502(d) workflow | **Done in 0031** (`item_privilege` + withhold + privilege log CSV + protocol stub) | — |
 | D-0027-02 | — | Filter list / saved search by code | **Done in 0028** (code any_of/none_of/missing + desk chips) | — |
 | D-0027-03 | — | Auto-propagate to near-dup / full thread | Never default; family = parent+all children only | residual / **0056** |
 | D-0027-04 | — | QC sampling reports / multi-reviewer lock | Single-desk P0 | later / **0058** |
@@ -160,13 +160,29 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 |---|---|---|---|---|
 | D-0030-01 | — | Image/PDF box markups & burn-in redaction | Text stand-off highlights only in 0030 | **0032** |
 | D-0030-02 | — | Notes in production load file | Default exclude (work product); opt-in later | **0040** |
-| D-0030-03 | — | Privilege log narrative from notes | Notes stay matter-local in 0030 | **0031** |
+| D-0030-03 | — | Privilege log narrative from notes | **Partial complete in 0031**: optional “draft from note” confirm only; never auto-export notes | — |
 | D-0030-04 | — | Case-wide persistent keyword highlight sets | User highlights only; FTS paint optional | residual |
 | D-0030-05 | — | Multi-user concurrent note edit | Single-desk actor | **0058** |
 | D-0030-06 | — | Rich text / markdown notes | P0 plain text | residual |
 | D-0030-07 | P3 | Full GUI smoke for notes panel / selection highlight | Automated unit + API; operator smoke local | operator / polish |
 | D-0030-08 | P3 | Dual body widgets (Label paint + TextEdit selection) | Usable; document residual under egui 0.34; unify later if API allows | residual polish |
 | D-0029-04 | — | Temporary FTS hit paint | Not shipped in 0030 (nice-to-have); user highlights shipped | residual |
+
+## From track 0031-PrivilegeWorkflow
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0031-01 | — | Production enforce withhold fail-closed | 0031 stores flag + API only | **0040** |
+| D-0031-01b | — | Soft-clear description must not appear on produced load-file metadata | Retained `item_privilege.description` after `status=cleared` is internal work product; exclude from any custom metadata dump (default exclude all privilege descriptions) | **0040** |
+| D-0031-02 | — | Partial redaction produce + log “produced redacted” | Status enum includes `partial_redaction` | **0032** / **0040** |
+| D-0031-03 | — | Category / thread-collapsed privilege logs | P0 standard document-by-document CSV only | residual |
+| D-0031-04 | — | Name normalization legend for log parties | Metadata as stored | residual |
+| D-0031-05 | — | AI privilege prediction / draft log descriptions | Off by default | Series G |
+| D-0031-06 | — | Clawback post-produce workflow UI | Protocol notes only in 0031 | residual / **0040** |
+| D-0031-07 | — | Multi-reviewer privilege lock / sampling QC | Single-desk | **0058** / **0041** |
+| D-0031-08 | P3 | Full GUI smoke for privilege panel / log export | Automated API + unit; operator smoke local | operator / polish |
+| D-0031-09 | — | Court e-file / load-file Bates on privilege log | ControlNumber = item_id until production | **0040** |
+| D-0031-10 | — | Optional ParentFrom/ParentTo extra CSV columns | P0: in-place inherit into From/To/… is enough | residual |
 
 ## Hygiene
 

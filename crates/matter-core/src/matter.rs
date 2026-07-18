@@ -3855,7 +3855,13 @@ impl Matter {
         })
         .to_string();
 
+        let add_privilege = add_defs.iter().any(|d| d.key == "privilege");
+        let remove_privilege = remove_defs.iter().any(|d| d.key == "privilege");
+
         self.with_transaction(|conn| {
+            let mut privilege_ensure_ids: Vec<String> = Vec::new();
+            let mut privilege_clear_ids: Vec<String> = Vec::new();
+
             for item_id in &targets {
                 // Adds first (with single-group clear), then removes — per spec §3.3.2.
                 for def in &add_defs {
@@ -3884,6 +3890,32 @@ impl Matter {
                         params![item_id, def.id],
                     )?;
                 }
+
+                // Privilege code ↔ claim lifecycle (same txn; separate audit).
+                if add_privilege {
+                    let ch = crate::privilege::ensure_item_privilege_conn(
+                        conn,
+                        &self.matter_id,
+                        item_id,
+                        &actor,
+                        &now,
+                    )?;
+                    if ch == crate::privilege::PrivilegeEnsureChange::Changed {
+                        privilege_ensure_ids.push(item_id.clone());
+                    }
+                }
+                if remove_privilege {
+                    let cleared = crate::privilege::soft_clear_item_privilege_conn(
+                        conn,
+                        &self.matter_id,
+                        item_id,
+                        &actor,
+                        &now,
+                    )?;
+                    if cleared {
+                        privilege_clear_ids.push(item_id.clone());
+                    }
+                }
             }
 
             audit::append_event(
@@ -3897,6 +3929,10 @@ impl Matter {
                 },
                 &now,
             )?;
+
+            // Distinct privilege audit events with full sorted item_ids.
+            Matter::audit_privilege_batch_upsert(conn, &actor, &privilege_ensure_ids, &now)?;
+            Matter::audit_privilege_batch_clear(conn, &actor, &privilege_clear_ids, &now)?;
             Ok(())
         })?;
 
@@ -4365,7 +4401,7 @@ impl Matter {
         Ok(out)
     }
 
-    fn ensure_item_in_matter(&self, item_id: &str) -> Result<()> {
+    pub(crate) fn ensure_item_in_matter(&self, item_id: &str) -> Result<()> {
         let ok: bool = self.conn.query_row(
             "SELECT COUNT(*) > 0 FROM items WHERE id = ?1 AND matter_id = ?2",
             params![item_id, self.matter_id],
@@ -4380,7 +4416,7 @@ impl Matter {
     /// Expand selected item ids to whole family units (parent + all direct
     /// children + same non-null `family_id` members). Does **not** expand
     /// near-dup groups or full threads.
-    fn expand_family_units(&self, item_ids: &[String]) -> Result<Vec<String>> {
+    pub(crate) fn expand_family_units(&self, item_ids: &[String]) -> Result<Vec<String>> {
         let mut out: HashSet<String> = HashSet::new();
         for iid in item_ids {
             let (parent_item_id, family_id): (Option<String>, Option<String>) =
@@ -4872,11 +4908,11 @@ fn slugify_code_key(s: &str) -> String {
     out
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn new_id(prefix: &str) -> String {
+pub(crate) fn new_id(prefix: &str) -> String {
     let n = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4885,7 +4921,7 @@ fn new_id(prefix: &str) -> String {
     format!("{prefix}_{nanos:x}_{n:x}")
 }
 
-fn normalize_actor(actor: &str) -> String {
+pub(crate) fn normalize_actor(actor: &str) -> String {
     let t = actor.trim();
     if t.is_empty() {
         "desk".to_string()
