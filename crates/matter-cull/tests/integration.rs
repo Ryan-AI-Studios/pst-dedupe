@@ -473,10 +473,12 @@ fn cancel_pause_resume_checkpoint() {
     let (_tmp, matter) = temp_matter("cancel");
     let job = matter.create_job(JOB_KIND_CULL).expect("job");
 
-    for i in 0..20 {
+    // Large n + small batch so cancel after first progress is always mid-run.
+    const N: u64 = 50;
+    for i in 0..N {
         insert(
             &matter,
-            &format!("f{i}.bin"),
+            &format!("f{i:03}.bin"),
             item_status::EXTRACTED,
             ItemInput {
                 dedup_role: Some(item_dedup_role::UNIQUE.into()),
@@ -488,11 +490,9 @@ fn cancel_pause_resume_checkpoint() {
 
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let cancel_flag2 = cancel_flag.clone();
-    let progress_n = Arc::new(AtomicBool::new(false));
-    let progress_n2 = progress_n.clone();
     let params = CullParams {
         preset_name: Some(PRESET_UNIQUE_ONLY.into()),
-        batch_size: 3,
+        batch_size: 2,
         ..Default::default()
     };
     let outcome = run_cull(
@@ -501,48 +501,40 @@ fn cancel_pause_resume_checkpoint() {
         &params,
         Some(&|| cancel_flag2.load(Ordering::SeqCst)),
         |_| {
-            // Cancel after first committed batch.
-            if progress_n2.swap(true, Ordering::SeqCst) {
-                // already flagged
-            } else {
-                cancel_flag.store(true, Ordering::SeqCst);
-            }
+            // Cancel after first committed batch — next item/batch sees cancel.
+            cancel_flag.store(true, Ordering::SeqCst);
         },
     )
     .expect("run");
 
-    // May succeed if cancel only after last batch; with 20 items and batch 3, should pause.
-    match outcome {
-        CullOutcome::Paused(s) => {
-            assert!(s.completed_count > 0 && s.completed_count < 20, "{s:?}");
-            let cp = matter
-                .get_checkpoint(&job.id, CULL_STAGE)
-                .expect("cp")
-                .expect("present");
-            assert_eq!(cp.completed_count as u64, s.completed_count);
+    let CullOutcome::Paused(s) = outcome else {
+        panic!("expected Paused after cancel, got {outcome:?}");
+    };
+    assert!(
+        s.completed_count > 0 && s.completed_count < N,
+        "partial progress required for pause: {s:?}"
+    );
+    let cp = matter
+        .get_checkpoint(&job.id, CULL_STAGE)
+        .expect("cp")
+        .expect("present");
+    assert_eq!(cp.completed_count as u64, s.completed_count);
 
-            // Resume with cancel off.
-            let outcome2 = run_cull(&matter, &job.id, &params, None, |_| {}).expect("resume");
-            assert!(
-                matches!(outcome2, CullOutcome::Succeeded(_)),
-                "{outcome2:?}"
-            );
-            let all = matter.list_cull_candidates(true).unwrap();
-            for c in all {
-                let item = matter.get_item(&c.id).unwrap();
-                assert!(
-                    item.cull_status.is_some(),
-                    "item {} missing cull_status after resume",
-                    c.id
-                );
-            }
-        }
-        CullOutcome::Succeeded(_) => {
-            // Cancel raced after completion — still OK if checkpoint exists.
-            let cp = matter.get_checkpoint(&job.id, CULL_STAGE).expect("cp");
-            assert!(cp.is_some());
-        }
-        other => panic!("unexpected {other:?}"),
+    // Resume with cancel off → Succeeded and every eligible item has cull_status.
+    let outcome2 = run_cull(&matter, &job.id, &params, None, |_| {}).expect("resume");
+    assert!(
+        matches!(outcome2, CullOutcome::Succeeded(_)),
+        "{outcome2:?}"
+    );
+    let all = matter.list_cull_candidates(true).unwrap();
+    assert_eq!(all.len() as u64, N);
+    for c in all {
+        let item = matter.get_item(&c.id).unwrap();
+        assert!(
+            item.cull_status.is_some(),
+            "item {} missing cull_status after resume",
+            c.id
+        );
     }
 }
 

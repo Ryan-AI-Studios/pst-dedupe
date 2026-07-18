@@ -355,6 +355,11 @@ impl CullRules {
                 self.version
             )));
         }
+        if self.thread.enabled {
+            return Err(CullError::InvalidRules(
+                "thread cull not implemented in P0".into(),
+            ));
+        }
         if self.date.enabled {
             if let Some(ref s) = self.date.start {
                 parse_bound_instant(s)
@@ -490,5 +495,13 @@ mod tests {
         assert!(back.exclude_exact_duplicates);
         assert!(!back.near_dup.enabled);
         assert!(!back.denist.enabled);
+    }
+
+    #[test]
+    fn thread_enabled_rejected_in_p0() {
+        let mut r = CullRules::default();
+        r.thread.enabled = true;
+        let err = r.validate().unwrap_err().to_string();
+        assert!(err.contains("thread cull not implemented"), "{err}");
     }
 }

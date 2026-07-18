@@ -1987,19 +1987,29 @@ impl Matter {
         Ok(n as u64)
     }
 
-    /// Clear cull *result* columns for all items in this matter.
+    /// Clear cull *result* columns for the **eligible** set only — same filter
+    /// as [`Self::list_cull_candidates`] (optional attachment exclusion).
+    ///
+    /// When `process_attachments` is false, attachment-role rows keep prior
+    /// cull fields (they are not re-evaluated by the job).
     ///
     /// Returns the number of rows updated.
-    pub fn clear_cull_fields(&self) -> Result<u64> {
+    pub fn clear_cull_fields(&self, process_attachments: bool) -> Result<u64> {
         let matter_id = self.matter_id.clone();
+        let attach_clause = if process_attachments {
+            ""
+        } else {
+            " AND IFNULL(role, '') != 'attachment' "
+        };
         self.with_transaction(|conn| {
-            let n = conn.execute(
+            let sql = format!(
                 "UPDATE items SET \
                     cull_status = NULL, cull_reasons_json = NULL, cull_preset_id = NULL, \
                     cull_preset_name = NULL, culled_at = NULL, cull_job_id = NULL \
-                 WHERE matter_id = ?1",
-                params![matter_id],
-            )?;
+                 WHERE matter_id = ?1 \
+                   {attach_clause}"
+            );
+            let n = conn.execute(&sql, params![matter_id])?;
             Ok(n as u64)
         })
     }

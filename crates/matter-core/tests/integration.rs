@@ -1390,10 +1390,89 @@ fn cull_batch_and_checkpoint_same_transaction() {
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0].id, a.id);
 
-    matter.clear_cull_fields().expect("clear");
+    matter.clear_cull_fields(true).expect("clear");
     let cleared = matter.get_item(&a.id).expect("get");
     assert!(cleared.cull_status.is_none());
     assert!(cleared.cull_reasons_json.is_none());
+}
+
+#[test]
+fn clear_cull_fields_respects_attachment_eligibility() {
+    use matter_core::{item_cull_status, item_role, item_status, CullFieldUpdate};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-cull-clear-eligible");
+    let matter = Matter::create(&root, "Cull Clear Eligible").expect("create");
+    let job = matter.create_job("cull").expect("job");
+
+    let standalone = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            path: Some("doc.txt".into()),
+            size_bytes: Some(10),
+            ..Default::default()
+        })
+        .expect("standalone");
+    // Attachment-role row without parent link (eligibility is role-based only).
+    let attach = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            path: Some("a.bin".into()),
+            size_bytes: Some(1),
+            ..Default::default()
+        })
+        .expect("attach");
+
+    assert_eq!(
+        matter.get_item(&attach.id).unwrap().role.as_deref(),
+        Some(item_role::ATTACHMENT)
+    );
+
+    let stamp = |id: &str| CullFieldUpdate {
+        item_id: id.into(),
+        cull_status: Some(item_cull_status::INCLUDED.into()),
+        cull_reasons_json: Some("[]".into()),
+        cull_preset_id: None,
+        cull_preset_name: Some("unique_only".into()),
+        culled_at: Some("2020-01-01T00:00:00Z".into()),
+        cull_job_id: Some(job.id.clone()),
+    };
+    matter
+        .apply_cull_batch_with_checkpoint(
+            &job.id,
+            "cull",
+            &[stamp(&standalone.id), stamp(&attach.id)],
+            r#"{"cursor_index":2}"#,
+            2,
+        )
+        .expect("stamp");
+
+    // process_attachments=false → clear only non-attachments.
+    let n = matter.clear_cull_fields(false).expect("clear");
+    assert_eq!(n, 1, "should clear standalone only");
+    assert!(matter
+        .get_item(&standalone.id)
+        .unwrap()
+        .cull_status
+        .is_none());
+    assert_eq!(
+        matter.get_item(&attach.id).unwrap().cull_status.as_deref(),
+        Some(item_cull_status::INCLUDED),
+        "attachment cull fields must survive when process_attachments=false"
+    );
+
+    // process_attachments=true → eligible set includes attachments (SQLite
+    // UPDATE rowcount may include already-null standalone rows).
+    let n2 = matter.clear_cull_fields(true).expect("clear all eligible");
+    assert!(n2 >= 1, "should touch attachment row, got {n2}");
+    assert!(matter.get_item(&attach.id).unwrap().cull_status.is_none());
+    assert!(matter
+        .get_item(&standalone.id)
+        .unwrap()
+        .cull_status
+        .is_none());
 }
 
 #[test]

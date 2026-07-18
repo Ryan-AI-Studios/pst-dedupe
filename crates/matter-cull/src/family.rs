@@ -34,37 +34,46 @@ fn keep_children_with_included_parent(
     candidates: &[CullCandidate],
     decisions: &mut HashMap<String, ItemCullDecision>,
 ) {
-    // Parents that are included after item pass.
-    let included_parents: HashSet<String> = candidates
-        .iter()
-        .filter(|c| {
-            decisions
+    // Nested chains (P→C→G): if C was culled at the item pass but P is
+    // included, C is force-included; then G must also be force-included.
+    // Iterate to fixpoint so deep trees converge in one family phase.
+    loop {
+        let included_ids: HashSet<String> = decisions
+            .iter()
+            .filter(|(_, d)| !d.is_culled())
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut changed = false;
+        for c in candidates {
+            let Some(ref parent_id) = c.parent_item_id else {
+                continue;
+            };
+            if !included_ids.contains(parent_id) {
+                continue;
+            }
+            let already_included = decisions
                 .get(&c.id)
                 .map(|d| !d.is_culled())
-                .unwrap_or(false)
-                && c.parent_item_id.is_none()
-        })
-        .map(|c| c.id.clone())
-        .collect();
-
-    // Also treat any item that has children as a potential parent even if it
-    // itself has a parent_item_id (nested). Spec says *direct* children of
-    // included parents — use parent_item_id link.
-    let included_ids: HashSet<String> = decisions
-        .iter()
-        .filter(|(_, d)| !d.is_culled())
-        .map(|(id, _)| id.clone())
-        .collect();
-
-    let _ = included_parents; // reserved for future parent-role filter
-
-    for c in candidates {
-        let Some(ref parent_id) = c.parent_item_id else {
-            continue;
-        };
-        if included_ids.contains(parent_id) {
+                .unwrap_or(false);
+            if already_included {
+                // Still clear stale reasons if any (absolute include).
+                if decisions
+                    .get(&c.id)
+                    .map(|d| !d.reasons.is_empty())
+                    .unwrap_or(false)
+                {
+                    decisions.insert(c.id.clone(), ItemCullDecision::included());
+                    changed = true;
+                }
+                continue;
+            }
             // Absolute: force included, clear reasons (even exact_duplicate).
             decisions.insert(c.id.clone(), ItemCullDecision::included());
+            changed = true;
+        }
+        if !changed {
+            break;
         }
     }
 }
@@ -73,30 +82,47 @@ fn cull_children_with_parent(
     candidates: &[CullCandidate],
     decisions: &mut HashMap<String, ItemCullDecision>,
 ) {
-    let culled_parents: HashSet<String> = decisions
-        .iter()
-        .filter(|(_, d)| d.is_culled())
-        .map(|(id, _)| id.clone())
-        .collect();
-
-    for c in candidates {
-        let Some(ref parent_id) = c.parent_item_id else {
-            continue;
-        };
-        if !culled_parents.contains(parent_id) {
-            continue;
-        }
-        let entry = decisions
-            .entry(c.id.clone())
-            .or_insert_with(ItemCullDecision::included);
-        if !entry
-            .reasons
+    // Nested chains: culled grandparent → child → grandchild must all end culled.
+    loop {
+        let culled_parents: HashSet<String> = decisions
             .iter()
-            .any(|r| r == reason::FAMILY_WITH_CULLED_PARENT)
-        {
-            entry.reasons.push(reason::FAMILY_WITH_CULLED_PARENT.into());
+            .filter(|(_, d)| d.is_culled())
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut changed = false;
+        for c in candidates {
+            let Some(ref parent_id) = c.parent_item_id else {
+                continue;
+            };
+            if !culled_parents.contains(parent_id) {
+                continue;
+            }
+            let entry = decisions
+                .entry(c.id.clone())
+                .or_insert_with(ItemCullDecision::included);
+            let was_culled = entry.is_culled()
+                && entry
+                    .reasons
+                    .iter()
+                    .any(|r| r == reason::FAMILY_WITH_CULLED_PARENT);
+            if !entry
+                .reasons
+                .iter()
+                .any(|r| r == reason::FAMILY_WITH_CULLED_PARENT)
+            {
+                entry.reasons.push(reason::FAMILY_WITH_CULLED_PARENT.into());
+            }
+            if entry.status != item_cull_status::CULLED {
+                entry.status = item_cull_status::CULLED.into();
+            }
+            if !was_culled {
+                changed = true;
+            }
         }
-        entry.status = item_cull_status::CULLED.into();
+        if !changed {
+            break;
+        }
     }
 }
 
@@ -148,5 +174,74 @@ mod tests {
         let c = decisions.get("c").unwrap();
         assert!(!c.is_culled());
         assert!(c.reasons.is_empty());
+    }
+
+    /// Nested P→C→G: C force-included from P must also force-include G.
+    #[test]
+    fn nested_chain_keep_children_fixpoint() {
+        let parent = cand("p", None, Some(item_dedup_role::UNIQUE));
+        let child = cand("c", Some("p"), Some(item_dedup_role::DUPLICATE));
+        let grand = cand("g", Some("c"), Some(item_dedup_role::DUPLICATE));
+        let candidates = vec![parent, child, grand];
+        let mut decisions = HashMap::new();
+        decisions.insert("p".into(), ItemCullDecision::included());
+        decisions.insert(
+            "c".into(),
+            ItemCullDecision::culled(vec![reason::EXACT_DUPLICATE.into()]),
+        );
+        decisions.insert(
+            "g".into(),
+            ItemCullDecision::culled(vec![reason::EXACT_DUPLICATE.into()]),
+        );
+        apply_family_policy(
+            &candidates,
+            &mut decisions,
+            FamilyPolicy::KeepChildrenWithIncludedParent,
+        );
+        assert!(!decisions.get("c").unwrap().is_culled());
+        assert!(decisions.get("c").unwrap().reasons.is_empty());
+        assert!(
+            !decisions.get("g").unwrap().is_culled(),
+            "grandchild must be force-included once child is included (fixpoint)"
+        );
+        assert!(decisions.get("g").unwrap().reasons.is_empty());
+    }
+
+    /// Nested P→C→G under cull_children_with_parent: culled parent cascades.
+    #[test]
+    fn nested_chain_cull_children_fixpoint() {
+        let parent = cand("p", None, Some(item_dedup_role::UNIQUE));
+        let child = cand("c", Some("p"), Some(item_dedup_role::UNIQUE));
+        let grand = cand("g", Some("c"), Some(item_dedup_role::UNIQUE));
+        let candidates = vec![parent, child, grand];
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            "p".into(),
+            ItemCullDecision::culled(vec![reason::DATE_OUT_OF_RANGE.into()]),
+        );
+        decisions.insert("c".into(), ItemCullDecision::included());
+        decisions.insert("g".into(), ItemCullDecision::included());
+        apply_family_policy(
+            &candidates,
+            &mut decisions,
+            FamilyPolicy::CullChildrenWithParent,
+        );
+        assert!(decisions.get("c").unwrap().is_culled());
+        assert!(decisions
+            .get("c")
+            .unwrap()
+            .reasons
+            .iter()
+            .any(|r| r == reason::FAMILY_WITH_CULLED_PARENT));
+        assert!(
+            decisions.get("g").unwrap().is_culled(),
+            "grandchild must be culled once child is culled (fixpoint)"
+        );
+        assert!(decisions
+            .get("g")
+            .unwrap()
+            .reasons
+            .iter()
+            .any(|r| r == reason::FAMILY_WITH_CULLED_PARENT));
     }
 }

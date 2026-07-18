@@ -89,11 +89,14 @@ auto-hide them as exact duplicates. See `crates/matter-neardup/README.md`.
 
 ### Run cull
 
-Workspace **cull preset** dropdown (built-ins: `unique_only`, `unique_plus_family`,
-`date_window`, `noise_light`) + **Run cull** starts `kind=cull` with
-`{ "preset_name", "reset": true, "batch_size": 500 }`. Flag-only: sets
-`cull_status` / reasons; never deletes items or CAS. Reuses progress / cancel /
-resume. See `crates/matter-cull/README.md`. **0025 promote** should prefer
+Workspace **cull preset** dropdown (built-ins that work out of the box:
+`unique_only`, `unique_plus_family`, `noise_light`) + **Run cull** starts
+`kind=cull` with `{ "preset_name", "reset": true, "batch_size": 500 }`.
+`date_window` remains an engine built-in but is **not** listed in the desk
+dropdown until bounds are filled — operators supply `start`/`end` (offset-aware
+RFC3339) via JSON params or a user preset edit. Flag-only: sets `cull_status` /
+reasons; never deletes items or CAS. Reuses progress / cancel / resume. See
+`crates/matter-cull/README.md`. **0025 promote** should prefer
 `cull_status=included` when present.
 
 ## Tests

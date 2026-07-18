@@ -73,13 +73,12 @@ pub fn neardup_default_params() -> String {
     .to_string()
 }
 
-/// Built-in cull preset names (desk dropdown).
-pub const CULL_BUILTIN_PRESETS: &[&str] = &[
-    "unique_only",
-    "unique_plus_family",
-    "date_window",
-    "noise_light",
-];
+/// Built-in cull preset names shown in the desk dropdown.
+///
+/// `date_window` is intentionally omitted: it needs operator-filled start/end
+/// bounds (offset-aware RFC3339). Operators can still use it via JSON params
+/// or a user preset that supplies bounds — see `matter-cull` README.
+pub const CULL_BUILTIN_PRESETS: &[&str] = &["unique_only", "unique_plus_family", "noise_light"];
 
 /// Cull params for a built-in (or named) preset (`kind = "cull"`).
 ///

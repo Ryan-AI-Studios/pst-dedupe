@@ -314,11 +314,12 @@ fn run_cull_inner(
 
     let is_fresh =
         cursor.cursor_index == 0 && cursor.completed_count == 0 && cursor.phase == "items";
+    let process_attachments = rules.roles.process_attachments;
     if params.reset && is_fresh {
-        matter.clear_cull_fields()?;
+        // Clear only the eligible set (same filter as list_cull_candidates).
+        matter.clear_cull_fields(process_attachments)?;
     }
 
-    let process_attachments = rules.roles.process_attachments;
     let candidates = matter.list_cull_candidates(process_attachments)?;
 
     // --- Phase: items — evaluate + write in batches ---
@@ -378,11 +379,9 @@ fn run_cull_inner(
 
     // --- Phase: family pass ---
     if cursor.phase == "family" {
-        if cancel.map(|f| f()).unwrap_or(false) {
-            return Ok(CullOutcome::Paused(summary_from_cursor(&cursor)));
-        }
-
         // Re-read candidates + current decisions from DB for family pass.
+        // On resume mid-family we recompute decisions and continue writes from
+        // cursor.cursor_index (cancel-aware every batch).
         let candidates = matter.list_cull_candidates(process_attachments)?;
         let mut decisions: HashMap<String, ItemCullDecision> = HashMap::new();
         for c in &candidates {
@@ -400,8 +399,7 @@ fn run_cull_inner(
 
         apply_family_policy(&candidates, &mut decisions, rules.family_policy);
 
-        // Write only rows that differ after family pass (or all for simplicity).
-        // Recompute counts from final decisions.
+        // Write final family decisions. Recompute counts from final decisions.
         let mut included = 0u64;
         let mut culled = 0u64;
         let mut by_reason: HashMap<String, u64> = HashMap::new();
@@ -432,13 +430,37 @@ fn run_cull_inner(
             });
         }
 
-        // Write in batches with cancel checks.
-        let mut offset = 0usize;
+        cursor.included = included;
+        cursor.culled = culled;
+        cursor.by_reason = by_reason.clone();
+
+        // Resume family writes from checkpoint cursor (0 on first family entry).
+        let mut offset = cursor.cursor_index as usize;
+        if offset > updates.len() {
+            return Err(CullError::Other(format!(
+                "family checkpoint cursor_index {offset} exceeds update count {}",
+                updates.len()
+            )));
+        }
+
         while offset < updates.len() {
-            if cancel.map(|f| f()).unwrap_or(false) && offset == 0 {
+            // Honor cancel on every family batch (not only the first).
+            if cancel.map(|f| f()).unwrap_or(false) {
+                cursor.phase = "family".into();
+                cursor.cursor_index = offset as u64;
                 cursor.included = included;
                 cursor.culled = culled;
                 cursor.by_reason = by_reason.clone();
+                let cursor_json = serde_json::to_string(&cursor)
+                    .map_err(|e| CullError::Other(format!("checkpoint serialize: {e}")))?;
+                // Persist pause checkpoint (empty write batch) so resume is exact.
+                matter.apply_cull_batch_with_checkpoint(
+                    job_id,
+                    CULL_STAGE,
+                    &[],
+                    &cursor_json,
+                    cursor.completed_count as i64,
+                )?;
                 return Ok(CullOutcome::Paused(summary_from_cursor(&cursor)));
             }
             let end = (offset + batch_size as usize).min(updates.len());
@@ -449,6 +471,8 @@ fn run_cull_inner(
             cursor.by_reason = by_reason.clone();
             if end == updates.len() {
                 cursor.phase = "done".into();
+            } else {
+                cursor.phase = "family".into();
             }
             let cursor_json = serde_json::to_string(&cursor)
                 .map_err(|e| CullError::Other(format!("checkpoint serialize: {e}")))?;

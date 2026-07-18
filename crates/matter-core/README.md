@@ -202,7 +202,7 @@ Deleting a preset does **not** clear item cull fields.
 |---|---|
 | `list_cull_candidates` / `_range` | Thin ordered candidates (`CullCandidate`) |
 | `count_cull_candidates` | Candidate count |
-| `clear_cull_fields` | Reset cull result columns (transactional) |
+| `clear_cull_fields(process_attachments)` | Reset cull result columns on the eligible set only (same attachment filter as list; transactional) |
 | `apply_cull_batch_with_checkpoint` | **N result updates + checkpoint in one commit** |
 | `list_cull_presets` / `get_cull_preset` / `upsert_cull_preset` / `delete_cull_preset` | Preset CRUD |
 

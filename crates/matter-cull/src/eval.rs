@@ -275,3 +275,64 @@ fn eval_near_dup(item: &CullCandidate, rules: &CullRules, reasons: &mut Vec<Stri
 pub fn reasons_to_json(reasons: &[String]) -> String {
     serde_json::to_string(reasons).unwrap_or_else(|_| "[]".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rules::{DateRule, MissingDatePolicy};
+
+    fn cand_with_sent(sent: &str) -> CullCandidate {
+        CullCandidate {
+            id: "x".into(),
+            parent_item_id: None,
+            family_id: None,
+            dedup_role: Some(item_dedup_role::UNIQUE.into()),
+            near_dup_role: None,
+            sent_at: Some(sent.into()),
+            received_at: None,
+            created_at: None,
+            modified_at: None,
+            path: Some("x.eml".into()),
+            custodian: None,
+            file_category: None,
+            mime_type: None,
+            size_bytes: Some(1),
+            status: "extracted".into(),
+            native_sha256: None,
+            text_sha256: None,
+            role: None,
+            imported_at: "2020-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn date_rules(start: &str, end: &str) -> CullRules {
+        CullRules {
+            exclude_exact_duplicates: false,
+            date: DateRule {
+                enabled: true,
+                field: DateField::SentAt,
+                start: Some(start.into()),
+                end: Some(end.into()),
+                missing_policy: MissingDatePolicy::Include,
+            },
+            ..Default::default()
+        }
+    }
+
+    /// start inclusive: instant == start → included.
+    #[test]
+    fn date_start_inclusive() {
+        let rules = date_rules("2023-01-01T00:00:00Z", "2023-02-01T00:00:00Z");
+        let d = evaluate_item(&cand_with_sent("2023-01-01T00:00:00Z"), &rules, None);
+        assert!(!d.is_culled(), "instant == start must be included: {d:?}");
+    }
+
+    /// end exclusive: instant == end → culled (date_out_of_range).
+    #[test]
+    fn date_end_exclusive() {
+        let rules = date_rules("2023-01-01T00:00:00Z", "2023-02-01T00:00:00Z");
+        let d = evaluate_item(&cand_with_sent("2023-02-01T00:00:00Z"), &rules, None);
+        assert!(d.is_culled(), "instant == end must be culled: {d:?}");
+        assert!(d.reasons.iter().any(|r| r == reason::DATE_OUT_OF_RANGE));
+    }
+}
