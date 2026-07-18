@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -21,6 +21,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (5, MIGRATION_V5),
     (6, MIGRATION_V6),
     (7, MIGRATION_V7),
+    (8, MIGRATION_V8),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -272,6 +273,42 @@ CREATE INDEX IF NOT EXISTS idx_items_review_set_id ON items(review_set_id);
 CREATE INDEX IF NOT EXISTS idx_items_review_set_order ON items(review_set_id, review_order);
 "#;
 
+/// Schema v8: coding catalog + item↔code membership (track 0027).
+///
+/// Matter-scoped code definitions and membership rows only — never deletes
+/// items/CAS. Inactive definitions remain for historical membership display.
+const MIGRATION_V8: &str = r#"
+CREATE TABLE code_definitions (
+    id TEXT PRIMARY KEY NOT NULL,
+    matter_id TEXT NOT NULL REFERENCES matters(id),
+    key TEXT NOT NULL,
+    label TEXT NOT NULL,
+    group_key TEXT NOT NULL,
+    cardinality TEXT NOT NULL,
+    color TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX idx_code_definitions_matter_key
+  ON code_definitions(matter_id, key);
+
+CREATE INDEX idx_code_definitions_matter_group_sort
+  ON code_definitions(matter_id, group_key, sort_order);
+
+CREATE TABLE item_codes (
+    item_id TEXT NOT NULL,
+    code_id TEXT NOT NULL,
+    set_at TEXT NOT NULL,
+    set_by TEXT NOT NULL,
+    PRIMARY KEY (item_id, code_id)
+);
+
+CREATE INDEX idx_item_codes_item ON item_codes(item_id);
+CREATE INDEX idx_item_codes_code ON item_codes(code_id);
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -364,7 +401,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 7);
+        assert_eq!(v, 8);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v2 columns present
@@ -469,6 +506,23 @@ mod tests {
             )
             .expect("pragma");
         assert!(has_one_default_idx);
+        // v8 coding tables
+        let has_code_defs: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='code_definitions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_code_defs);
+        let has_item_codes: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_codes'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_item_codes);
     }
 
     #[test]
@@ -1032,8 +1086,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v6â†’v7");
-        assert_eq!(v, 7);
+        let v = migrate(&conn).expect("migrate v6 to current");
+        assert_eq!(v, SCHEMA_VERSION);
 
         let cull_status: Option<String> = conn
             .query_row(
@@ -1103,13 +1157,15 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("mat schema");
-        assert_eq!(ms, 7);
+        assert_eq!(ms, SCHEMA_VERSION);
 
         for idx in [
             "idx_review_sets_one_default",
             "idx_items_in_review",
             "idx_items_review_set_id",
             "idx_items_review_set_order",
+            "idx_code_definitions_matter_key",
+            "idx_item_codes_item",
         ] {
             let exists: bool = conn
                 .query_row(
@@ -1120,6 +1176,113 @@ mod tests {
                 .expect("sqlite_master");
             assert!(exists, "expected index {idx}");
         }
+    }
+
+    /// v7 fixture → migrate to v8 → data intact + coding tables.
+    #[test]
+    fn migrate_v7_to_v8_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute_batch(MIGRATION_V3).expect("v3");
+        conn.execute_batch(MIGRATION_V4).expect("v4");
+        conn.execute_batch(MIGRATION_V5).expect("v5");
+        conn.execute_batch(MIGRATION_V6).expect("v6");
+        conn.execute_batch(MIGRATION_V7).expect("v7");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (7)", [])
+            .expect("meta v7");
+        assert_eq!(read_schema_version(&conn).expect("read"), 7);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v7', 'V7 Matter', '2020-01-01T00:00:00Z', 7, '/tmp/v7')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO review_sets (id, matter_id, name, is_default, policy, policy_json, \
+             item_count, created_at, updated_at, created_by) \
+             VALUES ('rs1', 'mat_v7', 'Review Corpus', 1, NULL, NULL, 1, \
+             '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', NULL)",
+            [],
+        )
+        .expect("review set");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, in_review, review_set_id, review_order) \
+             VALUES ('itm_mail', 'mat_v7', NULL, NULL, 'inbox/a.eml', NULL, \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             'mid@example.com', 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'parent', 'email', 1, 1, 'rs1', 1)",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v7 to v8");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 8);
+
+        let in_review: Option<i64> = conn
+            .query_row(
+                "SELECT in_review FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("in_review");
+        assert_eq!(in_review, Some(1));
+
+        let has_code_defs: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='code_definitions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("code_definitions");
+        assert!(has_code_defs);
+        let has_item_codes: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_codes'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("item_codes");
+        assert!(has_item_codes);
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v7'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+
+        // Unique (matter_id, key) enforced.
+        conn.execute(
+            "INSERT INTO code_definitions (id, matter_id, key, label, group_key, cardinality, \
+             color, sort_order, is_active, created_at) \
+             VALUES ('cd1', 'mat_v7', 'responsive', 'Responsive', 'responsiveness', 'single', \
+             NULL, 1, 1, '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("first code");
+        let err = conn
+            .execute(
+                "INSERT INTO code_definitions (id, matter_id, key, label, group_key, cardinality, \
+                 color, sort_order, is_active, created_at) \
+                 VALUES ('cd2', 'mat_v7', 'responsive', 'Dup', 'responsiveness', 'single', \
+                 NULL, 2, 1, '2020-01-01T00:00:00Z')",
+                [],
+            )
+            .expect_err("duplicate key must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UNIQUE") || msg.contains("unique"),
+            "expected unique violation, got: {msg}"
+        );
     }
 
     /// Each migration step updates schema_meta only after the full batch commits
