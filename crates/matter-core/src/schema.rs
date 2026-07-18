@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -23,6 +23,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (7, MIGRATION_V7),
     (8, MIGRATION_V8),
     (9, MIGRATION_V9),
+    (10, MIGRATION_V10),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -338,6 +339,19 @@ CREATE INDEX IF NOT EXISTS idx_items_review_list_order
   WHERE in_review = 1;
 "#;
 
+/// Schema v10: Tantivy FTS bookkeeping + saved search keyword (track 0029).
+///
+/// Nullable `fts_*` columns on items track which CAS digest was last indexed.
+/// `saved_searches.keyword` stores the optional body keyword query beside
+/// metadata `filter_json`. Tantivy segments live under `index/` on disk — never
+/// in SQLite (no FTS5 primary).
+const MIGRATION_V10: &str = r#"
+ALTER TABLE items ADD COLUMN fts_text_sha256 TEXT;
+ALTER TABLE items ADD COLUMN fts_indexed_at TEXT;
+ALTER TABLE items ADD COLUMN fts_error TEXT;
+ALTER TABLE saved_searches ADD COLUMN keyword TEXT;
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -434,8 +448,26 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 9);
+        assert_eq!(v, 10);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
+
+        // v10 FTS bookkeeping columns present
+        let has_fts: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'fts_text_sha256'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_fts, "expected fts_text_sha256 on items");
+        let has_kw: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('saved_searches') WHERE name = 'keyword'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pragma");
+        assert!(has_kw, "expected keyword on saved_searches");
 
         // v2 columns present
         let has_role: bool = conn
@@ -1275,7 +1307,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v7 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 9);
+        assert_eq!(v, 10);
 
         let in_review: Option<i64> = conn
             .query_row(
@@ -1381,9 +1413,9 @@ mod tests {
         )
         .expect("code");
 
-        let v = migrate(&conn).expect("migrate v8 to v9");
+        let v = migrate(&conn).expect("migrate v8 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 9);
+        assert_eq!(v, 10);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1419,6 +1451,15 @@ mod tests {
             .expect("idx");
         assert!(has_idx, "expected idx_items_review_list_order");
 
+        let has_fts: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'fts_text_sha256'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fts col");
+        assert!(has_fts);
+
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v8'",
@@ -1451,6 +1492,100 @@ mod tests {
             msg.contains("UNIQUE") || msg.contains("unique"),
             "expected unique violation, got: {msg}"
         );
+    }
+
+    /// v9 fixture → migrate to v10 → data intact + fts_* + keyword columns.
+    #[test]
+    fn migrate_v9_to_v10_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute_batch(MIGRATION_V3).expect("v3");
+        conn.execute_batch(MIGRATION_V4).expect("v4");
+        conn.execute_batch(MIGRATION_V5).expect("v5");
+        conn.execute_batch(MIGRATION_V6).expect("v6");
+        conn.execute_batch(MIGRATION_V7).expect("v7");
+        conn.execute_batch(MIGRATION_V8).expect("v8");
+        conn.execute_batch(MIGRATION_V9).expect("v9");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (9)", [])
+            .expect("meta v9");
+        assert_eq!(read_schema_version(&conn).expect("read"), 9);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v9', 'V9 Matter', '2020-01-01T00:00:00Z', 9, '/tmp/v9')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, text_sha256, in_review) \
+             VALUES ('itm_mail', 'mat_v9', NULL, NULL, 'inbox/a.eml', NULL, \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             'mid@example.com', 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'parent', 'email', 1, \
+             'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1)",
+            [],
+        )
+        .expect("item");
+        conn.execute(
+            "INSERT INTO saved_searches (id, matter_id, name, description, scope, filter_json, \
+             created_at, updated_at, created_by) \
+             VALUES ('ss1', 'mat_v9', 'Alice', NULL, 'review_corpus', '{}', \
+             '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', NULL)",
+            [],
+        )
+        .expect("saved search");
+
+        let v = migrate(&conn).expect("migrate v9 to v10");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 10);
+
+        let path: Option<String> = conn
+            .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
+                row.get(0)
+            })
+            .expect("path");
+        assert_eq!(path.as_deref(), Some("inbox/a.eml"));
+
+        let fts: Option<String> = conn
+            .query_row(
+                "SELECT fts_text_sha256 FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fts");
+        assert!(fts.is_none(), "new fts column starts NULL");
+
+        let keyword: Option<String> = conn
+            .query_row(
+                "SELECT keyword FROM saved_searches WHERE id = 'ss1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("keyword");
+        assert!(keyword.is_none());
+
+        let name: String = conn
+            .query_row(
+                "SELECT name FROM saved_searches WHERE id = 'ss1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("name");
+        assert_eq!(name, "Alice");
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v9'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
     }
 
     /// Each migration step updates schema_meta only after the full batch commits

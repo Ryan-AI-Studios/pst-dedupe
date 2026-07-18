@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v9**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v10**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -17,6 +17,7 @@
 //! - **Review list** thin projections for the desk Review surface (0026)
 //! - **Coding** catalog + item membership + batch apply/remove with audit (0027)
 //! - **Metadata filters** + `saved_searches` + paged filtered review list (0028)
+//! - **FTS bookkeeping** (`fts_*` columns) + filtered-in-ids for Tantivy compose (0029)
 //!
 //! ## Layout
 //!
@@ -24,7 +25,7 @@
 //! <matter-root>/
 //!   matter.db
 //!   blobs/sha256/<aa>/<fullhex>   # CAS (two-hex shard)
-//!   index/                        # reserved (Tantivy)
+//!   index/                        # Tantivy FTS (matter-search; segments on disk)
 //!   exports/                      # reserved (production)
 //!   logs/                         # optional file logs
 //!   workspace/temp/               # extractor spill (cleaned on open/create)
@@ -38,7 +39,8 @@
 //!
 //! ## Out of scope
 //!
-//! Purview/PST I/O, full-matter process jobs, Tantivy, UI, encryption, multi-tenant.
+//! Purview/PST I/O, full-matter process jobs, Tantivy engine (see `matter-search`),
+//! UI, encryption, multi-tenant.
 
 pub mod audit;
 pub mod cas;
@@ -75,11 +77,11 @@ pub use matter::{
     item_cull_status, item_dedup_role, item_dedup_tier, item_near_dup_role, item_role, item_status,
     item_thread_method, ApplyCodesInput, ApplyCodesResult, CodeDef, CodeDefInput, CullCandidate,
     CullFieldUpdate, CullPreset, CullPresetInput, DedupRoleCounts, DedupRoleUpdate,
-    DedupeCandidate, Item, ItemCodeInfo, ItemFamily, ItemInput, ItemUpdate, Matter, MatterInfo,
-    NearDupCandidate, NearDupFieldUpdate, PromoteCandidate, PromoteFieldUpdate, ReviewListRow,
-    ReviewSet, SavedSearch, SavedSearchInput, Source, ThreadCandidate, ThreadFieldUpdate, DB_FILE,
-    DEFAULT_REVIEW_SET_NAME, EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR, LOGS_DIR,
-    WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
+    DedupeCandidate, FtsCandidate, FtsFieldUpdate, Item, ItemCodeInfo, ItemFamily, ItemInput,
+    ItemUpdate, Matter, MatterInfo, NearDupCandidate, NearDupFieldUpdate, PromoteCandidate,
+    PromoteFieldUpdate, ReviewListRow, ReviewSet, SavedSearch, SavedSearchInput, Source,
+    ThreadCandidate, ThreadFieldUpdate, DB_FILE, DEFAULT_REVIEW_SET_NAME, EXPORTS_DIR,
+    FAMILY_KIND_EMAIL_ATTACHMENTS, INDEX_DIR, LOGS_DIR, WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
 };
 pub use schema::SCHEMA_VERSION;
 pub use thread_headers::{

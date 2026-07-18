@@ -103,6 +103,22 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
         {
             app.start_neardup();
         }
+        if ui
+            .add_enabled(!busy, egui::Button::new("Build / Update search index"))
+            .on_hover_text("Incremental Tantivy FTS index (kind=fts_index, reset:false)")
+            .clicked()
+        {
+            app.start_fts_index();
+        }
+        if ui
+            .add_enabled(!busy, egui::Button::new("Rebuild search index"))
+            .on_hover_text(
+                "Full FTS rebuild: drop handles, remove index/, clear fts_*, re-index (reset:true)",
+            )
+            .clicked()
+        {
+            app.start_fts_rebuild();
+        }
 
         ui.separator();
 

@@ -7,7 +7,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v9**) + family graph
+6. **Normalized Item** model (schema **v10**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
@@ -15,8 +15,9 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 11. **Promote** review-set membership columns + `review_sets` + batch helpers (0025)
 12. **Coding** catalog + `item_codes` membership + batch apply/remove with audit (0027)
 13. **Metadata filters** + `saved_searches` + paged filtered review list (0028)
+14. **FTS bookkeeping** (`fts_*`) + filtered-in-ids for Tantivy compose (0029)
 
-Schema version: **9** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, and the review-list ORDER BY partial index.
+Schema version: **10** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, and optional `saved_searches.keyword`. SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
 
 ## Layout
 
@@ -26,7 +27,7 @@ Under a caller-chosen root:
 <matter-root>/
   matter.db                 # SQLite (WAL, foreign_keys ON)
   blobs/sha256/<aa>/<hex>   # CAS — two-hex shard prefix
-  index/                    # reserved for Tantivy (track 0029)
+  index/                    # Tantivy FTS segments (matter-search / track 0029)
   exports/                  # reserved for production (track 0040)
   logs/                     # optional file logs
   workspace/temp/           # extractor spill (cleaned on open/create)

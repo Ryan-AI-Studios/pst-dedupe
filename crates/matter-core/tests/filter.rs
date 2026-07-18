@@ -672,14 +672,17 @@ fn saved_search_upsert_load_delete_roundtrip() {
             name: "Alice docs".into(),
             description: Some("custodian alice".into()),
             filter_json: filter_json.clone(),
+            keyword: Some("confidential".into()),
             created_by: Some("tester".into()),
         })
         .expect("upsert");
     assert_eq!(saved.name, "Alice docs");
     assert_eq!(saved.scope, SCOPE_REVIEW_CORPUS);
+    assert_eq!(saved.keyword.as_deref(), Some("confidential"));
 
     let got = matter.get_saved_search(&saved.id).expect("get");
     assert_eq!(got.filter_json, filter_json);
+    assert_eq!(got.keyword.as_deref(), Some("confidential"));
 
     let list = matter.list_saved_searches().expect("list");
     assert_eq!(list.len(), 1);
@@ -691,10 +694,12 @@ fn saved_search_upsert_load_delete_roundtrip() {
             name: "Alice docs".into(),
             description: Some("updated".into()),
             filter_json,
+            keyword: None,
             created_by: Some("tester".into()),
         })
         .expect("update");
     assert_eq!(updated.description.as_deref(), Some("updated"));
+    assert!(updated.keyword.is_none());
 
     // Audit events
     let save_n: i64 = matter
@@ -730,6 +735,7 @@ fn get_saved_search_scopes_by_matter_id() {
             name: "Mine".into(),
             description: None,
             filter_json: serde_json::to_string(&FilterSpec::default()).unwrap(),
+            keyword: None,
             created_by: Some("tester".into()),
         })
         .expect("own");
@@ -738,7 +744,7 @@ fn get_saved_search_scopes_by_matter_id() {
         .connection()
         .execute(
             "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
-             VALUES ('mat_other_not_us', 'Other', '2020-01-01T00:00:00Z', 9, '/tmp/other')",
+             VALUES ('mat_other_not_us', 'Other', '2020-01-01T00:00:00Z', 10, '/tmp/other')",
             [],
         )
         .expect("insert other matter");
@@ -815,7 +821,7 @@ fn filter_paging_offset_disjoint_count_stable() {
 
 #[test]
 fn migration_has_review_list_order_index() {
-    assert_eq!(SCHEMA_VERSION, 9);
+    assert_eq!(SCHEMA_VERSION, 10);
     let (_tmp, _root, matter, _set_id) = setup_review_matter("filter-idx");
     let exists: bool = matter
         .connection()

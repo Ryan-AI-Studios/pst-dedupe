@@ -9,7 +9,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
 use process_runner::{
     ExtractPstHandler, IngestHandler, JobParams, MatterCullHandler, MatterDedupeHandler,
-    MatterNearDupHandler, MatterPromoteHandler, MatterThreadHandler, ProcessRunner, RunnerConfig,
+    MatterFtsIndexHandler, MatterNearDupHandler, MatterPromoteHandler, MatterThreadHandler,
+    ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -71,6 +72,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterNearDupHandler::new()));
         runner.register(Arc::new(MatterCullHandler::new()));
         runner.register(Arc::new(MatterPromoteHandler::new()));
+        runner.register(Arc::new(MatterFtsIndexHandler::new()));
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 
@@ -381,6 +383,50 @@ impl DeskApp {
         }
     }
 
+    /// Incremental FTS index build/update (`reset: false`).
+    pub(crate) fn start_fts_index(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params = JobParams::new(params::fts_index_default_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "fts_index", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started FTS index job {job_id}"));
+                self.error_msg = None;
+                self.review.index_outdated = false;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Full FTS rebuild (`reset: true`). Drops any cached reader state first.
+    pub(crate) fn start_fts_rebuild(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        // Desk does not hold live MatterIndex Arcs; clear keyword banner state.
+        self.review.keyword_error = None;
+        self.review.index_outdated = false;
+        let params = JobParams::new(params::fts_index_reset_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "fts_index", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started FTS rebuild job {job_id} (reset:true)"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
     /// Human name for the current cull selection (resolves `user:<id>` via snapshot).
     pub(crate) fn cull_preset_display_name(&self) -> String {
         if let Some(id) = self
@@ -584,8 +630,16 @@ impl DeskApp {
             // Refresh lists when a job ends or starts.
             if prev == "running" || state == "succeeded" || state == "paused" || state == "failed" {
                 self.refresh_matter_lists();
-                if prev == "running" && (state == "succeeded" || state == "paused") {
-                    self.pump_extract_queue();
+                // After FTS (or any) job terminal state, re-load Review list so
+                // keyword results / index-outdated banners pick up the new index.
+                if prev == "running"
+                    && (state == "succeeded" || state == "paused" || state == "failed")
+                {
+                    self.review.request_reload();
+                    self.review.index_outdated = false;
+                    if state == "succeeded" || state == "paused" {
+                        self.pump_extract_queue();
+                    }
                 }
             }
         }
@@ -793,7 +847,21 @@ impl eframe::App for DeskApp {
             Screen::Review => {
                 if let Some(root) = self.matter_root.clone() {
                     let actor = self.settings.actor().to_string();
-                    review_ui::show(ui, &mut self.review, &root, &actor);
+                    let mut fts_req = None;
+                    let index_job_busy = self.job_may_be_writing();
+                    review_ui::show(
+                        ui,
+                        &mut self.review,
+                        &root,
+                        &actor,
+                        &mut fts_req,
+                        index_job_busy,
+                    );
+                    match fts_req {
+                        Some(review_ui::FtsUiRequest::UpdateIndex) => self.start_fts_index(),
+                        Some(review_ui::FtsUiRequest::RebuildIndex) => self.start_fts_rebuild(),
+                        None => {}
+                    }
                 } else {
                     ui.label("Open a matter to review.");
                 }

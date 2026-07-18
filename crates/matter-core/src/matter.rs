@@ -591,9 +591,10 @@ pub struct CullPresetInput {
     pub created_by: Option<String>,
 }
 
-/// Named saved search (schema v9 / track 0028).
+/// Named saved search (schema v9+ / tracks 0028–0029).
 ///
 /// `filter_json` is a serialized [`FilterSpec`]; load re-runs against live item state.
+/// Optional `keyword` is the body FTS query (Tantivy; not compiled into SQL).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedSearch {
     pub id: String,
@@ -603,6 +604,8 @@ pub struct SavedSearch {
     /// `review_corpus` or `entire_matter` (denormalized from FilterSpec for listing).
     pub scope: String,
     pub filter_json: String,
+    /// Optional keyword / Boolean query for Tantivy FTS (schema v10).
+    pub keyword: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub created_by: Option<String>,
@@ -617,7 +620,33 @@ pub struct SavedSearchInput {
     pub description: Option<String>,
     /// Serialized [`FilterSpec`] JSON (validated on upsert).
     pub filter_json: String,
+    /// Optional keyword query (body FTS). Empty string stored as NULL.
+    pub keyword: Option<String>,
     pub created_by: Option<String>,
+}
+
+/// One item's FTS bookkeeping assignment for transactional batch write (schema v10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FtsFieldUpdate {
+    pub item_id: String,
+    pub fts_text_sha256: Option<String>,
+    pub fts_indexed_at: Option<String>,
+    pub fts_error: Option<String>,
+}
+
+/// Thin row for FTS index candidates (no body text).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FtsCandidate {
+    pub id: String,
+    pub subject: Option<String>,
+    pub title: Option<String>,
+    pub path: Option<String>,
+    pub text_sha256: Option<String>,
+    pub html_sha256: Option<String>,
+    pub fts_text_sha256: Option<String>,
+    pub role: Option<String>,
+    pub parent_item_id: Option<String>,
+    pub family_id: Option<String>,
 }
 
 /// Partial update for an existing item.
@@ -2808,6 +2837,7 @@ impl Matter {
     }
 
     // --- Metadata filters + saved searches (schema v9 / track 0028) ---
+    // --- FTS bookkeeping + id-restricted filter (schema v10 / track 0029) ---
 
     /// Count items matching a metadata [`FilterSpec`].
     ///
@@ -2850,6 +2880,203 @@ impl Matter {
             .map_err(Error::from)
     }
 
+    /// Count items matching [`FilterSpec`] restricted to `item_ids` (FTS ∩ filter).
+    ///
+    /// When `include_family` is true: intersect first (filter on FTS hits only),
+    /// then expand family membership on the outer result (0029 lock).
+    pub fn count_items_filtered_in_ids(
+        &self,
+        spec: &FilterSpec,
+        item_ids: &[String],
+    ) -> Result<u64> {
+        if item_ids.is_empty() {
+            return Ok(0);
+        }
+        self.with_fts_hit_temp(item_ids, || {
+            let compiled = self.compile_filter_intersect_hits(spec)?;
+            let n: i64 = self.conn.query_row(
+                &compiled.count_sql,
+                params_from_iter(compiled.params.iter().cloned()),
+                |row| row.get(0),
+            )?;
+            Ok(n as u64)
+        })
+    }
+
+    /// Thin filtered rows restricted to FTS hit ids (temp-table join).
+    ///
+    /// Same columns/order as [`Self::list_items_filtered_thin`]. Family expand
+    /// (if requested) applies **after** FTS ∩ metadata intersection.
+    pub fn list_items_filtered_thin_in_ids(
+        &self,
+        spec: &FilterSpec,
+        item_ids: &[String],
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<ReviewListRow>> {
+        if item_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_fts_hit_temp(item_ids, || {
+            let compiled = self.compile_filter_intersect_hits(spec)?;
+            let limit_i = if limit == u64::MAX {
+                i64::MAX
+            } else {
+                limit as i64
+            };
+            let offset_i = offset as i64;
+            let mut params = compiled.params;
+            params.push(Value::Integer(limit_i));
+            params.push(Value::Integer(offset_i));
+            let mut stmt = self.conn.prepare(&compiled.list_sql)?;
+            let rows = stmt.query_map(params_from_iter(params), map_review_list_row)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Error::from)
+        })
+    }
+
+    /// Eligible FTS candidates with text or HTML CAS, ordered stably.
+    ///
+    /// Status filter: extracted-like (`extracted` / `partial` / `normalized`).
+    pub fn list_fts_candidates(&self, offset: u64, limit: u64) -> Result<Vec<FtsCandidate>> {
+        let limit_i = if limit == u64::MAX {
+            i64::MAX
+        } else {
+            limit as i64
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT id, subject, title, path, text_sha256, html_sha256, fts_text_sha256, \
+                    role, parent_item_id, family_id \
+             FROM items \
+             WHERE matter_id = ?1 \
+               AND status IN ('extracted', 'partial', 'normalized') \
+               AND (text_sha256 IS NOT NULL OR html_sha256 IS NOT NULL) \
+             ORDER BY imported_at ASC, path ASC, id ASC \
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![self.matter_id, limit_i, offset as i64],
+            map_fts_candidate_row,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Items that still have FTS bookkeeping but are no longer index-eligible
+    /// (no text CAS, or status not extracted-like). The FTS job should
+    /// `delete_term` these and clear `fts_*` so searches do not return ghosts.
+    pub fn list_fts_orphans(&self, offset: u64, limit: u64) -> Result<Vec<String>> {
+        let limit_i = if limit == u64::MAX {
+            i64::MAX
+        } else {
+            limit as i64
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM items \
+             WHERE matter_id = ?1 \
+               AND fts_text_sha256 IS NOT NULL \
+               AND ( \
+                 status NOT IN ('extracted', 'partial', 'normalized') \
+                 OR (text_sha256 IS NULL AND html_sha256 IS NULL) \
+               ) \
+             ORDER BY id ASC \
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt.query_map(params![self.matter_id, limit_i, offset as i64], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Attachment child paths keyed by parent item id (role = `attachment`).
+    pub fn list_attachment_names_for_parents(
+        &self,
+        parent_ids: &[String],
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        if parent_ids.is_empty() {
+            return Ok(out);
+        }
+        // Chunk to avoid huge IN lists.
+        const CHUNK: usize = 500;
+        for chunk in parent_ids.chunks(CHUNK) {
+            let placeholders: String = (1..=chunk.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT parent_item_id, path FROM items \
+                 WHERE matter_id = ?{mat} \
+                   AND IFNULL(role, '') = 'attachment' \
+                   AND parent_item_id IN ({placeholders}) \
+                 ORDER BY parent_item_id ASC, path ASC, id ASC",
+                mat = chunk.len() + 1
+            );
+            let mut params: Vec<Value> = chunk.iter().map(|id| Value::Text(id.clone())).collect();
+            params.push(Value::Text(self.matter_id.clone()));
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(params), |row| {
+                let parent: String = row.get(0)?;
+                let path: Option<String> = row.get(1)?;
+                Ok((parent, path))
+            })?;
+            for row in rows {
+                let (parent, path) = row?;
+                if let Some(p) = path {
+                    if !p.is_empty() {
+                        out.entry(parent).or_default().push(p);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Clear all FTS bookkeeping columns for this matter (full rebuild prep).
+    pub fn clear_fts_fields(&self) -> Result<u64> {
+        let matter_id = self.matter_id.clone();
+        self.with_transaction(|conn| {
+            let n = conn.execute(
+                "UPDATE items SET fts_text_sha256 = NULL, fts_indexed_at = NULL, fts_error = NULL \
+                 WHERE matter_id = ?1",
+                params![matter_id],
+            )?;
+            Ok(n as u64)
+        })
+    }
+
+    /// Apply N FTS field updates and upsert the job checkpoint in **one**
+    /// SQLite transaction (same pattern as near-dup / promote).
+    pub fn apply_fts_batch_with_checkpoint(
+        &self,
+        job_id: &str,
+        stage: &str,
+        updates: &[FtsFieldUpdate],
+        cursor_json: &str,
+        completed_count: i64,
+    ) -> Result<()> {
+        let now = now_rfc3339();
+        self.with_transaction(|conn| {
+            for u in updates {
+                conn.execute(
+                    "UPDATE items SET \
+                        fts_text_sha256 = ?1, fts_indexed_at = ?2, fts_error = ?3 \
+                     WHERE id = ?4",
+                    params![u.fts_text_sha256, u.fts_indexed_at, u.fts_error, u.item_id,],
+                )?;
+            }
+            jobs::put_checkpoint(conn, job_id, stage, cursor_json, completed_count, &now)?;
+            Ok(())
+        })
+    }
+
     /// Compile a filter with this matter's id and default review-set resolution.
     fn compile_filter_for_matter(&self, spec: &FilterSpec) -> Result<filter::CompiledFilter> {
         let review_set_id = if spec.scope == filter::SCOPE_REVIEW_CORPUS {
@@ -2860,10 +3087,143 @@ impl Matter {
         filter::compile_filter(spec, &self.matter_id, review_set_id.as_deref())
     }
 
+    /// Compile FilterSpec ∩ temp FTS hit ids; family expand after intersect when set.
+    fn compile_filter_intersect_hits(&self, spec: &FilterSpec) -> Result<filter::CompiledFilter> {
+        let review_set_id = if spec.scope == filter::SCOPE_REVIEW_CORPUS {
+            self.resolve_review_set_filter(None)?
+        } else {
+            None
+        };
+        // Force non-family compile, then wrap with hit restriction (+ optional family).
+        let mut intersect_spec = spec.clone();
+        let want_family = intersect_spec.include_family;
+        intersect_spec.include_family = false;
+        let compiled =
+            filter::compile_filter(&intersect_spec, &self.matter_id, review_set_id.as_deref())?;
+
+        // Inject `AND i.id IN (SELECT id FROM temp_fts_hits)` into the WHERE of
+        // the non-family list/count SQL.
+        let list_sql = inject_fts_hit_restriction(&compiled.list_sql);
+        let count_sql = inject_fts_hit_restriction(&compiled.count_sql);
+
+        if !want_family {
+            return Ok(filter::CompiledFilter {
+                list_sql,
+                count_sql,
+                params: compiled.params,
+            });
+        }
+
+        // Family expand after intersect: hits CTE = filtered ∩ FTS; outer expands.
+        let matter_id = &self.matter_id;
+        let mut outer_params: Vec<Value> = Vec::new();
+        let mut outer_scope: Vec<String> = Vec::new();
+        outer_scope.push("out.matter_id = ?".into());
+        outer_params.push(Value::Text(matter_id.to_string()));
+        match spec.scope.as_str() {
+            filter::SCOPE_REVIEW_CORPUS => {
+                outer_scope.push("out.in_review = 1".into());
+                if let Some(sid) = review_set_id.as_deref() {
+                    outer_scope.push("out.review_set_id = ?".into());
+                    outer_params.push(Value::Text(sid.to_string()));
+                }
+            }
+            filter::SCOPE_ENTIRE_MATTER => {
+                outer_scope.push("out.status IN ('extracted', 'partial', 'normalized')".into());
+            }
+            _ => {}
+        }
+        let outer_where = outer_scope.join(" AND ");
+        let order = filter::order_by_clause("out");
+        let cols = filter::thin_columns_sql_qualified("out");
+
+        // Hits WHERE params from the intersected non-family filter.
+        // Extract the WHERE clause body from count_sql after injection.
+        // Simpler: rebuild hits from items with same params as compiled.
+        // compiled.count_sql is like: SELECT COUNT(*) FROM items i WHERE ... AND i.id IN (...)
+        // We need the WHERE portion. Use list approach with CTE.
+        let where_sql = extract_where_clause(&list_sql).ok_or_else(|| {
+            Error::Other("failed to extract WHERE from filtered-in-ids SQL".into())
+        })?;
+
+        let mut all_params = compiled.params;
+        all_params.extend(outer_params);
+
+        let list_sql = format!(
+            "WITH hits AS ( \
+                 SELECT i.id, i.family_id, \
+                        COALESCE(i.parent_item_id, i.id) AS family_root \
+                 FROM items i \
+                 WHERE {where_sql} \
+             ) \
+             SELECT DISTINCT {cols} \
+             FROM items out \
+             WHERE {outer_where} \
+               AND ( \
+                 (out.family_id IS NOT NULL AND out.family_id IN ( \
+                     SELECT family_id FROM hits WHERE family_id IS NOT NULL \
+                 )) \
+                 OR out.id IN (SELECT family_root FROM hits) \
+                 OR out.parent_item_id IN (SELECT family_root FROM hits) \
+               ) \
+             ORDER BY {order} \
+             LIMIT ? OFFSET ?"
+        );
+        let count_sql = format!(
+            "WITH hits AS ( \
+                 SELECT i.id, i.family_id, \
+                        COALESCE(i.parent_item_id, i.id) AS family_root \
+                 FROM items i \
+                 WHERE {where_sql} \
+             ) \
+             SELECT COUNT(*) FROM ( \
+                 SELECT DISTINCT out.id \
+                 FROM items out \
+                 WHERE {outer_where} \
+                   AND ( \
+                     (out.family_id IS NOT NULL AND out.family_id IN ( \
+                         SELECT family_id FROM hits WHERE family_id IS NOT NULL \
+                     )) \
+                     OR out.id IN (SELECT family_root FROM hits) \
+                     OR out.parent_item_id IN (SELECT family_root FROM hits) \
+                   ) \
+             )"
+        );
+
+        Ok(filter::CompiledFilter {
+            list_sql,
+            count_sql,
+            params: all_params,
+        })
+    }
+
+    /// Populate a connection-local TEMP table of FTS hit ids for the closure.
+    fn with_fts_hit_temp<T>(
+        &self,
+        item_ids: &[String],
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.conn.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS temp_fts_hits (id TEXT PRIMARY KEY NOT NULL);
+             DELETE FROM temp_fts_hits;",
+        )?;
+        {
+            let mut stmt = self
+                .conn
+                .prepare("INSERT OR IGNORE INTO temp_fts_hits (id) VALUES (?1)")?;
+            for id in item_ids {
+                stmt.execute(params![id])?;
+            }
+        }
+        let result = f();
+        let _ = self.conn.execute_batch("DELETE FROM temp_fts_hits;");
+        result
+    }
+
     /// List saved searches for this matter, ordered by name.
     pub fn list_saved_searches(&self) -> Result<Vec<SavedSearch>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, matter_id, name, description, scope, filter_json, \
+            "SELECT id, matter_id, name, description, scope, filter_json, keyword, \
                     created_at, updated_at, created_by \
              FROM saved_searches WHERE matter_id = ?1 ORDER BY name ASC",
         )?;
@@ -2876,7 +3236,7 @@ impl Matter {
     pub fn get_saved_search(&self, search_id: &str) -> Result<SavedSearch> {
         self.conn
             .query_row(
-                "SELECT id, matter_id, name, description, scope, filter_json, \
+                "SELECT id, matter_id, name, description, scope, filter_json, keyword, \
                         created_at, updated_at, created_by \
                  FROM saved_searches WHERE id = ?1 AND matter_id = ?2",
                 params![search_id, self.matter_id],
@@ -2910,6 +3270,11 @@ impl Matter {
         let _ = self.compile_filter_for_matter(&spec)?;
         let scope = spec.scope.clone();
         let filter_json = serde_json::to_string(&spec)?;
+        let keyword = input
+            .keyword
+            .as_ref()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty());
 
         let saved = if let Some(ref id) = input.id {
             let existing = self.get_saved_search(id)?;
@@ -2933,13 +3298,15 @@ impl Matter {
             }
             self.conn.execute(
                 "UPDATE saved_searches SET name = ?1, description = ?2, scope = ?3, \
-                 filter_json = ?4, updated_at = ?5, created_by = COALESCE(?6, created_by) \
-                 WHERE id = ?7",
+                 filter_json = ?4, keyword = ?5, updated_at = ?6, \
+                 created_by = COALESCE(?7, created_by) \
+                 WHERE id = ?8",
                 params![
                     name,
                     input.description,
                     scope,
                     filter_json,
+                    keyword,
                     now,
                     input.created_by,
                     id
@@ -2963,8 +3330,8 @@ impl Matter {
             let id = new_id("ssr");
             self.conn.execute(
                 "INSERT INTO saved_searches (id, matter_id, name, description, scope, \
-                 filter_json, created_at, updated_at, created_by) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 filter_json, keyword, created_at, updated_at, created_by) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     id,
                     self.matter_id,
@@ -2972,6 +3339,7 @@ impl Matter {
                     input.description,
                     scope,
                     filter_json,
+                    keyword,
                     now,
                     now,
                     input.created_by
@@ -2987,6 +3355,7 @@ impl Matter {
             params_json: serde_json::json!({
                 "name": saved.name,
                 "scope": saved.scope,
+                "has_keyword": saved.keyword.is_some(),
             })
             .to_string(),
             tool_version: env!("CARGO_PKG_VERSION").into(),
@@ -2994,7 +3363,6 @@ impl Matter {
 
         Ok(saved)
     }
-
     /// Delete a saved search. Does **not** affect item codes or membership.
     ///
     /// Audits `search.delete`.
@@ -3794,10 +4162,60 @@ fn map_saved_search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedSearch
         description: row.get(3)?,
         scope: row.get(4)?,
         filter_json: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
-        created_by: row.get(8)?,
+        keyword: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        created_by: row.get(9)?,
     })
+}
+
+fn map_fts_candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FtsCandidate> {
+    Ok(FtsCandidate {
+        id: row.get(0)?,
+        subject: row.get(1)?,
+        title: row.get(2)?,
+        path: row.get(3)?,
+        text_sha256: row.get(4)?,
+        html_sha256: row.get(5)?,
+        fts_text_sha256: row.get(6)?,
+        role: row.get(7)?,
+        parent_item_id: row.get(8)?,
+        family_id: row.get(9)?,
+    })
+}
+
+/// Inject FTS hit-id restriction into non-family filter SQL.
+///
+/// Inserts `AND i.id IN (SELECT id FROM temp_fts_hits)` before `ORDER BY` /
+/// end of statement. Expects the items alias `i` used by [`filter::compile_filter`].
+fn inject_fts_hit_restriction(sql: &str) -> String {
+    const CLAUSE: &str = " AND i.id IN (SELECT id FROM temp_fts_hits)";
+    // Prefer inserting before ORDER BY (list) or at end (count).
+    if let Some(idx) = sql.find(" ORDER BY ") {
+        let mut s = String::with_capacity(sql.len() + CLAUSE.len());
+        s.push_str(&sql[..idx]);
+        s.push_str(CLAUSE);
+        s.push_str(&sql[idx..]);
+        s
+    } else {
+        format!("{sql}{CLAUSE}")
+    }
+}
+
+/// Extract the WHERE clause body from a simple `… WHERE … [ORDER BY …] [LIMIT …]` SQL.
+///
+/// Returns the text after ` WHERE ` up to (not including) ` ORDER BY ` / ` LIMIT `.
+fn extract_where_clause(sql: &str) -> Option<String> {
+    let upper = sql.to_ascii_uppercase();
+    let where_pos = upper.find(" WHERE ")?;
+    let start = where_pos + " WHERE ".len();
+    let rest = &sql[start..];
+    let rest_upper = rest.to_ascii_uppercase();
+    let end = rest_upper
+        .find(" ORDER BY ")
+        .or_else(|| rest_upper.find(" LIMIT "))
+        .unwrap_or(rest.len());
+    Some(rest[..end].trim().to_string())
 }
 
 fn map_dedupe_candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DedupeCandidate> {
