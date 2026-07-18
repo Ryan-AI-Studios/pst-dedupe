@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -24,6 +24,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (8, MIGRATION_V8),
     (9, MIGRATION_V9),
     (10, MIGRATION_V10),
+    (11, MIGRATION_V11),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -352,6 +353,58 @@ ALTER TABLE items ADD COLUMN fts_error TEXT;
 ALTER TABLE saved_searches ADD COLUMN keyword TEXT;
 "#;
 
+/// Schema v11: stand-off notes + text highlights (track 0030).
+///
+/// Work-product annotations beside the document — never rewrite CAS body text.
+/// Highlights store UTF-8 **char** indices + TextQuoteSelector-style fields.
+/// Denormalized `note_count` / `highlight_count` on items keep list badges fast.
+/// Hard-delete is OK; audit retains body / range snapshots.
+const MIGRATION_V11: &str = r#"
+CREATE TABLE item_notes (
+    id TEXT PRIMARY KEY NOT NULL,
+    item_id TEXT NOT NULL,
+    matter_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    highlight_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    updated_by TEXT NOT NULL
+);
+
+CREATE INDEX idx_item_notes_item_updated
+  ON item_notes(item_id, updated_at DESC);
+
+CREATE INDEX idx_item_notes_matter ON item_notes(matter_id);
+
+CREATE INDEX idx_item_notes_highlight ON item_notes(highlight_id);
+
+CREATE TABLE item_highlights (
+    id TEXT PRIMARY KEY NOT NULL,
+    item_id TEXT NOT NULL,
+    matter_id TEXT NOT NULL,
+    start_utf8 INTEGER NOT NULL,
+    end_utf8 INTEGER NOT NULL,
+    exact_quote TEXT NOT NULL,
+    prefix TEXT,
+    suffix TEXT,
+    body_digest TEXT NOT NULL,
+    color TEXT NOT NULL DEFAULT '#FFF59D',
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT NOT NULL
+);
+
+CREATE INDEX idx_item_highlights_item ON item_highlights(item_id);
+
+CREATE INDEX idx_item_highlights_matter_status
+  ON item_highlights(matter_id, status);
+
+ALTER TABLE items ADD COLUMN note_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE items ADD COLUMN highlight_count INTEGER NOT NULL DEFAULT 0;
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -448,7 +501,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 10);
+        assert_eq!(v, 11);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v10 FTS bookkeeping columns present
@@ -460,6 +513,15 @@ mod tests {
             )
             .expect("pragma");
         assert!(has_fts, "expected fts_text_sha256 on items");
+        // v11 notes / highlights
+        let has_notes: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_notes'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("item_notes");
+        assert!(has_notes);
         let has_kw: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('saved_searches') WHERE name = 'keyword'",
@@ -1307,7 +1369,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v7 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 10);
+        assert_eq!(v, 11);
 
         let in_review: Option<i64> = conn
             .query_row(
@@ -1415,7 +1477,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v8 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 10);
+        assert_eq!(v, 11);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1494,7 +1556,7 @@ mod tests {
         );
     }
 
-    /// v9 fixture → migrate to v10 → data intact + fts_* + keyword columns.
+    /// v9 fixture → migrate to current → data intact + fts_* + keyword columns.
     #[test]
     fn migrate_v9_to_v10_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -1540,9 +1602,8 @@ mod tests {
         )
         .expect("saved search");
 
-        let v = migrate(&conn).expect("migrate v9 to v10");
+        let v = migrate(&conn).expect("migrate v9 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 10);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1581,6 +1642,116 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v9'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    /// v10 fixture → migrate to v11 → data intact + notes/highlights tables + counts.
+    #[test]
+    fn migrate_v10_to_v11_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute_batch(MIGRATION_V3).expect("v3");
+        conn.execute_batch(MIGRATION_V4).expect("v4");
+        conn.execute_batch(MIGRATION_V5).expect("v5");
+        conn.execute_batch(MIGRATION_V6).expect("v6");
+        conn.execute_batch(MIGRATION_V7).expect("v7");
+        conn.execute_batch(MIGRATION_V8).expect("v8");
+        conn.execute_batch(MIGRATION_V9).expect("v9");
+        conn.execute_batch(MIGRATION_V10).expect("v10");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (10)", [])
+            .expect("meta v10");
+        assert_eq!(read_schema_version(&conn).expect("read"), 10);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v10', 'V10 Matter', '2020-01-01T00:00:00Z', 10, '/tmp/v10')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, text_sha256, in_review, \
+             fts_text_sha256) \
+             VALUES ('itm_mail', 'mat_v10', NULL, NULL, 'inbox/a.eml', NULL, \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             'mid@example.com', 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'parent', 'email', 1, \
+             'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1, \
+             'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v10 to v11");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 11);
+
+        let path: Option<String> = conn
+            .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
+                row.get(0)
+            })
+            .expect("path");
+        assert_eq!(path.as_deref(), Some("inbox/a.eml"));
+
+        let note_count: i64 = conn
+            .query_row(
+                "SELECT note_count FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("note_count");
+        assert_eq!(note_count, 0);
+
+        let hl_count: i64 = conn
+            .query_row(
+                "SELECT highlight_count FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("highlight_count");
+        assert_eq!(hl_count, 0);
+
+        let has_notes: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_notes'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("item_notes");
+        assert!(has_notes);
+
+        let has_hl: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_highlights'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("item_highlights");
+        assert!(has_hl);
+
+        let fts: Option<String> = conn
+            .query_row(
+                "SELECT fts_text_sha256 FROM items WHERE id = 'itm_mail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fts");
+        assert_eq!(
+            fts.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v10'",
                 [],
                 |row| row.get(0),
             )

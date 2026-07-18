@@ -820,8 +820,68 @@ fn filter_paging_offset_disjoint_count_stable() {
 }
 
 #[test]
+fn filter_has_notes_and_note_text() {
+    use matter_core::UpsertNoteInput;
+
+    let (_tmp, _root, matter, set_id) = setup_review_matter("filter-has-notes");
+    let with_note = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            subject: Some("noted".into()),
+            ..Default::default()
+        })
+        .expect("with");
+    let bare = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            subject: Some("bare".into()),
+            ..Default::default()
+        })
+        .expect("bare");
+    promote_item(&matter, &with_note.id, &set_id, 1).unwrap();
+    promote_item(&matter, &bare.id, &set_id, 2).unwrap();
+
+    matter
+        .upsert_note(UpsertNoteInput {
+            id: None,
+            item_id: with_note.id.clone(),
+            body: "special counsel phrase".into(),
+            highlight_id: None,
+            actor: "tester".into(),
+        })
+        .expect("note");
+
+    let has = FilterSpec::preset_has_notes();
+    let rows = matter.list_items_filtered_thin(&has, 100, 0).expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, with_note.id);
+
+    let text = FilterSpec {
+        conditions: vec![FilterCondition {
+            field: "note_text".into(),
+            op: "contains".into(),
+            value: Some(serde_json::json!("counsel")),
+            values: None,
+            start: None,
+            end: None,
+        }],
+        ..FilterSpec::default()
+    };
+    let rows2 = matter
+        .list_items_filtered_thin(&text, 100, 0)
+        .expect("text");
+    assert_eq!(rows2.len(), 1);
+    assert_eq!(rows2[0].id, with_note.id);
+
+    // Saved-search round-trip still FilterSpec v1.
+    let j = serde_json::to_string(&has).expect("ser");
+    let back: FilterSpec = serde_json::from_str(&j).expect("de");
+    assert_eq!(back, has);
+}
+
+#[test]
 fn migration_has_review_list_order_index() {
-    assert_eq!(SCHEMA_VERSION, 10);
+    assert_eq!(SCHEMA_VERSION, 11);
     let (_tmp, _root, matter, _set_id) = setup_review_matter("filter-idx");
     let exists: bool = matter
         .connection()

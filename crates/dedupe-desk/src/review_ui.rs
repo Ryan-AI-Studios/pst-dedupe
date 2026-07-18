@@ -1,5 +1,5 @@
 //! Review screen: linear corpus list + body viewer + family strip + coding + filters
-//! (0026/0027/0028).
+//! + notes/highlights (0026/0027/0028/0029/0030).
 //!
 //! # List virtualization
 //!
@@ -25,6 +25,11 @@
 //! Metadata [`FilterSpec`] composes with optional Tantivy keyword via
 //! `compose_keyword_filter`. Keyword / filter text fields steal focus; digit
 //! shortcuts respect `focus().is_none()`.
+//!
+//! # Notes / highlights (0030)
+//!
+//! Stand-off work-product annotations in the matter DB (never CAS). Selectable
+//! body + yellow paint for active ranges; notes panel for document/passage notes.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -34,11 +39,18 @@ use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense};
 use matter_core::{
     parse_bound_instant, ApplyCodesInput, ApplyCodesResult, CodeDef, CodeDefInput, FilterCondition,
-    FilterSpec, ItemCodeInfo, Matter, ReviewListRow, SavedSearch, SavedSearchInput,
+    FilterSpec, ItemCodeInfo, ItemHighlight, ItemNote, Matter, ResolvedHighlight, ReviewListRow,
+    SavedSearch, SavedSearchInput, UpsertNoteInput,
 };
 
 use crate::review_body::{BodyLoader, BodyPane};
 use crate::review_nav;
+use crate::review_notes::{
+    body_digest_for_item, body_job_for_ui, find_highlight_for_selection, find_resolved,
+    focus_allows_coding_shortcuts, highlight_input_from_selection, highlight_ui_status,
+    note_upsert_from_draft, passage_note_hint_from_quote, resolve_for_paint,
+    selection_from_char_range, stale_count_for_ui, BodySelection,
+};
 
 /// Fixed list row height (sans item spacing) for `ScrollArea::show_rows`.
 pub const ROW_HEIGHT: f32 = 22.0;
@@ -73,7 +85,7 @@ struct BatchConfirm {
     propagate_family: bool,
 }
 
-/// Draft fields for the Review filter bar (0028).
+/// Draft fields for the Review filter bar (0028 + 0030 notes chips).
 #[derive(Debug, Clone, Default)]
 pub struct FilterDraft {
     pub custodian: String,
@@ -85,6 +97,12 @@ pub struct FilterDraft {
     /// Uncoded chip / `code_missing eq true`. Mutually exclusive with [`Self::code_keys`]
     /// when serializing via [`Self::to_filter_spec`].
     pub code_missing: bool,
+    /// `has_notes eq true` chip (track 0030).
+    pub has_notes: bool,
+    /// `has_highlights eq true` chip (track 0030).
+    pub has_highlights: bool,
+    /// Optional note body contains (LIKE).
+    pub note_text: String,
     /// Name for Save as.
     pub save_name: String,
     /// Currently selected saved search id in the dropdown (if any).
@@ -127,6 +145,37 @@ impl FilterDraft {
                 op: "any_of".into(),
                 value: None,
                 values: Some(keys),
+                start: None,
+                end: None,
+            });
+        }
+        if self.has_notes {
+            conditions.push(FilterCondition {
+                field: "has_notes".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        if self.has_highlights {
+            conditions.push(FilterCondition {
+                field: "has_highlights".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        let note_q = self.note_text.trim();
+        if !note_q.is_empty() {
+            conditions.push(FilterCondition {
+                field: "note_text".into(),
+                op: "contains".into(),
+                value: Some(serde_json::json!(note_q)),
+                values: None,
                 start: None,
                 end: None,
             });
@@ -181,6 +230,17 @@ impl FilterDraft {
                     d.code_missing = want;
                     if want {
                         d.code_keys.clear();
+                    }
+                }
+                ("has_notes", "eq") => {
+                    d.has_notes = c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
+                }
+                ("has_highlights", "eq") => {
+                    d.has_highlights = c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
+                }
+                ("note_text", "contains") => {
+                    if let Some(v) = c.value.as_ref().and_then(|v| v.as_str()) {
+                        d.note_text = v.to_string();
                     }
                 }
                 ("best_effort_date" | "sent_at" | "received_at", "between") => {
@@ -272,6 +332,45 @@ pub struct ReviewState {
     filter_error: Option<String>,
     /// Filter status line (e.g. saved / loaded).
     filter_status: Option<String>,
+    /// Notes for the current selection (newest first).
+    item_notes: Vec<ItemNote>,
+    /// Highlights for the current selection (stored SQLite rows).
+    item_highlights: Vec<ItemHighlight>,
+    /// `(item_id, display_digest)` for which we already ran
+    /// `resolve_highlights(..., persist_stale: true)` this session.
+    stale_persist_key: Option<(String, String)>,
+    /// Draft for new document or passage note (user-entered only).
+    note_draft: String,
+    /// When set, next Save binds the draft as a passage note to this highlight.
+    pending_highlight_id: Option<String>,
+    /// Hint-only quote context for the passage-note editor (never auto-saved).
+    passage_note_hint: String,
+    /// Note id being edited (if any) + draft body.
+    note_edit_id: Option<String>,
+    note_edit_body: String,
+    /// Last body char selection (for Highlight / Note on selection).
+    body_selection: Option<BodySelection>,
+    /// Buffer for selectable body TextEdit (reverted if mutated).
+    body_edit_buf: String,
+    /// Item id that `body_edit_buf` was synced from.
+    body_edit_item_id: Option<String>,
+    /// True when a notes TextEdit had focus last frame (coding focus gate).
+    note_editor_focused: bool,
+    /// Notes/highlights status / errors.
+    notes_status: Option<String>,
+    notes_error: Option<String>,
+    /// Async note/highlight mutate in flight.
+    notes_busy: bool,
+    notes_rx: Option<Receiver<Result<NotesMutateResult, String>>>,
+}
+
+/// Result of an off-thread notes/highlights mutation.
+#[derive(Debug)]
+struct NotesMutateResult {
+    item_id: String,
+    notes: Vec<ItemNote>,
+    highlights: Vec<ItemHighlight>,
+    message: String,
 }
 
 impl ReviewState {
@@ -312,6 +411,22 @@ impl ReviewState {
         self.saved_searches.clear();
         self.filter_error = None;
         self.filter_status = None;
+        self.item_notes.clear();
+        self.item_highlights.clear();
+        self.stale_persist_key = None;
+        self.note_draft.clear();
+        self.pending_highlight_id = None;
+        self.passage_note_hint.clear();
+        self.note_edit_id = None;
+        self.note_edit_body.clear();
+        self.body_selection = None;
+        self.body_edit_buf.clear();
+        self.body_edit_item_id = None;
+        self.note_editor_focused = false;
+        self.notes_status = None;
+        self.notes_error = None;
+        self.notes_busy = false;
+        self.notes_rx = None;
     }
 
     /// Request a thin-list reload on next show.
@@ -815,6 +930,376 @@ impl ReviewState {
             });
     }
 
+    fn clear_notes_for_selection(&mut self) {
+        self.item_notes.clear();
+        self.item_highlights.clear();
+        self.stale_persist_key = None;
+        self.note_draft.clear();
+        self.pending_highlight_id = None;
+        self.passage_note_hint.clear();
+        self.note_edit_id = None;
+        self.note_edit_body.clear();
+        self.body_selection = None;
+        self.body_edit_buf.clear();
+        self.body_edit_item_id = None;
+        self.notes_status = None;
+        self.notes_error = None;
+    }
+
+    fn reload_notes_for_selection(&mut self, matter_root: &Utf8Path) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            self.clear_notes_for_selection();
+            return;
+        };
+        match load_notes_highlights(matter_root, &item_id) {
+            Ok((notes, highlights)) => {
+                self.item_notes = notes;
+                self.item_highlights = highlights;
+                // Force re-resolve + optional persist against the current body.
+                self.stale_persist_key = None;
+                self.notes_error = None;
+            }
+            Err(e) => {
+                self.item_notes.clear();
+                self.item_highlights.clear();
+                self.stale_persist_key = None;
+                self.notes_error = Some(e);
+            }
+        }
+    }
+
+    /// Ready display body for the current selection, if loaded.
+    fn ready_body_for_item(&self, item_id: &str) -> Option<&str> {
+        match self.body.pane() {
+            BodyPane::Ready {
+                item_id: bid,
+                text: Ok(t),
+                ..
+            } if bid == item_id => Some(t.as_str()),
+            _ => None,
+        }
+    }
+
+    /// In-memory re-resolve against the ready body (None when body not ready).
+    fn resolved_highlights_for_item(
+        &self,
+        item_id: &str,
+        text_sha256: Option<&str>,
+    ) -> Option<Vec<ResolvedHighlight>> {
+        let body = self.ready_body_for_item(item_id)?;
+        let digest = body_digest_for_item(text_sha256, body);
+        Some(resolve_for_paint(&self.item_highlights, body, &digest))
+    }
+
+    /// Persist `status=stale` in SQLite once per (item, digest) when body is ready.
+    /// UI still prefers in-memory resolve; this only aligns stored rows.
+    fn maybe_persist_stale_resolves(
+        &mut self,
+        matter_root: &Utf8Path,
+        item_id: &str,
+        text_sha256: Option<&str>,
+    ) {
+        if self.item_highlights.is_empty() {
+            return;
+        }
+        let Some(body) = self.ready_body_for_item(item_id).map(|s| s.to_string()) else {
+            return;
+        };
+        let digest = body_digest_for_item(text_sha256, &body);
+        let key = (item_id.to_string(), digest.clone());
+        if self.stale_persist_key.as_ref() == Some(&key) {
+            return;
+        }
+        match Matter::open(matter_root) {
+            Ok(matter) => {
+                match matter.resolve_highlights(item_id, &body, &digest, true) {
+                    Ok(_resolved) => {
+                        // Refresh stored rows so status columns match persist.
+                        if let Ok(hls) = matter.list_highlights(item_id) {
+                            self.item_highlights = hls;
+                        }
+                        self.stale_persist_key = Some(key);
+                    }
+                    Err(_) => {
+                        // Non-fatal: banners still use in-memory resolve; avoid
+                        // clobbering an operator-visible notes_error.
+                        self.stale_persist_key = Some(key);
+                    }
+                }
+            }
+            Err(_) => {
+                // Matter briefly unreadable — skip; try next frame / reload.
+            }
+        }
+    }
+
+    fn poll_notes(&mut self, matter_root: &Utf8Path, ctx: &egui::Context) {
+        let Some(rx) = self.notes_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(result)) => {
+                self.notes_busy = false;
+                self.notes_rx = None;
+                if self.current_item_id() == Some(result.item_id.as_str()) {
+                    self.item_notes = result.notes;
+                    self.item_highlights = result.highlights;
+                } else {
+                    self.reload_notes_for_selection(matter_root);
+                }
+                self.notes_status = Some(result.message);
+                self.notes_error = None;
+                ctx.request_repaint();
+            }
+            Ok(Err(e)) => {
+                self.notes_busy = false;
+                self.notes_rx = None;
+                self.notes_error = Some(e);
+                self.notes_status = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.notes_busy = false;
+                self.notes_rx = None;
+                self.notes_error = Some("Notes worker ended unexpectedly.".into());
+            }
+        }
+    }
+
+    fn save_document_note(&mut self, matter_root: &Utf8Path, ctx: &egui::Context, actor: &str) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            return;
+        };
+        let pending = self.pending_highlight_id.clone();
+        let input =
+            match note_upsert_from_draft(&item_id, &self.note_draft, pending.as_deref(), actor) {
+                Ok(i) => i,
+                Err(e) => {
+                    self.notes_error = Some(e);
+                    return;
+                }
+            };
+        let is_passage = input.highlight_id.is_some();
+        let ok = self.run_notes_mutate(matter_root, ctx, item_id, move |matter| {
+            matter.upsert_note(input)?;
+            Ok(if is_passage {
+                "Passage note saved.".into()
+            } else {
+                "Document note saved.".into()
+            })
+        });
+        // Keep draft + pending highlight binding on failure so the operator
+        // does not lose work product text.
+        if ok {
+            self.note_draft.clear();
+            self.pending_highlight_id = None;
+            self.passage_note_hint.clear();
+        }
+    }
+
+    fn save_note_edit(&mut self, matter_root: &Utf8Path, ctx: &egui::Context, actor: &str) {
+        let Some(note_id) = self.note_edit_id.clone() else {
+            return;
+        };
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            return;
+        };
+        if self.note_edit_body.trim().is_empty() {
+            self.notes_error = Some("note body cannot be empty or whitespace-only".into());
+            return;
+        }
+        let body = self.note_edit_body.clone();
+        let actor = actor.to_string();
+        let ok = self.run_notes_mutate(matter_root, ctx, item_id.clone(), move |matter| {
+            matter.upsert_note(UpsertNoteInput {
+                id: Some(note_id),
+                item_id,
+                body,
+                // highlight_id ignored on update (matter-core); body-only edit.
+                highlight_id: None,
+                actor,
+            })?;
+            Ok("Note updated.".into())
+        });
+        if ok {
+            self.note_edit_id = None;
+            self.note_edit_body.clear();
+        }
+    }
+
+    fn delete_note_ui(
+        &mut self,
+        matter_root: &Utf8Path,
+        ctx: &egui::Context,
+        note_id: &str,
+        actor: &str,
+    ) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            return;
+        };
+        let note_id = note_id.to_string();
+        let actor = actor.to_string();
+        self.run_notes_mutate(matter_root, ctx, item_id, move |matter| {
+            matter.delete_note(&note_id, &actor)?;
+            Ok("Note deleted.".into())
+        });
+    }
+
+    fn create_highlight_from_selection(
+        &mut self,
+        matter_root: &Utf8Path,
+        ctx: &egui::Context,
+        actor: &str,
+        with_note: bool,
+    ) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            return;
+        };
+        let Some(sel) = self.body_selection else {
+            self.notes_error = Some("Select text in the body first.".into());
+            return;
+        };
+
+        let body = match self.body.pane() {
+            BodyPane::Ready {
+                item_id: bid,
+                text: Ok(t),
+                ..
+            } if bid == &item_id => t.clone(),
+            _ => {
+                self.notes_error = Some("Body not ready.".into());
+                return;
+            }
+        };
+        let text_sha = self
+            .selection
+            .and_then(|i| self.rows.get(i))
+            .and_then(|r| r.text_sha256.clone());
+        let digest = body_digest_for_item(text_sha.as_deref(), &body);
+        // Reuse only active-after-resolve highlights (not stale offset collisions).
+        let resolved = resolve_for_paint(&self.item_highlights, &body, &digest);
+
+        // Passage-note path: bind draft to an existing matching active highlight
+        // when present (no second create), else create highlight first — never
+        // auto-persist synthetic "Note on: …" body text.
+        if with_note {
+            if let Some(existing) =
+                find_highlight_for_selection(&self.item_highlights, &resolved, sel)
+            {
+                let hid = existing.id.clone();
+                let hint = passage_note_hint_from_quote(&existing.exact_quote);
+                self.pending_highlight_id = Some(hid);
+                self.passage_note_hint = hint;
+                self.notes_status =
+                    Some("Type a passage note and Save (linked to selection highlight).".into());
+                self.notes_error = None;
+                return;
+            }
+        }
+
+        let input = match highlight_input_from_selection(&item_id, &body, &digest, sel, actor, None)
+        {
+            Ok(i) => i,
+            Err(e) => {
+                self.notes_error = Some(e);
+                return;
+            }
+        };
+        let quote_for_hint = input.exact_quote.clone();
+        let ok = self.run_notes_mutate(matter_root, ctx, item_id, move |matter| {
+            let _hl = matter.create_highlight(input)?;
+            Ok("Highlight created.".into())
+        });
+        if ok && with_note {
+            // Bind draft to the just-created (or matching) highlight — user must type body.
+            // Re-resolve after reload so we only attach to active resolved ranges.
+            let resolved_after = resolve_for_paint(&self.item_highlights, &body, &digest);
+            if let Some(hl) =
+                find_highlight_for_selection(&self.item_highlights, &resolved_after, sel)
+            {
+                self.pending_highlight_id = Some(hl.id.clone());
+                self.passage_note_hint = passage_note_hint_from_quote(&quote_for_hint);
+                self.notes_status = Some(
+                    "Highlight created — type a passage note and Save (not auto-saved).".into(),
+                );
+            } else {
+                self.passage_note_hint = passage_note_hint_from_quote(&quote_for_hint);
+                self.notes_status = Some(
+                    "Highlight created — type a passage note after reload if binding missing."
+                        .into(),
+                );
+            }
+        }
+    }
+
+    fn delete_highlight_ui(
+        &mut self,
+        matter_root: &Utf8Path,
+        ctx: &egui::Context,
+        highlight_id: &str,
+        actor: &str,
+    ) {
+        let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
+            return;
+        };
+        let highlight_id = highlight_id.to_string();
+        let actor = actor.to_string();
+        self.run_notes_mutate(matter_root, ctx, item_id, move |matter| {
+            matter.delete_highlight(&highlight_id, &actor)?;
+            Ok("Highlight deleted (linked notes unlinked).".into())
+        });
+    }
+
+    /// Run a notes/highlights mutation. Returns `true` only when the write
+    /// succeeded (reload of lists may still surface a secondary error).
+    fn run_notes_mutate<F>(
+        &mut self,
+        matter_root: &Utf8Path,
+        ctx: &egui::Context,
+        item_id: String,
+        f: F,
+    ) -> bool
+    where
+        F: FnOnce(&Matter) -> Result<String, matter_core::Error> + Send + 'static,
+    {
+        if self.notes_busy {
+            return false;
+        }
+        // Sync path for small single writes (notes/highlights are cheap).
+        let root = matter_root.to_owned();
+        let write_ok = match Matter::open(&root) {
+            Ok(matter) => match f(&matter) {
+                Ok(message) => {
+                    match load_notes_highlights(&root, &item_id) {
+                        Ok((notes, highlights)) => {
+                            self.item_notes = notes;
+                            self.item_highlights = highlights;
+                            self.notes_status = Some(message);
+                            self.notes_error = None;
+                        }
+                        Err(e) => {
+                            // Write already committed; keep success so drafts clear.
+                            self.notes_status = Some(message);
+                            self.notes_error = Some(e);
+                        }
+                    }
+                    true
+                }
+                Err(e) => {
+                    self.notes_error = Some(e.to_string());
+                    self.notes_status = None;
+                    false
+                }
+            },
+            Err(e) => {
+                self.notes_error = Some(e.to_string());
+                false
+            }
+        };
+        let _ = ctx; // reserved for future off-thread path + request_repaint
+        write_ok
+    }
+
     /// Toggle a code on the current item (no confirm).
     fn toggle_current_code(
         &mut self,
@@ -885,6 +1370,9 @@ impl ReviewState {
             if self.selection_detail.is_none() {
                 self.load_selection_detail(matter_root);
             }
+            if self.item_notes.is_empty() && self.item_highlights.is_empty() {
+                self.reload_notes_for_selection(matter_root);
+            }
             return;
         }
         self.selection = Some(idx);
@@ -895,6 +1383,8 @@ impl ReviewState {
         self.load_selection_detail(matter_root);
         // Keep header chips correct even when selection is off the visible page.
         self.refresh_row_codes(matter_root);
+        self.clear_notes_for_selection();
+        self.reload_notes_for_selection(matter_root);
         self.spawn_body_for_selection(ctx, matter_root);
     }
 
@@ -1220,6 +1710,16 @@ pub fn apply_codes_blocking(
 }
 
 /// Insert a custom code definition (label → slug key). Returns new definition id.
+fn load_notes_highlights(
+    matter_root: &Utf8Path,
+    item_id: &str,
+) -> Result<(Vec<ItemNote>, Vec<ItemHighlight>), String> {
+    let matter = Matter::open(matter_root).map_err(|e| e.to_string())?;
+    let notes = matter.list_notes(item_id).map_err(|e| e.to_string())?;
+    let highlights = matter.list_highlights(item_id).map_err(|e| e.to_string())?;
+    Ok((notes, highlights))
+}
+
 pub fn upsert_code_definition_blocking(
     matter_root: &Utf8Path,
     label: &str,
@@ -1323,6 +1823,7 @@ pub fn show(
     }
     state.body.try_take();
     state.poll_coding(matter_root, &ctx);
+    state.poll_notes(matter_root, &ctx);
 
     // Kick body load when we have a selection but body is idle (first paint after reload).
     if state.selection.is_some() && matches!(state.body.pane(), BodyPane::Idle) {
@@ -1393,9 +1894,14 @@ pub fn show(
     }
 
     // Keyboard: only when no widget has focus (egui 0.34: focused()).
-    // Filter text fields steal focus — digit shortcuts must not fire then.
+    // Filter / keyword / note TextEdit steal focus — digit shortcuts must not fire then.
+    // `note_editor_focused` is from the previous frame's notes panel TextEdit.
     let no_focus = ctx.memory(|m| m.focused().is_none());
-    if review_nav::focus_allows_shortcuts(no_focus) {
+    let note_focus = state.note_editor_focused;
+    state.note_editor_focused = false;
+    if review_nav::focus_allows_shortcuts(no_focus)
+        && focus_allows_coding_shortcuts(no_focus, note_focus)
+    {
         let (want_next, want_prev, want_enter, digit) = ui.input(|i| {
             let next =
                 i.key_pressed(Key::CloseBracket) || (i.modifiers.alt && i.key_pressed(Key::N));
@@ -1757,9 +2263,22 @@ fn show_filter_bar(
             if ui.small_button("Responsive").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_responsive());
             }
+            if ui.small_button("Has notes").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_has_notes());
+            }
+            if ui.small_button("Has highlights").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_has_highlights());
+            }
             if state.filter_draft.code_missing {
                 ui.label(
                     RichText::new("active: Uncoded")
+                        .small()
+                        .color(Color32::from_rgb(40, 120, 60)),
+                );
+            }
+            if state.filter_draft.has_notes {
+                ui.label(
+                    RichText::new("active: Has notes")
                         .small()
                         .color(Color32::from_rgb(40, 120, 60)),
                 );
@@ -1786,6 +2305,22 @@ fn show_filter_bar(
                     .hint_text("exclusive end"),
             );
             ui.checkbox(&mut state.filter_draft.include_family, "Include family");
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Note text:");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.filter_draft.note_text)
+                    .desired_width(220.0)
+                    .hint_text("Note text contains…"),
+            );
+            if !state.filter_draft.note_text.trim().is_empty() {
+                ui.label(
+                    RichText::new("active: note text")
+                        .small()
+                        .color(Color32::from_rgb(40, 120, 60)),
+                );
+            }
         });
 
         // Codes multi-select (active defs)
@@ -2067,70 +2602,419 @@ fn show_viewer(
         // Coding panel
         show_coding_panel(ui, state, matter_root, ctx, actor, &row.id);
 
+        // Align DB stale flags once body is available (cheap; once per item+digest).
+        state.maybe_persist_stale_resolves(matter_root, &row.id, row.text_sha256.as_deref());
+
+        // In-memory re-resolve drives banners / labels / paint (not raw DB alone).
+        let resolved_for_ui =
+            state.resolved_highlights_for_item(&row.id, row.text_sha256.as_deref());
+        let resolved_slice = resolved_for_ui.as_deref();
+
+        // Notes / highlights header counts
+        let n_notes = state.item_notes.len();
+        let n_hl = state.item_highlights.len();
+        let n_stale = stale_count_for_ui(&state.item_highlights, resolved_slice);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(format!("📝 {n_notes} notes · {n_hl} highlights"))
+                    .strong()
+                    .small(),
+            );
+            if n_stale > 0 {
+                ui.colored_label(
+                    Color32::from_rgb(180, 120, 40),
+                    format!("{n_stale} stale highlight(s) — re-resolve failed"),
+                );
+            }
+        });
+        if let Some(st) = state.notes_status.clone() {
+            ui.label(
+                RichText::new(st)
+                    .small()
+                    .color(Color32::from_rgb(40, 120, 60)),
+            );
+        }
+        if let Some(err) = state.notes_error.clone() {
+            ui.colored_label(Color32::from_rgb(200, 60, 60), err);
+        }
+
         ui.separator();
 
-        // Body
-        let body_height = (ui.available_height() - 72.0).max(120.0);
+        // Body (selectable + highlight paint)
+        let body_height = (ui.available_height() - 160.0).max(100.0);
+        // Clone pane data so we can mutably borrow `state` for selection/paint.
+        let body_view = match state.body.pane() {
+            BodyPane::Idle => BodyView::Idle,
+            BodyPane::Loading { .. } => BodyView::Loading,
+            BodyPane::Ready {
+                text,
+                truncated,
+                item_id,
+                ..
+            } => {
+                if item_id != &row.id {
+                    BodyView::Loading
+                } else {
+                    match text {
+                        Ok(s) => BodyView::Ready {
+                            text: s.clone(),
+                            truncated: *truncated,
+                        },
+                        Err(e) => BodyView::Error(e.clone()),
+                    }
+                }
+            }
+        };
         egui::ScrollArea::vertical()
             .id_salt("review_body_scroll")
-            .max_height(body_height)
+            .max_height(body_height * 0.62)
             .auto_shrink([false, false])
-            .show(ui, |ui| match state.body.pane() {
-                BodyPane::Idle => {
+            .show(ui, |ui| match body_view {
+                BodyView::Idle => {
                     ui.label("…");
                 }
-                BodyPane::Loading { .. } => {
+                BodyView::Loading => {
                     ui.label("Loading…");
                 }
-                BodyPane::Ready {
-                    text,
-                    truncated,
-                    item_id,
-                    ..
-                } => {
-                    if item_id != &row.id {
-                        ui.label("Loading…");
-                        return;
-                    }
-                    if *truncated {
+                BodyView::Ready { text, truncated } => {
+                    if truncated {
                         ui.colored_label(
                             Color32::from_rgb(180, 120, 40),
                             "Body truncated for display (2 MiB cap). Full text remains in CAS.",
                         );
                     }
-                    match text {
-                        Ok(s) if s.is_empty() => {
-                            ui.label(
-                                RichText::new("No extracted text")
-                                    .italics()
-                                    .color(Color32::GRAY),
-                            );
-                        }
-                        Ok(s) => {
-                            ui.add(egui::Label::new(RichText::new(s.as_str()).monospace()).wrap());
-                        }
-                        Err(e) if e.contains("No extracted text") => {
-                            ui.label(
-                                RichText::new("No extracted text")
-                                    .italics()
-                                    .color(Color32::GRAY),
-                            );
-                        }
-                        Err(e) => {
-                            ui.colored_label(
-                                Color32::from_rgb(200, 60, 60),
-                                format!("Body error: {e}"),
-                            );
-                        }
+                    if text.is_empty() {
+                        ui.label(
+                            RichText::new("No extracted text")
+                                .italics()
+                                .color(Color32::GRAY),
+                        );
+                    } else {
+                        show_selectable_body(
+                            ui,
+                            state,
+                            &row,
+                            &text,
+                            resolved_for_ui.as_deref().unwrap_or(&[]),
+                        );
                     }
                 }
+                BodyView::Error(e) if e.contains("No extracted text") => {
+                    ui.label(
+                        RichText::new("No extracted text")
+                            .italics()
+                            .color(Color32::GRAY),
+                    );
+                }
+                BodyView::Error(e) => {
+                    ui.colored_label(Color32::from_rgb(200, 60, 60), format!("Body error: {e}"));
+                }
             });
+
+        // Selection actions
+        ui.horizontal(|ui| {
+            let has_sel = state.body_selection.map(|s| !s.is_empty()).unwrap_or(false);
+            if ui
+                .add_enabled(
+                    has_sel && !state.notes_busy,
+                    egui::Button::new("Highlight").small(),
+                )
+                .on_hover_text("Create yellow stand-off highlight on selection")
+                .clicked()
+            {
+                state.create_highlight_from_selection(matter_root, ctx, actor, false);
+            }
+            if ui
+                .add_enabled(
+                    has_sel && !state.notes_busy,
+                    egui::Button::new("Note on selection").small(),
+                )
+                .on_hover_text(
+                    "Create highlight (if needed) and open a passage-note draft — type text, then Save",
+                )
+                .clicked()
+            {
+                state.create_highlight_from_selection(matter_root, ctx, actor, true);
+            }
+            if let Some(sel) = state.body_selection {
+                ui.label(
+                    RichText::new(format!("sel chars {}..{}", sel.start, sel.end))
+                        .small()
+                        .weak(),
+                );
+            }
+        });
+
+        ui.separator();
+
+        // Notes panel (banner + labels use same resolved list as paint).
+        show_notes_panel(
+            ui,
+            state,
+            matter_root,
+            ctx,
+            actor,
+            resolved_for_ui.as_deref(),
+        );
 
         ui.separator();
 
         // Family / attachment strip
         show_family_strip(ui, state, &row, matter_root, ctx);
     });
+}
+
+enum BodyView {
+    Idle,
+    Loading,
+    Ready { text: String, truncated: bool },
+    Error(String),
+}
+
+fn show_selectable_body(
+    ui: &mut egui::Ui,
+    state: &mut ReviewState,
+    row: &ReviewListRow,
+    body: &str,
+    resolved: &[ResolvedHighlight],
+) {
+    // Sync edit buffer when selection/body changes.
+    if state.body_edit_item_id.as_deref() != Some(row.id.as_str()) || state.body_edit_buf != body {
+        // Only force-resync when item changed or buffer drifted from edits.
+        if state.body_edit_item_id.as_deref() != Some(row.id.as_str()) {
+            state.body_edit_buf = body.to_string();
+            state.body_edit_item_id = Some(row.id.clone());
+        } else if state.body_edit_buf != body {
+            // Prefer loaded body over accidental edits.
+            state.body_edit_buf = body.to_string();
+        }
+    }
+
+    let wrap_width = ui.available_width();
+    let job = body_job_for_ui(body, resolved, wrap_width);
+
+    // Paint highlighted body (read-only layout job).
+    // Dual widget residual (egui 0.34): Label paints ranges; TextEdit below captures
+    // selection. Unifying paint+cursor on one widget is deferred — see desk README.
+    ui.add(egui::Label::new(job).wrap().selectable(true));
+
+    // Selection capture via a second pass TextEdit (same text) — frame-less, used for cursor range.
+    // Keep buffer in sync; reject mutations so CAS display is never rewritten here.
+    let mut buf = state.body_edit_buf.clone();
+    let output = egui::TextEdit::multiline(&mut buf)
+        .id_salt("review_body_select")
+        .font(egui::TextStyle::Monospace)
+        .desired_width(ui.available_width())
+        .desired_rows(6)
+        .hint_text("Select text here to create a highlight…")
+        .show(ui);
+    if buf != body {
+        // Discard edits — body is CAS-backed work product display only.
+        state.body_edit_buf = body.to_string();
+    } else {
+        state.body_edit_buf = buf;
+    }
+    if let Some(range) = output.cursor_range {
+        let r = range.as_sorted_char_range();
+        state.body_selection = selection_from_char_range(r);
+    }
+    if output.response.gained_focus() || output.response.has_focus() {
+        // Body select TextEdit also steals digit shortcuts (covered by focused()).
+    }
+}
+
+fn show_notes_panel(
+    ui: &mut egui::Ui,
+    state: &mut ReviewState,
+    matter_root: &Utf8Path,
+    ctx: &egui::Context,
+    actor: &str,
+    resolved: Option<&[ResolvedHighlight]>,
+) {
+    ui.label(RichText::new("Notes").strong().small());
+    ui.label(
+        RichText::new(
+            "Work product — stored in matter DB only; not produced with load files by default.",
+        )
+        .weak()
+        .small(),
+    );
+
+    // Stale banner — from in-memory re-resolve when body is ready.
+    let n_stale = stale_count_for_ui(&state.item_highlights, resolved);
+    if n_stale > 0 {
+        ui.colored_label(
+            Color32::from_rgb(180, 120, 40),
+            format!("⚠ {n_stale} highlight(s) are stale (body changed; quote not re-found)."),
+        );
+    }
+
+    // Add document note, or passage note when pending_highlight_id is set.
+    let is_passage_draft = state.pending_highlight_id.is_some();
+    ui.horizontal(|ui| {
+        if is_passage_draft {
+            ui.label("New passage note:");
+            if let Some(hid) = state.pending_highlight_id.as_deref() {
+                ui.label(
+                    RichText::new(format!("🔗 {hid}"))
+                        .small()
+                        .color(Color32::from_rgb(80, 100, 160)),
+                );
+            }
+        } else {
+            ui.label("New document note:");
+        }
+    });
+    let hint: String = if is_passage_draft && !state.passage_note_hint.is_empty() {
+        state.passage_note_hint.clone()
+    } else if is_passage_draft {
+        "Type a passage note linked to the highlight…".into()
+    } else {
+        "Type a document note…".into()
+    };
+    let draft_resp = ui.add(
+        egui::TextEdit::multiline(&mut state.note_draft)
+            .id_salt("note_draft")
+            .desired_width(ui.available_width())
+            .desired_rows(2)
+            .hint_text(hint),
+    );
+    if draft_resp.has_focus() {
+        state.note_editor_focused = true;
+    }
+    ui.horizontal(|ui| {
+        let can_save = !state.note_draft.trim().is_empty() && !state.notes_busy;
+        let save_label = if is_passage_draft {
+            "Save passage note"
+        } else {
+            "Save note"
+        };
+        if ui
+            .add_enabled(can_save, egui::Button::new(save_label).small())
+            .clicked()
+        {
+            state.save_document_note(matter_root, ctx, actor);
+        }
+        if is_passage_draft
+            && ui
+                .small_button("Cancel passage")
+                .on_hover_text("Keep the highlight; discard passage-note draft binding")
+                .clicked()
+        {
+            state.pending_highlight_id = None;
+            state.passage_note_hint.clear();
+            // Keep note_draft text so the operator can still save as a document note.
+            state.notes_status = Some("Passage binding cleared (highlight kept).".into());
+        }
+    });
+
+    // List notes newest first (API order).
+    egui::ScrollArea::vertical()
+        .id_salt("notes_list_scroll")
+        .max_height(140.0)
+        .show(ui, |ui| {
+            if state.item_notes.is_empty() {
+                ui.label(RichText::new("(no notes)").weak().small());
+                return;
+            }
+            let notes: Vec<ItemNote> = state.item_notes.clone();
+            for note in notes {
+                ui.group(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(&note.updated_at).small().weak());
+                        ui.label(
+                            RichText::new(format!("by {}", note.updated_by))
+                                .small()
+                                .weak(),
+                        );
+                        if let Some(hid) = note.highlight_id.as_deref() {
+                            ui.label(
+                                RichText::new(format!("🔗 passage {hid}"))
+                                    .small()
+                                    .color(Color32::from_rgb(80, 100, 160)),
+                            );
+                        } else {
+                            ui.label(RichText::new("document").small().weak());
+                        }
+                    });
+                    if state.note_edit_id.as_deref() == Some(note.id.as_str()) {
+                        let edit_resp = ui.add(
+                            egui::TextEdit::multiline(&mut state.note_edit_body)
+                                .id_salt(format!("note_edit_{}", note.id))
+                                .desired_width(ui.available_width())
+                                .desired_rows(2),
+                        );
+                        if edit_resp.has_focus() {
+                            state.note_editor_focused = true;
+                        }
+                        ui.horizontal(|ui| {
+                            let can_edit_save =
+                                !state.note_edit_body.trim().is_empty() && !state.notes_busy;
+                            if ui
+                                .add_enabled(can_edit_save, egui::Button::new("Save").small())
+                                .clicked()
+                            {
+                                state.save_note_edit(matter_root, ctx, actor);
+                            }
+                            if ui.small_button("Cancel").clicked() {
+                                state.note_edit_id = None;
+                                state.note_edit_body.clear();
+                            }
+                        });
+                    } else {
+                        ui.label(RichText::new(&note.body).small());
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Edit").clicked() {
+                                state.note_edit_id = Some(note.id.clone());
+                                state.note_edit_body = note.body.clone();
+                            }
+                            if ui
+                                .add_enabled(!state.notes_busy, egui::Button::new("Delete").small())
+                                .clicked()
+                            {
+                                state.delete_note_ui(matter_root, ctx, &note.id, actor);
+                            }
+                        });
+                    }
+                });
+            }
+        });
+
+    // Highlights list (compact) — status labels from re-resolve when available.
+    if !state.item_highlights.is_empty() {
+        ui.add_space(4.0);
+        ui.label(RichText::new("Highlights").strong().small());
+        let hls: Vec<ItemHighlight> = state.item_highlights.clone();
+        for hl in hls {
+            ui.horizontal_wrapped(|ui| {
+                let res = resolved.and_then(|r| find_resolved(r, &hl.id));
+                let status_raw = highlight_ui_status(&hl, res);
+                let status = if status_raw == "stale" {
+                    "⚠ stale"
+                } else {
+                    "active"
+                };
+                // Prefer remapped offsets from resolve for display when present.
+                let (start, end) = res
+                    .map(|r| (r.start_utf8, r.end_utf8))
+                    .unwrap_or((hl.start_utf8, hl.end_utf8));
+                ui.label(
+                    RichText::new(format!(
+                        "[{status}] chars {start}..{end} “{}”",
+                        hl.exact_quote.chars().take(40).collect::<String>()
+                    ))
+                    .small()
+                    .monospace(),
+                );
+                if ui
+                    .add_enabled(!state.notes_busy, egui::Button::new("Delete").small())
+                    .clicked()
+                {
+                    state.delete_highlight_ui(matter_root, ctx, &hl.id, actor);
+                }
+            });
+        }
+    }
 }
 
 fn show_coding_panel(
@@ -3168,5 +4052,127 @@ mod tests {
         // Scoped load: only requested ids.
         let empty = load_item_codes(&root, &[]).expect("empty");
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn note_on_selection_draft_binds_highlight_without_fake_body() {
+        // Desk helper contract: user text + highlight_id; never "Note on: …".
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = base.join("matter-passage-draft");
+        let matter = Matter::create(&root, "Passage Draft").expect("create");
+        let body = "The confidential clause is material.";
+        let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+        let item = matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                subject: Some("Note me".into()),
+                text_sha256: Some(digest.clone()),
+                ..Default::default()
+            })
+            .expect("item");
+        // Char range of "confidential"
+        let start = body.find("confidential").expect("quote") as i64;
+        let end = start + "confidential".chars().count() as i64;
+        let hl = matter
+            .create_highlight(matter_core::CreateHighlightInput {
+                item_id: item.id.clone(),
+                start_utf8: start,
+                end_utf8: end,
+                exact_quote: "confidential".into(),
+                display_body: body.into(),
+                body_digest: digest,
+                color: None,
+                actor: "desk-test".into(),
+            })
+            .expect("hl");
+        drop(matter);
+
+        // Empty draft rejected (UI would not call Save).
+        assert!(note_upsert_from_draft(&item.id, "", Some(&hl.id), "desk-test").is_err());
+
+        let input = note_upsert_from_draft(
+            &item.id,
+            "Attorney: this may be privileged.",
+            Some(&hl.id),
+            "desk-test",
+        )
+        .expect("input");
+        assert_eq!(input.highlight_id.as_deref(), Some(hl.id.as_str()));
+        assert_eq!(input.body, "Attorney: this may be privileged.");
+        assert!(!input.body.starts_with("Note on:"));
+
+        let matter = Matter::open(&root).expect("open");
+        let note = matter.upsert_note(input).expect("save");
+        assert_eq!(note.highlight_id.as_deref(), Some(hl.id.as_str()));
+        assert_eq!(note.body, "Attorney: this may be privileged.");
+        // Only user text was stored — no synthetic placeholder notes.
+        let notes = matter.list_notes(&item.id).expect("list");
+        assert_eq!(notes.len(), 1);
+        assert!(!notes[0].body.starts_with("Note on:"));
+    }
+
+    #[test]
+    fn failed_note_save_keeps_draft_and_edit_state() {
+        let mut state = ReviewState {
+            rows: vec![stub_row("itm_missing")],
+            selection: Some(0),
+            note_draft: "precious draft text".into(),
+            pending_highlight_id: Some("hlt_pending".into()),
+            passage_note_hint: "Passage note on “x”…".into(),
+            ..Default::default()
+        };
+
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        // No matter created → open fails; draft must remain.
+        let missing = base.join("no-such-matter");
+        let ctx = egui::Context::default();
+        state.save_document_note(&missing, &ctx, "desk-test");
+        assert_eq!(state.note_draft, "precious draft text");
+        assert_eq!(state.pending_highlight_id.as_deref(), Some("hlt_pending"));
+        assert!(!state.passage_note_hint.is_empty());
+        assert!(state.notes_error.is_some());
+
+        // Edit path: keep edit buffer on failure.
+        state.note_edit_id = Some("note_x".into());
+        state.note_edit_body = "edit body keep me".into();
+        state.save_note_edit(&missing, &ctx, "desk-test");
+        assert_eq!(state.note_edit_id.as_deref(), Some("note_x"));
+        assert_eq!(state.note_edit_body, "edit body keep me");
+        assert!(state.notes_error.is_some());
+    }
+
+    #[test]
+    fn successful_document_note_clears_draft() {
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = base.join("matter-note-clear");
+        let matter = Matter::create(&root, "Note Clear").expect("create");
+        let item = matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                subject: Some("Doc note".into()),
+                ..Default::default()
+            })
+            .expect("item");
+        drop(matter);
+
+        let mut state = ReviewState {
+            rows: vec![stub_row(&item.id)],
+            selection: Some(0),
+            note_draft: "  durable work product  ".into(),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        state.save_document_note(&root, &ctx, "desk-test");
+        assert!(state.notes_error.is_none(), "err: {:?}", state.notes_error);
+        assert!(state.note_draft.is_empty(), "draft cleared after success");
+        assert!(state.pending_highlight_id.is_none());
+        assert_eq!(state.item_notes.len(), 1);
+        assert_eq!(state.item_notes[0].body, "durable work product");
+        assert!(state.item_notes[0].highlight_id.is_none());
     }
 }

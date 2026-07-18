@@ -148,11 +148,25 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0029-01 | P3 | FTS hit window capped at 50k unique ids before filter intersect | Documented `DEFAULT_FTS_FETCH_LIMIT`; keyset/streaming deferred (Codex residual) | residual scale |
 | D-0029-02 | — | CJK tokenizers (jieba/lindera) | P0 Latin `default` tokenizer only | **0054** |
 | D-0029-03 | — | Fuzzy / proximity dtSearch parity | P0 Boolean + phrases only | residual |
-| D-0029-04 | — | Snippet highlight UI | Optional SnippetGenerator; full UI → **0030** | residual / **0030** |
+| D-0029-04 | — | Snippet highlight UI | Optional SnippetGenerator / temporary FTS hit paint | residual / **0030** (nice-to-have; not DoD) |
 | D-0029-05 | — | SQLite FTS5 primary | Forbidden by plan §4.7 | never |
 | D-0029-06 | — | Crash left duplicate Tantivy docs | **Done in 0029**: delete-before-add + HashSet de-dupe | — |
 | D-0029-07 | — | Windows mmap rebuild Access Denied | **Done in 0029**: drop readers + desk busy gate before rebuild | — |
 | D-0029-08 | P3 | Full GUI smoke for keyword / Update / Rebuild | Automated matter-search + desk unit; operator smoke local | operator / polish |
+
+## From track 0030-NotesHighlights
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0030-01 | — | Image/PDF box markups & burn-in redaction | Text stand-off highlights only in 0030 | **0032** |
+| D-0030-02 | — | Notes in production load file | Default exclude (work product); opt-in later | **0040** |
+| D-0030-03 | — | Privilege log narrative from notes | Notes stay matter-local in 0030 | **0031** |
+| D-0030-04 | — | Case-wide persistent keyword highlight sets | User highlights only; FTS paint optional | residual |
+| D-0030-05 | — | Multi-user concurrent note edit | Single-desk actor | **0058** |
+| D-0030-06 | — | Rich text / markdown notes | P0 plain text | residual |
+| D-0030-07 | P3 | Full GUI smoke for notes panel / selection highlight | Automated unit + API; operator smoke local | operator / polish |
+| D-0030-08 | P3 | Dual body widgets (Label paint + TextEdit selection) | Usable; document residual under egui 0.34; unify later if API allows | residual polish |
+| D-0029-04 | — | Temporary FTS hit paint | Not shipped in 0030 (nice-to-have); user highlights shipped | residual |
 
 ## Hygiene
 
