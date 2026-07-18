@@ -58,7 +58,8 @@ pub use audit::{
 pub use cas::{sha256_hex, Cas, PUT_READER_BUF_SIZE};
 pub use error::{Error, Result};
 pub use filter::{
-    compile_filter, parse_bound_instant, CompiledFilter, FilterCondition, FilterSpec,
+    compile_filter, normalize_stored_instant_for_compare, parse_bound_instant, parse_item_instant,
+    register_filter_functions, CompiledFilter, FilterCondition, FilterSpec, DESK_UTC_TS_FN,
     FILTER_SPEC_VERSION, SCOPE_ENTIRE_MATTER, SCOPE_REVIEW_CORPUS,
 };
 pub use item_errors::{ItemError, ItemErrorInput};

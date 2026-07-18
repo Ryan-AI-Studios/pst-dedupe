@@ -2754,6 +2754,8 @@ impl Matter {
             limit as i64
         };
         let offset_i = offset as i64;
+        // ORDER BY matches filtered list (filter::order_by_clause): NULLS LAST
+        // for review_order, then imported_at, path, id (stable deep OFFSET).
         let sql = match resolved.as_deref() {
             Some(_) => {
                 "SELECT id, review_order, role, parent_item_id, subject, from_addr, \
@@ -2762,7 +2764,7 @@ impl Matter {
                         family_id \
                  FROM items \
                  WHERE matter_id = ?1 AND in_review = 1 AND review_set_id = ?2 \
-                 ORDER BY review_order ASC, id ASC \
+                 ORDER BY (review_order IS NULL), review_order ASC, imported_at ASC, path ASC, id ASC \
                  LIMIT ?3 OFFSET ?4"
             }
             None => {
@@ -2772,7 +2774,7 @@ impl Matter {
                         family_id \
                  FROM items \
                  WHERE matter_id = ?1 AND in_review = 1 \
-                 ORDER BY review_order ASC, id ASC \
+                 ORDER BY (review_order IS NULL), review_order ASC, imported_at ASC, path ASC, id ASC \
                  LIMIT ?2 OFFSET ?3"
             }
         };
@@ -2870,14 +2872,14 @@ impl Matter {
             .map_err(Error::from)
     }
 
-    /// Load a saved search by id.
+    /// Load a saved search by id (scoped to this matter).
     pub fn get_saved_search(&self, search_id: &str) -> Result<SavedSearch> {
         self.conn
             .query_row(
                 "SELECT id, matter_id, name, description, scope, filter_json, \
                         created_at, updated_at, created_by \
-                 FROM saved_searches WHERE id = ?1",
-                params![search_id],
+                 FROM saved_searches WHERE id = ?1 AND matter_id = ?2",
+                params![search_id, self.matter_id],
                 map_saved_search_row,
             )
             .map_err(|e| match e {

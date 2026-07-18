@@ -185,6 +185,94 @@ fn filter_date_between_offset_required() {
     );
 }
 
+/// Offset-bearing stored `sent_at` must compare as the UTC instant, not TEXT.
+///
+/// Stored `2023-01-01T00:00:00-05:00` == `2023-01-01T05:00:00Z`.
+/// Lexical TEXT compare vs `2023-01-01T03:00:00Z` would exclude (T00 < T03);
+/// correct UTC compare includes (05:00Z >= 03:00Z).
+#[test]
+fn filter_date_offset_bearing_stored_ts_compares_as_utc() {
+    let (_tmp, _root, matter, set_id) = setup_review_matter("filter-date-offset-item");
+    let offset_item = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            // Instant = 05:00Z; lexical "…T00:00:00-05:00" sorts before "…T03:00:00Z".
+            sent_at: Some("2023-01-01T00:00:00-05:00".into()),
+            subject: Some("offset-bearing".into()),
+            ..Default::default()
+        })
+        .expect("offset item");
+    let late_z = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            sent_at: Some("2023-01-01T06:00:00Z".into()),
+            subject: Some("late Z".into()),
+            ..Default::default()
+        })
+        .expect("late Z");
+    promote_item(&matter, &offset_item.id, &set_id, 1).unwrap();
+    promote_item(&matter, &late_z.id, &set_id, 2).unwrap();
+
+    // gte 03:00Z: offset item (05:00Z) and late_z (06:00Z) both match.
+    let gte_03 = FilterSpec {
+        conditions: vec![FilterCondition {
+            field: "sent_at".into(),
+            op: "gte".into(),
+            value: Some(serde_json::json!("2023-01-01T03:00:00Z")),
+            values: None,
+            start: None,
+            end: None,
+        }],
+        ..FilterSpec::default()
+    };
+    let rows = matter
+        .list_items_filtered_thin(&gte_03, 100, 0)
+        .expect("gte 03");
+    let ids: Vec<_> = rows.iter().map(|r| r.id.as_str()).collect();
+    assert!(
+        ids.contains(&offset_item.id.as_str()),
+        "offset-bearing 05:00Z must match gte 03:00Z (UTC); ids={ids:?}"
+    );
+    assert!(ids.contains(&late_z.id.as_str()));
+
+    // gte 05:30Z: only late_z; pure lexical would also exclude offset item but
+    // for the wrong reason — here we assert correct include/exclude boundary.
+    let gte_0530 = FilterSpec {
+        conditions: vec![FilterCondition {
+            field: "sent_at".into(),
+            op: "gte".into(),
+            value: Some(serde_json::json!("2023-01-01T05:30:00Z")),
+            values: None,
+            start: None,
+            end: None,
+        }],
+        ..FilterSpec::default()
+    };
+    let rows = matter
+        .list_items_filtered_thin(&gte_0530, 100, 0)
+        .expect("gte 05:30");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, late_z.id);
+
+    // between [04:00Z, 05:30Z): only offset item (05:00Z).
+    let between = FilterSpec {
+        conditions: vec![FilterCondition {
+            field: "sent_at".into(),
+            op: "between".into(),
+            value: None,
+            values: None,
+            start: Some("2023-01-01T04:00:00Z".into()),
+            end: Some("2023-01-01T05:30:00Z".into()),
+        }],
+        ..FilterSpec::default()
+    };
+    let rows = matter
+        .list_items_filtered_thin(&between, 100, 0)
+        .expect("between");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, offset_item.id);
+}
+
 #[test]
 fn filter_code_any_of_responsive() {
     let (_tmp, _root, matter, set_id) = setup_review_matter("filter-code-any");
@@ -517,6 +605,49 @@ fn saved_search_upsert_load_delete_roundtrip() {
         )
         .expect("audit");
     assert_eq!(del_n, 1);
+}
+
+/// `get_saved_search` must require `matter_id` (defense in depth).
+#[test]
+fn get_saved_search_scopes_by_matter_id() {
+    let (_tmp, _root, matter, _set_id) = setup_review_matter("filter-saved-scope");
+    let own = matter
+        .upsert_saved_search(SavedSearchInput {
+            id: None,
+            name: "Mine".into(),
+            description: None,
+            filter_json: serde_json::to_string(&FilterSpec::default()).unwrap(),
+            created_by: Some("tester".into()),
+        })
+        .expect("own");
+    // Second matters row so FK allows a foreign saved_search (multi-matter-in-one-db).
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_other_not_us', 'Other', '2020-01-01T00:00:00Z', 9, '/tmp/other')",
+            [],
+        )
+        .expect("insert other matter");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO saved_searches (id, matter_id, name, description, scope, filter_json, \
+             created_at, updated_at, created_by) \
+             VALUES ('ss_foreign', 'mat_other_not_us', 'Foreign', NULL, 'review_corpus', '{}', \
+             '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', NULL)",
+            [],
+        )
+        .expect("insert foreign");
+
+    assert_eq!(matter.get_saved_search(&own.id).expect("own").id, own.id);
+    let err = matter
+        .get_saved_search("ss_foreign")
+        .expect_err("foreign matter_id must not resolve");
+    assert!(
+        err.to_string().contains("not found"),
+        "expected not found, got {err}"
+    );
 }
 
 #[test]

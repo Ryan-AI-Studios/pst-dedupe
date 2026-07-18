@@ -19,13 +19,29 @@
 //! SQLite ASC places NULLs first by default; the `IS NULL` leading key
 //! emulates NULLS LAST. Partial index `idx_items_review_list_order` covers
 //! the common `in_review = 1` path for deep OFFSET pages.
+//!
+//! ## Date comparison
+//!
+//! Filter bounds are always compiled to **UTC Z** RFC3339 (`…Z`). Item
+//! `sent_at` / `received_at` may be stored as offset-bearing RFC3339 (or
+//! legacy naive-as-UTC). SQL comparisons wrap item expressions with the
+//! connection UDF [`DESK_UTC_TS_FN`] (`desk_utc_ts`) so both sides compare
+//! as normalized UTC Z text. Extract-pst writes Z form; the UDF is defense
+//! for offset-bearing and legacy values.
 
 use chrono::{DateTime, FixedOffset, Utc};
+use rusqlite::functions::FunctionFlags;
 use rusqlite::types::Value;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::matter::item_status;
+
+/// SQLite scalar UDF name: normalize a stored instant TEXT to UTC Z RFC3339.
+///
+/// Registered on every matter connection via [`register_filter_functions`].
+pub const DESK_UTC_TS_FN: &str = "desk_utc_ts";
 
 /// Current `FilterSpec` document version.
 pub const FILTER_SPEC_VERSION: u32 = 1;
@@ -532,10 +548,15 @@ fn push_date_condition(
     where_parts: &mut Vec<String>,
     params: &mut Vec<Value>,
 ) -> Result<()> {
-    // best_effort_date: COALESCE(sent_at, received_at) string compare in UTC RFC3339.
+    // Normalize item timestamps to UTC Z via desk_utc_ts so offset-bearing
+    // stored values compare correctly against bound UTC Z strings.
+    // best_effort_date: first usable of sent_at / received_at after normalize.
     let expr = match field {
-        "best_effort_date" => format!("COALESCE({alias}.sent_at, {alias}.received_at)"),
-        "sent_at" | "received_at" => format!("{alias}.{field}"),
+        "best_effort_date" => format!(
+            "COALESCE({fn}({alias}.sent_at), {fn}({alias}.received_at))",
+            fn = DESK_UTC_TS_FN
+        ),
+        "sent_at" | "received_at" => format!("{DESK_UTC_TS_FN}({alias}.{field})"),
         _ => unreachable!(),
     };
     match op {
@@ -577,9 +598,29 @@ fn push_date_condition(
     Ok(())
 }
 
+/// Register filter-related SQLite UDFs on a matter connection.
+///
+/// Called from [`crate::schema::configure_connection`] so every open/create
+/// path can evaluate compiled date filters.
+pub fn register_filter_functions(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        DESK_UTC_TS_FN,
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let raw: Option<String> = ctx.get(0)?;
+            match raw {
+                None => Ok(None::<String>),
+                Some(s) => Ok(normalize_stored_instant_for_compare(&s)),
+            }
+        },
+    )?;
+    Ok(())
+}
+
 /// Parse an RFC3339 timestamp that **must** include an offset or `Z`.
 ///
-/// Naive formats are rejected. Returns UTC instant formatted as RFC3339.
+/// Naive formats are rejected. Returns UTC instant.
 pub fn parse_bound_instant(s: &str) -> Result<DateTime<Utc>> {
     let t = s.trim();
     if t.is_empty() {
@@ -601,6 +642,32 @@ pub fn parse_bound_instant(s: &str) -> Result<DateTime<Utc>> {
     Err(Error::Other(format!(
         "invalid RFC3339 date bound '{t}' (offset or Z required)"
     )))
+}
+
+/// Parse a stored item timestamp for comparison (best-effort, cull-aligned).
+///
+/// Accepts offset-bearing RFC3339; treats naive forms as UTC (extract writes Z,
+/// but legacy / hand-inserted rows may omit it).
+pub fn parse_item_instant(s: &str) -> Option<DateTime<Utc>> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(t) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    // Legacy: treat trailing-naive as UTC for *item* fields only.
+    if let Ok(dt) = DateTime::parse_from_rfc3339(&format!("{t}Z")) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    None
+}
+
+/// Normalize a stored item timestamp to UTC Z RFC3339 (seconds) for SQL text compare.
+///
+/// Returns `None` for empty/unparseable values (SQL NULL → no match).
+pub fn normalize_stored_instant_for_compare(s: &str) -> Option<String> {
+    parse_item_instant(s).map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 fn require_date_bound(raw: Option<&str>, label: &str) -> Result<String> {
@@ -797,6 +864,54 @@ mod tests {
         assert!(parse_bound_instant("2023-01-01T00:00:00Z").is_ok());
         assert!(parse_bound_instant("2023-01-01T00:00:00").is_err());
         assert!(parse_bound_instant("2023-01-01").is_err());
+    }
+
+    #[test]
+    fn normalize_stored_instant_converts_offset_to_z() {
+        // 00:00-05:00 == 05:00Z
+        assert_eq!(
+            normalize_stored_instant_for_compare("2023-01-01T00:00:00-05:00").as_deref(),
+            Some("2023-01-01T05:00:00Z")
+        );
+        assert_eq!(
+            normalize_stored_instant_for_compare("2023-01-01T05:00:00Z").as_deref(),
+            Some("2023-01-01T05:00:00Z")
+        );
+        // Naive treated as UTC (item fields only).
+        assert_eq!(
+            normalize_stored_instant_for_compare("2023-01-01T05:00:00").as_deref(),
+            Some("2023-01-01T05:00:00Z")
+        );
+        assert!(normalize_stored_instant_for_compare("not-a-date").is_none());
+    }
+
+    #[test]
+    fn compile_date_wraps_desk_utc_ts() {
+        let spec = FilterSpec {
+            conditions: vec![FilterCondition {
+                field: "sent_at".into(),
+                op: "gte".into(),
+                value: Some(serde_json::json!("2023-01-01T00:00:00Z")),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..FilterSpec::default()
+        };
+        let compiled = compile_filter(&spec, "mat1", None).expect("compile");
+        assert!(
+            compiled.list_sql.contains(DESK_UTC_TS_FN),
+            "expected {DESK_UTC_TS_FN} in SQL: {}",
+            compiled.list_sql
+        );
+        assert!(
+            compiled.params.iter().any(|p| matches!(
+                p,
+                Value::Text(t) if t == "2023-01-01T00:00:00Z"
+            )),
+            "bound must be UTC Z: {:?}",
+            compiled.params
+        );
     }
 
     #[test]

@@ -410,12 +410,16 @@ pub(crate) fn read_schema_version(conn: &Connection) -> Result<u32> {
 }
 
 /// Configure SQLite for a single-writer desktop matter DB.
+///
+/// Also registers filter UDFs (e.g. `desk_utc_ts`) required by compiled
+/// metadata date predicates (track 0028).
 pub(crate) fn configure_connection(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
          PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;",
     )?;
+    crate::filter::register_filter_functions(conn)?;
     Ok(())
 }
 
