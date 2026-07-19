@@ -191,8 +191,8 @@ fn empty_matter_valid_pack_with_sentinels() {
     assert!(status.contains("(none),0"));
 
     let errs = read_pack_file(&out, "errors_by_code.csv");
+    assert_exact_label_count_csv(&errs, &[], |raw| raw, 0);
     assert!(errs.starts_with("code,count\n"));
-    assert!(errs.contains("(none),0"), "zero-error still needs sentinel");
 
     let jobs = read_pack_file(&out, "jobs.csv");
     assert!(jobs.contains("job_id,kind,state"));
@@ -517,8 +517,18 @@ fn seeded_overview_metrics_match_summary() {
         0,
     );
     let errs = read_pack_file(&out, "errors_by_code.csv");
-    assert!(errs.contains("parse_failed"));
-    assert!(!errs.contains("(none),0"), "non-empty should omit sentinel");
+    assert_exact_label_count_csv(
+        &errs,
+        &ov.errors.by_code,
+        |raw| {
+            if raw.is_empty() {
+                "(none)"
+            } else {
+                raw
+            }
+        },
+        ov.errors.other_codes_count,
+    );
 
     // jobs.csv: parse columns for completed_count=7 and dual datetime values
     let jobs = read_pack_file(&out, "jobs.csv");

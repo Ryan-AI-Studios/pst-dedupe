@@ -763,12 +763,8 @@ impl Matter {
 
     fn audit_report_export_fail(&self, error_message: &str) -> Result<()> {
         let now = now_rfc3339();
-        // Truncate long I/O messages; never include subjects.
-        let msg = if error_message.len() > 500 {
-            format!("{}…", &error_message[..500])
-        } else {
-            error_message.to_string()
-        };
+        // Truncate long I/O messages at a UTF-8 char boundary; never include subjects.
+        let msg = truncate_utf8(error_message, 500);
         audit::append_event(
             self.connection(),
             &AuditEventInput {
@@ -797,6 +793,19 @@ fn write_text_file(path: &Utf8Path, content: &str) -> Result<()> {
     f.write_all(content.as_bytes())?;
     f.flush()?;
     Ok(())
+}
+
+/// Truncate `s` to at most `max_bytes` UTF-8 bytes without splitting a codepoint.
+/// Appends an ellipsis when truncation occurs.
+fn truncate_utf8(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 fn csv_line(fields: &[&str]) -> String {
@@ -1140,6 +1149,20 @@ mod unit_tests {
     fn excel_datetime_from_rfc3339() {
         let excel = rfc3339_to_excel_utc("2026-07-19T10:00:00Z");
         assert_eq!(excel, "2026-07-19 10:00:00 UTC");
+    }
+
+    #[test]
+    fn truncate_utf8_does_not_split_codepoint() {
+        // Multibyte chars (é = 2 bytes) so max_bytes=5 lands mid-char without char boundary.
+        let s = "éééééééééé"; // 10 * 2 = 20 bytes
+        assert!(s.len() > 5);
+        let t = truncate_utf8(s, 5);
+        assert!(t.ends_with('…'));
+        assert!(t.is_char_boundary(t.len() - '…'.len_utf8()) || t.ends_with('…'));
+        // Body before ellipsis is valid UTF-8 prefix.
+        let body = t.trim_end_matches('…');
+        assert!(s.starts_with(body));
+        assert!(body.len() <= 5);
     }
 
     #[test]
