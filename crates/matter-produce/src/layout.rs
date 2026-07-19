@@ -69,9 +69,9 @@ impl VolumeLayout {
 /// - **Default path** (`output_dir` unset): under `exports/productions/<stamp>/`.
 ///   If that folder already has production content, a unique timestamp suffix is
 ///   appended so a prior complete volume is never silently overwritten.
-/// - **Explicit `output_dir`**: rejected when the directory is non-empty with
-///   production content (NATIVES/TEXT/DATA load files). Incomplete resume of the
-///   *same* job reuses `cursor.output_root` and never calls this function.
+/// - **Explicit `output_dir`**: must not exist as a non-empty directory (any entry).
+///   Incomplete resume of the *same* job reuses `cursor.output_root` and never
+///   calls this function.
 pub fn resolve_output_root(matter: &Matter, params: &ProduceParams) -> Result<Utf8PathBuf> {
     if let Some(dir) = params
         .output_dir
@@ -80,11 +80,11 @@ pub fn resolve_output_root(matter: &Matter, params: &ProduceParams) -> Result<Ut
         .filter(|s| !s.is_empty())
     {
         let root = Utf8PathBuf::from(dir);
-        if volume_has_production_content(&root) {
+        if path_is_nonempty(&root) {
             return Err(crate::error::ProduceError::Other(format!(
-                "output_dir '{}' is non-empty (contains prior production content); \
-                 refuse to overwrite. Choose an empty directory or omit output_dir \
-                 for a unique exports/productions path",
+                "output_dir '{}' is non-empty; refuse to overwrite. \
+                 Choose an empty directory or omit output_dir for a unique \
+                 exports/productions path",
                 root
             )));
         }
@@ -131,6 +131,23 @@ pub fn volume_has_production_content(root: &Utf8Path) -> bool {
         return true;
     }
     false
+}
+
+/// True when `path` exists and is a non-empty directory, or is an existing file.
+fn path_is_nonempty(path: &Utf8Path) -> bool {
+    let std = path.as_std_path();
+    if !std.exists() {
+        return false;
+    }
+    if std.is_file() {
+        return true;
+    }
+    if !std.is_dir() {
+        return true;
+    }
+    fs::read_dir(std)
+        .map(|mut it| it.next().is_some())
+        .unwrap_or(false)
 }
 
 fn dir_has_any_file(dir: &Utf8Path) -> bool {

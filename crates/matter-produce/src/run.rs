@@ -304,6 +304,9 @@ fn run_produce_inner(
             });
         }
 
+        // Populate selected_count before fail_if_withheld so fail audit reports it.
+        cursor.selected_count = ordered.len() as u64;
+
         // Fail-closed withhold scan before any assignment when requested.
         if params.fail_if_withheld {
             for id in &ordered {
@@ -351,7 +354,6 @@ fn run_produce_inner(
         )?;
 
         cursor.ordered_ids = ordered;
-        cursor.selected_count = cursor.ordered_ids.len() as u64;
         cursor.production_set_id = set_id;
         cursor.production_name = name;
         cursor.output_root = output_root.to_string();
@@ -412,12 +414,19 @@ fn run_produce_inner(
         // Must run before JSONL recovery so a hold asserted between pause and resume never
         // leaves the item in the final DAT/NATIVES/TEXT.
         if matter.item_is_withheld(&item_id)? {
+            let existing = jsonl_by_item.remove(&item_id);
+            let had_jsonl = existing.is_some();
+            purge_withheld_item_artifacts(
+                matter,
+                &layout,
+                &cursor.production_set_id,
+                &item_id,
+                existing.as_ref(),
+            )?;
+            if had_jsonl {
+                rewrite_rows_jsonl_excluding(&layout, &item_id)?;
+            }
             if params.fail_if_withheld {
-                // Drop any recovered artifacts/JSONL so partial volumes are not left dirty.
-                if let Some(existing) = jsonl_by_item.remove(&item_id) {
-                    let _ = remove_row_artifacts(&layout, &existing);
-                    rewrite_rows_jsonl_excluding(&layout, &item_id)?;
-                }
                 update_production_set_status(
                     matter,
                     &cursor.production_set_id,
@@ -430,11 +439,6 @@ fn run_produce_inner(
                     ),
                     summary: summary_from_cursor(&cursor),
                 });
-            }
-            // Invalidate any prior JSONL/native/text for this control.
-            if let Some(existing) = jsonl_by_item.remove(&item_id) {
-                let _ = remove_row_artifacts(&layout, &existing);
-                rewrite_rows_jsonl_excluding(&layout, &item_id)?;
             }
             // Count once: late-withhold sweep may already have recorded this item.
             if !production_item_is_skipped_withheld(matter, &cursor.production_set_id, &item_id)? {
@@ -644,6 +648,25 @@ fn produce_one_item(
     layout: &VolumeLayout,
     control: &str,
 ) -> Result<ProducedOne> {
+    // Package both text + native fully before returning Ok; on any Error/Err after
+    // writes, delete partial control artifacts so withhold/failure never leaves bytes.
+    let result = produce_one_item_inner(matter, params, item, layout, control);
+    match &result {
+        Ok(ProducedOne::Ok { .. }) | Ok(ProducedOne::Skipped { .. }) => {}
+        Ok(ProducedOne::Error { .. }) | Err(_) => {
+            cleanup_control_artifacts(layout, control);
+        }
+    }
+    result
+}
+
+fn produce_one_item_inner(
+    matter: &Matter,
+    params: &ProduceParams,
+    item: &Item,
+    layout: &VolumeLayout,
+    control: &str,
+) -> Result<ProducedOne> {
     // When redactions exist, resolve text first so a missing redacted artifact
     // never leaves an unregistered native under NATIVES/.
     // For non-redacted items, same order is fine (text may be optional).
@@ -721,6 +744,10 @@ fn produce_one_item(
         }
     };
 
+    let text_sha256 = text_art
+        .as_ref()
+        .map(|t| t.sha256.clone())
+        .unwrap_or_default();
     let text_relpath = if text_art.is_some() {
         Some(VolumeLayout::text_relpath(control))
     } else {
@@ -770,6 +797,7 @@ fn produce_one_item(
         has_redacted_text: if has_redacted { "Y" } else { "N" }.into(),
         withheld: "N".into(),
         prod_status: prod_status.into(),
+        text_sha256,
     };
 
     let _ = native_art; // silence unused when only metadata used
@@ -786,6 +814,10 @@ fn append_row_json(layout: &VolumeLayout, row: &LoadRow) -> Result<()> {
     let mut map = serde_json::Map::new();
     for (name, val) in crate::dat::DAT_FIELDS.iter().zip(row.field_values().iter()) {
         map.insert((*name).to_string(), json!(val));
+    }
+    // Recovery-only TEXT integrity (not a DAT column).
+    if !row.text_sha256.trim().is_empty() {
+        map.insert("text_sha256".into(), json!(row.text_sha256));
     }
     // BEGBATES/ENDBATES/CONTROL are same — field_values already expands.
     let line = serde_json::to_string(&serde_json::Value::Object(map))?;
@@ -920,6 +952,7 @@ fn load_row_from_json_value(v: &serde_json::Value) -> Result<LoadRow> {
         has_redacted_text: g("HAS_REDACTED_TEXT"),
         withheld: g("WITHHELD"),
         prod_status: g("PROD_STATUS"),
+        text_sha256: g("text_sha256"),
     })
 }
 
@@ -978,11 +1011,24 @@ fn apply_late_withhold_sweep(
         if !matter.item_is_withheld(&item_id)? {
             continue;
         }
+        let already_skipped_withheld =
+            production_item_is_skipped_withheld(matter, &cursor.production_set_id, &item_id)?;
+        let had_jsonl = jsonl_by_item.contains_key(&item_id);
+        let was_ok =
+            production_item_ok_control(matter, &cursor.production_set_id, &item_id)?.is_some();
+        let existing = jsonl_by_item.remove(&item_id);
+        // Purge JSONL paths, production_items relpaths, and control-derived files.
+        purge_withheld_item_artifacts(
+            matter,
+            layout,
+            &cursor.production_set_id,
+            &item_id,
+            existing.as_ref(),
+        )?;
+        if existing.is_some() {
+            rewrite_rows_jsonl_excluding(layout, &item_id)?;
+        }
         if params.fail_if_withheld {
-            if let Some(existing) = jsonl_by_item.remove(&item_id) {
-                let _ = remove_row_artifacts(layout, &existing);
-                rewrite_rows_jsonl_excluding(layout, &item_id)?;
-            }
             update_production_set_status(
                 matter,
                 &cursor.production_set_id,
@@ -995,16 +1041,6 @@ fn apply_late_withhold_sweep(
                 ),
                 summary: summary_from_cursor(cursor),
             }));
-        }
-
-        let already_skipped_withheld =
-            production_item_is_skipped_withheld(matter, &cursor.production_set_id, &item_id)?;
-        let had_jsonl = jsonl_by_item.contains_key(&item_id);
-        let was_ok =
-            production_item_ok_control(matter, &cursor.production_set_id, &item_id)?.is_some();
-        if let Some(existing) = jsonl_by_item.remove(&item_id) {
-            let _ = remove_row_artifacts(layout, &existing);
-            rewrite_rows_jsonl_excluding(layout, &item_id)?;
         }
         // Un-count as produced when we previously packaged this item.
         if (had_jsonl || was_ok) && cursor.produced_count > 0 {
@@ -1096,8 +1132,126 @@ fn validate_recovered_artifacts(layout: &VolumeLayout, row: &LoadRow) -> Result<
                 row.text_path
             )));
         }
+        let bytes = std::fs::read(&abs)?;
+        if bytes.is_empty() {
+            return Err(ProduceError::Other(format!(
+                "empty text artifact for recovered row: {}",
+                row.text_path
+            )));
+        }
+        if !row.text_sha256.trim().is_empty() {
+            let disk_sha = {
+                let d = Sha256::digest(&bytes);
+                d.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            };
+            if !disk_sha.eq_ignore_ascii_case(row.text_sha256.trim()) {
+                return Err(ProduceError::Other(format!(
+                    "text SHA256 mismatch for recovered {}: expected={} disk={}",
+                    row.text_path, row.text_sha256, disk_sha
+                )));
+            }
+        }
     }
     Ok(())
+}
+
+/// Best-effort delete of all NATIVES/TEXT files for a control number.
+fn cleanup_control_artifacts(layout: &VolumeLayout, control: &str) {
+    let control = control.trim();
+    if control.is_empty() {
+        return;
+    }
+    let text = layout.text.join(format!("{control}.txt"));
+    let _ = std::fs::remove_file(text.as_std_path());
+    // Remove NATIVES/<control> and NATIVES/<control>.*
+    if let Ok(entries) = std::fs::read_dir(layout.natives.as_std_path()) {
+        let prefix_dot = format!("{control}.");
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str == control || name_str.starts_with(&prefix_dot) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Purge volume bytes for a withheld item using JSONL row, production_items
+/// relpaths, and control-derived NATIVES/TEXT paths.
+fn purge_withheld_item_artifacts(
+    matter: &Matter,
+    layout: &VolumeLayout,
+    set_id: &str,
+    item_id: &str,
+    jsonl_row: Option<&LoadRow>,
+) -> Result<()> {
+    if let Some(row) = jsonl_row {
+        let _ = remove_row_artifacts(layout, row);
+        if !row.control_number.trim().is_empty() {
+            let safe = sanitize_filename_part(row.control_number.trim());
+            cleanup_control_artifacts(layout, &safe);
+        }
+    }
+    if let Some(rec) = load_production_item_paths(matter, set_id, item_id)? {
+        if let Some(rel) = rec
+            .native_relpath
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if let Ok(abs) = volume_rel_to_abs(layout, rel) {
+                let _ = std::fs::remove_file(abs);
+            }
+        }
+        if let Some(rel) = rec
+            .text_relpath
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if let Ok(abs) = volume_rel_to_abs(layout, rel) {
+                let _ = std::fs::remove_file(abs);
+            }
+        }
+        if let Some(control) = rec.control_number.as_deref() {
+            let control = control.trim();
+            if !control.is_empty() && !control.starts_with("SKIP_") {
+                let safe = sanitize_filename_part(control);
+                cleanup_control_artifacts(layout, &safe);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Recorded production_items paths for an item (any status).
+struct ProductionItemPaths {
+    control_number: Option<String>,
+    native_relpath: Option<String>,
+    text_relpath: Option<String>,
+}
+
+fn load_production_item_paths(
+    matter: &Matter,
+    set_id: &str,
+    item_id: &str,
+) -> Result<Option<ProductionItemPaths>> {
+    let mut stmt = matter.connection().prepare(
+        "SELECT control_number, native_relpath, text_relpath FROM production_items \
+         WHERE production_set_id = ?1 AND item_id = ?2 LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![set_id, item_id])?;
+    if let Some(row) = rows.next()? {
+        let control: Option<String> = row.get(0)?;
+        let native: Option<String> = row.get(1)?;
+        let text: Option<String> = row.get(2)?;
+        return Ok(Some(ProductionItemPaths {
+            control_number: control,
+            native_relpath: native,
+            text_relpath: text,
+        }));
+    }
+    Ok(None)
 }
 
 /// Convert a DAT-style relative path (`NATIVES\…` / `TEXT\…`) to an absolute path
@@ -1150,6 +1304,9 @@ fn rewrite_rows_jsonl_excluding(layout: &VolumeLayout, exclude_item_id: &str) ->
         let mut map = serde_json::Map::new();
         for (name, val) in crate::dat::DAT_FIELDS.iter().zip(row.field_values().iter()) {
             map.insert((*name).to_string(), json!(val));
+        }
+        if !row.text_sha256.trim().is_empty() {
+            map.insert("text_sha256".into(), json!(row.text_sha256));
         }
         let line = serde_json::to_string(&serde_json::Value::Object(map))?;
         writeln!(f, "{line}")?;

@@ -77,6 +77,8 @@ pub struct LoadRow {
     pub has_redacted_text: String,
     pub withheld: String,
     pub prod_status: String,
+    /// Recovery-only integrity hash for TEXT (not a DAT column).
+    pub text_sha256: String,
 }
 
 impl LoadRow {
@@ -134,38 +136,18 @@ pub fn encode_dat_field(value: &str) -> String {
 
 /// Format a datetime field as UTC ISO `YYYY-MM-DDTHH:MM:SSZ`.
 ///
-/// Unknown / unparsable → empty string (never invent a time).
+/// Accepts only RFC3339 values with an explicit offset or `Z`.
+/// Zone-less / unparsable inputs → empty string (never invent a timezone).
 pub fn format_utc_datetime(raw: Option<&str>) -> String {
     let Some(s) = raw.map(str::trim).filter(|t| !t.is_empty()) else {
         return String::new();
     };
-    // Accept RFC3339 with offset / Z, or "… UTC" suffix already.
+    // RFC3339 requires an explicit offset or Z — do not append Z to zone-less strings.
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return dt
             .with_timezone(&Utc)
             .to_rfc3339_opts(SecondsFormat::Secs, true);
     }
-    // Try appending Z if missing zone but looks like ISO local.
-    if let Ok(dt) = DateTime::parse_from_rfc3339(&format!("{s}Z")) {
-        return dt
-            .with_timezone(&Utc)
-            .to_rfc3339_opts(SecondsFormat::Secs, true);
-    }
-    // chrono NaiveDateTime + assume UTC
-    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-        return DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)
-            .to_rfc3339_opts(SecondsFormat::Secs, true);
-    }
-    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-        return DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)
-            .to_rfc3339_opts(SecondsFormat::Secs, true);
-    }
-    // Already ends with Z or UTC — pass through if looks UTC-marked.
-    let upper = s.to_ascii_uppercase();
-    if upper.ends_with('Z') || upper.ends_with(" UTC") {
-        return s.to_string();
-    }
-    // Refuse zone-less floating times we cannot classify.
     String::new()
 }
 
@@ -247,5 +229,13 @@ mod tests {
     fn empty_datetime_stays_empty() {
         assert_eq!(format_utc_datetime(None), "");
         assert_eq!(format_utc_datetime(Some("")), "");
+    }
+
+    #[test]
+    fn zoneless_datetime_stays_empty() {
+        // Must not invent Z / assume UTC for floating local times.
+        assert_eq!(format_utc_datetime(Some("2026-07-19T12:00:00")), "");
+        assert_eq!(format_utc_datetime(Some("2026-07-19 12:00:00")), "");
+        assert_eq!(format_utc_datetime(Some("2026-07-19T12:00:00 UTC")), "");
     }
 }

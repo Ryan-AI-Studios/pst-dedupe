@@ -1,7 +1,7 @@
 //! Resolve native and text bytes for production packaging.
 
 use std::fs::{self, File};
-use std::io::{self, copy, Write};
+use std::io::{self, Write};
 use std::path::Path;
 
 use dedup_engine::exporter::{export_eml, EmlMessage};
@@ -27,6 +27,8 @@ pub struct NativeArtifact {
 #[derive(Debug, Clone)]
 pub struct TextArtifact {
     pub has_redacted: bool,
+    /// SHA-256 of the bytes written under TEXT/ (for resume integrity).
+    pub sha256: String,
 }
 
 /// Derive a safe extension for a native from path / mime / default.
@@ -280,8 +282,11 @@ pub fn resolve_text(
             return Ok(Err("redacted_text_missing".into()));
         };
         // NEVER fall back to text_sha256.
-        write_text_from_cas(matter, sha, text_dir, control)?;
-        return Ok(Ok(Some(TextArtifact { has_redacted: true })));
+        let written = write_text_from_cas(matter, sha, text_dir, control)?;
+        return Ok(Ok(Some(TextArtifact {
+            has_redacted: true,
+            sha256: written,
+        })));
     }
 
     if let Some(sha) = item
@@ -290,28 +295,39 @@ pub fn resolve_text(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        write_text_from_cas(matter, sha, text_dir, control)?;
+        let written = write_text_from_cas(matter, sha, text_dir, control)?;
         return Ok(Ok(Some(TextArtifact {
             has_redacted: false,
+            sha256: written,
         })));
     }
 
     Ok(Ok(None))
 }
 
+/// Write TEXT from CAS; returns SHA-256 of the written bytes.
 fn write_text_from_cas(
     matter: &Matter,
     digest: &str,
     text_dir: &Path,
     control: &str,
-) -> Result<()> {
+) -> Result<String> {
     let mut reader = matter.cas().open_read(digest)?;
     fs::create_dir_all(text_dir)?;
     let dest = text_dir.join(format!("{control}.txt"));
     let mut file = File::create(&dest)?;
-    copy(&mut reader, &mut file)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n])?;
+        hasher.update(&buf[..n]);
+    }
     file.flush()?;
-    Ok(())
+    Ok(hex_encode(hasher.finalize().as_ref()))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

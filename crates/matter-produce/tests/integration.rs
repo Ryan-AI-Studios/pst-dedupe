@@ -304,6 +304,16 @@ fn fail_if_withheld_aborts() {
             ..Default::default()
         },
     );
+    // Second non-withheld item so selected_count > 1 is meaningful.
+    let n2 = put_native(&matter, b"ok");
+    insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("ok.pdf".into()),
+            native_sha256: Some(n2),
+            ..Default::default()
+        },
+    );
     matter
         .upsert_item_privilege(UpsertItemPrivilegeInput {
             item_id: id,
@@ -329,8 +339,14 @@ fn fail_if_withheld_aborts() {
     )
     .expect("run");
     match outcome {
-        ProduceOutcome::Failed { message, .. } => {
+        ProduceOutcome::Failed { message, summary } => {
             assert!(message.contains("fail_if_withheld"), "{message}");
+            assert!(
+                summary.selected_count > 0,
+                "fail_if_withheld pre-scan must report selected_count, got {}",
+                summary.selected_count
+            );
+            assert_eq!(summary.selected_count, 2);
         }
         other => panic!("expected Failed, got {other:?}"),
     }
@@ -688,6 +704,9 @@ fn utc_dates_in_dat() {
         format_utc_datetime(Some("2026-07-19T15:00:00+03:00")),
         "2026-07-19T12:00:00Z"
     );
+    // Zone-less inputs must remain empty (never invent Z).
+    assert_eq!(format_utc_datetime(Some("2026-07-19T12:00:00")), "");
+    assert_eq!(format_utc_datetime(Some("2026-07-19 12:00:00")), "");
 }
 
 /// 12. Multi-line → ® in DAT.
@@ -1405,4 +1424,286 @@ fn output_dir_collision_unique_or_reject() {
         fs::read(first_native.as_std_path()).unwrap(),
         b"first-volume-native"
     );
+
+    // Explicit dir with only unrelated content (no production markers) is still rejected.
+    let (tmp_out, out_base) = utf8_tempdir();
+    let cluttered = out_base.join("cluttered_out");
+    fs::create_dir_all(cluttered.as_std_path()).unwrap();
+    fs::write(cluttered.join("README.txt").as_std_path(), b"not empty").unwrap();
+    let job4 = matter.create_job(JOB_KIND_PRODUCE).expect("job4");
+    let err = run_produce(
+        &matter,
+        &job4.id,
+        &ProduceParams {
+            name: Some("Clutter".into()),
+            output_dir: Some(cluttered.to_string()),
+            ..Default::default()
+        },
+        None,
+        |_| {},
+    );
+    match err {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.to_ascii_lowercase().contains("non-empty"),
+                "expected non-empty rejection for unrelated files, got: {msg}"
+            );
+        }
+        Ok(other) => {
+            panic!("expected hard error for non-empty unrelated output_dir, got {other:?}")
+        }
+    }
+    drop(tmp_out);
+}
+
+/// Crash window: production_items=ok + files on disk but no JSONL row; late withhold
+/// must purge control-derived NATIVES/TEXT bytes (not only JSONL-linked artifacts).
+#[test]
+fn late_withhold_after_db_ok_without_jsonl_purges_bytes() {
+    let (_tmp, matter) = temp_matter("late-wh-no-jsonl");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let mut ids = Vec::new();
+    for i in 0..2 {
+        let n = put_native(&matter, format!("native-dbok-{i}").as_bytes());
+        let t = put_text(&matter, &format!("text-dbok-{i}"));
+        let id = insert_review_item(
+            &matter,
+            ItemInput {
+                path: Some(format!("d{i}.bin")),
+                native_sha256: Some(n),
+                text_sha256: Some(t),
+                subject: Some(format!("DbOk{i}")),
+                ..Default::default()
+            },
+        );
+        ids.push(id);
+    }
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_flag = cancel.clone();
+    let outcome = run_produce(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("DbOkWh".into()),
+            ..Default::default()
+        },
+        Some(&|| cancel_flag.load(Ordering::SeqCst)),
+        |completed| {
+            if completed >= 1 {
+                cancel_flag.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .expect("run");
+    let paused = match outcome {
+        ProduceOutcome::Paused(s) => s,
+        other => panic!("expected Paused, got {other:?}"),
+    };
+    assert!(paused.produced_count >= 1);
+    let root = paused.output_root.clone();
+    let first_id = ids[0].clone();
+
+    // Precondition: control files exist.
+    let native_path = camino::Utf8Path::new(&root)
+        .join("NATIVES")
+        .join("PROD000001.bin");
+    let text_path = camino::Utf8Path::new(&root)
+        .join("TEXT")
+        .join("PROD000001.txt");
+    assert!(native_path.as_std_path().exists());
+    assert!(text_path.as_std_path().exists());
+
+    // Simulate crash after production_items ok + files written, before durable JSONL:
+    // strip JSONL entry while leaving production_items and volume files.
+    let jsonl = camino::Utf8Path::new(&root).join("DATA").join("rows.jsonl");
+    if jsonl.as_std_path().exists() {
+        let content = fs::read_to_string(jsonl.as_std_path()).unwrap();
+        let kept: Vec<&str> = content
+            .lines()
+            .filter(|line| !line.contains(&first_id))
+            .collect();
+        fs::write(jsonl.as_std_path(), kept.join("\n")).unwrap();
+    }
+    // Rewind checkpoint so first item is not done (still selected for resume).
+    let cp = matter
+        .get_checkpoint(&job.id, PRODUCE_STAGE)
+        .unwrap()
+        .expect("checkpoint");
+    let mut cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor");
+    let done = cursor
+        .get_mut("done_item_ids")
+        .and_then(|v| v.as_array_mut())
+        .expect("done_item_ids");
+    done.retain(|v| v.as_str() != Some(first_id.as_str()));
+    cursor["cursor_index"] = serde_json::json!(0);
+    cursor["completed_count"] = serde_json::json!(0);
+    // Keep produced_count / production_items so was_ok path is exercised.
+    cursor["phase"] = serde_json::json!("work");
+    matter
+        .put_checkpoint(&job.id, PRODUCE_STAGE, &cursor.to_string(), 0)
+        .expect("put checkpoint");
+
+    // Confirm production_items still has ok for first item.
+    let ok_row: i64 = matter
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM production_items WHERE item_id = ?1 AND status = 'ok'",
+            [&first_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ok_row, 1, "precondition: production_items ok without JSONL");
+
+    // Late withhold.
+    matter
+        .upsert_item_privilege(UpsertItemPrivilegeInput {
+            item_id: first_id.clone(),
+            basis: "attorney_client".into(),
+            description: "hold after db-ok crash window".into(),
+            status: "asserted".into(),
+            withhold: true,
+            include_on_log: true,
+            actor: "t".into(),
+        })
+        .expect("withhold");
+
+    let s2 = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("DbOkWh".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(s2.skipped_withheld, 1);
+    assert_eq!(s2.produced_count, 1);
+
+    let dat = dat_text(&s2.output_root);
+    assert!(!dat.contains(&first_id), "withheld must not be in DAT");
+
+    // No bytes for withheld control under NATIVES/TEXT.
+    assert!(
+        !native_path.as_std_path().exists(),
+        "withheld native must be purged even without JSONL row"
+    );
+    assert!(
+        !text_path.as_std_path().exists(),
+        "withheld text must be purged even without JSONL row"
+    );
+    let natives = camino::Utf8Path::new(&s2.output_root).join("NATIVES");
+    if natives.as_std_path().exists() {
+        for e in fs::read_dir(natives.as_std_path()).unwrap() {
+            let name = e.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.starts_with("PROD000001"),
+                "stale native for withheld control: {name}"
+            );
+        }
+    }
+    let text_dir = camino::Utf8Path::new(&s2.output_root).join("TEXT");
+    if text_dir.as_std_path().exists() {
+        for e in fs::read_dir(text_dir.as_std_path()).unwrap() {
+            let name = e.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.starts_with("PROD000001"),
+                "stale text for withheld control: {name}"
+            );
+        }
+    }
+}
+
+/// Truncated TEXT after produce + rewound checkpoint → resume rebuilds TEXT.
+#[test]
+fn resume_rebuilds_when_recovered_text_truncated() {
+    let (_tmp, matter) = temp_matter("rebuild-text");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let mut ids = Vec::new();
+    for i in 0..2 {
+        let n = put_native(&matter, format!("native-txt-{i}").as_bytes());
+        let t = put_text(&matter, &format!("full-text-body-for-item-{i}"));
+        let id = insert_review_item(
+            &matter,
+            ItemInput {
+                path: Some(format!("t{i}.bin")),
+                native_sha256: Some(n),
+                text_sha256: Some(t),
+                subject: Some(format!("Txt{i}")),
+                ..Default::default()
+            },
+        );
+        ids.push(id);
+    }
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_flag = cancel.clone();
+    let outcome = run_produce(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("TxtRebuild".into()),
+            ..Default::default()
+        },
+        Some(&|| cancel_flag.load(Ordering::SeqCst)),
+        |completed| {
+            if completed >= 1 {
+                cancel_flag.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .expect("run");
+    let paused = match outcome {
+        ProduceOutcome::Paused(s) => s,
+        other => panic!("expected Paused, got {other:?}"),
+    };
+    let first_id = ids[0].clone();
+    let root = paused.output_root.clone();
+
+    let text_path = camino::Utf8Path::new(&root)
+        .join("TEXT")
+        .join("PROD000001.txt");
+    assert!(text_path.as_std_path().exists());
+    let original = fs::read_to_string(text_path.as_std_path()).unwrap();
+    assert!(!original.is_empty());
+
+    // Rewind checkpoint as if crash after JSONL append.
+    let cp = matter
+        .get_checkpoint(&job.id, PRODUCE_STAGE)
+        .unwrap()
+        .expect("checkpoint");
+    let mut cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor");
+    let done = cursor
+        .get_mut("done_item_ids")
+        .and_then(|v| v.as_array_mut())
+        .expect("done_item_ids");
+    done.retain(|v| v.as_str() != Some(first_id.as_str()));
+    cursor["next_seq"] = serde_json::json!(1);
+    cursor["produced_count"] = serde_json::json!(0);
+    cursor["cursor_index"] = serde_json::json!(0);
+    cursor["completed_count"] = serde_json::json!(0);
+    cursor["phase"] = serde_json::json!("work");
+    matter
+        .put_checkpoint(&job.id, PRODUCE_STAGE, &cursor.to_string(), 0)
+        .expect("put checkpoint");
+
+    // Truncate TEXT to empty (fails size>0 and sha integrity).
+    fs::write(text_path.as_std_path(), b"").expect("truncate text");
+
+    let s2 = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("TxtRebuild".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(s2.produced_count, 2);
+    assert!(
+        text_path.as_std_path().exists(),
+        "TEXT must be rebuilt on resume"
+    );
+    let rebuilt = fs::read_to_string(text_path.as_std_path()).unwrap();
+    assert_eq!(rebuilt, "full-text-body-for-item-0");
+    assert_ne!(rebuilt, "", "rebuilt TEXT must be non-empty");
 }
