@@ -219,7 +219,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0033-10 | — | Macro-enabled .docm/.xlsm execute | Never execute; text extract best-effort only | never |
 | D-0033-11 | — | calamine still may allocate large range matrices internally | P0 mitigates with early text-cap break + native size cap; streaming sheet API if calamine adds one later | residual polish |
 
-## From track 0034-PdfExtractPreview (planned — Ready)
+## From track 0034-PdfExtractPreview (Completed — Codex luna PASS WITH DEFERRED P3)
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
