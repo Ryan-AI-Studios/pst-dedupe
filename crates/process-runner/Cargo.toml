@@ -6,7 +6,7 @@ description = "In-process matter job runner: single worker thread, cancel, watch
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["ingest", "extract_pst", "dedupe", "thread", "neardup", "cull", "promote", "fts", "office", "pdf"]
+default = ["ingest", "extract_pst", "dedupe", "thread", "neardup", "cull", "promote", "fts", "office", "pdf", "calendar"]
 ingest = ["dep:ingest-purview"]
 extract_pst = ["dep:extract-pst"]
 dedupe = ["dep:matter-dedupe"]
@@ -17,6 +17,9 @@ promote = ["dep:matter-promote"]
 fts = ["dep:matter-search"]
 office = ["dep:extract-office"]
 pdf = ["dep:extract-pdf"]
+calendar = ["dep:extract-calendar"]
+# Alias for feature name in docs / CI.
+ics = ["calendar"]
 
 [dependencies]
 matter-core = { path = "../matter-core" }
@@ -35,6 +38,7 @@ matter-promote = { path = "../matter-promote", optional = true }
 matter-search = { path = "../matter-search", optional = true }
 extract-office = { path = "../extract-office", optional = true }
 extract-pdf = { path = "../extract-pdf", optional = true }
+extract-calendar = { path = "../extract-calendar", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

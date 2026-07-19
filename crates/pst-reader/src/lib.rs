@@ -48,7 +48,8 @@
 //! | API | Role |
 //! |---|---|
 //! | `read_message_properties` | CLI Tier-2: body preview truncated to 4KB |
-//! | `read_message_extract` / `ExtractedMessage` | Full body, DisplayTo/Cc/Bcc, submit + delivery time, optional HTML, In-Reply-To / References / ConversationIndex |
+//! | `read_message_extract` / `ExtractedMessage` | Full body, DisplayTo/Cc/Bcc, submit + delivery time, optional HTML, In-Reply-To / References / ConversationIndex, MessageClass + appointment start/end/location |
+//! | `is_calendar_message_class` | IPM.Appointment / Schedule.Meeting.* classification |
 //! | `list_attachments` / `AttachmentInfo` | NID, filename, size, mime, method |
 //! | `open_attachment_data` / `AttachmentDataReader` | `Read` over attach binary (leaf-block stream; no multi-GB `Vec` production path) |
 //! | `filetime_to_rfc3339` | FILETIME → RFC3339 UTC helper |
@@ -64,7 +65,8 @@ pub use error::{PstError, Result};
 pub use messaging::attachment::{AttachmentDataReader, AttachmentInfo, AttachmentMeta};
 pub use messaging::folder::FolderInfo;
 pub use messaging::message::{
-    filetime_to_rfc3339, filetime_to_unix, ExtractedMessage, MessageProperties,
+    filetime_to_rfc3339, filetime_to_unix, is_calendar_message_class, ExtractedMessage,
+    MessageProperties,
 };
 pub use ndb::NodeId;
 

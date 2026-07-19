@@ -122,6 +122,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
             app.start_pdf_extract();
         }
         if ui
+            .add_enabled(!busy, egui::Button::new("Extract ICS"))
+            .on_hover_text(
+                "Parse ICS/calendar natives in CAS into calendar items (kind=ics_extract); multi-event → archive + single-event children",
+            )
+            .clicked()
+        {
+            app.start_ics_extract();
+        }
+        if ui
             .add_enabled(!busy, egui::Button::new("Build / Update search index"))
             .on_hover_text("Incremental Tantivy FTS index (kind=fts_index, reset:false)")
             .clicked()

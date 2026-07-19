@@ -30,6 +30,9 @@ pub mod office;
 #[cfg(feature = "pdf")]
 pub mod pdf;
 
+#[cfg(feature = "calendar")]
+pub mod ics;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
@@ -59,3 +62,6 @@ pub use office::MatterOfficeExtractHandler;
 
 #[cfg(feature = "pdf")]
 pub use pdf::MatterPdfExtractHandler;
+
+#[cfg(feature = "calendar")]
+pub use ics::MatterIcsExtractHandler;

@@ -4,6 +4,29 @@ Blocking library that opens **Unicode PST** evidence (filesystem and/or matter
 CAS), walks folders/messages/attachments via **`pst-reader`**, and writes
 **Normalized Items** into `matter-core`.
 
+## Calendar messages (0035)
+
+When `PidTagMessageClass` (`0x001A`) is a calendar class, the parent item is
+written with `file_category=calendar` (not `email`):
+
+| Class | Path |
+|---|---|
+| `IPM.Appointment` | calendar |
+| `IPM.Schedule.Meeting.Request` | calendar |
+| `IPM.Schedule.Meeting.Resp.*` | calendar |
+| `IPM.Schedule.Meeting.Canceled` | calendar |
+| `IPM.Note` / other | existing email path (**unchanged**) |
+
+Standard tags only (P0): `PidTagStartDate` `0x0060`, `PidTagEndDate` `0x0061`,
+best-effort `PidTagLocation` `0x3A0D`. Full **PidLid*** named-prop map
+(AppointmentStartWhole, BusyStatus, RecurrencePattern, …) is residual.
+
+- `cal_extract_method` = `pst_oxocal_v1`
+- Review body is synthesized (Subject/When/Where/Organizer/Attendees/Class/description)
+- Pure calendar without Message-ID uses `compute_non_email_logical_hash`; meeting
+  requests that carry Message-ID keep the email MID logical_hash path
+- `sent_at` falls back to `cal_start_at` when submit time is missing
+
 ## Threading headers (0022)
 
 Parent email rows store reply-chain fields when present on the message:

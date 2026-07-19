@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v15**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v16**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -23,6 +23,7 @@
 //! - **Redaction** regions + true redacted text CAS artifact (0032)
 //! - **Office extract** bookkeeping (`office_*` columns) for OOXML text (0033)
 //! - **PDF extract** bookkeeping (`pdf_*` columns, `pdf_needs_ocr`) for embedded text (0034)
+//! - **Calendar** fields (`cal_*`, `message_class`) + ICS extract bookkeeping (0035)
 //!
 //! ## Layout
 //!
@@ -48,6 +49,7 @@
 //! UI, encryption, multi-tenant.
 
 pub mod audit;
+pub mod calendar;
 pub mod cas;
 pub mod error;
 pub mod filter;
@@ -66,6 +68,7 @@ pub use audit::{
     canonical_audit_preimage, compute_entry_hash, verify_audit_chain, AuditEvent, AuditEventInput,
     AuditHashFields, GENESIS_PREV_HASH,
 };
+pub use calendar::{ics_extract_status, ApplyIcsExtractInput, IcsCandidate, IcsExtractApplyResult};
 pub use cas::{sha256_hex, Cas, PUT_READER_BUF_SIZE};
 pub use error::{Error, Result};
 pub use filter::{

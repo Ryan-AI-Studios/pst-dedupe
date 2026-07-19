@@ -235,6 +235,24 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0034-10 | — | Auto-run pdf_extract after pst extract | Manual/job button P0 | residual |
 | D-0034-11 | — | Tunable MIN_TEXT_CHARS thresholds per matter | P0 fixed constants (50 total / 20 per page) | residual |
 
+## From track 0035-CalendarItems (Completed — Codex luna PASS WITH DEFERRED P3)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0035-01 | — | Full PidLid named-property map (Location, Busy, Recurrence blob, …) | P0 standard tags + ICS; honest nulls | residual |
+| D-0035-02 | — | RRULE expansion to all occurrences | P0 flag + text only; no infinite expand | residual |
+| D-0035-03 | — | Exception instances / series graph | Residual | residual |
+| D-0035-04 | — | Month/week calendar UI | Review text + list only | residual |
+| D-0035-05 | — | Tasks / contacts (`IPM.Task`, …) | Calendar classes only | residual |
+| D-0035-06 | — | Live Graph/Exchange calendar APIs | Export/ICS/PST only | never |
+| D-0035-07 | P3 | Full GUI smoke calendar chip / ICS job | Automated + operator smoke | operator / polish |
+| D-0035-08 | — | Dedicated FilterSpec `cal_start_at` field | P0 maps start→sent_at when email times null | residual polish |
+| D-0035-09 | — | Calendar-specific logical_hash preimage polish | non-email hash / UID path P0 | residual |
+| D-0035-10 | — | Produce archive-parent multi-event ICS explicitly | Children ship single-event natives; full dump only if parent selected | **0040** |
+| D-0035-11 | — | Floating times / exotic non-IANA TZIDs | Fail-soft null offset; no invent | residual |
+| D-0035-12 | P3 | Embedded VTIMEZONE not used for offset resolution | IANA chrono-tz only; blobs copied into child natives | residual |
+| D-0035-13 | P3 | Force multi-child rewrite via `update_item` leaves FTS bookkeeping until reindex | ICS apply path clears FTS; update_item does not | residual polish |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

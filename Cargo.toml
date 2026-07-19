@@ -19,6 +19,7 @@ members = [
     "crates/extract-office",
     "crates/extract-pdf",
     "crates/dedupe-desk",
+    "crates/extract-calendar",
 ]
 
 [workspace.dependencies]

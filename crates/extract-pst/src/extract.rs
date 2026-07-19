@@ -1,13 +1,13 @@
 //! Blocking PST extract → Normalized Items.
 
 use matter_core::{
-    compute_email_logical_hash, item_role, item_status, normalize_body,
-    normalize_conversation_index_to_hex, normalize_message_id, parse_in_reply_to,
+    compute_email_logical_hash, compute_non_email_logical_hash, item_role, item_status,
+    normalize_body, normalize_conversation_index_to_hex, normalize_message_id, parse_in_reply_to,
     parse_references_header, references_to_json, AuditEventInput, ConversationIndexInput,
     EmailLogicalInput, Item, ItemErrorInput, ItemInput, ItemUpdate, JobState, LogicalAttachment,
-    Matter, FAMILY_KIND_EMAIL_ATTACHMENTS, LOGICAL_HASH_VERSION,
+    Matter, NonEmailLogicalInput, FAMILY_KIND_EMAIL_ATTACHMENTS, LOGICAL_HASH_VERSION,
 };
-use pst_reader::{filetime_to_rfc3339, ExtractedMessage, NodeId};
+use pst_reader::{filetime_to_rfc3339, is_calendar_message_class, ExtractedMessage, NodeId};
 use serde_json::json;
 
 use crate::checkpoint::{nid_hex, ExtractCursor};
@@ -669,11 +669,44 @@ fn extract_one_message(
     let cc = parse_display_list(extracted.display_cc.as_deref());
     let bcc = parse_display_list(extracted.display_bcc.as_deref());
 
-    let sent_at = extracted.submit_time.and_then(filetime_to_rfc3339);
+    let cat = map_pst_message_category(extracted.message_class.as_deref());
+    let is_calendar = cat.is_calendar;
+
+    let cal_start_at = extracted.start_date.and_then(filetime_to_rfc3339);
+    let cal_end_at = extracted.end_date.and_then(filetime_to_rfc3339);
+    let cal_attendees_json = if is_calendar {
+        calendar_attendees_json(&to, &cc)
+    } else {
+        None
+    };
+
+    let mut sent_at = extracted.submit_time.and_then(filetime_to_rfc3339);
     let received_at = extracted.delivery_time.and_then(filetime_to_rfc3339);
+    // Prefer cal_start_at for sort when email sent time missing (calendar path).
+    if is_calendar && sent_at.is_none() {
+        sent_at = cal_start_at.clone();
+    }
 
     let body_raw = extracted.body_text.clone().unwrap_or_default();
-    let body_for_hash = normalize_body(&body_raw);
+    // Calendar review text: structured summary + description (spec §3.6).
+    // Attendees line: DisplayTo + DisplayCc (best-effort).
+    let (display_body, calendar_text_truncated) = if is_calendar {
+        let mut attendees_for_text = to.clone();
+        for c in &cc {
+            if !attendees_for_text.iter().any(|a| a == c) {
+                attendees_for_text.push(c.clone());
+            }
+        }
+        synthesize_calendar_review_text(
+            &extracted,
+            &attendees_for_text,
+            cal_start_at.as_deref(),
+            cal_end_at.as_deref(),
+        )
+    } else {
+        (body_raw.clone(), false)
+    };
+    let body_for_hash = normalize_body(&display_body);
     let body_bytes = body_for_hash.as_bytes();
 
     let text_sha256 = if body_bytes.is_empty() {
@@ -693,7 +726,10 @@ fn extract_one_message(
         )
     };
 
-    let html_sha256 = if let Some(ref html) = extracted.body_html {
+    let html_sha256 = if is_calendar {
+        // Calendar path stores synthesized plain text only.
+        None
+    } else if let Some(ref html) = extracted.body_html {
         if html.is_empty() {
             None
         } else if (html.len() as u64) <= limits.max_in_memory_put_bytes {
@@ -723,6 +759,14 @@ fn extract_one_message(
     let (in_reply_to, references_json, conversation_topic, conversation_index_hex) =
         thread_header_fields(&extracted);
 
+    let file_category = cat.file_category;
+    let from_addr = if is_calendar {
+        // Organizer not available via standard tags in P0; fall back to sender.
+        extracted.sender_email.clone()
+    } else {
+        extracted.sender_email.clone()
+    };
+
     // Insert parent shell first so family can link.
     let family = matter.insert_family(FAMILY_KIND_EMAIL_ATTACHMENTS)?;
     let parent = matter.insert_item(ItemInput {
@@ -732,10 +776,10 @@ fn extract_one_message(
         status: item_status::PARTIAL.to_string(),
         role: Some(item_role::PARENT.to_string()),
         mime_type: Some("application/vnd.ms-outlook".into()),
-        file_category: Some("email".into()),
+        file_category: Some(file_category.into()),
         message_id: mid.clone(),
         subject: extracted.subject.clone(),
-        from_addr: extracted.sender_email.clone(),
+        from_addr: from_addr.clone(),
         to_addrs_json: Some(serde_json::to_string(&to)?),
         cc_addrs_json: Some(serde_json::to_string(&cc)?),
         bcc_addrs_json: Some(serde_json::to_string(&bcc)?),
@@ -748,16 +792,41 @@ fn extract_one_message(
         references_json,
         conversation_topic,
         conversation_index_hex,
-        extra_json: Some(
-            json!({
+        message_class: extracted.message_class.clone(),
+        cal_start_at: if is_calendar {
+            cal_start_at.clone()
+        } else {
+            None
+        },
+        cal_end_at: if is_calendar {
+            cal_end_at.clone()
+        } else {
+            None
+        },
+        cal_location: if is_calendar {
+            extracted.location.clone()
+        } else {
+            None
+        },
+        cal_organizer: if is_calendar { from_addr.clone() } else { None },
+        cal_attendees_json: cal_attendees_json.clone(),
+        cal_extract_method: cat.cal_extract_method.map(|s| s.into()),
+        extra_json: {
+            let mut extra = json!({
                 "pst_nid": nid_hex(msg_nid.0),
                 "folder": folder_path,
                 "extract_tool": "extract-pst",
                 "extract_version": env!("CARGO_PKG_VERSION"),
                 "native_format": NATIVE_FORMAT_V1,
-            })
-            .to_string(),
-        ),
+                "message_class": extracted.message_class,
+            });
+            if is_calendar && calendar_text_truncated {
+                if let Some(obj) = extra.as_object_mut() {
+                    obj.insert("calendar_text_truncated".into(), json!(true));
+                }
+            }
+            Some(extra.to_string())
+        },
         ..Default::default()
     })?;
 
@@ -954,20 +1023,37 @@ fn extract_one_message(
         .put_bytes(&native_bytes)
         .map_err(|e| Error::CasPutFailed(e.to_string()))?;
 
-    // Logical hash via matter-core (always pass bcc).
-    let logical_input = EmailLogicalInput {
-        message_id: extracted.message_id.clone(),
-        subject: extracted.subject.clone(),
-        from: extracted.sender_email.clone(),
-        to: to.clone(),
-        cc: cc.clone(),
-        bcc: bcc.clone(),
-        sent: sent_at.clone(),
-        received: received_at.clone(),
-        body: Some(body_for_hash.clone()),
-        attachments: logical_atts,
+    // Logical hash: email MID path when Message-ID present; pure calendar without
+    // Message-ID uses non-email preimage (spec §3.7). Meeting requests that also
+    // carry Message-ID keep the email path for exact dups of the message.
+    let logical_hash = if is_calendar && mid.is_none() {
+        let child_digests: Vec<String> = logical_atts
+            .iter()
+            .map(|a| a.native_sha256.clone())
+            .collect();
+        compute_non_email_logical_hash(&NonEmailLogicalInput {
+            category: Some("calendar".into()),
+            title: extracted.subject.clone(),
+            author: from_addr.clone(),
+            created: cal_start_at.clone().or(sent_at.clone()),
+            text: Some(body_for_hash.clone()),
+            children_native_sha256: child_digests,
+        })
+    } else {
+        // Email path (IPM.Note etc.) and calendar-with-MID: always pass bcc.
+        compute_email_logical_hash(&EmailLogicalInput {
+            message_id: extracted.message_id.clone(),
+            subject: extracted.subject.clone(),
+            from: extracted.sender_email.clone(),
+            to: to.clone(),
+            cc: cc.clone(),
+            bcc: bcc.clone(),
+            sent: sent_at.clone(),
+            received: received_at.clone(),
+            body: Some(body_for_hash.clone()),
+            attachments: logical_atts,
+        })
     };
-    let logical_hash = compute_email_logical_hash(&logical_input);
 
     let status = if parent_partial || attach_err > 0 {
         item_status::PARTIAL
@@ -992,6 +1078,117 @@ fn extract_one_message(
 
     let _ = job_id; // used in error paths
     Ok(())
+}
+
+/// Extract-path category mapping from `PidTagMessageClass` (spec §3.2 / §3.9).
+///
+/// Isolated so unit tests can assert `file_category` / `cal_extract_method`
+/// without opening a full PST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PstMessageCategoryMapping {
+    file_category: &'static str,
+    cal_extract_method: Option<&'static str>,
+    is_calendar: bool,
+}
+
+fn map_pst_message_category(message_class: Option<&str>) -> PstMessageCategoryMapping {
+    let is_calendar = message_class.is_some_and(is_calendar_message_class);
+    if is_calendar {
+        PstMessageCategoryMapping {
+            file_category: "calendar",
+            cal_extract_method: Some("pst_oxocal_v1"),
+            is_calendar: true,
+        }
+    } else {
+        PstMessageCategoryMapping {
+            file_category: "email",
+            cal_extract_method: None,
+            is_calendar: false,
+        }
+    }
+}
+
+/// Serialize DisplayTo / DisplayCc into `cal_attendees_json` (spec §3.1 / §3.3).
+///
+/// Best-effort shape: `[{ "addr", "name?", "role?", "partstat?" }, …]`.
+/// PST Display* strings yield addresses only; role/partstat omitted when unknown.
+fn calendar_attendees_json(to: &[String], cc: &[String]) -> Option<String> {
+    let mut arr = Vec::new();
+    for addr in to {
+        if addr.is_empty() {
+            continue;
+        }
+        arr.push(json!({ "addr": addr }));
+    }
+    for addr in cc {
+        if addr.is_empty() {
+            continue;
+        }
+        // Avoid duplicate when the same person appears on To and Cc.
+        if arr
+            .iter()
+            .any(|v| v.get("addr").and_then(|a| a.as_str()) == Some(addr.as_str()))
+        {
+            continue;
+        }
+        arr.push(json!({ "addr": addr }));
+    }
+    if arr.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&arr).unwrap_or_default())
+    }
+}
+
+/// Synthesize review plain-text for calendar items (spec §3.6).
+///
+/// Returns `(text, truncated)`. Text is capped at
+/// [`crate::limits::MAX_CALENDAR_REVIEW_TEXT_BYTES`] with a truncation marker
+/// (mirrors extract-calendar).
+fn synthesize_calendar_review_text(
+    extracted: &ExtractedMessage,
+    attendees: &[String],
+    start: Option<&str>,
+    end: Option<&str>,
+) -> (String, bool) {
+    use crate::limits::{CALENDAR_TEXT_TRUNCATION_MARKER, MAX_CALENDAR_REVIEW_TEXT_BYTES};
+
+    let subject = extracted.subject.as_deref().unwrap_or("");
+    let when = match (start, end) {
+        (Some(s), Some(e)) => format!("{s} – {e}"),
+        (Some(s), None) => s.to_string(),
+        (None, Some(e)) => format!("– {e}"),
+        (None, None) => String::new(),
+    };
+    let where_ = extracted.location.as_deref().unwrap_or("");
+    let organizer = extracted.sender_email.as_deref().unwrap_or("");
+    let att_line = attendees.join("; ");
+    let class = extracted.message_class.as_deref().unwrap_or("");
+    let description = extracted.body_text.as_deref().unwrap_or("");
+    let mut full = format!(
+        "Subject: {subject}\n\
+         When: {when}\n\
+         Where: {where_}\n\
+         Organizer: {organizer}\n\
+         Attendees: {att_line}\n\
+         Busy: \n\
+         Class: {class}\n\
+         ---\n\
+         {description}"
+    );
+    let mut truncated = false;
+    if full.len() > MAX_CALENDAR_REVIEW_TEXT_BYTES {
+        truncated = true;
+        let keep =
+            MAX_CALENDAR_REVIEW_TEXT_BYTES.saturating_sub(CALENDAR_TEXT_TRUNCATION_MARKER.len());
+        let mut end = keep.min(full.len());
+        while end > 0 && !full.is_char_boundary(end) {
+            end -= 1;
+        }
+        full.truncate(end);
+        full.push_str(CALENDAR_TEXT_TRUNCATION_MARKER);
+    }
+    (full, truncated)
 }
 
 /// Normalize reply-chain / conversation header fields for parent insert.
@@ -1090,6 +1287,10 @@ mod tests {
             conversation_topic: Some("  Topic  ".into()),
             conversation_index_bytes: Some(vec![0x01, 0x02, 0x03]),
             conversation_index_string: None,
+            message_class: None,
+            start_date: None,
+            end_date: None,
+            location: None,
         };
         let (irt, refs, topic, ci) = thread_header_fields(&msg);
         assert_eq!(irt.as_deref(), Some("parent@ex.com"));
@@ -1127,9 +1328,172 @@ mod tests {
             conversation_topic: None,
             conversation_index_bytes: None,
             conversation_index_string: None,
+            message_class: None,
+            start_date: None,
+            end_date: None,
+            location: None,
         };
         let (a, b, c, d) = thread_header_fields(&msg);
         assert!(a.is_none() && b.is_none() && c.is_none() && d.is_none());
+    }
+
+    #[test]
+    fn calendar_review_text_contains_markers() {
+        let msg = ExtractedMessage {
+            nid: NodeId(1),
+            message_id: None,
+            subject: Some("Standup".into()),
+            sender_email: Some("org@ex.com".into()),
+            display_to: Some("a@ex.com".into()),
+            display_cc: None,
+            display_bcc: None,
+            submit_time: None,
+            delivery_time: None,
+            body_text: Some("Bring notes".into()),
+            body_html: None,
+            message_size: None,
+            has_attachments: None,
+            in_reply_to: None,
+            references: None,
+            conversation_topic: None,
+            conversation_index_bytes: None,
+            conversation_index_string: None,
+            message_class: Some("IPM.Appointment".into()),
+            start_date: None,
+            end_date: None,
+            location: Some("Room 1".into()),
+        };
+        let (text, truncated) = synthesize_calendar_review_text(
+            &msg,
+            &["a@ex.com".into()],
+            Some("2026-07-18T14:00:00Z"),
+            Some("2026-07-18T14:30:00Z"),
+        );
+        assert!(!truncated);
+        assert!(text.contains("Subject: Standup"));
+        assert!(text.contains("Where: Room 1"));
+        assert!(text.contains("Class: IPM.Appointment"));
+        assert!(text.contains("Bring notes"));
+        assert!(text.contains("Attendees: a@ex.com"));
+        assert!(is_calendar_message_class("IPM.Appointment"));
+        assert!(!is_calendar_message_class("IPM.Note"));
+    }
+
+    #[test]
+    fn calendar_review_text_large_body_is_capped() {
+        use crate::limits::{CALENDAR_TEXT_TRUNCATION_MARKER, MAX_CALENDAR_REVIEW_TEXT_BYTES};
+        let huge = "X".repeat(MAX_CALENDAR_REVIEW_TEXT_BYTES + 50_000);
+        let msg = ExtractedMessage {
+            nid: NodeId(1),
+            message_id: None,
+            subject: Some("Big".into()),
+            sender_email: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            submit_time: None,
+            delivery_time: None,
+            body_text: Some(huge),
+            body_html: None,
+            message_size: None,
+            has_attachments: None,
+            in_reply_to: None,
+            references: None,
+            conversation_topic: None,
+            conversation_index_bytes: None,
+            conversation_index_string: None,
+            message_class: Some("IPM.Appointment".into()),
+            start_date: None,
+            end_date: None,
+            location: None,
+        };
+        let (text, truncated) = synthesize_calendar_review_text(&msg, &[], None, None);
+        assert!(truncated, "large body must set truncated");
+        assert!(
+            text.len() <= MAX_CALENDAR_REVIEW_TEXT_BYTES,
+            "capped len {}",
+            text.len()
+        );
+        assert!(
+            text.ends_with(CALENDAR_TEXT_TRUNCATION_MARKER)
+                || text.contains(CALENDAR_TEXT_TRUNCATION_MARKER),
+            "must include truncation marker"
+        );
+        assert!(text.contains("Subject: Big"));
+    }
+
+    #[test]
+    fn calendar_attendees_json_from_display_to_and_cc() {
+        let to = vec!["alice@ex.com".into(), "bob@ex.com".into()];
+        let cc = vec!["carol@ex.com".into(), "alice@ex.com".into()]; // dup of To
+        let json = calendar_attendees_json(&to, &cc).expect("json");
+        let arr: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(arr.len(), 3, "dedupe To/Cc: {json}");
+        let addrs: Vec<&str> = arr
+            .iter()
+            .filter_map(|o| o.get("addr").and_then(|a| a.as_str()))
+            .collect();
+        assert_eq!(addrs, vec!["alice@ex.com", "bob@ex.com", "carol@ex.com"]);
+        // Empty inputs → None (not empty array).
+        assert!(calendar_attendees_json(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn calendar_path_item_input_includes_attendees_json() {
+        // Persistence shape for calendar ItemInput: cal_attendees_json populated
+        // from DisplayTo when mapping calendar category (unit-level contract).
+        let to = parse_display_list(Some("Alice <alice@ex.com>; Bob <bob@ex.com>"));
+        let cc = parse_display_list(Some("Carol <carol@ex.com>"));
+        let cat = map_pst_message_category(Some("IPM.Appointment"));
+        assert!(cat.is_calendar);
+        let attendees = calendar_attendees_json(&to, &cc).expect("attendees");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8");
+        let matter = Matter::create(root.join("cal-att"), "CalAtt").expect("create");
+        let item = matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                file_category: Some(cat.file_category.into()),
+                cal_extract_method: cat.cal_extract_method.map(|s| s.into()),
+                cal_attendees_json: Some(attendees.clone()),
+                cal_organizer: Some("org@ex.com".into()),
+                message_class: Some("IPM.Appointment".into()),
+                to_addrs_json: Some(serde_json::to_string(&to).unwrap()),
+                ..Default::default()
+            })
+            .expect("insert");
+        let got = matter.get_item(&item.id).expect("get");
+        let json = got.cal_attendees_json.as_deref().expect("persisted json");
+        let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["addr"], "alice@ex.com");
+        assert_eq!(arr[2]["addr"], "carol@ex.com");
+    }
+
+    /// Spec §3.9 cases 7–8: calendar MessageClass → calendar category; Note stays email.
+    #[test]
+    fn pst_message_category_mapping_calendar_and_note() {
+        let appt = map_pst_message_category(Some("IPM.Appointment"));
+        assert_eq!(appt.file_category, "calendar");
+        assert_eq!(appt.cal_extract_method, Some("pst_oxocal_v1"));
+        assert!(appt.is_calendar);
+        assert!(is_calendar_message_class("IPM.Appointment"));
+
+        let meeting = map_pst_message_category(Some("IPM.Schedule.Meeting.Request"));
+        assert_eq!(meeting.file_category, "calendar");
+        assert_eq!(meeting.cal_extract_method, Some("pst_oxocal_v1"));
+        assert!(meeting.is_calendar);
+
+        let note = map_pst_message_category(Some("IPM.Note"));
+        assert_eq!(note.file_category, "email");
+        assert_eq!(note.cal_extract_method, None);
+        assert!(!note.is_calendar);
+        assert!(!is_calendar_message_class("IPM.Note"));
+
+        let missing = map_pst_message_category(None);
+        assert_eq!(missing.file_category, "email");
+        assert_eq!(missing.cal_extract_method, None);
+        assert!(!missing.is_calendar);
     }
 
     #[test]
@@ -1176,6 +1540,10 @@ mod tests {
             conversation_topic: Some("Topic".into()),
             conversation_index_bytes: Some(vec![0xaa, 0xbb]),
             conversation_index_string: None,
+            message_class: None,
+            start_date: None,
+            end_date: None,
+            location: None,
         };
         refresh_thread_headers(&matter, &parent.id, &extracted).expect("refresh");
 

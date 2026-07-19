@@ -241,6 +241,21 @@ impl FilterSpec {
         }
     }
 
+    /// Quick chip: calendar appointments / meeting items (track 0035).
+    pub fn preset_calendar() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "file_category".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::String("calendar".into())),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
     /// Quick chip: redactions present but redacted produce artifact missing/outdated (track 0032).
     pub fn preset_redacted_text_stale() -> Self {
         Self {
