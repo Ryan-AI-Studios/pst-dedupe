@@ -15,6 +15,7 @@ members = [
     "crates/matter-neardup",
     "crates/matter-cull",
     "crates/matter-promote",
+    "crates/matter-produce",
     "crates/matter-search",
     "crates/extract-office",
     "crates/extract-pdf",

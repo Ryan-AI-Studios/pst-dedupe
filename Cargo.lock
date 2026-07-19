@@ -2725,6 +2725,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "matter-produce"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "csv",
+ "dedup-engine",
+ "matter-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "matter-promote"
 version = "0.1.0"
 dependencies = [
@@ -3699,6 +3716,7 @@ dependencies = [
  "matter-cull",
  "matter-dedupe",
  "matter-neardup",
+ "matter-produce",
  "matter-promote",
  "matter-search",
  "matter-thread",

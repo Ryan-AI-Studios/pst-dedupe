@@ -88,6 +88,7 @@ runner.shutdown(); // or drop
 | `neardup` | `MatterNearDupHandler` | `{ "shingle_k", "cjk_char_n", "num_hashes", "num_bands", "rows_per_band", "threshold", "skip_exact_duplicates", "min_chars", "reset", "batch_size", "include_attachments", ... }` (all optional; defaults apply) | checkpoint `stage=neardup` cursor |
 | `cull` | `MatterCullHandler` | `{ "preset_name": "unique_only", "preset_id", "rules", "reset", "batch_size" }` (all optional; defaults apply) | checkpoint `stage=cull` cursor |
 | `promote` | `MatterPromoteHandler` | `{ "policy": "auto", "review_set_name", "expand_families", "reset", "batch_size", "require_dedupe" }` (all optional; defaults apply) | checkpoint `stage=promote` cursor |
+| `produce` | `MatterProduceHandler` | `{ "scope": "review_corpus", "name", "bates_prefix": "PROD", "fail_if_withheld", "export_eml_if_missing_native", "include_csv_twin", "expand_family", "output_dir" }` (all optional; defaults apply). Alias kind `production_export` | checkpoint `stage=produce` cursor |
 | `fts_index` | `MatterFtsIndexHandler` | `{ "reset": false, "batch_size": 100, "scope": "all_with_text", "writer_heap_bytes" }` (all optional; defaults apply) | checkpoint `stage=fts_index` cursor |
 | `office_extract` | `MatterOfficeExtractHandler` | `{ "force": false, "batch_size": 50, "formats": ["docx","xlsx","pptx"] }` (all optional; defaults apply) | checkpoint `stage=office_extract` cursor |
 | `pdf_extract` | `MatterPdfExtractHandler` | `{ "force": false, "batch_size": 50 }` (all optional; defaults apply) | checkpoint `stage=pdf_extract` cursor |
@@ -107,6 +108,7 @@ matter-thread:   run_thread(matter, job_id, ...)          // no create_job
 matter-neardup:  run_neardup(matter, job_id, ...)         // no create_job
 matter-cull:     run_cull(matter, job_id, ...)            // no create_job
 matter-promote:  run_promote(matter, job_id, ...)         // no create_job
+matter-produce:  run_produce(matter, job_id, ...)         // no create_job
 matter-search:   run_fts_index(matter, job_id, ...)       // no create_job
 ```
 
@@ -123,6 +125,7 @@ Legacy wrappers (`ingest_path`, `extract_pst_item`) still create a job then call
 | `neardup` | on | `matter-neardup` |
 | `cull` | on | `matter-cull` |
 | `promote` | on | `matter-promote` |
+| `produce` | on | `matter-produce` |
 | `fts` | on | `matter-search` |
 | `office` | on | `extract-office` |
 | `pdf` | on | `extract-pdf` |

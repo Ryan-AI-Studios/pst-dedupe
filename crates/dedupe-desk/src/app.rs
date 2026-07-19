@@ -13,8 +13,9 @@ use matter_core::CaseOverview;
 use process_runner::{
     ExtractPstHandler, IngestHandler, JobParams, MatterClassifyHandler, MatterCullHandler,
     MatterDedupeHandler, MatterFtsIndexHandler, MatterIcsExtractHandler, MatterNearDupHandler,
-    MatterOcrHandler, MatterOfficeExtractHandler, MatterPdfExtractHandler, MatterPromoteHandler,
-    MatterThreadHandler, ProcessRunner, RunnerConfig,
+    MatterOcrHandler, MatterOfficeExtractHandler, MatterPdfExtractHandler, MatterProduceHandler,
+    MatterProductionExportHandler, MatterPromoteHandler, MatterThreadHandler, ProcessRunner,
+    RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -71,6 +72,13 @@ pub struct DeskApp {
     pub(crate) cull_preset: String,
     /// Selected promote policy for the workspace dropdown (`auto` + named).
     pub(crate) promote_policy: String,
+    /// Produce dialog open + draft fields.
+    pub(crate) produce_dialog_open: bool,
+    pub(crate) produce_name: String,
+    pub(crate) produce_bates_prefix: String,
+    pub(crate) produce_fail_if_withheld: bool,
+    pub(crate) produce_expand_family: bool,
+    pub(crate) produce_output_dir: String,
     /// Review screen state (thin list + body loader).
     pub(crate) review: ReviewState,
 }
@@ -85,6 +93,8 @@ impl DeskApp {
         runner.register(Arc::new(MatterNearDupHandler::new()));
         runner.register(Arc::new(MatterCullHandler::new()));
         runner.register(Arc::new(MatterPromoteHandler::new()));
+        runner.register(Arc::new(MatterProduceHandler::new()));
+        runner.register(Arc::new(MatterProductionExportHandler::new()));
         runner.register(Arc::new(MatterFtsIndexHandler::new()));
         runner.register(Arc::new(MatterOfficeExtractHandler::new()));
         runner.register(Arc::new(MatterPdfExtractHandler::new()));
@@ -122,6 +132,12 @@ impl DeskApp {
             last_job_id: None,
             cull_preset: "unique_only".into(),
             promote_policy: "auto".into(),
+            produce_dialog_open: false,
+            produce_name: "Review Production".into(),
+            produce_bates_prefix: "PROD".into(),
+            produce_fail_if_withheld: false,
+            produce_expand_family: false,
+            produce_output_dir: String::new(),
             review: ReviewState::default(),
         }
     }
@@ -527,6 +543,68 @@ impl DeskApp {
                     "Started promote job {job_id} (policy={policy}; auto resolves at run)"
                 ));
                 self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Open the Produce review set dialog (defaults under exports/productions).
+    pub(crate) fn open_produce_dialog(&mut self) {
+        if self.matter_root.is_none() {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        }
+        if self.produce_name.trim().is_empty() {
+            self.produce_name = "Review Production".into();
+        }
+        if self.produce_bates_prefix.trim().is_empty() {
+            self.produce_bates_prefix = "PROD".into();
+        }
+        // Default empty output → engine uses exports/productions/<name_or_stamp>/.
+        self.produce_dialog_open = true;
+    }
+
+    /// Start produce job from dialog draft fields.
+    pub(crate) fn start_produce(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let name = self.produce_name.trim();
+        let prefix = self.produce_bates_prefix.trim();
+        if name.is_empty() {
+            self.error_msg = Some("Production name is required.".into());
+            return;
+        }
+        if prefix.is_empty() {
+            self.error_msg = Some("Bates prefix is required.".into());
+            return;
+        }
+        let output = self.produce_output_dir.trim();
+        let output_opt = if output.is_empty() {
+            None
+        } else {
+            Some(output)
+        };
+        let params_json = params::produce_params(
+            name,
+            prefix,
+            self.produce_fail_if_withheld,
+            self.produce_expand_family,
+            output_opt,
+        );
+        let params = JobParams::new(params_json);
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "produce", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!(
+                    "Started produce job {job_id} (name={name}, prefix={prefix})"
+                ));
+                self.error_msg = None;
+                self.produce_dialog_open = false;
             }
             Err(e) => self.note_start_error(e),
         }
@@ -1233,8 +1311,104 @@ impl eframe::App for DeskApp {
                     ui.label("Open a matter to review.");
                 }
             }
-            Screen::StubProduce => self.show_stub(ui, "Produce"),
+            Screen::StubProduce => {
+                ui.heading("Produce");
+                ui.label(
+                    "Export the review corpus as natives + text + Concordance DAT/CSV \
+                     (track 0040).",
+                );
+                ui.add_space(8.0);
+                let busy = self.runner_busy();
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Produce review set…"))
+                    .on_hover_text(
+                        "Withheld items skipped by default. Family expand off — \
+                         broken-family QC is track 0041.",
+                    )
+                    .clicked()
+                {
+                    self.open_produce_dialog();
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Default output: <matter>/exports/productions/<name>/\n\
+                         DAT: UTF-8 BOM, þ/¶ delimiters, ® newlines, UTC dates.\n\
+                         Privilege descriptions and notes are never included.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            }
         });
+
+        if self.produce_dialog_open {
+            egui::Window::new("Produce review set")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(420.0)
+                .show(&ctx, |ui| {
+                    ui.label("Packages in_review items (or fails if the corpus is empty).");
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.produce_name)
+                                .desired_width(260.0),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Bates prefix:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.produce_bates_prefix)
+                                .desired_width(120.0),
+                        );
+                    });
+                    ui.checkbox(
+                        &mut self.produce_fail_if_withheld,
+                        "Fail if any selected item is withheld",
+                    );
+                    ui.checkbox(
+                        &mut self.produce_expand_family,
+                        "Expand families (include parents/children)",
+                    );
+                    if !self.produce_expand_family {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(180, 120, 40),
+                            "Family expand is OFF — ensure review membership is family-complete \
+                             or accept orphan/broken-family risk (QC in track 0041).",
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Output folder:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.produce_output_dir)
+                                .desired_width(240.0)
+                                .hint_text("default: exports/productions/<name>/"),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new(
+                            "Leave output empty to write under the matter exports/productions/ tree.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let busy = self.runner_busy();
+                        if ui
+                            .add_enabled(!busy, egui::Button::new("Start produce"))
+                            .clicked()
+                        {
+                            self.start_produce();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.produce_dialog_open = false;
+                        }
+                    });
+                });
+        }
 
         if self.about_open {
             egui::Window::new("About Dedupe Desk")

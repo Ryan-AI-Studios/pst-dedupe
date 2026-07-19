@@ -11,7 +11,7 @@ pub enum Screen {
     StubReduce,
     /// Review corpus list + body viewer (track 0026).
     Review,
-    /// Placeholder for later tracks.
+    /// Production export (track 0040) — produce dialog + job.
     StubProduce,
 }
 
@@ -27,7 +27,8 @@ impl Screen {
     }
 
     pub fn is_stub(self) -> bool {
-        matches!(self, Self::StubReduce | Self::StubProduce)
+        // Produce screen is live (0040); Reduce remains a placeholder.
+        matches!(self, Self::StubReduce)
     }
 
     /// Whether this screen requires an open matter root.
