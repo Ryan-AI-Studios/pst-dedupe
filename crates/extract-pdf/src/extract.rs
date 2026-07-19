@@ -110,7 +110,7 @@ pub fn extract_pdf_with_limits(
         return Err(Error::NotPdf("missing %PDF- magic".into()));
     }
 
-    // Load once (structure + text). Do not re-parse via extract_text_from_mem_by_pages.
+    // Load once (structure + text). Never re-parse via extract_text_from_mem*.
     let doc = match Document::load_mem(data) {
         Ok(d) => d,
         Err(e) => {
@@ -127,114 +127,83 @@ pub fn extract_pdf_with_limits(
     let pages_map = doc.get_pages();
     let total_pages = pages_map.len();
     let page_count_u32 = total_pages.min(u32::MAX as usize) as u32;
-    // Page numbers in document order (BTreeMap keys).
     let page_nums: Vec<u32> = pages_map.keys().copied().collect();
     let multi_page = page_nums.len() > 1;
 
-    // Display text (optional page markers) vs raw text for classification.
+    // Display (optional markers) vs raw (classification). Both hard-capped.
+    // Per-page PlainTextOutput writes into CappedString so a single hostile
+    // page cannot grow an unbounded String before TextBuf sees it.
     let mut display_buf = TextBuf::with_limit(max_text_bytes);
-    let mut raw_parts: Vec<String> = Vec::new();
+    let mut raw_buf = TextBuf::with_limit(max_text_bytes);
     let mut pages_used = 0usize;
     let mut page_capped = false;
-    let mut extracted_any = false;
+    let mut any_page_ok = false;
+    let mut first_page_err: Option<String> = None;
 
-    for (idx, &page_num) in page_nums.iter().enumerate() {
+    for &page_num in &page_nums {
         if pages_used >= max_pages {
             page_capped = true;
             break;
         }
-        if display_buf.is_full() {
+        if display_buf.is_full() || raw_buf.is_full() {
             break;
         }
 
-        let mut page_s = String::new();
-        let page_result = {
-            let mut output = PlainTextOutput::new(&mut page_s);
+        // Remaining budget for this page (+1 so empty pages still "run").
+        let page_cap = max_text_bytes.saturating_sub(raw_buf.len()).max(1);
+        let mut page_sink = CappedString::new(page_cap);
+        if let Err(e) = {
+            let mut output = PlainTextOutput::new(&mut page_sink);
             output_doc_page(&doc, &mut output, page_num)
-        };
-
-        match page_result {
-            Ok(()) => {
-                extracted_any = true;
+        } {
+            if !any_page_ok && first_page_err.is_none() {
+                first_page_err = Some(e.to_string());
             }
-            Err(e) => {
-                // Fallback only when the first page fails entirely.
-                if idx == 0 && !extracted_any {
-                    match pdf_extract::extract_text_from_mem(data) {
-                        Ok(t) => {
-                            // Single-blob fallback: treat as one logical page of raw text.
-                            let class = classify_text(&t, page_count_u32.max(1));
-                            if class == TextClass::Empty {
-                                return Ok(ExtractedPdfText {
-                                    text: String::new(),
-                                    method: methods::PDF_EXTRACT_V1.into(),
-                                    partial: false,
-                                    page_count: page_count_u32,
-                                    class,
-                                });
-                            }
-                            let mut fb = TextBuf::with_limit(max_text_bytes);
-                            fb.push_str(&t);
-                            let (text, text_partial) = fb.into_string();
-                            return Ok(ExtractedPdfText {
-                                text,
-                                method: methods::PDF_EXTRACT_V1.into(),
-                                partial: text_partial || page_capped,
-                                page_count: page_count_u32,
-                                class,
-                            });
-                        }
-                        Err(e2) => {
-                            return Err(Error::parse(format!(
-                                "text extract failed: {e}; fallback: {e2}"
-                            )));
-                        }
-                    }
-                }
-                // Later page failure: treat as empty page text and continue.
-                page_s.clear();
-            }
+            // No whole-document fallback (unbounded). Continue with empty page.
+            page_sink.clear();
+        } else {
+            any_page_ok = true;
         }
 
-        // Raw accumulation (no display markers) — joined later with "\n\n".
-        raw_parts.push(page_s.clone());
+        let page_s = page_sink.into_inner();
 
-        // Display text with optional markers for multi-page readability.
-        if pages_used > 0 && !display_buf.push_str("\n\n") {
-            break;
+        // Push into both raw (classification) and display (CAS) buffers.
+        // Do not short-circuit after raw fills — display must still receive
+        // the same page text (or truncation) for low_text/ok CAS writes.
+        if pages_used > 0 {
+            let _ = raw_buf.push_str("\n\n");
+            let _ = display_buf.push_str("\n\n");
         }
         if multi_page {
-            // 1-based sequential display index (matches prior enumerate behavior).
             let marker = format!("--- Page {} ---\n", pages_used + 1);
-            if !display_buf.push_str(&marker) {
-                break;
-            }
+            let _ = display_buf.push_str(&marker);
         }
-        if !display_buf.push_str(&page_s) {
-            pages_used += 1;
+        let _ = raw_buf.push_str(&page_s);
+        let _ = display_buf.push_str(&page_s);
+        pages_used += 1;
+        if raw_buf.is_full() || display_buf.is_full() {
             break;
         }
-        pages_used += 1;
     }
 
-    if pages_used == 0 && page_nums.is_empty() {
-        // No pages extracted — still record page_count from structure.
+    // Single-page hard failure with no successful page → parse error.
+    if !any_page_ok && page_nums.len() == 1 {
+        if let Some(e) = first_page_err {
+            return Err(Error::parse(format!("text extract failed: {e}")));
+        }
     }
 
     let (display_text, text_partial) = display_buf.into_string();
-    let partial = text_partial || page_capped;
-    // Prefer structural page count; fall back to pages we saw in text extract.
+    let (raw_text, raw_partial) = raw_buf.into_string();
+    let partial = text_partial || raw_partial || page_capped;
     let page_count = if page_count_u32 > 0 {
         page_count_u32
     } else {
         pages_used.min(u32::MAX as usize) as u32
     };
 
-    // Classification uses raw page text only (joined with blank lines).
-    let raw_text = raw_parts.join("\n\n");
     let class = classify_text(&raw_text, page_count.max(1));
 
-    // Empty: return empty display text (no markers-only CAS).
     if class == TextClass::Empty {
         return Ok(ExtractedPdfText {
             text: String::new(),
@@ -245,7 +214,6 @@ pub fn extract_pdf_with_limits(
         });
     }
 
-    // Ensure truncation marker constant is linked for callers/tests.
     let _ = TRUNCATION_MARKER;
 
     Ok(ExtractedPdfText {
@@ -255,6 +223,65 @@ pub fn extract_pdf_with_limits(
         page_count,
         class,
     })
+}
+
+// --- Capped sink for per-page PlainTextOutput ---
+
+/// `fmt::Write` sink that never grows past `max` bytes (char-boundary safe).
+struct CappedString {
+    s: String,
+    max: usize,
+    truncated: bool,
+}
+
+impl CappedString {
+    fn new(max: usize) -> Self {
+        Self {
+            s: String::with_capacity(max.min(64 * 1024)),
+            max,
+            truncated: false,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.s.clear();
+        self.truncated = false;
+    }
+
+    fn into_inner(self) -> String {
+        self.s
+    }
+}
+
+impl std::fmt::Write for CappedString {
+    fn write_str(&mut self, t: &str) -> std::fmt::Result {
+        if self.truncated || self.s.len() >= self.max {
+            self.truncated = true;
+            return Ok(());
+        }
+        let remaining = self.max - self.s.len();
+        if t.len() <= remaining {
+            self.s.push_str(t);
+            if self.s.len() >= self.max {
+                self.truncated = true;
+            }
+            return Ok(());
+        }
+        let mut end = remaining;
+        while end > 0 && !t.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.s.push_str(&t[..end]);
+        self.truncated = true;
+        Ok(())
+    }
+}
+
+impl pdf_extract::ConvertToFmt for &mut CappedString {
+    type Writer = Self;
+    fn convert(self) -> Self::Writer {
+        self
+    }
 }
 
 /// Panic-isolating wrapper for job use. Converts panics to parse errors.

@@ -1193,7 +1193,11 @@ impl ReviewState {
             self.item_pdf_needs_ocr = 0;
             return;
         };
-        // Prefer item-level OCR flag independently of annotation load success.
+        // Always reset OCR flag on selection change first, then load for this
+        // item. Avoids showing a prior item's banner when the new load fails
+        // (Codex P2-009). Annotation failure must not clear a successfully
+        // loaded flag (P2-007).
+        self.item_pdf_needs_ocr = 0;
         if let Ok(flag) = load_item_pdf_needs_ocr(matter_root, &item_id) {
             self.item_pdf_needs_ocr = flag;
         }
@@ -1206,7 +1210,7 @@ impl ReviewState {
             }
             Err(e) => {
                 // Clear notes/highlights/redactions only — keep pdf_needs_ocr
-                // from the item load above (or prior value if that also failed).
+                // from the item load above (already 0 if item load failed).
                 self.item_notes.clear();
                 self.item_highlights.clear();
                 self.item_redactions.clear();
