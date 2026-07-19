@@ -1,7 +1,10 @@
 //! Create / open matter helpers (short, non-blocking for empty open; errors to UI).
 
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
+
 use camino::{Utf8Path, Utf8PathBuf};
-use matter_core::Matter;
+use matter_core::{load_case_overview, CaseOverview, Matter, OverviewOptions};
 
 use crate::params::validate_matter_name;
 
@@ -155,6 +158,147 @@ pub fn refresh_snapshot(matter_root: &Utf8Path) -> Result<MatterSnapshot, String
     })
 }
 
+// ---------------------------------------------------------------------------
+// Case overview (track 0038) — always off UI thread
+// ---------------------------------------------------------------------------
+
+/// Result of a background overview load.
+#[derive(Debug)]
+pub enum OverviewLoadResult {
+    Ok(Box<CaseOverview>),
+    Err(String),
+}
+
+/// At most one in-flight overview load (background SQL / fan-out).
+///
+/// Concurrent refresh requests while busy set a coalesce flag; when the in-flight
+/// load completes, a pending request is re-spawned so job-completion refreshes
+/// are never silently dropped.
+#[derive(Default)]
+pub struct OverviewLoadState {
+    busy: bool,
+    /// True when a refresh was requested while a load was already in flight.
+    pending: bool,
+    /// Last root used for spawn (needed to re-issue a pending load).
+    last_root: Option<Utf8PathBuf>,
+    rx: Option<Receiver<OverviewLoadResult>>,
+}
+
+impl OverviewLoadState {
+    pub fn is_busy(&self) -> bool {
+        self.busy
+    }
+
+    /// Whether a refresh is queued to run after the current load finishes.
+    #[cfg(test)]
+    pub fn is_pending(&self) -> bool {
+        self.pending
+    }
+
+    /// Spawn `load_case_overview` on a worker thread (never on the egui thread).
+    ///
+    /// If a load is already in flight, marks `pending` so a follow-up load runs
+    /// after the current one completes (coalesced: multiple requests → one follow-up).
+    pub fn spawn(&mut self, matter_root: Utf8PathBuf) {
+        self.last_root = Some(matter_root.clone());
+        if self.busy {
+            self.pending = true;
+            return;
+        }
+        self.start_load(matter_root);
+    }
+
+    fn start_load(&mut self, matter_root: Utf8PathBuf) {
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        self.busy = true;
+        let _ = thread::Builder::new()
+            .name("desk-overview".into())
+            .spawn(move || {
+                let result = match load_case_overview(&matter_root, &OverviewOptions::default()) {
+                    Ok(ov) => OverviewLoadResult::Ok(Box::new(ov)),
+                    Err(e) => OverviewLoadResult::Err(e.to_string()),
+                };
+                let _ = tx.send(result);
+            });
+    }
+
+    /// Poll for a completed load. On completion, if a refresh was requested while
+    /// busy, immediately spawns another load (coalesce).
+    pub fn try_take(&mut self) -> Option<OverviewLoadResult> {
+        let rx = self.rx.as_ref()?;
+        match rx.try_recv() {
+            Ok(r) => {
+                self.busy = false;
+                self.rx = None;
+                self.reschedule_if_pending();
+                Some(r)
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.busy = false;
+                self.rx = None;
+                self.reschedule_if_pending();
+                Some(OverviewLoadResult::Err(
+                    "Overview load thread ended unexpectedly.".into(),
+                ))
+            }
+        }
+    }
+
+    fn reschedule_if_pending(&mut self) {
+        if !self.pending {
+            return;
+        }
+        self.pending = false;
+        if let Some(root) = self.last_root.clone() {
+            self.start_load(root);
+        }
+    }
+
+    /// Clear in-flight load when switching matters.
+    pub fn clear(&mut self) {
+        self.busy = false;
+        self.pending = false;
+        self.last_root = None;
+        self.rx = None;
+    }
+}
+
+/// Display label for empty category buckets.
+pub fn overview_category_label(raw: &str) -> &str {
+    if raw.is_empty() {
+        "(uncategorized)"
+    } else {
+        raw
+    }
+}
+
+/// Display label for empty custodian buckets.
+pub fn overview_custodian_label(raw: &str) -> &str {
+    if raw.is_empty() {
+        "(none)"
+    } else {
+        raw
+    }
+}
+
+/// Format byte counts for KPI cards (KiB / MiB / GiB when large).
+pub fn format_bytes(n: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+    if n >= GIB {
+        format!("{:.2} GiB", n as f64 / GIB as f64)
+    } else if n >= MIB {
+        format!("{:.2} MiB", n as f64 / MIB as f64)
+    } else if n >= KIB {
+        format!("{:.1} KiB", n as f64 / KIB as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +358,96 @@ mod tests {
         let (_t, base) = utf8_temp();
         assert!(create_matter(&base, "").is_err());
         assert!(create_matter(&base, "a/b").is_err());
+    }
+
+    #[test]
+    fn overview_label_helpers() {
+        assert_eq!(overview_category_label(""), "(uncategorized)");
+        assert_eq!(overview_category_label("email"), "email");
+        assert_eq!(overview_custodian_label(""), "(none)");
+        assert_eq!(overview_custodian_label("Alice"), "Alice");
+        assert_eq!(format_bytes(500), "500 B");
+        assert!(format_bytes(5_000_000).contains("MiB") || format_bytes(5_000_000).contains("KiB"));
+    }
+
+    #[test]
+    fn overview_load_off_ui_thread_completes() {
+        let (_t, base) = utf8_temp();
+        let root = create_matter(&base, "OverviewLoad").expect("create");
+        let mut state = OverviewLoadState::default();
+        state.spawn(root);
+        assert!(state.is_busy());
+        let mut got = None;
+        for _ in 0..200 {
+            if let Some(r) = state.try_take() {
+                got = Some(r);
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        match got.expect("overview result") {
+            OverviewLoadResult::Ok(ov) => {
+                assert_eq!(ov.totals.items_total, 0);
+                let _ = ov;
+            }
+            OverviewLoadResult::Err(e) => panic!("overview failed: {e}"),
+        }
+        assert!(!state.is_busy());
+        assert!(!state.is_pending());
+    }
+
+    /// Double refresh while busy must coalesce (pending) and re-spawn after take.
+    #[test]
+    fn overview_load_double_request_coalesces_pending() {
+        let (_t, base) = utf8_temp();
+        let root = create_matter(&base, "OverviewCoalesce").expect("create");
+        let mut state = OverviewLoadState::default();
+        state.spawn(root.clone());
+        assert!(state.is_busy());
+        assert!(!state.is_pending());
+
+        // Second request while busy → pending flag, not dropped.
+        state.spawn(root.clone());
+        assert!(state.is_busy());
+        assert!(state.is_pending());
+        // Further requests stay coalesced to a single follow-up.
+        state.spawn(root);
+        assert!(state.is_pending());
+
+        // First completion delivers a result and immediately re-spawns.
+        let mut first = None;
+        for _ in 0..200 {
+            if let Some(r) = state.try_take() {
+                first = Some(r);
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(
+            first.expect("first overview result"),
+            OverviewLoadResult::Ok(_)
+        ));
+        assert!(
+            state.is_busy(),
+            "pending refresh must re-spawn after first completion"
+        );
+        assert!(!state.is_pending());
+
+        // Second load completes and leaves idle.
+        let mut second = None;
+        for _ in 0..200 {
+            if let Some(r) = state.try_take() {
+                second = Some(r);
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(
+            second.expect("second overview result"),
+            OverviewLoadResult::Ok(_)
+        ));
+        assert!(!state.is_busy());
+        assert!(!state.is_pending());
     }
 
     /// Concurrent reader during a held writer connection (WAL / open_for_read).

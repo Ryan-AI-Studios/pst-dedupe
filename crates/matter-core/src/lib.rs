@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v18**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v19**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -26,6 +26,7 @@
 //! - **Calendar** fields (`cal_*`, `message_class`) + ICS extract bookkeeping (0035)
 //! - **OCR** bookkeeping (`ocr_*` columns) for offline Tesseract text (0036)
 //! - **File category** bookkeeping (`category_*` columns) for taxonomy_v1 (0037)
+//! - **Case overview** aggregations (`CaseOverview` / `load_case_overview`) for desk KPIs (0038)
 //!
 //! ## Layout
 //!
@@ -62,6 +63,7 @@ pub mod logical_hash;
 pub mod matter;
 pub mod ocr;
 pub mod office;
+pub mod overview;
 pub mod pdf;
 pub mod privilege;
 pub mod redaction;
@@ -111,6 +113,11 @@ pub use matter::{
 pub use ocr::{ocr_status, ApplyOcrTextInput, OcrApplyResult, OcrCandidate};
 pub use office::{
     office_extract_status, ApplyOfficeTextInput, OfficeCandidate, OfficeExtractApplyResult,
+};
+pub use overview::{
+    load_case_overview, load_case_overview_on, CaseOverview, CullOverview, ErrorOverview,
+    JobsOverview, LabelCount, OcrOverview, OverviewJobRow, OverviewOptions, OverviewTotals,
+    PrivilegeOverview, ReviewOverview,
 };
 pub use pdf::{pdf_extract_status, ApplyPdfTextInput, PdfCandidate, PdfExtractApplyResult};
 pub use privilege::{

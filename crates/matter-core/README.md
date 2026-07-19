@@ -7,7 +7,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (schema **v14**) + family graph
+6. **Normalized Item** model (fields introduced across schema v2–v14; current [`SCHEMA_VERSION`] is **19**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
@@ -21,7 +21,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 17. **Redaction** regions + true redacted text CAS artifact (0032)
 18. **Office extract** bookkeeping (`office_*`) for OOXML text fill (0033)
 
-Schema version: **18** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, text redaction, office extract bookkeeping, PDF extract bookkeeping (`pdf_needs_ocr`), calendar/ICS fields (`cal_*`, `ics_*`), OCR bookkeeping (`ocr_*`), and file-category bookkeeping (`category_*` / taxonomy_v1). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+Schema version: **19** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, text redaction, office extract bookkeeping, PDF extract bookkeeping (`pdf_needs_ocr`), calendar/ICS fields (`cal_*`, `ics_*`), OCR bookkeeping (`ocr_*`), file-category bookkeeping (`category_*` / taxonomy_v1), and **supporting indexes** for case overview rollups (`(matter_id, file_category)`, `(matter_id, custodian)`, `(matter_id, role)`). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
 
 ## Layout
 
@@ -125,6 +125,32 @@ Nullable columns on `items` (does **not** overload `status`):
 | `apply_dedup_batch_with_checkpoint` | **N role updates + checkpoint in one commit** (DoD-5) |
 
 Engine: `crates/matter-dedupe`. Never delete items/blobs; never use CLI content-hash as suppress key.
+
+## Case overview (0038)
+
+Read-only rollups for the desk Overview panel and for **0039** exportable reports.
+Do **not** re-implement these queries in 0039 — serialize `CaseOverview` instead.
+
+| API | Purpose |
+|---|---|
+| `load_case_overview(root, &OverviewOptions)` | Concurrent fan-out: multiple short-lived `Matter::open_for_read` + `std::thread` for independent GROUP BYs, then join into `CaseOverview` |
+| `load_case_overview_on(&matter, &opts)` | Sequential path on one open handle (tests / small matters) |
+| `Matter::overview_*` | Slice helpers (totals, status, category, custodian, cull, review, privilege, OCR, errors, jobs) |
+
+### Locked metric rules
+
+| Metric | Rule |
+|---|---|
+| **Top-level size** | `SUM(COALESCE(size_bytes,0))` where `role IS NULL OR role != 'attachment'` — **never** unlabeled `SUM` over all rows |
+| **Top-level items** | Count same role filter (not `COUNT(DISTINCT family_id)` — forbidden) |
+| **families_total** | Optional cheap `COUNT(*) WHERE role = 'parent'` only |
+| **Review progress** | `in_review` (default set) + `reviewed_count` (≥1 `item_codes` row) + `unreviewed_count`; invariant reviewed + unreviewed = in_review |
+| **Errors** | Matter-scoped total + top-N by `code` (default 15); join item/source/job to matter |
+| **Top-N defaults** | categories 25, custodians 25, error codes 15, recent jobs 5 |
+| **Privacy** | Counts and labels only — no subject/body |
+| **Audit** | None on view (read-only) |
+
+Empty labels are returned as `""`; UI maps category → `(uncategorized)`, custodian → `(none)`.
 
 ## Schema v4 — Email threading (0022)
 
