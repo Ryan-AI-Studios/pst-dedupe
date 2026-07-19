@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v19**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v21**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -28,6 +28,8 @@
 //! - **File category** bookkeeping (`category_*` columns) for taxonomy_v1 (0037)
 //! - **Case overview** aggregations (`CaseOverview` / `load_case_overview`) for desk KPIs (0038)
 //! - **Matter report** CSV pack export from `CaseOverview` + jobs (0039; PDF deferred D-0039-01)
+//! - **Production export** bookkeeping (`production_sets` / `production_items`, schema v20) (0040)
+//! - **Production QC** run history (`qc_runs` + selection fingerprint gate, schema v21) (0041)
 //!
 //! ## Layout
 //!
@@ -67,6 +69,7 @@ pub mod office;
 pub mod overview;
 pub mod pdf;
 pub mod privilege;
+pub mod qc;
 pub mod redaction;
 pub mod report;
 pub mod schema;
@@ -128,6 +131,7 @@ pub use privilege::{
     PrivilegeLogExportParams, PrivilegeLogExportResult, PrivilegeProtocol,
     UpsertItemPrivilegeInput, UpsertPrivilegeProtocolInput, PRIVILEGE_LOG_COLUMNS,
 };
+pub use qc::{qc_run_is_fresh, selection_fingerprint, InsertQcRunInput, QcRunRecord};
 pub use redaction::{
     build_redacted_text, merge_redaction_intervals, redaction_reason, redaction_status,
     resolve_redaction_against_body, CreateRedactionInput, ItemRedaction, RedactedTextResult,
