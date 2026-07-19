@@ -58,6 +58,9 @@ pub use handlers::MatterPromoteHandler;
 #[cfg(feature = "produce")]
 pub use handlers::{MatterProduceHandler, MatterProductionExportHandler};
 
+#[cfg(feature = "qc")]
+pub use handlers::MatterQcHandler;
+
 #[cfg(feature = "fts")]
 pub use handlers::MatterFtsIndexHandler;
 

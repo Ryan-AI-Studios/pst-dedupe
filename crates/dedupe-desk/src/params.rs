@@ -155,7 +155,7 @@ pub fn promote_params_for_policy(policy: &str) -> String {
 /// Default params for production export (`kind = "produce"`).
 #[allow(dead_code)]
 pub fn produce_default_params() -> String {
-    produce_params("Review Production", "PROD", false, false, None)
+    produce_params("Review Production", "PROD", false, false, true, None)
 }
 
 /// Build produce job params JSON.
@@ -164,6 +164,7 @@ pub fn produce_params(
     bates_prefix: &str,
     fail_if_withheld: bool,
     expand_family: bool,
+    require_qc_pass: bool,
     output_dir: Option<&str>,
 ) -> String {
     let mut v = serde_json::json!({
@@ -174,9 +175,29 @@ pub fn produce_params(
         "export_eml_if_missing_native": true,
         "include_csv_twin": true,
         "expand_family": expand_family,
+        "require_qc_pass": require_qc_pass,
     });
     if let Some(dir) = output_dir.map(str::trim).filter(|s| !s.is_empty()) {
         v["output_dir"] = serde_json::Value::String(dir.to_string());
+    }
+    v.to_string()
+}
+
+/// Default params for production QC (`kind = "qc"`).
+pub fn qc_default_params() -> String {
+    qc_params("review_corpus", false, None)
+}
+
+/// Build production QC job params JSON.
+pub fn qc_params(scope: &str, expand_family_for_scan: bool, report_dir: Option<&str>) -> String {
+    let mut v = serde_json::json!({
+        "scope": scope,
+        "expand_family_for_scan": expand_family_for_scan,
+        "profile": "default_production_qc_v1",
+        "rules": [],
+    });
+    if let Some(dir) = report_dir.map(str::trim).filter(|s| !s.is_empty()) {
+        v["report_dir"] = serde_json::Value::String(dir.to_string());
     }
     v.to_string()
 }
@@ -424,17 +445,38 @@ mod tests {
         assert_eq!(v["export_eml_if_missing_native"], true);
         assert_eq!(v["include_csv_twin"], true);
         assert_eq!(v["expand_family"], false);
+        assert_eq!(v["require_qc_pass"], true);
         assert!(v.get("output_dir").is_none() || v["output_dir"].is_null());
     }
 
     #[test]
     fn produce_params_with_output_dir() {
-        let j = produce_params("P1", "ABC", true, false, Some(r"C:\out\prod"));
+        let j = produce_params("P1", "ABC", true, false, false, Some(r"C:\out\prod"));
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["name"], "P1");
         assert_eq!(v["bates_prefix"], "ABC");
         assert_eq!(v["fail_if_withheld"], true);
+        assert_eq!(v["require_qc_pass"], false);
         assert_eq!(v["output_dir"], r"C:\out\prod");
+    }
+
+    #[test]
+    fn qc_default_json_shape() {
+        let j = qc_default_params();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["scope"], "review_corpus");
+        assert_eq!(v["expand_family_for_scan"], false);
+        assert_eq!(v["profile"], "default_production_qc_v1");
+        assert!(v["rules"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn qc_params_with_report_dir() {
+        let j = qc_params("item_ids", true, Some(r"C:\out\qc"));
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["scope"], "item_ids");
+        assert_eq!(v["expand_family_for_scan"], true);
+        assert_eq!(v["report_dir"], r"C:\out\qc");
     }
 
     #[test]

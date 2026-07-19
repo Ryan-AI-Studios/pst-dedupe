@@ -14,8 +14,8 @@ use process_runner::{
     ExtractPstHandler, IngestHandler, JobParams, MatterClassifyHandler, MatterCullHandler,
     MatterDedupeHandler, MatterFtsIndexHandler, MatterIcsExtractHandler, MatterNearDupHandler,
     MatterOcrHandler, MatterOfficeExtractHandler, MatterPdfExtractHandler, MatterProduceHandler,
-    MatterProductionExportHandler, MatterPromoteHandler, MatterThreadHandler, ProcessRunner,
-    RunnerConfig,
+    MatterProductionExportHandler, MatterPromoteHandler, MatterQcHandler, MatterThreadHandler,
+    ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -78,7 +78,14 @@ pub struct DeskApp {
     pub(crate) produce_bates_prefix: String,
     pub(crate) produce_fail_if_withheld: bool,
     pub(crate) produce_expand_family: bool,
+    pub(crate) produce_require_qc_pass: bool,
     pub(crate) produce_output_dir: String,
+    /// Last production QC summary (from job message / status).
+    pub(crate) last_qc_status: Option<String>,
+    pub(crate) last_qc_report_path: Option<String>,
+    pub(crate) last_qc_passed: Option<bool>,
+    pub(crate) last_qc_error_count: Option<u64>,
+    pub(crate) last_qc_warn_count: Option<u64>,
     /// Review screen state (thin list + body loader).
     pub(crate) review: ReviewState,
 }
@@ -95,6 +102,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterPromoteHandler::new()));
         runner.register(Arc::new(MatterProduceHandler::new()));
         runner.register(Arc::new(MatterProductionExportHandler::new()));
+        runner.register(Arc::new(MatterQcHandler::new()));
         runner.register(Arc::new(MatterFtsIndexHandler::new()));
         runner.register(Arc::new(MatterOfficeExtractHandler::new()));
         runner.register(Arc::new(MatterPdfExtractHandler::new()));
@@ -137,7 +145,13 @@ impl DeskApp {
             produce_bates_prefix: "PROD".into(),
             produce_fail_if_withheld: false,
             produce_expand_family: false,
+            produce_require_qc_pass: true,
             produce_output_dir: String::new(),
+            last_qc_status: None,
+            last_qc_report_path: None,
+            last_qc_passed: None,
+            last_qc_error_count: None,
+            last_qc_warn_count: None,
             review: ReviewState::default(),
         }
     }
@@ -246,6 +260,11 @@ impl DeskApp {
         self.report_export_status = None;
         self.report_export_error = None;
         self.report_export_rx = None;
+        self.last_qc_status = None;
+        self.last_qc_report_path = None;
+        self.last_qc_passed = None;
+        self.last_qc_error_count = None;
+        self.last_qc_warn_count = None;
         self.refresh_matter_lists();
         self.status_msg = Some(format!("Opened matter at {root}"));
     }
@@ -564,6 +583,67 @@ impl DeskApp {
         self.produce_dialog_open = true;
     }
 
+    /// Start production QC job on the review corpus.
+    pub(crate) fn start_production_qc(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params_json = params::qc_default_params();
+        let params = JobParams::new(params_json);
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "qc", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started production QC job {job_id}"));
+                self.error_msg = None;
+                self.last_qc_status = Some("running…".into());
+            }
+            Err(e) => {
+                self.error_msg = Some(format_runner_error(&e));
+            }
+        }
+    }
+
+    /// Capture last QC outcome from runner progress message (best-effort parse).
+    pub(crate) fn note_qc_progress_message(&mut self, message: &str) {
+        // Example: "qc passed=true errors=0 warns=1 candidates=12 → C:\...\qc_..."
+        if !message.contains("qc passed=") && !message.contains("errors=") {
+            return;
+        }
+        self.last_qc_status = Some(message.to_string());
+        if let Some(idx) = message.find("passed=") {
+            let rest = &message[idx + "passed=".len()..];
+            let token = rest.split_whitespace().next().unwrap_or("");
+            self.last_qc_passed = Some(token.starts_with("true") || token.starts_with('1'));
+        }
+        if let Some(idx) = message.find("errors=") {
+            let rest = &message[idx + "errors=".len()..];
+            if let Some(n) = rest.split([' ', '=']).next().and_then(|s| s.parse().ok()) {
+                self.last_qc_error_count = Some(n);
+            }
+        }
+        if let Some(idx) = message.find("warns=") {
+            let rest = &message[idx + "warns=".len()..];
+            if let Some(n) = rest.split([' ', '=']).next().and_then(|s| s.parse().ok()) {
+                self.last_qc_warn_count = Some(n);
+            }
+        }
+        if let Some(idx) = message.find('→') {
+            let path = message[idx + '→'.len_utf8()..].trim();
+            if !path.is_empty() {
+                self.last_qc_report_path = Some(path.to_string());
+            }
+        } else if let Some(idx) = message.find("->") {
+            let path = message[idx + 2..].trim();
+            if !path.is_empty() {
+                self.last_qc_report_path = Some(path.to_string());
+            }
+        }
+    }
+
     /// Start produce job from dialog draft fields.
     pub(crate) fn start_produce(&mut self) {
         let Some(root) = self.matter_root.clone() else {
@@ -591,6 +671,7 @@ impl DeskApp {
             prefix,
             self.produce_fail_if_withheld,
             self.produce_expand_family,
+            self.produce_require_qc_pass,
             output_opt,
         );
         let params = JobParams::new(params_json);
@@ -997,6 +1078,22 @@ impl DeskApp {
         if state != self.last_progress_state {
             let prev = self.last_progress_state.clone();
             self.last_progress_state = state.clone();
+            // Capture QC summary from terminal job messages.
+            if prev == "running"
+                && (state == "succeeded" || state == "failed")
+                && snap.stage.as_deref() == Some("qc")
+            {
+                if let Some(ref msg) = snap.message {
+                    self.note_qc_progress_message(msg);
+                }
+            } else if prev == "running" && (state == "succeeded" || state == "failed") {
+                // Fallback: message itself indicates QC outcome.
+                if let Some(ref msg) = snap.message {
+                    if msg.contains("qc passed=") {
+                        self.note_qc_progress_message(msg);
+                    }
+                }
+            }
             // Refresh lists when a job ends or starts.
             if prev == "running" || state == "succeeded" || state == "paused" || state == "failed" {
                 self.refresh_matter_lists();
@@ -1315,19 +1412,73 @@ impl eframe::App for DeskApp {
                 ui.heading("Produce");
                 ui.label(
                     "Export the review corpus as natives + text + Concordance DAT/CSV \
-                     (track 0040).",
+                     (track 0040). Run production QC first (track 0041).",
                 );
                 ui.add_space(8.0);
                 let busy = self.runner_busy();
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Produce review set…"))
-                    .on_hover_text(
-                        "Withheld items skipped by default. Family expand off — \
-                         broken-family QC is track 0041.",
-                    )
-                    .clicked()
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Run production QC"))
+                        .on_hover_text(
+                            "Scan the review corpus for broken families, withheld items, \
+                             missing natives/text, redaction gaps, and more. Writes \
+                             exports/qc/ findings CSV.",
+                        )
+                        .clicked()
+                    {
+                        self.start_production_qc();
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Produce review set…"))
+                        .on_hover_text(
+                            "Withheld items skipped by default. Family expand off. \
+                             Require QC pass is on by default.",
+                        )
+                        .clicked()
+                    {
+                        self.open_produce_dialog();
+                    }
+                });
+                ui.add_space(6.0);
+                // QC summary chips
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Last QC:").strong());
+                    match self.last_qc_passed {
+                        Some(true) => {
+                            ui.colored_label(egui::Color32::from_rgb(40, 140, 70), "passed");
+                        }
+                        Some(false) => {
+                            ui.colored_label(egui::Color32::from_rgb(180, 50, 50), "failed");
+                        }
+                        None => {
+                            ui.label(egui::RichText::new("none").weak());
+                        }
+                    }
+                    if let Some(e) = self.last_qc_error_count {
+                        ui.label(format!("errors={e}"));
+                    }
+                    if let Some(w) = self.last_qc_warn_count {
+                        ui.label(format!("warns={w}"));
+                    }
+                });
+                if let Some(ref path) = self.last_qc_report_path {
+                    ui.label(
+                        egui::RichText::new(format!("Report: {path}"))
+                            .weak()
+                            .small(),
+                    );
+                }
+                if let Some(ref st) = self.last_qc_status {
+                    ui.label(egui::RichText::new(st.clone()).small());
+                }
+                if self.produce_require_qc_pass
+                    && (self.last_qc_passed != Some(true) || self.last_qc_passed.is_none())
                 {
-                    self.open_produce_dialog();
+                    ui.colored_label(
+                        egui::Color32::from_rgb(180, 120, 40),
+                        "Require QC pass is ON — run production QC (and fix errors) before produce. \
+                         Selection changes after QC make the run stale.",
+                    );
                 }
                 ui.add_space(6.0);
                 ui.label(
@@ -1376,8 +1527,25 @@ impl eframe::App for DeskApp {
                         ui.colored_label(
                             egui::Color32::from_rgb(180, 120, 40),
                             "Family expand is OFF — ensure review membership is family-complete \
-                             or accept orphan/broken-family risk (QC in track 0041).",
+                             or run production QC for orphan/broken-family findings.",
                         );
+                    }
+                    ui.checkbox(
+                        &mut self.produce_require_qc_pass,
+                        "Require QC pass (fresh selection fingerprint)",
+                    );
+                    if self.produce_require_qc_pass {
+                        if self.last_qc_passed.is_none() {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(180, 50, 50),
+                                "No QC run yet — Start produce will fail closed until you run QC.",
+                            );
+                        } else if self.last_qc_passed == Some(false) {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(180, 50, 50),
+                                "Last QC failed — fix errors and re-run QC before produce.",
+                            );
+                        }
                     }
                     ui.horizontal(|ui| {
                         ui.label("Output folder:");
@@ -1397,10 +1565,19 @@ impl eframe::App for DeskApp {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let busy = self.runner_busy();
-                        if ui
-                            .add_enabled(!busy, egui::Button::new("Start produce"))
-                            .clicked()
-                        {
+                        let gate_blocks = self.produce_require_qc_pass
+                            && self.last_qc_passed != Some(true);
+                        let can_start = !busy && !gate_blocks;
+                        let hover = if busy {
+                            "A job is running."
+                        } else {
+                            "QC required: run production QC and ensure it passed \
+                             (or uncheck Require QC pass)."
+                        };
+                        let start = ui
+                            .add_enabled(can_start, egui::Button::new("Start produce"))
+                            .on_disabled_hover_text(hover);
+                        if start.clicked() {
                             self.start_produce();
                         }
                         if ui.button("Cancel").clicked() {
