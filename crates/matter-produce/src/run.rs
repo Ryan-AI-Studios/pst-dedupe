@@ -1,6 +1,6 @@
 //! Core produce job: select → withhold gate → control numbers → package → DAT.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use chrono::Utc;
@@ -331,7 +331,10 @@ fn run_produce_inner(
     }
 
     let layout = VolumeLayout::create(camino::Utf8Path::new(&cursor.output_root))?;
-    let done: HashSet<String> = cursor.done_item_ids.iter().cloned().collect();
+    // Index existing rows.jsonl so resume after crash-between-append-and-checkpoint
+    // does not re-produce / re-append (idempotent by ITEM_ID).
+    let jsonl_by_item = index_rows_jsonl_by_item_id(&layout)?;
+    let mut done: HashSet<String> = cursor.done_item_ids.iter().cloned().collect();
     let total = cursor.ordered_ids.len();
     let mut offset = cursor.cursor_index as usize;
     if offset > total {
@@ -362,6 +365,29 @@ fn run_produce_inner(
             continue;
         }
 
+        // Crash window recovery: JSONL already has a complete row for this ITEM_ID
+        // (append succeeded, checkpoint did not). Reuse that control; do not re-produce.
+        if let Some(existing) = jsonl_by_item.get(&item_id) {
+            recover_done_from_existing_row(
+                &mut cursor,
+                &mut done,
+                params.bates_prefix_clean(),
+                &item_id,
+                &existing.control_number,
+            );
+            offset += 1;
+            cursor.cursor_index = offset as u64;
+            cursor.completed_count = offset as u64;
+            save_checkpoint(matter, job_id, &cursor)?;
+            progress(cursor.completed_count);
+            continue;
+        }
+
+        // production_items status=ok without JSONL: re-use control if recorded, then re-produce
+        // so the load row is written (crash between DB record and JSONL append).
+        let prior_ok_control =
+            production_item_ok_control(matter, &cursor.production_set_id, &item_id)?;
+
         let item = match matter.get_item(&item_id) {
             Ok(i) => i,
             Err(e) => {
@@ -377,7 +403,8 @@ fn run_produce_inner(
                     None,
                     Some(&format!("get_item: {e}")),
                 )?;
-                cursor.done_item_ids.push(item_id);
+                cursor.done_item_ids.push(item_id.clone());
+                done.insert(item_id);
                 offset += 1;
                 cursor.cursor_index = offset as u64;
                 cursor.completed_count = offset as u64;
@@ -416,7 +443,8 @@ fn run_produce_inner(
                 None,
             )?;
             // Never write natives/text/DAT for withheld.
-            cursor.done_item_ids.push(item_id);
+            cursor.done_item_ids.push(item_id.clone());
+            done.insert(item_id);
             offset += 1;
             cursor.cursor_index = offset as u64;
             cursor.completed_count = offset as u64;
@@ -426,13 +454,22 @@ fn run_produce_inner(
         }
 
         // Assign control number from next_seq (monotonic; never renumber done rows).
-        let control = format_control(
-            params.bates_prefix_clean(),
-            cursor.next_seq,
-            params.seq_width,
-        );
-        let control_safe = sanitize_filename_part(&control);
-        cursor.next_seq += 1;
+        // If production_items already recorded ok with a control, reuse that control and
+        // do not burn a new sequence value.
+        let control_safe = if let Some(prior) = prior_ok_control.as_deref() {
+            let safe = sanitize_filename_part(prior);
+            advance_next_seq_for_control(&mut cursor, params.bates_prefix_clean(), prior);
+            safe
+        } else {
+            let control = format_control(
+                params.bates_prefix_clean(),
+                cursor.next_seq,
+                params.seq_width,
+            );
+            let safe = sanitize_filename_part(&control);
+            cursor.next_seq += 1;
+            safe
+        };
 
         match produce_one_item(matter, params, &item, &layout, &control_safe) {
             Ok(ProducedOne::Ok {
@@ -440,6 +477,8 @@ fn run_produce_inner(
                 text_relpath,
                 row,
             }) => {
+                // Order: production_items (ok) → JSONL append → done + checkpoint.
+                // Crash after JSONL is recovered via jsonl_by_item on resume.
                 record_production_item(
                     matter,
                     &cursor.production_set_id,
@@ -451,9 +490,6 @@ fn run_produce_inner(
                     None,
                     None,
                 )?;
-                // Row is collected at finalize from DB + re-scan; store row JSON in error?
-                // Better: append to a rows sidecar or rebuild at finalize from production_items + files.
-                // Store load-row JSON in production_items.error temporarily? No — use a side file.
                 append_row_json(&layout, &row)?;
                 cursor.produced_count += 1;
             }
@@ -507,7 +543,8 @@ fn run_produce_inner(
             "running",
             cursor.next_seq,
         )?;
-        cursor.done_item_ids.push(item_id);
+        cursor.done_item_ids.push(item_id.clone());
+        done.insert(item_id);
         offset += 1;
         cursor.cursor_index = offset as u64;
         cursor.completed_count = offset as u64;
@@ -541,14 +578,15 @@ fn produce_one_item(
     layout: &VolumeLayout,
     control: &str,
 ) -> Result<ProducedOne> {
-    let native_result =
-        resolve_native(matter, item, params, layout.natives.as_std_path(), control)?;
+    // When redactions exist, resolve text first so a missing redacted artifact
+    // never leaves an unregistered native under NATIVES/.
+    // For non-redacted items, same order is fine (text may be optional).
     let text_result = resolve_text(matter, item, layout.text.as_std_path(), control)?;
 
     // Redacted text missing is a hard item error (never original text on disk).
     if let Err(reason) = &text_result {
         if reason == "redacted_text_missing" {
-            // Ensure no original text leaked — we never wrote TEXT for this path.
+            // Ensure no original text leaked — we never wrote TEXT or native for this path.
             return Ok(ProducedOne::Error {
                 message: reason.clone(),
             });
@@ -561,6 +599,9 @@ fn produce_one_item(
             return Ok(ProducedOne::Error { message: reason });
         }
     };
+
+    let native_result =
+        resolve_native(matter, item, params, layout.natives.as_std_path(), control)?;
 
     let (native_art, native_relpath, file_ext, mime, size, sha) = match native_result {
         Ok(art) => {
@@ -715,42 +756,155 @@ fn load_rows_from_jsonl(layout: &VolumeLayout) -> Result<Vec<LoadRow>> {
         return Ok(Vec::new());
     }
     let text = std::fs::read_to_string(path.as_std_path())?;
-    let mut rows = Vec::new();
+    // Keep last occurrence per ITEM_ID so crash/resume duplicates cannot
+    // inflate load.dat / load.csv row counts.
+    let mut by_item: HashMap<String, LoadRow> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let v: serde_json::Value = serde_json::from_str(line)?;
-        let g = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        rows.push(LoadRow {
-            control_number: g("CONTROL_NUMBER"),
-            item_id: g("ITEM_ID"),
-            parent_item_id: g("PARENT_ITEM_ID"),
-            family_id: g("FAMILY_ID"),
-            custodian: g("CUSTODIAN"),
-            file_name: g("FILE_NAME"),
-            file_ext: g("FILE_EXT"),
-            file_category: g("FILE_CATEGORY"),
-            mime_type: g("MIME_TYPE"),
-            file_size: g("FILE_SIZE"),
-            sha256: g("SHA256"),
-            date_sent: g("DATE_SENT"),
-            date_received: g("DATE_RECEIVED"),
-            date_created: g("DATE_CREATED"),
-            from: g("FROM"),
-            to: g("TO"),
-            cc: g("CC"),
-            bcc: g("BCC"),
-            subject: g("SUBJECT"),
-            native_path: g("NATIVE_PATH"),
-            text_path: g("TEXT_PATH"),
-            has_redacted_text: g("HAS_REDACTED_TEXT"),
-            withheld: g("WITHHELD"),
-            prod_status: g("PROD_STATUS"),
-        });
+        let row = load_row_from_json_value(&serde_json::from_str(line)?)?;
+        if row.item_id.is_empty() {
+            // Malformed sidecar line — keep under a synthetic key so we do not drop it silently.
+            let key = format!("__missing_item_{}", order.len());
+            order.push(key.clone());
+            by_item.insert(key, row);
+            continue;
+        }
+        if !by_item.contains_key(&row.item_id) {
+            order.push(row.item_id.clone());
+        }
+        by_item.insert(row.item_id.clone(), row);
+    }
+    let mut rows = Vec::with_capacity(order.len());
+    for id in order {
+        if let Some(r) = by_item.remove(&id) {
+            rows.push(r);
+        }
+    }
+    // Defensive: unique CONTROL_NUMBER among produced rows (last ITEM_ID wins already).
+    let mut seen_control = HashSet::new();
+    for r in &rows {
+        if r.control_number.is_empty() {
+            continue;
+        }
+        if !seen_control.insert(r.control_number.clone()) {
+            return Err(ProduceError::Other(format!(
+                "duplicate CONTROL_NUMBER {} after ITEM_ID dedupe of rows.jsonl",
+                r.control_number
+            )));
+        }
     }
     Ok(rows)
+}
+
+fn load_row_from_json_value(v: &serde_json::Value) -> Result<LoadRow> {
+    let g = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    Ok(LoadRow {
+        control_number: g("CONTROL_NUMBER"),
+        item_id: g("ITEM_ID"),
+        parent_item_id: g("PARENT_ITEM_ID"),
+        family_id: g("FAMILY_ID"),
+        custodian: g("CUSTODIAN"),
+        file_name: g("FILE_NAME"),
+        file_ext: g("FILE_EXT"),
+        file_category: g("FILE_CATEGORY"),
+        mime_type: g("MIME_TYPE"),
+        file_size: g("FILE_SIZE"),
+        sha256: g("SHA256"),
+        date_sent: g("DATE_SENT"),
+        date_received: g("DATE_RECEIVED"),
+        date_created: g("DATE_CREATED"),
+        from: g("FROM"),
+        to: g("TO"),
+        cc: g("CC"),
+        bcc: g("BCC"),
+        subject: g("SUBJECT"),
+        native_path: g("NATIVE_PATH"),
+        text_path: g("TEXT_PATH"),
+        has_redacted_text: g("HAS_REDACTED_TEXT"),
+        withheld: g("WITHHELD"),
+        prod_status: g("PROD_STATUS"),
+    })
+}
+
+/// Map ITEM_ID → last LoadRow present in `DATA/rows.jsonl` (if any).
+fn index_rows_jsonl_by_item_id(layout: &VolumeLayout) -> Result<HashMap<String, LoadRow>> {
+    let rows = load_rows_from_jsonl(layout)?;
+    let mut map = HashMap::with_capacity(rows.len());
+    for r in rows {
+        if !r.item_id.is_empty() {
+            map.insert(r.item_id.clone(), r);
+        }
+    }
+    Ok(map)
+}
+
+/// Mark an item done from a pre-existing JSONL row without re-producing.
+///
+/// Advances `next_seq` past the assigned control when the crash window left
+/// the checkpoint behind the durable row append.
+fn recover_done_from_existing_row(
+    cursor: &mut CheckpointCursor,
+    done: &mut HashSet<String>,
+    prefix: &str,
+    item_id: &str,
+    control_number: &str,
+) {
+    let seq_before = cursor.next_seq;
+    advance_next_seq_for_control(cursor, prefix, control_number);
+    // If this control was at/after the checkpoint's next_seq, the append was not
+    // checkpointed yet — count it as produced now.
+    if let Some(seq) = parse_control_seq(prefix, control_number) {
+        if seq >= seq_before {
+            cursor.produced_count += 1;
+        }
+    }
+    if !done.contains(item_id) {
+        cursor.done_item_ids.push(item_id.to_string());
+        done.insert(item_id.to_string());
+    }
+}
+
+fn advance_next_seq_for_control(cursor: &mut CheckpointCursor, prefix: &str, control: &str) {
+    if let Some(seq) = parse_control_seq(prefix, control) {
+        let next = seq.saturating_add(1);
+        if next > cursor.next_seq {
+            cursor.next_seq = next;
+        }
+    }
+}
+
+/// Parse trailing decimal sequence from `{prefix}{digits}`.
+fn parse_control_seq(prefix: &str, control: &str) -> Option<u64> {
+    let rest = control.strip_prefix(prefix)?;
+    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
+}
+
+/// If `production_items` already has status=ok for this item, return its control number.
+fn production_item_ok_control(
+    matter: &Matter,
+    set_id: &str,
+    item_id: &str,
+) -> Result<Option<String>> {
+    let mut stmt = matter.connection().prepare(
+        "SELECT control_number FROM production_items \
+         WHERE production_set_id = ?1 AND item_id = ?2 AND status = 'ok' LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![set_id, item_id])?;
+    if let Some(row) = rows.next()? {
+        let control: String = row.get(0)?;
+        if control.is_empty() || control.starts_with("SKIP_") {
+            return Ok(None);
+        }
+        return Ok(Some(control));
+    }
+    Ok(None)
 }
 
 fn format_control(prefix: &str, seq: u64, width: u32) -> String {

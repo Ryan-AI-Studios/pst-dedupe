@@ -1200,7 +1200,7 @@ impl DeskApp {
                 Screen::Workspace,
                 Screen::StubReduce,
                 Screen::Review,
-                Screen::StubProduce,
+                Screen::Produce,
             ] {
                 let selected = self.screen == target;
                 let enabled = target == Screen::Home || has_matter;
@@ -1311,7 +1311,7 @@ impl eframe::App for DeskApp {
                     ui.label("Open a matter to review.");
                 }
             }
-            Screen::StubProduce => {
+            Screen::Produce => {
                 ui.heading("Produce");
                 ui.label(
                     "Export the review corpus as natives + text + Concordance DAT/CSV \

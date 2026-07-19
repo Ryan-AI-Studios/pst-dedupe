@@ -451,6 +451,18 @@ fn redaction_missing_artifact_errors() {
     // Original CAS still intact.
     let orig = matter.get_bytes(&text_sha).unwrap();
     assert_eq!(orig, body.as_bytes());
+
+    // F-002: no orphan native for the failed control under NATIVES/.
+    let natives_dir = camino::Utf8Path::new(&s.output_root).join("NATIVES");
+    if natives_dir.as_std_path().exists() {
+        for e in fs::read_dir(natives_dir.as_std_path()).unwrap() {
+            let name = e.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.starts_with("PROD"),
+                "orphan native left for failed redacted item: {name}"
+            );
+        }
+    }
 }
 
 /// 7. Privilege description not in DAT.
@@ -708,6 +720,126 @@ fn multiline_becomes_registered_mark_in_dat() {
     assert!(encoded.contains(DAT_NEWLINE));
     assert!(dat.contains(&encoded), "dat missing ® subject: {dat}");
     assert!(!dat.contains("Line1\nLine2"));
+}
+
+/// Crash window: rows.jsonl has the row but checkpoint missing the item id.
+/// Resume must not double the DAT row or re-assign a new control.
+#[test]
+fn crash_resume_jsonl_without_checkpoint_no_duplicate() {
+    let (_tmp, matter) = temp_matter("crash-jsonl");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let mut ids = Vec::new();
+    for i in 0..2 {
+        let n = put_native(&matter, format!("native-crash-{i}").as_bytes());
+        let id = insert_review_item(
+            &matter,
+            ItemInput {
+                path: Some(format!("c{i}.bin")),
+                native_sha256: Some(n),
+                subject: Some(format!("Crash{i}")),
+                ..Default::default()
+            },
+        );
+        ids.push(id);
+    }
+
+    // Produce first item only, then pause.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_flag = cancel.clone();
+    let outcome = run_produce(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("CrashJsonl".into()),
+            ..Default::default()
+        },
+        Some(&|| cancel_flag.load(Ordering::SeqCst)),
+        |completed| {
+            if completed >= 1 {
+                cancel_flag.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .expect("run");
+    let paused = match outcome {
+        ProduceOutcome::Paused(s) => s,
+        other => panic!("expected Paused, got {other:?}"),
+    };
+    assert!(paused.produced_count >= 1);
+
+    // Simulate crash after rows.jsonl append but before done_item_ids checkpoint:
+    // leave JSONL + production_items intact; rewind checkpoint as if the item
+    // was never marked done and next_seq was not advanced.
+    let cp = matter
+        .get_checkpoint(&job.id, PRODUCE_STAGE)
+        .unwrap()
+        .expect("checkpoint");
+    let mut cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor json");
+    let first_id = ids[0].clone();
+    let done = cursor
+        .get_mut("done_item_ids")
+        .and_then(|v| v.as_array_mut())
+        .expect("done_item_ids");
+    done.retain(|v| v.as_str() != Some(first_id.as_str()));
+    cursor["next_seq"] = serde_json::json!(1);
+    cursor["produced_count"] = serde_json::json!(0);
+    cursor["cursor_index"] = serde_json::json!(0);
+    cursor["completed_count"] = serde_json::json!(0);
+    cursor["phase"] = serde_json::json!("work");
+    let rewritten = cursor.to_string();
+    matter
+        .put_checkpoint(&job.id, PRODUCE_STAGE, &rewritten, 0)
+        .expect("put checkpoint");
+
+    // JSONL must still contain the first item's row (durable side effect).
+    let jsonl_path = camino::Utf8Path::new(&paused.output_root)
+        .join("DATA")
+        .join("rows.jsonl");
+    let jsonl = fs::read_to_string(jsonl_path.as_std_path()).expect("jsonl");
+    assert!(
+        jsonl.contains(&first_id),
+        "rows.jsonl should still hold first item before resume"
+    );
+
+    // Resume: must not re-append a second row for the first item.
+    let s2 = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("CrashJsonl".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(s2.produced_count, 2);
+    let dat = dat_text(&s2.output_root);
+    // Header + one data line per produced item.
+    let data_lines: Vec<&str> = dat
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .skip(1)
+        .collect();
+    assert_eq!(
+        data_lines.len(),
+        2,
+        "DAT must have exactly 2 data rows (no JSONL duplicate): {dat}"
+    );
+    let item_hits: Vec<_> = data_lines
+        .iter()
+        .filter(|l| l.contains(&first_id))
+        .collect();
+    assert_eq!(
+        item_hits.len(),
+        1,
+        "first ITEM_ID must appear in exactly one DAT row: {dat}"
+    );
+    assert!(dat.contains(&ids[1]));
+    assert!(dat.contains("PROD000001"));
+    assert!(dat.contains("PROD000002"));
+    // No PROD000003 renumber of the recovered item.
+    assert!(
+        !dat.contains("PROD000003"),
+        "must not burn a third control on resume: {dat}"
+    );
 }
 
 /// 13. Cancel/resume partial consistency.
