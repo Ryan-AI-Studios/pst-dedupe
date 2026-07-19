@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
 use process_runner::{
-    ExtractPstHandler, IngestHandler, JobParams, MatterCullHandler, MatterDedupeHandler,
-    MatterFtsIndexHandler, MatterIcsExtractHandler, MatterNearDupHandler, MatterOcrHandler,
-    MatterOfficeExtractHandler, MatterPdfExtractHandler, MatterPromoteHandler, MatterThreadHandler,
-    ProcessRunner, RunnerConfig,
+    ExtractPstHandler, IngestHandler, JobParams, MatterClassifyHandler, MatterCullHandler,
+    MatterDedupeHandler, MatterFtsIndexHandler, MatterIcsExtractHandler, MatterNearDupHandler,
+    MatterOcrHandler, MatterOfficeExtractHandler, MatterPdfExtractHandler, MatterPromoteHandler,
+    MatterThreadHandler, ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -78,6 +78,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterPdfExtractHandler::new()));
         runner.register(Arc::new(MatterIcsExtractHandler::new()));
         runner.register(Arc::new(MatterOcrHandler::new()));
+        runner.register(Arc::new(MatterClassifyHandler::new()));
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 
@@ -529,6 +530,26 @@ impl DeskApp {
             Ok(job_id) => {
                 self.last_job_id = Some(job_id.clone());
                 self.status_msg = Some(format!("Started OCR job {job_id}"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Classify file types (`classify`) using taxonomy_v1.
+    pub(crate) fn start_classify(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params = JobParams::new(params::classify_default_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "classify", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started classify job {job_id}"));
                 self.error_msg = None;
             }
             Err(e) => self.note_start_error(e),

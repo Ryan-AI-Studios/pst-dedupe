@@ -141,6 +141,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
             app.start_ics_extract();
         }
         if ui
+            .add_enabled(!busy, egui::Button::new("Classify file types"))
+            .on_hover_text(
+                "Assign taxonomy_v1 file categories from path/mime/magic (kind=classify); retires bare attachment category",
+            )
+            .clicked()
+        {
+            app.start_classify();
+        }
+        if ui
             .add_enabled(!busy, egui::Button::new("Build / Update search index"))
             .on_hover_text("Incremental Tantivy FTS index (kind=fts_index, reset:false)")
             .clicked()

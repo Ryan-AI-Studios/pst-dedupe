@@ -170,12 +170,25 @@ impl<'a> ExpandSession<'a> {
         let digest = self.matter.put_bytes(data)?;
         self.cas_puts += 1;
 
+        // Path-only classify at insert so inventory is immediately filterable (0037).
+        let category = if logical_path.trim().is_empty() {
+            None
+        } else {
+            Some(
+                ::file_category::classify_path_mime(Some(logical_path), None)
+                    .category
+                    .as_str()
+                    .to_string(),
+            )
+        };
+
         self.matter.insert_item(ItemInput {
             source_id: Some(self.source_id.to_string()),
             path: Some(logical_path.to_string()),
             native_sha256: Some(digest),
             status: status.into(),
             size_bytes: Some(data.len() as i64),
+            file_category: category,
             // Inventory-only row (0016); Normalized Item fields filled by 0018+.
             ..Default::default()
         })?;

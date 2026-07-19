@@ -10,7 +10,7 @@ Matter-level **flag-only data reduction** (track **0024**). Writes `cull_status`
 | `unique_only` | Cull `dedup_role=duplicate`; status gate on extracted/partial/normalized |
 | `unique_plus_family` | unique_only + absolute family keep-children |
 | `date_window` | unique_only + date filter template (operator fills offset-aware bounds). Desk UI omits this until bounds are set; use JSON params / user preset with `start`/`end`. |
-| `noise_light` | unique_only + zero-size empty + exclude common executable MIME prefixes |
+| `noise_light` | unique_only + zero-size empty + exclude common executable MIME prefixes **and** `file_category=executable` |
 
 User presets live in `cull_presets` (matter-core schema v6). Built-ins are code
 constants and do not require a DB row.

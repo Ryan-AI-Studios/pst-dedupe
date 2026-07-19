@@ -19,6 +19,17 @@ use crate::native_message::{
 use crate::open::{candidate_fs_path, open_pst, PstOpenSpec};
 use crate::recipients::parse_display_list;
 
+/// Classify an attachment child from path/mime/optional CAS head.
+///
+/// Returns a taxonomy_v1 category string — **never** bare `"attachment"`.
+/// Role remains `attachment` separately.
+fn classify_attachment_category(path: &str, mime: Option<&str>, head: Option<&[u8]>) -> String {
+    file_category::classify_with_head(Some(path), mime, head)
+        .category
+        .as_str()
+        .to_string()
+}
+
 /// List inventory items that look like PSTs under a source.
 pub fn list_discovered_psts(matter: &Matter, source_id: &str) -> Result<Vec<Item>> {
     let items = matter.list_items_for_source(source_id)?;
@@ -866,6 +877,7 @@ fn extract_one_message(
                 attach_err += 1;
                 parent_partial = true;
                 cursor.attachments_err = cursor.attachments_err.saturating_add(1);
+                let cat = classify_attachment_category(&a_path, att.mime_tag.as_deref(), None);
                 let child = matter.insert_item(ItemInput {
                     source_id: Some(source_id.to_string()),
                     family_id: Some(family.id.clone()),
@@ -873,7 +885,7 @@ fn extract_one_message(
                     status: item_status::ERROR.to_string(),
                     role: Some(item_role::ATTACHMENT.to_string()),
                     parent_item_id: Some(parent.id.clone()),
-                    file_category: Some("attachment".into()),
+                    file_category: Some(cat),
                     title: Some(att.filename.clone()),
                     size_bytes: Some(att.size as i64),
                     mime_type: att.mime_tag.clone(),
@@ -905,6 +917,7 @@ fn extract_one_message(
                     attach_err += 1;
                     parent_partial = true;
                     cursor.attachments_err = cursor.attachments_err.saturating_add(1);
+                    let cat = classify_attachment_category(&a_path, att.mime_tag.as_deref(), None);
                     let child = matter.insert_item(ItemInput {
                         source_id: Some(source_id.to_string()),
                         family_id: Some(family.id.clone()),
@@ -912,7 +925,7 @@ fn extract_one_message(
                         status: item_status::ERROR.to_string(),
                         role: Some(item_role::ATTACHMENT.to_string()),
                         parent_item_id: Some(parent.id.clone()),
-                        file_category: Some("attachment".into()),
+                        file_category: Some(cat),
                         title: Some(att.filename.clone()),
                         size_bytes: Some(att.size as i64),
                         ..Default::default()
@@ -939,6 +952,7 @@ fn extract_one_message(
                 attach_err += 1;
                 parent_partial = true;
                 cursor.attachments_err = cursor.attachments_err.saturating_add(1);
+                let cat = classify_attachment_category(&a_path, att.mime_tag.as_deref(), None);
                 let child = matter.insert_item(ItemInput {
                     source_id: Some(source_id.to_string()),
                     family_id: Some(family.id.clone()),
@@ -946,7 +960,7 @@ fn extract_one_message(
                     status: item_status::ERROR.to_string(),
                     role: Some(item_role::ATTACHMENT.to_string()),
                     parent_item_id: Some(parent.id.clone()),
-                    file_category: Some("attachment".into()),
+                    file_category: Some(cat),
                     title: Some(att.filename.clone()),
                     size_bytes: Some(att.size as i64),
                     ..Default::default()
@@ -970,6 +984,11 @@ fn extract_one_message(
             }
         };
 
+        // Cheap CAS head for magic after put (≤64 KiB); fall back to path/mime.
+        let head = matter
+            .read_cas_prefix(&digest, file_category::magic::MAGIC_HEAD_MAX)
+            .ok();
+        let cat = classify_attachment_category(&a_path, att.mime_tag.as_deref(), head.as_deref());
         let child = matter.insert_item(ItemInput {
             source_id: Some(source_id.to_string()),
             family_id: Some(family.id.clone()),
@@ -978,7 +997,7 @@ fn extract_one_message(
             status: item_status::EXTRACTED.to_string(),
             role: Some(item_role::ATTACHMENT.to_string()),
             parent_item_id: Some(parent.id.clone()),
-            file_category: Some("attachment".into()),
+            file_category: Some(cat),
             title: Some(att.filename.clone()),
             size_bytes: Some(att.size as i64),
             mime_type: att.mime_tag.clone(),
@@ -1095,13 +1114,13 @@ fn map_pst_message_category(message_class: Option<&str>) -> PstMessageCategoryMa
     let is_calendar = message_class.is_some_and(is_calendar_message_class);
     if is_calendar {
         PstMessageCategoryMapping {
-            file_category: "calendar",
+            file_category: file_category::Category::Calendar.as_str(),
             cal_extract_method: Some("pst_oxocal_v1"),
             is_calendar: true,
         }
     } else {
         PstMessageCategoryMapping {
-            file_category: "email",
+            file_category: file_category::Category::Email.as_str(),
             cal_extract_method: None,
             is_calendar: false,
         }

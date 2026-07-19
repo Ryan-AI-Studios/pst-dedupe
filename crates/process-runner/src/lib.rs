@@ -69,3 +69,6 @@ pub use handlers::MatterIcsExtractHandler;
 
 #[cfg(feature = "ocr")]
 pub use handlers::MatterOcrHandler;
+
+#[cfg(feature = "classify")]
+pub use handlers::MatterClassifyHandler;

@@ -531,7 +531,7 @@ fn process_one(
             None
         },
         source_native_sha256: Some(native_sha.into()),
-        file_category: Some("calendar".into()),
+        file_category: Some(file_category::Category::Calendar.as_str().into()),
         refine_file_category: true,
         message_class: ev.fields.message_class.clone(),
         cal_start_at: ev.fields.cal_start_at.clone(),
@@ -590,7 +590,7 @@ fn expand_multi_event_container(
     matter.update_item(
         &cand.id,
         ItemUpdate {
-            file_category: Some(Some("archive".into())),
+            file_category: Some(Some(file_category::Category::Archive.as_str().into())),
             message_class: Some(Some("VCALENDAR".into())),
             extra_json: Some(Some(parent_extra.clone())),
             ..Default::default()
@@ -712,7 +712,7 @@ fn expand_multi_event_container(
         status: Some(ics_extract_status::OK.into()),
         error: None,
         source_native_sha256: Some(native_sha.into()),
-        file_category: Some("archive".into()),
+        file_category: Some(file_category::Category::Archive.as_str().into()),
         refine_file_category: true,
         message_class: Some("VCALENDAR".into()),
         extra_json: Some(parent_extra),
@@ -787,7 +787,7 @@ fn upsert_container_child(
     }
 
     let logical = compute_non_email_logical_hash(&NonEmailLogicalInput {
-        category: Some("calendar".into()),
+        category: Some(file_category::Category::Calendar.as_str().into()),
         title: ev.fields.subject.clone(),
         author: ev.fields.cal_organizer.clone(),
         created: ev.fields.cal_start_at.clone(),
@@ -813,7 +813,7 @@ fn upsert_container_child(
                 parent_item_id: Some(Some(cand.id.clone())),
                 family_id: Some(Some(family_id.into())),
                 mime_type: Some(Some("text/calendar".into())),
-                file_category: Some(Some("calendar".into())),
+                file_category: Some(Some(file_category::Category::Calendar.as_str().into())),
                 subject: Some(ev.fields.subject.clone()),
                 from_addr: Some(ev.fields.cal_organizer.clone()),
                 to_addrs_json: Some(to_json.clone()),
@@ -848,7 +848,7 @@ fn upsert_container_child(
             parent_item_id: Some(cand.id.clone()),
             family_id: Some(family_id.into()),
             mime_type: Some("text/calendar".into()),
-            file_category: Some("calendar".into()),
+            file_category: Some(file_category::Category::Calendar.as_str().into()),
             subject: ev.fields.subject.clone(),
             from_addr: ev.fields.cal_organizer.clone(),
             to_addrs_json: to_json.clone(),

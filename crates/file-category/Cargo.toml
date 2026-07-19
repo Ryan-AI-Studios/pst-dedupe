@@ -1,0 +1,20 @@
+[package]
+name = "file-category"
+version = "0.1.0"
+edition = "2021"
+description = "Stable taxonomy_v1 file-category classifier + resumable classify job (track 0037)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+matter-core = { path = "../matter-core" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+mime_guess = "2.0"
+infer = "0.19"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rusqlite = { workspace = true }
+camino = { workspace = true }

@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v17**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v18**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -25,6 +25,7 @@
 //! - **PDF extract** bookkeeping (`pdf_*` columns, `pdf_needs_ocr`) for embedded text (0034)
 //! - **Calendar** fields (`cal_*`, `message_class`) + ICS extract bookkeeping (0035)
 //! - **OCR** bookkeeping (`ocr_*` columns) for offline Tesseract text (0036)
+//! - **File category** bookkeeping (`category_*` columns) for taxonomy_v1 (0037)
 //!
 //! ## Layout
 //!
@@ -52,6 +53,7 @@
 pub mod audit;
 pub mod calendar;
 pub mod cas;
+pub mod category;
 pub mod error;
 pub mod filter;
 pub mod item_errors;
@@ -72,6 +74,10 @@ pub use audit::{
 };
 pub use calendar::{ics_extract_status, ApplyIcsExtractInput, IcsCandidate, IcsExtractApplyResult};
 pub use cas::{sha256_hex, Cas, PUT_READER_BUF_SIZE};
+pub use category::{
+    category_status, classify_candidate_needs_work, ApplyClassificationInput, CategoryApplyResult,
+    ClassifyCandidate,
+};
 pub use error::{Error, Result};
 pub use filter::{
     compile_filter, normalize_stored_instant_for_compare, parse_bound_instant, parse_item_instant,

@@ -21,7 +21,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 17. **Redaction** regions + true redacted text CAS artifact (0032)
 18. **Office extract** bookkeeping (`office_*`) for OOXML text fill (0033)
 
-Schema version: **17** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, text redaction, office extract bookkeeping, PDF extract bookkeeping (`pdf_needs_ocr`), calendar/ICS fields (`cal_*`, `ics_*`), and OCR bookkeeping (`ocr_*`). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+Schema version: **18** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, text redaction, office extract bookkeeping, PDF extract bookkeeping (`pdf_needs_ocr`), calendar/ICS fields (`cal_*`, `ics_*`), OCR bookkeeping (`ocr_*`), and file-category bookkeeping (`category_*` / taxonomy_v1). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
 
 ## Layout
 
@@ -84,7 +84,7 @@ Extends v1 `items` with nullable columns (safe `ALTER TABLE … ADD COLUMN` migr
 | `role` | `standalone` \| `parent` \| `attachment` (constants in `item_role`) |
 | `parent_item_id` | Denorm parent link; **app-enforced** (no ALTER FK) |
 | `mime_type` | Best-effort IANA type |
-| `file_category` | Coarse: `email`, `attachment`, `office`, `pdf`, … |
+| `file_category` | `taxonomy_v1` closed set: `email`, `document`, `spreadsheet`, `presentation`, `pdf`, `image`, … — **not** bare `attachment` (`role=attachment` is separate; see file-category / taxonomy_v1) |
 | `custodian` | Nullable |
 | `subject` / `title` | Email subject vs non-email title |
 | `from_addr` | Single from |

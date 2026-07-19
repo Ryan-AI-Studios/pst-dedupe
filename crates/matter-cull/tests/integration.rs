@@ -12,7 +12,7 @@ use matter_core::{
 use matter_cull::{
     reason, run_cull, CullOutcome, CullParams, CullRules, DateField, DateRule, EmptyRule,
     FamilyPolicy, ListMode, MissingDatePolicy, PathContainsRule, StringListRule, CULL_STAGE,
-    JOB_KIND_CULL, PRESET_UNIQUE_ONLY,
+    JOB_KIND_CULL, PRESET_NOISE_LIGHT, PRESET_UNIQUE_ONLY,
 };
 
 fn utf8_tempdir() -> (tempfile::TempDir, camino::Utf8PathBuf) {
@@ -331,6 +331,51 @@ fn file_category_include_mode() {
         Some(item_cull_status::CULLED)
     );
     assert!(reasons_of(&matter, &other).contains(&reason::FILE_CATEGORY.to_string()));
+}
+
+/// noise_light excludes file_category=executable (taxonomy_v1 / 0037).
+#[test]
+fn noise_light_excludes_executable_category() {
+    let (_tmp, matter) = temp_matter("noise_exe");
+    let job = matter.create_job(JOB_KIND_CULL).expect("job");
+
+    let good = insert(
+        &matter,
+        "doc.pdf",
+        item_status::EXTRACTED,
+        ItemInput {
+            file_category: Some("pdf".into()),
+            size_bytes: Some(100),
+            dedup_role: Some(item_dedup_role::UNIQUE.into()),
+            ..Default::default()
+        },
+    );
+    let exe = insert(
+        &matter,
+        "tool.exe",
+        item_status::EXTRACTED,
+        ItemInput {
+            file_category: Some("executable".into()),
+            size_bytes: Some(100),
+            dedup_role: Some(item_dedup_role::UNIQUE.into()),
+            ..Default::default()
+        },
+    );
+
+    let params = CullParams {
+        preset_name: Some(PRESET_NOISE_LIGHT.into()),
+        ..Default::default()
+    };
+    let _ = run_with(&matter, &job.id, &params);
+    assert_eq!(
+        matter.get_item(&good).unwrap().cull_status.as_deref(),
+        Some(item_cull_status::INCLUDED)
+    );
+    assert_eq!(
+        matter.get_item(&exe).unwrap().cull_status.as_deref(),
+        Some(item_cull_status::CULLED)
+    );
+    assert!(reasons_of(&matter, &exe).contains(&reason::FILE_CATEGORY.to_string()));
 }
 
 /// 7. Near-dup member NOT culled by default.

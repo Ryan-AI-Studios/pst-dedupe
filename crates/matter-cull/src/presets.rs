@@ -1,7 +1,8 @@
 //! Built-in cull presets (code constants).
 
 use crate::rules::{
-    CullRules, DateRule, EmptyRule, FamilyPolicy, MimePrefixesRule, MissingDatePolicy,
+    CullRules, DateRule, EmptyRule, FamilyPolicy, ListMode, MimePrefixesRule, MissingDatePolicy,
+    StringListRule,
 };
 
 /// Built-in preset name: cull exact duplicates only.
@@ -10,7 +11,7 @@ pub const PRESET_UNIQUE_ONLY: &str = "unique_only";
 pub const PRESET_UNIQUE_PLUS_FAMILY: &str = "unique_plus_family";
 /// Built-in: unique_only + date window template (operator fills bounds).
 pub const PRESET_DATE_WINDOW: &str = "date_window";
-/// Built-in: unique_only + zero-size empty + executable mime exclude.
+/// Built-in: unique_only + zero-size empty + executable mime/category exclude.
 pub const PRESET_NOISE_LIGHT: &str = "noise_light";
 
 /// All built-in preset names in stable order.
@@ -55,7 +56,8 @@ pub fn date_window() -> CullRules {
     r
 }
 
-/// Built-in `noise_light` — unique + empty zero_size + exe mime prefixes.
+/// Built-in `noise_light` — unique + empty zero_size + exe mime prefixes
+/// + `file_category=executable` exclude (taxonomy_v1 / 0037).
 pub fn noise_light() -> CullRules {
     let mut r = unique_only_base();
     r.empty = EmptyRule {
@@ -65,11 +67,16 @@ pub fn noise_light() -> CullRules {
     };
     r.mime_prefixes = MimePrefixesRule {
         enabled: true,
-        mode: crate::rules::ListMode::Exclude,
+        mode: ListMode::Exclude,
         values: vec![
             "application/x-msdownload".into(),
             "application/x-dosexec".into(),
         ],
+    };
+    r.file_categories = StringListRule {
+        enabled: true,
+        mode: ListMode::Exclude,
+        values: vec!["executable".into()],
     };
     r
 }
