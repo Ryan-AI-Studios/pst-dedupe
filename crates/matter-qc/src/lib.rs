@@ -36,11 +36,12 @@ pub use params::{
 };
 pub use report::{count_severities, default_qc_report_dir, write_qc_report, QcReportMeta};
 pub use rules::{
-    default_rule_pack, evaluate_candidates, is_email_like, resolve_rules, QcFinding, ResolvedRules,
-    RULE_BROKEN_FAMILY_INCOMPLETE_PARENT, RULE_BROKEN_FAMILY_ORPHAN_CHILD, RULE_EMPTY_SELECTION,
-    RULE_ITEM_STATUS_ERROR, RULE_MISSING_NATIVE, RULE_MISSING_TEXT, RULE_ONLY_WITHHELD,
-    RULE_PDF_NEEDS_OCR, RULE_REDACTED_TEXT_MISSING, RULE_WITHHELD_FAMILY_MEMBER,
-    RULE_WITHHELD_IN_SELECTION, RULE_ZERO_SIZE,
+    default_rule_pack, evaluate_candidates, evaluate_candidates_with_cancel, is_email_like,
+    resolve_rules, QcFinding, ResolvedRules, RULE_BROKEN_FAMILY_INCOMPLETE_PARENT,
+    RULE_BROKEN_FAMILY_ORPHAN_CHILD, RULE_EMPTY_SELECTION, RULE_ITEM_STATUS_ERROR,
+    RULE_MISSING_NATIVE, RULE_MISSING_TEXT, RULE_ONLY_WITHHELD, RULE_PDF_NEEDS_OCR,
+    RULE_REDACTED_TEXT_MISSING, RULE_WITHHELD_FAMILY_MEMBER, RULE_WITHHELD_IN_SELECTION,
+    RULE_ZERO_SIZE,
 };
 pub use run::{run_production_qc, QcOutcome, QcReport, QcSummary, JOB_KIND_QC, QC_STAGE};
 pub use select::select_item_ids;

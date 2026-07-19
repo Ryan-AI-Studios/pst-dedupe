@@ -24,6 +24,10 @@ use crate::matter_ops::{MatterOpResult, MatterOpState};
 use crate::matter_ui::{self, MatterSnapshot, OverviewLoadResult, OverviewLoadState};
 use crate::nav::{self, Screen};
 use crate::params::{self, format_runner_error, is_transient_sqlite_lock};
+use crate::produce_qc::{
+    evaluate_produce_qc_readiness, hydrate_last_qc_summary, load_findings_csv, ProduceQcReadiness,
+    QcFindingRow, FINDINGS_DISPLAY_CAP,
+};
 use crate::progress_ui;
 use crate::review_ui::{self, ReviewState};
 use crate::settings::DeskSettings;
@@ -80,12 +84,21 @@ pub struct DeskApp {
     pub(crate) produce_expand_family: bool,
     pub(crate) produce_require_qc_pass: bool,
     pub(crate) produce_output_dir: String,
-    /// Last production QC summary (from job message / status).
+    /// Last production QC summary (from job message / status / hydrated qc_runs).
     pub(crate) last_qc_status: Option<String>,
     pub(crate) last_qc_report_path: Option<String>,
     pub(crate) last_qc_passed: Option<bool>,
     pub(crate) last_qc_error_count: Option<u64>,
     pub(crate) last_qc_warn_count: Option<u64>,
+    /// Soft-gate readiness from matter_qc (freshness vs current selection).
+    pub(crate) produce_qc_readiness: ProduceQcReadiness,
+    /// Flags last used when computing `produce_qc_readiness` (detect checkbox drift).
+    produce_qc_readiness_expand: bool,
+    produce_qc_readiness_require: bool,
+    /// Loaded findings.csv rows for the desk panel (capped).
+    pub(crate) qc_findings: Vec<QcFindingRow>,
+    pub(crate) qc_findings_error: Option<String>,
+    pub(crate) qc_findings_show: bool,
     /// Review screen state (thin list + body loader).
     pub(crate) review: ReviewState,
 }
@@ -152,6 +165,12 @@ impl DeskApp {
             last_qc_passed: None,
             last_qc_error_count: None,
             last_qc_warn_count: None,
+            produce_qc_readiness: ProduceQcReadiness::Unknown,
+            produce_qc_readiness_expand: false,
+            produce_qc_readiness_require: true,
+            qc_findings: Vec::new(),
+            qc_findings_error: None,
+            qc_findings_show: false,
             review: ReviewState::default(),
         }
     }
@@ -265,8 +284,63 @@ impl DeskApp {
         self.last_qc_passed = None;
         self.last_qc_error_count = None;
         self.last_qc_warn_count = None;
+        self.produce_qc_readiness = ProduceQcReadiness::Unknown;
+        self.qc_findings.clear();
+        self.qc_findings_error = None;
+        self.qc_findings_show = false;
+        self.hydrate_qc_from_matter();
+        self.refresh_produce_qc_readiness();
         self.refresh_matter_lists();
         self.status_msg = Some(format!("Opened matter at {root}"));
+    }
+
+    /// Hydrate session QC fields from `qc_runs` so reopen is not forced re-QC when fresh.
+    fn hydrate_qc_from_matter(&mut self) {
+        let Some(root) = self.matter_root.as_ref() else {
+            return;
+        };
+        let h = hydrate_last_qc_summary(root);
+        if h.passed.is_some() {
+            self.last_qc_passed = h.passed;
+            self.last_qc_error_count = h.error_count;
+            self.last_qc_warn_count = h.warn_count;
+            self.last_qc_report_path = h.report_path;
+            self.last_qc_status = h.status;
+            if let Some(ref path) = self.last_qc_report_path.clone() {
+                self.load_qc_findings_from_report(path);
+            }
+        }
+    }
+
+    /// Recompute soft-gate using current produce flags (cheap open_for_read + SQL).
+    pub(crate) fn refresh_produce_qc_readiness(&mut self) {
+        let Some(root) = self.matter_root.as_ref() else {
+            self.produce_qc_readiness = ProduceQcReadiness::Unknown;
+            return;
+        };
+        self.produce_qc_readiness_expand = self.produce_expand_family;
+        self.produce_qc_readiness_require = self.produce_require_qc_pass;
+        self.produce_qc_readiness = evaluate_produce_qc_readiness(
+            root,
+            self.produce_require_qc_pass,
+            self.produce_expand_family,
+        );
+    }
+
+    /// Load findings.csv into the scrollable panel (cap [`FINDINGS_DISPLAY_CAP`]).
+    fn load_qc_findings_from_report(&mut self, report_path: &str) {
+        match load_findings_csv(report_path, FINDINGS_DISPLAY_CAP) {
+            Ok(rows) => {
+                self.qc_findings = rows;
+                self.qc_findings_error = None;
+                self.qc_findings_show = !self.qc_findings.is_empty();
+            }
+            Err(e) => {
+                self.qc_findings.clear();
+                self.qc_findings_error = Some(e);
+                self.qc_findings_show = false;
+            }
+        }
     }
 
     /// Poll background matter-report export worker.
@@ -580,16 +654,20 @@ impl DeskApp {
             self.produce_bates_prefix = "PROD".into();
         }
         // Default empty output → engine uses exports/productions/<name_or_stamp>/.
+        self.refresh_produce_qc_readiness();
         self.produce_dialog_open = true;
     }
 
     /// Start production QC job on the review corpus.
+    ///
+    /// Uses the same `expand_family` flag as produce so the QC selection
+    /// fingerprint matches produce when Require QC pass is on.
     pub(crate) fn start_production_qc(&mut self) {
         let Some(root) = self.matter_root.clone() else {
             self.error_msg = Some("No matter open.".into());
             return;
         };
-        let params_json = params::qc_default_params();
+        let params_json = params::qc_params("review_corpus", self.produce_expand_family, None);
         let params = JobParams::new(params_json);
         match self
             .runner
@@ -597,7 +675,10 @@ impl DeskApp {
         {
             Ok(job_id) => {
                 self.last_job_id = Some(job_id.clone());
-                self.status_msg = Some(format!("Started production QC job {job_id}"));
+                self.status_msg = Some(format!(
+                    "Started production QC job {job_id} (expand_family={})",
+                    self.produce_expand_family
+                ));
                 self.error_msg = None;
                 self.last_qc_status = Some("running…".into());
             }
@@ -642,6 +723,10 @@ impl DeskApp {
                 self.last_qc_report_path = Some(path.to_string());
             }
         }
+        if let Some(ref path) = self.last_qc_report_path.clone() {
+            self.load_qc_findings_from_report(path);
+        }
+        self.refresh_produce_qc_readiness();
     }
 
     /// Start produce job from dialog draft fields.
@@ -1440,7 +1525,12 @@ impl eframe::App for DeskApp {
                     }
                 });
                 ui.add_space(6.0);
-                // QC summary chips
+                // QC summary chips (session + freshness preflight)
+                if self.produce_qc_readiness_expand != self.produce_expand_family
+                    || self.produce_qc_readiness_require != self.produce_require_qc_pass
+                {
+                    self.refresh_produce_qc_readiness();
+                }
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Last QC:").strong());
                     match self.last_qc_passed {
@@ -1461,6 +1551,45 @@ impl eframe::App for DeskApp {
                         ui.label(format!("warns={w}"));
                     }
                 });
+                // Freshness chip (Missing / Failed / Stale / Passed)
+                if self.produce_require_qc_pass {
+                    let (color, text) = match &self.produce_qc_readiness {
+                        ProduceQcReadiness::Allowed => (
+                            egui::Color32::from_rgb(40, 140, 70),
+                            "Gate: Passed (fresh)".to_string(),
+                        ),
+                        ProduceQcReadiness::Missing => (
+                            egui::Color32::from_rgb(180, 50, 50),
+                            "Gate: Missing".to_string(),
+                        ),
+                        ProduceQcReadiness::Failed { .. } => (
+                            egui::Color32::from_rgb(180, 50, 50),
+                            "Gate: Failed".to_string(),
+                        ),
+                        ProduceQcReadiness::Stale { .. } => (
+                            egui::Color32::from_rgb(180, 120, 40),
+                            "Gate: Stale — Selection changed since last QC — re-run QC".to_string(),
+                        ),
+                        ProduceQcReadiness::Unknown => (
+                            egui::Color32::from_rgb(120, 120, 120),
+                            "Gate: unknown".to_string(),
+                        ),
+                        ProduceQcReadiness::Unavailable(msg) => (
+                            egui::Color32::from_rgb(180, 120, 40),
+                            format!("Gate: unavailable ({msg})"),
+                        ),
+                    };
+                    ui.colored_label(color, text);
+                    if !matches!(
+                        self.produce_qc_readiness,
+                        ProduceQcReadiness::Allowed | ProduceQcReadiness::Unknown
+                    ) {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(180, 120, 40),
+                            self.produce_qc_readiness.label(),
+                        );
+                    }
+                }
                 if let Some(ref path) = self.last_qc_report_path {
                     ui.label(
                         egui::RichText::new(format!("Report: {path}"))
@@ -1471,21 +1600,71 @@ impl eframe::App for DeskApp {
                 if let Some(ref st) = self.last_qc_status {
                     ui.label(egui::RichText::new(st.clone()).small());
                 }
-                if self.produce_require_qc_pass
-                    && (self.last_qc_passed != Some(true) || self.last_qc_passed.is_none())
-                {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(180, 120, 40),
-                        "Require QC pass is ON — run production QC (and fix errors) before produce. \
-                         Selection changes after QC make the run stale.",
-                    );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            self.last_qc_report_path.is_some(),
+                            egui::Button::new(if self.qc_findings_show {
+                                "Hide findings"
+                            } else {
+                                "Show findings"
+                            }),
+                        )
+                        .on_hover_text("Load findings.csv from the last QC report (capped)")
+                        .clicked()
+                    {
+                        if self.qc_findings_show {
+                            self.qc_findings_show = false;
+                        } else if let Some(ref path) = self.last_qc_report_path.clone() {
+                            self.load_qc_findings_from_report(path);
+                            self.qc_findings_show = true;
+                        }
+                    }
+                    if !self.qc_findings.is_empty() {
+                        ui.label(format!(
+                            "{} finding(s){}",
+                            self.qc_findings.len(),
+                            if self.qc_findings.len() >= FINDINGS_DISPLAY_CAP {
+                                " (capped)"
+                            } else {
+                                ""
+                            }
+                        ));
+                    }
+                });
+                if let Some(ref err) = self.qc_findings_error {
+                    ui.colored_label(egui::Color32::from_rgb(180, 50, 50), err);
+                }
+                if self.qc_findings_show && !self.qc_findings.is_empty() {
+                    egui::ScrollArea::vertical()
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new("qc_findings_grid")
+                                .num_columns(4)
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new("rule").strong().small());
+                                    ui.label(egui::RichText::new("sev").strong().small());
+                                    ui.label(egui::RichText::new("item").strong().small());
+                                    ui.label(egui::RichText::new("message").strong().small());
+                                    ui.end_row();
+                                    for row in &self.qc_findings {
+                                        ui.label(egui::RichText::new(&row.rule_id).small());
+                                        ui.label(egui::RichText::new(&row.severity).small());
+                                        ui.label(egui::RichText::new(&row.item_id).small());
+                                        ui.label(egui::RichText::new(&row.message).small());
+                                        ui.end_row();
+                                    }
+                                });
+                        });
                 }
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(
                         "Default output: <matter>/exports/productions/<name>/\n\
                          DAT: UTF-8 BOM, þ/¶ delimiters, ® newlines, UTC dates.\n\
-                         Privilege descriptions and notes are never included.",
+                         Privilege descriptions and notes are never included.\n\
+                         QC expand_family must match produce expand (same checkbox).",
                     )
                     .weak()
                     .small(),
@@ -1494,6 +1673,12 @@ impl eframe::App for DeskApp {
         });
 
         if self.produce_dialog_open {
+            // Keep preflight aligned with checkboxes while dialog is open.
+            if self.produce_qc_readiness_expand != self.produce_expand_family
+                || self.produce_qc_readiness_require != self.produce_require_qc_pass
+            {
+                self.refresh_produce_qc_readiness();
+            }
             egui::Window::new("Produce review set")
                 .collapsible(false)
                 .resizable(true)
@@ -1535,16 +1720,43 @@ impl eframe::App for DeskApp {
                         "Require QC pass (fresh selection fingerprint)",
                     );
                     if self.produce_require_qc_pass {
-                        if self.last_qc_passed.is_none() {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(180, 50, 50),
-                                "No QC run yet — Start produce will fail closed until you run QC.",
-                            );
-                        } else if self.last_qc_passed == Some(false) {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(180, 50, 50),
-                                "Last QC failed — fix errors and re-run QC before produce.",
-                            );
+                        match &self.produce_qc_readiness {
+                            ProduceQcReadiness::Allowed => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(40, 140, 70),
+                                    "QC fresh pass — produce allowed.",
+                                );
+                            }
+                            ProduceQcReadiness::Missing => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(180, 50, 50),
+                                    "No QC run yet — run production QC before produce.",
+                                );
+                            }
+                            ProduceQcReadiness::Failed { .. } => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(180, 50, 50),
+                                    "Last QC failed — fix errors and re-run QC before produce.",
+                                );
+                            }
+                            ProduceQcReadiness::Stale { .. } => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(180, 120, 40),
+                                    "Selection changed since last QC — re-run QC",
+                                );
+                            }
+                            ProduceQcReadiness::Unknown => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(180, 120, 40),
+                                    "QC status unknown — refresh or run QC.",
+                                );
+                            }
+                            ProduceQcReadiness::Unavailable(msg) => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(180, 50, 50),
+                                    format!("QC preflight failed: {msg}"),
+                                );
+                            }
                         }
                     }
                     ui.horizontal(|ui| {
@@ -1565,14 +1777,16 @@ impl eframe::App for DeskApp {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let busy = self.runner_busy();
+                        // Soft-gate: require fresh pass (not merely last_qc_passed session flag).
                         let gate_blocks = self.produce_require_qc_pass
-                            && self.last_qc_passed != Some(true);
+                            && !self.produce_qc_readiness.allows_produce();
                         let can_start = !busy && !gate_blocks;
                         let hover = if busy {
-                            "A job is running."
+                            "A job is running.".to_string()
+                        } else if gate_blocks {
+                            self.produce_qc_readiness.label()
                         } else {
-                            "QC required: run production QC and ensure it passed \
-                             (or uncheck Require QC pass)."
+                            "Start packaging the review corpus.".into()
                         };
                         let start = ui
                             .add_enabled(can_start, egui::Button::new("Start produce"))

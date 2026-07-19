@@ -184,11 +184,19 @@ pub fn produce_params(
 }
 
 /// Default params for production QC (`kind = "qc"`).
+///
+/// Expand defaults to **false** — when starting QC from the Produce screen,
+/// pass the same `expand_family` flag as produce via [`qc_params`] so the
+/// selection fingerprint matches (otherwise produce is permanently stale).
+#[allow(dead_code)] // retained as the documented expand=false default helper
 pub fn qc_default_params() -> String {
     qc_params("review_corpus", false, None)
 }
 
 /// Build production QC job params JSON.
+///
+/// **Contract:** `expand_family_for_scan` must match produce's `expand_family`
+/// when QC is used to authorize that produce selection.
 pub fn qc_params(scope: &str, expand_family_for_scan: bool, report_dir: Option<&str>) -> String {
     let mut v = serde_json::json!({
         "scope": scope,
@@ -477,6 +485,16 @@ mod tests {
         assert_eq!(v["scope"], "item_ids");
         assert_eq!(v["expand_family_for_scan"], true);
         assert_eq!(v["report_dir"], r"C:\out\qc");
+    }
+
+    #[test]
+    fn qc_params_includes_expand_family_for_scan_true_when_requested() {
+        // Desk must pass produce_expand_family into QC so fingerprints match.
+        let j = qc_params("review_corpus", true, None);
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["scope"], "review_corpus");
+        assert_eq!(v["expand_family_for_scan"], true);
+        assert!(v.get("report_dir").is_none() || v["report_dir"].is_null());
     }
 
     #[test]

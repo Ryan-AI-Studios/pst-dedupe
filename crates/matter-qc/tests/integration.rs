@@ -9,9 +9,10 @@ use matter_core::{
     FAMILY_KIND_EMAIL_ATTACHMENTS, SCHEMA_VERSION,
 };
 use matter_qc::{
-    run_production_qc, QcOutcome, QcParams, QcRuleConfig, QcSeverity, JOB_KIND_QC,
-    RULE_BROKEN_FAMILY_INCOMPLETE_PARENT, RULE_BROKEN_FAMILY_ORPHAN_CHILD, RULE_EMPTY_SELECTION,
-    RULE_MISSING_NATIVE, RULE_MISSING_TEXT, RULE_PDF_NEEDS_OCR, RULE_REDACTED_TEXT_MISSING,
+    evaluate_candidates_with_cancel, resolve_rules, run_production_qc, QcError, QcOutcome,
+    QcParams, QcRuleConfig, QcSeverity, JOB_KIND_QC, RULE_BROKEN_FAMILY_INCOMPLETE_PARENT,
+    RULE_BROKEN_FAMILY_ORPHAN_CHILD, RULE_EMPTY_SELECTION, RULE_MISSING_NATIVE, RULE_MISSING_TEXT,
+    RULE_ONLY_WITHHELD, RULE_PDF_NEEDS_OCR, RULE_REDACTED_TEXT_MISSING,
     RULE_WITHHELD_FAMILY_MEMBER, RULE_WITHHELD_IN_SELECTION, RULE_ZERO_SIZE,
 };
 
@@ -471,4 +472,68 @@ fn findings_csv_no_subject_leak() {
     let latest = matter.load_latest_qc_run().unwrap().expect("qc_run");
     assert_eq!(latest.selection_fingerprint, r.selection_fingerprint);
     assert_eq!(latest.passed, r.passed);
+}
+
+/// Dangling parent_item_id must not abort withheld_family_member / incomplete checks.
+#[test]
+fn dangling_parent_does_not_abort_qc() {
+    let (_tmp, matter) = temp_matter("dangle-parent");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let id = good_doc(&matter, "orphanish.pdf");
+    // Simulate broken parent pointer (insert APIs refuse missing parents).
+    matter
+        .connection()
+        .execute(
+            "UPDATE items SET parent_item_id = 'itm_missing_parent' WHERE id = ?1",
+            [&id],
+        )
+        .expect("sql");
+    let r = run_qc(&matter, &job.id, &QcParams::default());
+    // Orphan rule fires; no hard error from item_is_withheld on missing parent.
+    let orphan = findings_of(&r, RULE_BROKEN_FAMILY_ORPHAN_CHILD);
+    assert_eq!(orphan.len(), 1);
+    assert!(!r.passed);
+}
+
+/// All candidates withheld → only_withheld set-level error.
+#[test]
+fn only_withheld_set_level_error() {
+    let (_tmp, matter) = temp_matter("only-withheld");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let id = good_doc(&matter, "priv.pdf");
+    matter
+        .upsert_item_privilege(UpsertItemPrivilegeInput {
+            item_id: id,
+            basis: "attorney_client".into(),
+            description: "all withheld".into(),
+            status: "asserted".into(),
+            withhold: true,
+            include_on_log: true,
+            actor: "t".into(),
+        })
+        .unwrap();
+    let r = run_qc(&matter, &job.id, &QcParams::default());
+    assert!(!r.passed);
+    let f = findings_of(&r, RULE_ONLY_WITHHELD);
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].severity, QcSeverity::Error);
+    assert!(f[0].item_id.is_none());
+}
+
+/// Cancel callback during evaluate returns Cancelled.
+#[test]
+fn evaluate_cancel_between_items() {
+    let (_tmp, matter) = temp_matter("eval-cancel");
+    let a = good_doc(&matter, "a.pdf");
+    let b = good_doc(&matter, "b.pdf");
+    let rules = resolve_rules(&[]);
+    let cancel = || true;
+    let err = evaluate_candidates_with_cancel(
+        &matter,
+        &[a, b],
+        &rules,
+        Some(&cancel as &dyn Fn() -> bool),
+    )
+    .expect_err("must cancel");
+    assert!(matches!(err, QcError::Cancelled));
 }

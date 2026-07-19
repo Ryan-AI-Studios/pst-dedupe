@@ -172,10 +172,22 @@ fn usable_text(item: &Item) -> bool {
 }
 
 /// Evaluate all enabled rules against the candidate set.
+///
+/// When `cancel` returns true between items, returns [`crate::QcError::Cancelled`].
 pub fn evaluate_candidates(
     matter: &Matter,
     candidate_ids: &[String],
     rules: &ResolvedRules,
+) -> Result<Vec<QcFinding>> {
+    evaluate_candidates_with_cancel(matter, candidate_ids, rules, None)
+}
+
+/// Like [`evaluate_candidates`], checking `cancel` every item (load + per-item rules).
+pub fn evaluate_candidates_with_cancel(
+    matter: &Matter,
+    candidate_ids: &[String],
+    rules: &ResolvedRules,
+    cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<Vec<QcFinding>> {
     let mut findings = Vec::new();
     let candidate_set: HashSet<&str> = candidate_ids.iter().map(String::as_str).collect();
@@ -195,6 +207,9 @@ pub fn evaluate_candidates(
     let mut items: Vec<Item> = Vec::with_capacity(candidate_ids.len());
     let mut withheld_map: HashMap<String, bool> = HashMap::new();
     for id in candidate_ids {
+        if cancel.map(|c| c()).unwrap_or(false) {
+            return Err(crate::QcError::Cancelled);
+        }
         let item = matter.get_item(id)?;
         let withheld = matter.item_is_withheld(id)?;
         withheld_map.insert(id.clone(), withheld);
@@ -217,6 +232,9 @@ pub fn evaluate_candidates(
     }
 
     for item in &items {
+        if cancel.map(|c| c()).unwrap_or(false) {
+            return Err(crate::QcError::Cancelled);
+        }
         let id = item.id.as_str();
         let is_withheld = *withheld_map.get(id).unwrap_or(&false);
 
@@ -360,6 +378,19 @@ pub fn evaluate_candidates(
     Ok(findings)
 }
 
+/// Withhold lookup that treats missing items as not withheld.
+///
+/// Orphan / broken-family rules already cover parents missing from the
+/// selection; relative withhold checks must not hard-error on a dangling
+/// `parent_item_id` (or a child id that vanished mid-scan).
+fn item_is_withheld_loose(matter: &Matter, item_id: &str) -> Result<bool> {
+    match matter.item_is_withheld(item_id) {
+        Ok(v) => Ok(v),
+        Err(matter_core::Error::ItemNotFound(_)) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn has_missing_non_withheld_child(
     matter: &Matter,
     parent_id: &str,
@@ -376,7 +407,7 @@ fn has_missing_non_withheld_child(
         if candidate_set.contains(child_id.as_str()) {
             continue;
         }
-        if matter.item_is_withheld(&child_id)? {
+        if item_is_withheld_loose(matter, &child_id)? {
             continue;
         }
         return Ok(true);
@@ -386,7 +417,7 @@ fn has_missing_non_withheld_child(
 
 fn family_has_withheld_relative(matter: &Matter, item: &Item) -> Result<bool> {
     if let Some(parent) = item.parent_item_id.as_deref() {
-        if matter.item_is_withheld(parent)? {
+        if item_is_withheld_loose(matter, parent)? {
             return Ok(true);
         }
     }
@@ -398,7 +429,7 @@ fn family_has_withheld_relative(matter: &Matter, item: &Item) -> Result<bool> {
     })?;
     for r in rows {
         let child_id = r?;
-        if matter.item_is_withheld(&child_id)? {
+        if item_is_withheld_loose(matter, &child_id)? {
             return Ok(true);
         }
     }

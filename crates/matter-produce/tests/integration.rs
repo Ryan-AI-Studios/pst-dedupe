@@ -1986,3 +1986,95 @@ fn qc_gate_fresh_pass_allows_produce() {
         other => panic!("expected Succeeded, got {other:?}"),
     }
 }
+
+/// QC expand=false fingerprint vs produce expand=true (family members added) → stale gate.
+#[test]
+fn qc_expand_false_produce_expand_true_is_stale() {
+    use matter_core::{
+        item_role, selection_fingerprint, InsertQcRunInput, FAMILY_KIND_EMAIL_ATTACHMENTS,
+    };
+
+    let (_tmp, matter) = temp_matter("qc-expand-mismatch");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let family = matter
+        .insert_family(FAMILY_KIND_EMAIL_ATTACHMENTS)
+        .expect("family");
+    let n_p = put_native(&matter, b"parent");
+    let t_p = put_text(&matter, "parent body");
+    // Parent NOT in review — only child selected when expand=false.
+    let parent = matter
+        .insert_item(ItemInput {
+            path: Some("parent.eml".into()),
+            native_sha256: Some(n_p),
+            text_sha256: Some(t_p),
+            file_category: Some("email".into()),
+            role: Some(item_role::PARENT.into()),
+            family_id: Some(family.id.clone()),
+            in_review: Some(0),
+            status: item_status::EXTRACTED.into(),
+            size_bytes: Some(4),
+            ..Default::default()
+        })
+        .expect("parent")
+        .id;
+    let n_c = put_native(&matter, b"child");
+    let t_c = put_text(&matter, "child body");
+    let child = matter
+        .insert_item(ItemInput {
+            path: Some("child.pdf".into()),
+            native_sha256: Some(n_c),
+            text_sha256: Some(t_c),
+            file_category: Some("document".into()),
+            role: Some(item_role::ATTACHMENT.into()),
+            parent_item_id: Some(parent.clone()),
+            family_id: Some(family.id),
+            in_review: Some(1),
+            status: item_status::EXTRACTED.into(),
+            size_bytes: Some(4),
+            ..Default::default()
+        })
+        .expect("child")
+        .id;
+
+    // Simulate QC run with expand_family_for_scan=false (child only).
+    let qc_ids = vec![child];
+    let fp = selection_fingerprint(&qc_ids);
+    matter
+        .insert_qc_run(InsertQcRunInput {
+            profile: "default_production_qc_v1".into(),
+            passed: true,
+            error_count: 0,
+            warn_count: 0,
+            candidate_count: 1,
+            selection_fingerprint: fp,
+            scope: "review_corpus".into(),
+            scope_json: Some(r#"{"expand_family_for_scan":false}"#.into()),
+            report_path: None,
+            job_id: None,
+            rules_json: None,
+        })
+        .expect("qc_run");
+
+    let outcome = run_produce(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("ExpandMismatch".into()),
+            require_qc_pass: true,
+            expand_family: true,
+            ..Default::default()
+        },
+        None,
+        |_| {},
+    )
+    .expect("run");
+    match outcome {
+        ProduceOutcome::Failed { message, .. } => {
+            assert!(
+                message.contains("QC stale") || message.contains("selection changed"),
+                "expand mismatch must be stale; msg={message}"
+            );
+        }
+        other => panic!("expected Failed stale for expand mismatch, got {other:?}"),
+    }
+}

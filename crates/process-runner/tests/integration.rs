@@ -1580,3 +1580,61 @@ fn classify_handler_via_process_runner() {
     assert_eq!(item.category_taxonomy.as_deref(), Some("taxonomy_v1"));
     assert_eq!(item.role.as_deref(), Some(item_role::ATTACHMENT));
 }
+
+/// Thin production QC handler smoke (`kind = "qc"`).
+#[cfg(feature = "qc")]
+#[test]
+fn qc_handler_via_process_runner() {
+    use matter_core::{item_role, item_status, ItemInput};
+    use process_runner::MatterQcHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-qc");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        let native = matter.put_bytes(b"native").expect("put");
+        let text = matter.put_bytes(b"plain text body").expect("put text");
+        matter
+            .insert_item(ItemInput {
+                path: Some("memo.pdf".into()),
+                native_sha256: Some(native),
+                text_sha256: Some(text),
+                status: item_status::EXTRACTED.into(),
+                file_category: Some("document".into()),
+                role: Some(item_role::STANDALONE.into()),
+                in_review: Some(1),
+                size_bytes: Some(6),
+                ..Default::default()
+            })
+            .expect("item");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterQcHandler::new()));
+
+    let params = JobParams::new(
+        serde_json::json!({
+            "scope": "review_corpus",
+            "expand_family_for_scan": false,
+            "profile": "default_production_qc_v1",
+            "rules": []
+        })
+        .to_string(),
+    );
+    let job_id = runner.start(&root, "qc", params).expect("start qc");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "err={:?}",
+        job.error_summary
+    );
+    assert_eq!(job.kind, "qc");
+    let run = matter.load_latest_qc_run().expect("load").expect("qc_run");
+    assert!(run.passed, "clean doc should pass QC");
+    assert_eq!(run.candidate_count, 1);
+}

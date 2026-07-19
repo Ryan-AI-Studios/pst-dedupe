@@ -26,6 +26,10 @@ pub enum QcError {
     #[error("CSV error: {0}")]
     Csv(#[from] csv::Error),
 
+    /// Cooperative cancel during evaluation.
+    #[error("cancelled")]
+    Cancelled,
+
     #[error("{0}")]
     Other(String),
 }

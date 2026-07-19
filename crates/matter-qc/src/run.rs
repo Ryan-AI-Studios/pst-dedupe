@@ -11,7 +11,7 @@ use serde_json::json;
 use crate::error::{QcError, Result};
 use crate::params::{QcParams, QcSeverity};
 use crate::report::{count_severities, default_qc_report_dir, write_qc_report, QcReportMeta};
-use crate::rules::{evaluate_candidates, resolve_rules, QcFinding};
+use crate::rules::{evaluate_candidates_with_cancel, resolve_rules, QcFinding};
 use crate::select::select_item_ids;
 
 /// Job kind string for process-runner.
@@ -224,7 +224,19 @@ fn run_qc_inner(
 
     progress(0);
     let rules = resolve_rules(&params.rules);
-    let findings = evaluate_candidates(matter, &ordered, &rules)?;
+    let findings = match evaluate_candidates_with_cancel(matter, &ordered, &rules, cancel) {
+        Ok(f) => f,
+        Err(QcError::Cancelled) => {
+            return Ok(QcOutcome::Paused(QcSummary {
+                candidate_count,
+                selection_fingerprint: fingerprint,
+                scope,
+                profile: profile.into(),
+                ..Default::default()
+            }));
+        }
+        Err(e) => return Err(e),
+    };
     progress(candidate_count);
 
     if cancel.map(|c| c()).unwrap_or(false) {
