@@ -189,9 +189,9 @@ fn excel_now_from_rfc(rfc: &str) -> String {
 ///
 /// Pipeline:
 /// 1. Redact `file://` URIs, Windows/UNC/Unix absolute paths, and path-like tokens.
-/// 2. Allowlist remaining tokens: lowercase snake_case error codes
-///    (`^[a-z][a-z0-9_]{0,64}$` with at least one `_`) or a small set of generic
-///    words (case-insensitive).
+/// 2. Allowlist remaining tokens against a **finite** registry of stable error codes
+///    and short generic words (case-insensitive). Syntactic snake_case is **not**
+///    enough — client phrases like `acme_merger_strategy` must not pass.
 /// 3. If nothing remains → `(redacted)` (unless the original input was empty/whitespace
 ///    → empty).
 pub fn scrub_error_summary(s: &str) -> String {
@@ -225,7 +225,7 @@ pub fn scrub_error_summary(s: &str) -> String {
     }
 }
 
-/// Keep only stable error-code tokens and short generic error words.
+/// Keep only registered stable error-code tokens and short generic error words.
 fn filter_error_summary_allowlist(s: &str) -> String {
     s.split_whitespace()
         .filter(|tok| token_is_allowed_error_summary(tok))
@@ -243,34 +243,32 @@ fn token_is_allowed_error_summary(tok: &str) -> bool {
     if bare.is_empty() || bare == REDACTED {
         return false;
     }
-    if is_error_code_shape(bare) {
+    if is_registered_error_code(bare) {
         return true;
     }
     is_generic_error_word(bare)
 }
 
-/// Stable machine codes: lowercase snake/alphanum matching
-/// `^[a-z][a-z0-9_]{0,64}$` **and** containing at least one `_`.
-///
-/// Plain English words (`while`, `extract`, `processing`) also match the bare
-/// character class; requiring an underscore keeps real codes
-/// (`ocr_pdf_renderer_missing`, `parse_failed`) while dropping free text.
-/// Single-word status phrases are covered by [`is_generic_error_word`].
-fn is_error_code_shape(tok: &str) -> bool {
-    let b = tok.as_bytes();
-    if b.is_empty() || b.len() > 65 {
-        return false;
-    }
-    if !b[0].is_ascii_lowercase() {
-        return false;
-    }
-    if !b
-        .iter()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
-    {
-        return false;
-    }
-    tok.contains('_')
+/// Finite registry of stable machine codes known to Desk jobs / item_errors.
+/// Deliberately **not** a syntactic snake_case predicate (client free text can look
+/// like codes). Extend when new stable codes ship.
+fn is_registered_error_code(tok: &str) -> bool {
+    const STABLE_CODES: &[&str] = &[
+        "parse_failed",
+        "ocr_pdf_renderer_missing",
+        "engine_not_found",
+        "unsupported_7z",
+        "pdf_needs_ocr",
+        "low_text",
+        "empty_text",
+        "mid_logical_conflicts",
+        "job_not_found",
+        "worker_gone",
+        "item_error",
+        "fts_query_invalid",
+        "privilege_log_incomplete",
+    ];
+    STABLE_CODES.iter().any(|c| tok.eq_ignore_ascii_case(c))
 }
 
 fn is_generic_error_word(tok: &str) -> bool {
@@ -1137,6 +1135,22 @@ mod unit_tests {
             scrub_error_summary("parse_failed timeout"),
             "parse_failed timeout"
         );
+    }
+
+    #[test]
+    fn scrub_drops_lowercase_snake_client_text() {
+        // Finite allowlist only — syntactic snake_case is not enough.
+        let safe = scrub_error_summary("acme_merger_strategy");
+        assert!(!safe.contains("acme"));
+        assert!(!safe.contains("merger"));
+        assert!(!safe.contains("strategy"));
+        assert_eq!(safe, REDACTED);
+
+        let mixed = scrub_error_summary("failed acme_merger_strategy parse_failed");
+        assert!(!mixed.contains("acme"));
+        assert!(!mixed.contains("merger"));
+        assert!(mixed.contains("failed"));
+        assert!(mixed.contains("parse_failed"));
     }
 
     #[test]

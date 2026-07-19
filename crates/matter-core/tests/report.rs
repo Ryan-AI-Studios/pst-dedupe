@@ -840,6 +840,12 @@ fn scrub_and_excel_helpers_public() {
     let root_unix = scrub_error_summary("failed /client_secret");
     assert!(!root_unix.contains("client_secret"));
     assert!(root_unix.eq_ignore_ascii_case("failed") || root_unix == "(redacted)");
+
+    // Lowercase snake_case client text must not pass as a "code".
+    let client_snake = scrub_error_summary("acme_merger_strategy");
+    assert!(!client_snake.contains("acme"));
+    assert!(!client_snake.contains("merger"));
+    assert_eq!(client_snake, "(redacted)");
 }
 
 #[test]
@@ -916,7 +922,7 @@ fn error_summary_free_text_absent_from_pack() {
         .set_job_state(
             &job.id,
             JobState::Failed,
-            Some("failed while processing CONFIDENTIAL_SUBJECT_XYZ"),
+            Some("failed while processing CONFIDENTIAL_SUBJECT_XYZ acme_merger_strategy"),
         )
         .expect("fail");
 
@@ -931,12 +937,15 @@ fn error_summary_free_text_absent_from_pack() {
         .expect("export");
 
     // Distinctive free-text tokens from the seeded job error (not README words
-    // like "subjects").
+    // like "subjects"). Includes lowercase snake_case client text.
     let forbidden = [
         "CONFIDENTIAL",
         "CONFIDENTIAL_SUBJECT_XYZ",
         "SUBJECT_XYZ",
         "processing",
+        "acme_merger_strategy",
+        "acme",
+        "merger",
     ];
     for name in pack_files(&out) {
         let body = read_pack_file(&out, &name);
