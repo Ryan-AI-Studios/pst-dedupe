@@ -649,6 +649,19 @@ impl ReviewState {
     }
 
     /// Request a thin-list reload on next show.
+    /// Jump to an item by id after reload (e.g. QC findings → Review).
+    ///
+    /// Sets [`Self::last_item_id`] and marks the list dirty so the next paint
+    /// restores selection when the id is present in the loaded rows.
+    pub fn request_jump_to_item(&mut self, item_id: &str) {
+        let id = item_id.trim();
+        if id.is_empty() {
+            return;
+        }
+        self.last_item_id = Some(id.to_string());
+        self.needs_reload = true;
+    }
+
     pub fn request_reload(&mut self) {
         self.needs_reload = true;
     }

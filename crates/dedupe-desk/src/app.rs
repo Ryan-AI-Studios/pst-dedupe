@@ -436,6 +436,21 @@ impl DeskApp {
         self.screen = Screen::Review;
     }
 
+    /// Navigate to Review and select a specific item id (QC findings → Review).
+    pub(crate) fn open_review_item(&mut self, item_id: &str) {
+        if self.matter_root.is_none() {
+            return;
+        }
+        let id = item_id.trim();
+        if id.is_empty() {
+            self.open_review();
+            return;
+        }
+        self.review.request_jump_to_item(id);
+        self.screen = Screen::Review;
+        self.status_msg = Some(format!("Review: jump to {id}"));
+    }
+
     fn create_matter_at(&mut self, parent: PathBuf) {
         if self.job_may_be_writing() {
             self.error_msg = Some(
@@ -1685,6 +1700,7 @@ impl eframe::App for DeskApp {
                     ui.colored_label(egui::Color32::from_rgb(180, 50, 50), err);
                 }
                 if self.qc_findings_show && !self.qc_findings.is_empty() {
+                    let mut jump_item: Option<String> = None;
                     egui::ScrollArea::vertical()
                         .max_height(160.0)
                         .show(ui, |ui| {
@@ -1700,12 +1716,28 @@ impl eframe::App for DeskApp {
                                     for row in &self.qc_findings {
                                         ui.label(egui::RichText::new(&row.rule_id).small());
                                         ui.label(egui::RichText::new(&row.severity).small());
-                                        ui.label(egui::RichText::new(&row.item_id).small());
+                                        if row.item_id.is_empty() {
+                                            ui.label(egui::RichText::new("—").small());
+                                        } else if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(&row.item_id).small(),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .on_hover_text("Open in Review")
+                                            .clicked()
+                                        {
+                                            jump_item = Some(row.item_id.clone());
+                                        }
                                         ui.label(egui::RichText::new(&row.message).small());
                                         ui.end_row();
                                     }
                                 });
                         });
+                    if let Some(id) = jump_item {
+                        self.open_review_item(&id);
+                    }
                 }
                 ui.add_space(6.0);
                 ui.label(
