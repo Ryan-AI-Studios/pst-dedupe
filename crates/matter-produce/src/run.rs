@@ -1,6 +1,7 @@
 //! Core produce job: select → withhold gate → control numbers → package → DAT.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::time::Instant;
 
 use chrono::Utc;
@@ -310,7 +311,14 @@ fn run_produce_inner(
         cursor.ordered_ids = ordered;
         cursor.next_seq = 1;
         save_checkpoint(matter, job_id, &cursor)?;
+    }
 
+    // Layout / production_set may still be empty after a hard-fail checkpoint that
+    // only recorded selection (e.g. non-empty explicit output_dir). Re-enter setup
+    // rather than creating DATA/NATIVES/TEXT under an empty root.
+    if !cursor.ordered_ids.is_empty()
+        && (cursor.output_root.trim().is_empty() || cursor.production_set_id.trim().is_empty())
+    {
         // Fail-closed withhold scan before any assignment when requested.
         if params.fail_if_withheld {
             for id in &cursor.ordered_ids {
@@ -361,6 +369,12 @@ fn run_produce_inner(
         cursor.production_name = name;
         cursor.output_root = output_root.to_string();
         save_checkpoint(matter, job_id, &cursor)?;
+    }
+
+    if cursor.output_root.trim().is_empty() {
+        return Err(ProduceError::Other(
+            "internal: produce output_root is empty after setup".into(),
+        ));
     }
 
     let layout = VolumeLayout::create(camino::Utf8Path::new(&cursor.output_root))?;
@@ -549,6 +563,59 @@ fn run_produce_inner(
                 text_relpath,
                 row,
             }) => {
+                // TOCTOU: hold may be asserted during CAS copy / EML write.
+                // Recheck before committing production_items / JSONL / DAT.
+                if matter.item_is_withheld(&item_id)? {
+                    cleanup_control_artifacts(&layout, &control_safe);
+                    if let Some(ref rel) = native_relpath {
+                        let p = layout.root.join(rel.replace('\\', "/"));
+                        let _ = fs::remove_file(p.as_std_path());
+                    }
+                    if let Some(ref rel) = text_relpath {
+                        let p = layout.root.join(rel.replace('\\', "/"));
+                        let _ = fs::remove_file(p.as_std_path());
+                    }
+                    if params.fail_if_withheld {
+                        update_production_set_status(
+                            matter,
+                            &cursor.production_set_id,
+                            "failed",
+                            cursor.next_seq,
+                        )?;
+                        return Ok(ProduceOutcome::Failed {
+                            message: format!(
+                                "fail_if_withheld: item {item_id} became withheld during produce; aborting"
+                            ),
+                            summary: summary_from_cursor(&cursor),
+                        });
+                    }
+                    if !production_item_is_skipped_withheld(
+                        matter,
+                        &cursor.production_set_id,
+                        &item_id,
+                    )? {
+                        cursor.skipped_withheld += 1;
+                        record_production_item(
+                            matter,
+                            &cursor.production_set_id,
+                            &item_id,
+                            "",
+                            None,
+                            None,
+                            "skipped",
+                            Some("withheld"),
+                            None,
+                        )?;
+                    }
+                    cursor.done_item_ids.push(item_id.clone());
+                    done.insert(item_id);
+                    offset += 1;
+                    cursor.cursor_index = offset as u64;
+                    cursor.completed_count = offset as u64;
+                    save_checkpoint(matter, job_id, &cursor)?;
+                    progress(cursor.completed_count);
+                    continue;
+                }
                 // Order: production_items (ok) → JSONL append → done + checkpoint.
                 // Crash after JSONL is recovered via jsonl_by_item on resume.
                 record_production_item(
@@ -839,6 +906,19 @@ fn finalize_volume(
     cursor: &mut CheckpointCursor,
 ) -> Result<ProduceOutcome> {
     let layout = VolumeLayout::create(camino::Utf8Path::new(&cursor.output_root))?;
+    // Hold may land after the last work-item commit but before finalize writes DAT.
+    let mut jsonl_by_item = index_rows_jsonl_by_item_id(&layout)?;
+    let mut done: HashSet<String> = cursor.done_item_ids.iter().cloned().collect();
+    if let Some(failed) = apply_late_withhold_sweep(
+        matter,
+        params,
+        &layout,
+        cursor,
+        &mut jsonl_by_item,
+        &mut done,
+    )? {
+        return Ok(failed);
+    }
     let rows = load_rows_from_jsonl(&layout)?;
 
     write_load_dat(layout.load_dat.as_std_path(), &rows)?;

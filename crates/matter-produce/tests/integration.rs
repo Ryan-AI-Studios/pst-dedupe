@@ -1440,6 +1440,29 @@ fn output_dir_collision_unique_or_reject() {
         b"first-volume-native"
     );
 
+    // Resume after pre-layout hard fail re-enters setup (does not write under empty root).
+    // Checkpoint freezes the prior colliding output_dir, so resume fails closed again.
+    let err_resume = run_produce(
+        &matter,
+        &job3.id,
+        &ProduceParams {
+            name: Some("ExplicitCollide".into()),
+            output_dir: Some(first_root.clone()),
+            ..Default::default()
+        },
+        None,
+        |_| {},
+    );
+    assert!(
+        err_resume.is_err(),
+        "resume with frozen non-empty output_dir must fail closed, got {err_resume:?}"
+    );
+    // Must not have materialized a volume at the empty-string root (cwd).
+    assert!(
+        !std::path::Path::new("DATA").join("load.dat").exists(),
+        "must not write load.dat under empty/cwd root on bad resume"
+    );
+
     // Explicit dir with only unrelated content (no production markers) is still rejected.
     let (tmp_out, out_base) = utf8_tempdir();
     let cluttered = out_base.join("cluttered_out");
