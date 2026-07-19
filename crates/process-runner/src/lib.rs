@@ -61,6 +61,9 @@ pub use handlers::{MatterProduceHandler, MatterProductionExportHandler};
 #[cfg(feature = "qc")]
 pub use handlers::MatterQcHandler;
 
+#[cfg(feature = "gap")]
+pub use handlers::MatterGapHandler;
+
 #[cfg(feature = "fts")]
 pub use handlers::MatterFtsIndexHandler;
 

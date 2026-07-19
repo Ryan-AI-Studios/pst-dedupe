@@ -28,6 +28,7 @@ const PROGRESS_STAGES: &[&str] = &[
     "promote",
     "produce",
     "qc",
+    "gap",
     "fts",
     "office",
     "pdf",
@@ -706,6 +707,7 @@ fn load_resume_params(matter: &Matter, job: &Job) -> String {
     // then fall back to the full stage list so resume restores frozen params.
     let kind_stage = match job.kind.as_str() {
         "qc" => Some("qc"),
+        "gap" => Some("gap"),
         "produce" | "production_export" => Some("produce"),
         "dedupe" => Some("dedupe"),
         "thread" => Some("thread"),

@@ -358,6 +358,22 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0040-03 | — | Broken-family QC handoff | **Closed in 0041** | — |
 | D-0032-04 | — | Stale redaction produce QC | **Closed in 0041** | — |
 
+## From track 0042-GapAnalysis (Completed — PASS WITH DEFERRED P3)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0042-01 | — | Fuzzy custodian name / alias matching beyond case-fold | P0 exact normalize + **warn** severity | residual |
+| D-0042-02 | — | Ingest opposing natives into CAS | Metadata set-diff only P0 | residual |
+| D-0042-03 | — | Foreign DAT auto column-detect ML | Enum map + 0040 default map P0 | residual |
+| D-0042-04 | — | Day-level date holes / heatmap UI | **Forbidden P0**; week/month only | residual |
+| D-0042-05 | — | Purview legal-hold / hold-notice roster sync | Manual expected list P0 | residual |
+| D-0042-06 | — | OPT/image opposing productions | DAT metadata P0 | residual |
+| D-0042-07 | — | CLI `gap run` | Desk P0 | **0045** |
+| D-0042-08 | P3 | Full GUI smoke Gap panel | Automated + operator smoke | operator / polish |
+| D-0042-09 | — | Emit `MESSAGE_ID` on 0040 produce DAT for foreign-style re-import | Self-compare uses ITEM_ID/CONTROL P0 | residual / produce polish |
+| D-0042-10 | — | Raise missing_custodian default to error after alias table ships | P0 locked **warn** | residual |
+| (mid-index) | — | Per-row MID full scan O(n·m) | **Closed in 0042**: `message_id_index` + bulk compare | — |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

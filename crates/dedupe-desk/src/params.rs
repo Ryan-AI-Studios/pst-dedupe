@@ -296,6 +296,45 @@ pub fn classify_default_params() -> String {
     .to_string()
 }
 
+/// Collection gap job params (`kind = "gap"`, collection only).
+pub fn gap_collection_params(
+    window_start: &str,
+    window_end: &str,
+    flag_unexpected_custodian: bool,
+) -> String {
+    let mut v = serde_json::json!({
+        "kind": "collection",
+        "bucket": "week",
+        "flag_unexpected_custodian": flag_unexpected_custodian,
+        "matter_scope": "inventory",
+    });
+    if !window_start.trim().is_empty() {
+        v["window_start"] = serde_json::Value::String(window_start.trim().to_string());
+    }
+    if !window_end.trim().is_empty() {
+        v["window_end"] = serde_json::Value::String(window_end.trim().to_string());
+    }
+    v.to_string()
+}
+
+/// Opposing set-diff job params (`kind = "gap"`).
+pub fn gap_opposing_params(import_id: &str, matter_scope: &str) -> String {
+    serde_json::json!({
+        "kind": "opposing",
+        "import_id": import_id,
+        "matter_scope": matter_scope,
+        "flag_matter_not_in_expected": false,
+        "bucket": "week",
+    })
+    .to_string()
+}
+
+/// Default collection gap params.
+#[allow(dead_code)]
+pub fn gap_default_params() -> String {
+    gap_collection_params("", "", true)
+}
+
 /// True when `path` looks like a PST (case-insensitive `.pst` extension).
 pub fn looks_like_pst(path: &str) -> bool {
     Path::new(path)

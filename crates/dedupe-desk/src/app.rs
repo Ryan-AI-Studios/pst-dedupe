@@ -12,14 +12,15 @@ use eframe::egui;
 use matter_core::CaseOverview;
 use process_runner::{
     ExtractPstHandler, IngestHandler, JobParams, MatterClassifyHandler, MatterCullHandler,
-    MatterDedupeHandler, MatterFtsIndexHandler, MatterIcsExtractHandler, MatterNearDupHandler,
-    MatterOcrHandler, MatterOfficeExtractHandler, MatterPdfExtractHandler, MatterProduceHandler,
-    MatterProductionExportHandler, MatterPromoteHandler, MatterQcHandler, MatterThreadHandler,
-    ProcessRunner, RunnerConfig,
+    MatterDedupeHandler, MatterFtsIndexHandler, MatterGapHandler, MatterIcsExtractHandler,
+    MatterNearDupHandler, MatterOcrHandler, MatterOfficeExtractHandler, MatterPdfExtractHandler,
+    MatterProduceHandler, MatterProductionExportHandler, MatterPromoteHandler, MatterQcHandler,
+    MatterThreadHandler, ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
 use crate::dialogs::{DialogKind, DialogState};
+use crate::gap_ui::{self, GapState};
 use crate::matter_ops::{MatterOpResult, MatterOpState};
 use crate::matter_ui::{self, MatterSnapshot, OverviewLoadResult, OverviewLoadState};
 use crate::nav::{self, Screen};
@@ -101,6 +102,8 @@ pub struct DeskApp {
     pub(crate) qc_findings_show: bool,
     /// Review screen state (thin list + body loader).
     pub(crate) review: ReviewState,
+    /// Gap analysis panel state (track 0042).
+    pub(crate) gap: GapState,
 }
 
 impl DeskApp {
@@ -116,6 +119,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterProduceHandler::new()));
         runner.register(Arc::new(MatterProductionExportHandler::new()));
         runner.register(Arc::new(MatterQcHandler::new()));
+        runner.register(Arc::new(MatterGapHandler::new()));
         runner.register(Arc::new(MatterFtsIndexHandler::new()));
         runner.register(Arc::new(MatterOfficeExtractHandler::new()));
         runner.register(Arc::new(MatterPdfExtractHandler::new()));
@@ -172,6 +176,7 @@ impl DeskApp {
             qc_findings_error: None,
             qc_findings_show: false,
             review: ReviewState::default(),
+            gap: GapState::new(),
         }
     }
 
@@ -703,6 +708,76 @@ impl DeskApp {
         }
     }
 
+    /// Start collection gap analysis job (`kind = "gap"`).
+    pub(crate) fn start_collection_gap(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params_json = gap_ui::collection_params_from_state(&self.gap);
+        let params = JobParams::new(params_json);
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "gap", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started collection gap job {job_id}"));
+                self.error_msg = None;
+                self.gap.last_status = Some("running collection gap…".into());
+            }
+            Err(e) => {
+                self.error_msg = Some(format_runner_error(&e));
+            }
+        }
+    }
+
+    /// Start opposing DAT set-diff job (`kind = "gap"`).
+    pub(crate) fn start_opposing_gap(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let Some(params_json) = gap_ui::opposing_params_from_state(&self.gap) else {
+            self.error_msg = Some("Import an opposing DAT first.".into());
+            return;
+        };
+        let params = JobParams::new(params_json);
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "gap", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started opposing gap job {job_id}"));
+                self.error_msg = None;
+                self.gap.last_status = Some("running opposing compare…".into());
+            }
+            Err(e) => {
+                self.error_msg = Some(format_runner_error(&e));
+            }
+        }
+    }
+
+    /// Capture last gap outcome from runner progress message.
+    pub(crate) fn note_gap_progress_message(&mut self, message: &str) {
+        if !message.contains("gap kind=") && !message.starts_with("gap ") {
+            return;
+        }
+        self.gap.last_status = Some(message.to_string());
+        if let Some(idx) = message.find('→') {
+            let path = message[idx + '→'.len_utf8()..].trim();
+            if !path.is_empty() {
+                self.gap.last_report_path = Some(path.to_string());
+            }
+        } else if let Some(idx) = message.find("->") {
+            let path = message[idx + 2..].trim();
+            if !path.is_empty() {
+                self.gap.last_report_path = Some(path.to_string());
+            }
+        }
+    }
+
     /// Capture last QC outcome from runner progress message (best-effort parse).
     pub(crate) fn note_qc_progress_message(&mut self, message: &str) {
         // Example: "qc passed=true errors=0 warns=1 candidates=12 → C:\...\qc_..."
@@ -1211,7 +1286,7 @@ impl DeskApp {
         if state != self.last_progress_state {
             let prev = self.last_progress_state.clone();
             self.last_progress_state = state.clone();
-            // Capture QC summary from terminal job messages.
+            // Capture QC / gap summary from terminal job messages.
             if prev == "running"
                 && (state == "succeeded" || state == "failed")
                 && snap.stage.as_deref() == Some("qc")
@@ -1219,11 +1294,20 @@ impl DeskApp {
                 if let Some(ref msg) = snap.message {
                     self.note_qc_progress_message(msg);
                 }
+            } else if prev == "running"
+                && (state == "succeeded" || state == "failed")
+                && snap.stage.as_deref() == Some("gap")
+            {
+                if let Some(ref msg) = snap.message {
+                    self.note_gap_progress_message(msg);
+                }
             } else if prev == "running" && (state == "succeeded" || state == "failed") {
-                // Fallback: message itself indicates QC outcome.
+                // Fallback: message itself indicates QC / gap outcome.
                 if let Some(ref msg) = snap.message {
                     if msg.contains("qc passed=") {
                         self.note_qc_progress_message(msg);
+                    } else if msg.contains("gap kind=") {
+                        self.note_gap_progress_message(msg);
                     }
                 }
             }
@@ -1433,6 +1517,7 @@ impl DeskApp {
                 Screen::StubReduce,
                 Screen::Review,
                 Screen::Produce,
+                Screen::Gap,
             ] {
                 let selected = self.screen == target;
                 let enabled = target == Screen::Home || has_matter;
@@ -1448,6 +1533,11 @@ impl DeskApp {
                     let next = nav::resolve_nav(self.screen, target, has_matter);
                     if next == Screen::Review && self.screen != Screen::Review {
                         self.review.request_reload();
+                    }
+                    if next == Screen::Gap {
+                        if let Some(ref root) = self.matter_root {
+                            self.gap.request_reload(root);
+                        }
                     }
                     self.screen = next;
                 }
@@ -1469,6 +1559,7 @@ impl eframe::App for DeskApp {
         self.poll_matter_op();
         self.poll_overview_load();
         self.poll_report_export();
+        self.gap.poll();
         self.on_progress_tick();
 
         let snap = self.progress_rx.borrow().clone();
@@ -1478,6 +1569,7 @@ impl eframe::App for DeskApp {
             || self.matter_op.is_busy()
             || self.overview_load.is_busy()
             || self.report_export_busy
+            || self.gap.busy
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -1541,6 +1633,17 @@ impl eframe::App for DeskApp {
                     }
                 } else {
                     ui.label("Open a matter to review.");
+                }
+            }
+            Screen::Gap => {
+                let root = self.matter_root.clone();
+                let busy = self.runner_busy();
+                gap_ui::show(ui, &mut self.gap, root.as_deref(), busy);
+                if gap_ui::take_start_collection(&mut self.gap) {
+                    self.start_collection_gap();
+                }
+                if gap_ui::take_start_opposing(&mut self.gap) {
+                    self.start_opposing_gap();
                 }
             }
             Screen::Produce => {

@@ -1213,6 +1213,7 @@ dependencies = [
  "camino",
  "eframe",
  "matter-core",
+ "matter-gap",
  "matter-qc",
  "matter-search",
  "process-runner",
@@ -2676,6 +2677,7 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "chrono",
+ "csv",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2704,6 +2706,23 @@ dependencies = [
  "camino",
  "chrono",
  "matter-core",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "matter-gap"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "csv",
+ "matter-core",
+ "matter-produce",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3733,6 +3752,7 @@ dependencies = [
  "matter-core",
  "matter-cull",
  "matter-dedupe",
+ "matter-gap",
  "matter-neardup",
  "matter-produce",
  "matter-promote",

@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 21;
+pub const SCHEMA_VERSION: u32 = 22;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -35,6 +35,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (19, MIGRATION_V19),
     (20, MIGRATION_V20),
     (21, MIGRATION_V21),
+    (22, MIGRATION_V22),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -646,6 +647,89 @@ CREATE TABLE qc_runs (
 );
 
 CREATE INDEX idx_qc_runs_matter_created ON qc_runs(matter_id, created_at);
+"#;
+
+/// Schema v22: gap analysis roster + opposing DAT expected docs (track 0042).
+///
+/// Expected custodians/sources for collection gap; gap_imports / gap_expected_docs
+/// for opposing load-file set-diff; gap_runs for report history.
+const MIGRATION_V22: &str = r#"
+CREATE TABLE expected_custodians (
+    id TEXT PRIMARY KEY NOT NULL,
+    matter_id TEXT NOT NULL REFERENCES matters(id),
+    name_norm TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    notes TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_expected_custodians_matter_name
+    ON expected_custodians(matter_id, name_norm);
+CREATE INDEX idx_expected_custodians_matter
+    ON expected_custodians(matter_id);
+
+CREATE TABLE expected_sources (
+    id TEXT PRIMARY KEY NOT NULL,
+    matter_id TEXT NOT NULL REFERENCES matters(id),
+    label TEXT NOT NULL,
+    label_norm TEXT NOT NULL,
+    path_hint TEXT,
+    kind TEXT,
+    notes TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_expected_sources_matter_label
+    ON expected_sources(matter_id, label_norm);
+CREATE INDEX idx_expected_sources_matter
+    ON expected_sources(matter_id);
+
+CREATE TABLE gap_imports (
+    id TEXT PRIMARY KEY NOT NULL,
+    matter_id TEXT NOT NULL REFERENCES matters(id),
+    kind TEXT NOT NULL,
+    path TEXT NOT NULL,
+    imported_at TEXT NOT NULL,
+    row_count INTEGER NOT NULL,
+    column_map_json TEXT,
+    error_count INTEGER
+);
+CREATE INDEX idx_gap_imports_matter ON gap_imports(matter_id);
+
+CREATE TABLE gap_expected_docs (
+    id TEXT PRIMARY KEY NOT NULL,
+    import_id TEXT NOT NULL REFERENCES gap_imports(id),
+    control_number TEXT,
+    sha256 TEXT,
+    message_id TEXT,
+    item_id TEXT,
+    logical_hash TEXT,
+    custodian TEXT,
+    file_name TEXT,
+    file_category TEXT,
+    mime_type TEXT,
+    file_ext TEXT,
+    date_sent TEXT,
+    date_received TEXT,
+    date_created TEXT
+);
+CREATE INDEX idx_gap_expected_docs_import ON gap_expected_docs(import_id);
+
+CREATE TABLE gap_runs (
+    id TEXT PRIMARY KEY NOT NULL,
+    matter_id TEXT NOT NULL REFERENCES matters(id),
+    kind TEXT NOT NULL,
+    params_json TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    warn_count INTEGER NOT NULL DEFAULT 0,
+    finding_count INTEGER NOT NULL DEFAULT 0,
+    report_path TEXT,
+    job_id TEXT,
+    summary_json TEXT
+);
+CREATE INDEX idx_gap_runs_matter_started ON gap_runs(matter_id, started_at);
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -2904,8 +2988,7 @@ mod tests {
         )
         .expect("matter");
 
-        let v = migrate(&conn).expect("migrate v20 to v21");
-        assert_eq!(v, 21);
+        let v = migrate(&conn).expect("migrate v20 to current");
         assert_eq!(v, SCHEMA_VERSION);
 
         let has: bool = conn
@@ -2958,6 +3041,131 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v20'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v21_to_v22_adds_gap_tables() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        for &(target, sql) in MIGRATIONS {
+            if target > 21 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v21', 'V21 Matter', '2020-01-01T00:00:00Z', 21, '/tmp/v21')",
+            [],
+        )
+        .expect("matter");
+
+        let v = migrate(&conn).expect("migrate v21 to v22");
+        assert_eq!(v, 22);
+        assert_eq!(v, SCHEMA_VERSION);
+
+        for table in [
+            "expected_custodians",
+            "expected_sources",
+            "gap_imports",
+            "gap_expected_docs",
+            "gap_runs",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='{table}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("table");
+            assert!(has, "expected table {table}");
+        }
+
+        for col in [
+            "id",
+            "matter_id",
+            "name_norm",
+            "display_name",
+            "notes",
+            "active",
+            "created_at",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('expected_custodians') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected expected_custodians.{col}");
+        }
+
+        for col in [
+            "id",
+            "import_id",
+            "control_number",
+            "sha256",
+            "message_id",
+            "item_id",
+            "logical_hash",
+            "custodian",
+            "file_name",
+            "file_category",
+            "mime_type",
+            "file_ext",
+            "date_sent",
+            "date_received",
+            "date_created",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('gap_expected_docs') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected gap_expected_docs.{col}");
+        }
+
+        for idx in [
+            "idx_expected_custodians_matter_name",
+            "idx_gap_imports_matter",
+            "idx_gap_expected_docs_import",
+            "idx_gap_runs_matter_started",
+        ] {
+            let has_idx: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='{idx}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("idx");
+            assert!(has_idx, "expected {idx}");
+        }
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v21'",
                 [],
                 |row| row.get(0),
             )
