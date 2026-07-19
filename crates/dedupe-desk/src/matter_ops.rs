@@ -114,7 +114,9 @@ mod tests {
         op.spawn_create(parent, "OffThread".into());
         assert!(op.is_busy());
         let mut result = None;
-        for _ in 0..200 {
+        // CI cold-start (Windows runners) can exceed 2s for first Matter create;
+        // allow ~30s before failing so this is not a load flake.
+        for _ in 0..3_000 {
             if let Some(r) = op.try_take() {
                 result = Some(r);
                 break;
