@@ -32,7 +32,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0018-01 | P3 | Attach path may materialize large subnode `Vec` before stream switch | Primary path streams; residual fallback | future polish |
-| D-0018-02 | — | EML as native identity | Never; production EML export separate | **0040** |
+| D-0018-02 | — | EML as native identity | Never; **closed in 0040** (export-only EML packaging; not CAS identity) | — |
 | D-0018-03 | — | MAPI recipient table (vs Display* only) | Best-effort DisplayTo/Cc/Bcc P0 | later |
 | D-0018-04 | — | Process runner / progress UI | Runner **done in 0019**; Desk UI progress | **0020** |
 
@@ -129,7 +129,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0027-03 | — | Auto-propagate to near-dup / full thread | Never default; family = parent+all children only | residual / **0056** |
 | D-0027-04 | — | QC sampling reports / multi-reviewer lock | Single-desk P0 | later / **0058** |
 | D-0027-05 | P3 | Full GUI smoke for coding panel / batch / digits path | Automated matter-core + desk unit/integration tests; operator smoke local | operator / polish |
-| D-0027-06 | — | Production export of coded subsets | Membership only in 0027 | **0040** |
+| D-0027-06 | — | Production export of coded subsets | Membership only in 0027; **closed in 0040** (`scope=item_ids` / review corpus) | — |
 
 ## From track 0028-FiltersSavedSearch
 
@@ -159,7 +159,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0030-01 | — | Image/PDF box markups & burn-in redaction | **Text path closed in 0032** (regions + true redacted CAS). Full PDF/image geometric burn-in still deferred | **0034** |
-| D-0030-02 | — | Notes in production load file | Default exclude (work product); opt-in later | **0040** |
+| D-0030-02 | — | Notes in production load file | **Closed in 0040** (default exclude; residual opt-in) | residual opt-in |
 | D-0030-03 | — | Privilege log narrative from notes | **Partial complete in 0031**: optional “draft from note” confirm only; never auto-export notes | — |
 | D-0030-04 | — | Case-wide persistent keyword highlight sets | User highlights only; FTS paint optional | residual |
 | D-0030-05 | — | Multi-user concurrent note edit | Single-desk actor | **0058** |
@@ -172,8 +172,8 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0031-01 | — | Production enforce withhold fail-closed | 0031 stores flag + API only | **0040** |
-| D-0031-01b | — | Soft-clear description must not appear on produced load-file metadata | Retained `item_privilege.description` after `status=cleared` is internal work product; exclude from any custom metadata dump (default exclude all privilege descriptions) | **0040** |
+| D-0031-01 | — | Production enforce withhold fail-closed | **Closed in 0040** (skip + `fail_if_withheld`; late/TOCTOU recheck; purge artifacts) | — |
+| D-0031-01b | — | Soft-clear description must not appear on produced load-file metadata | **Closed in 0040** (DAT field set has no privilege description columns) | — |
 | D-0031-02 | — | Partial redaction produce + log “produced redacted” | **Partial complete in 0032**: `partial_redaction` + redacted text CAS + regenerate; packaging / “produced redacted” load-file still **0040** | **0040** |
 | D-0031-03 | — | Category / thread-collapsed privilege logs | P0 standard document-by-document CSV only | residual |
 | D-0031-04 | — | Name normalization legend for log parties | Metadata as stored | residual |
@@ -190,7 +190,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 |---|---|---|---|---|
 | D-0032-01 | — | Full PDF/image geometric redaction + content burn-in | P0 is text-body regions + redacted text CAS only | **0034** / residual |
 | D-0032-02 | — | Native DOCX/XLSX redaction | Text path only | **0033**+ |
-| D-0032-03 | — | Production packaging of redacted text + load file | Artifact API in 0032; NULL sha = fail/regenerate (0032 severs on body change) | **0040** |
+| D-0032-03 | — | Production packaging of redacted text + load file | **Closed in 0040** (`redacted_text_sha256` only when redactions; never original; synthetic EML uses redacted body) | — |
 | D-0032-04 | — | QC fail produce if stale redactions / missing artifact | Filters expose stale; engine later | **0041** |
 | D-0032-05 | — | AI suggested redaction ranges | Human-only P0 | Series G |
 | D-0032-06 | — | Metadata header field redaction | Body display text only | residual |
@@ -248,7 +248,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0035-07 | P3 | Full GUI smoke calendar chip / ICS job | Automated + operator smoke | operator / polish |
 | D-0035-08 | — | Dedicated FilterSpec `cal_start_at` field | P0 maps start→sent_at when email times null | residual polish |
 | D-0035-09 | — | Calendar-specific logical_hash preimage polish | non-email hash / UID path P0 | residual |
-| D-0035-10 | — | Produce archive-parent multi-event ICS explicitly | Children ship single-event natives; full dump only if parent selected | **0040** |
+| D-0035-10 | — | Produce archive-parent multi-event ICS explicitly | **Closed in 0040** (selected child native only; parent only if selected) | — |
 | D-0035-11 | — | Floating times / exotic non-IANA TZIDs | Fail-soft null offset; no invent | residual |
 | D-0035-12 | P3 | Embedded VTIMEZONE not used for offset resolution | IANA chrono-tz only; blobs copied into child natives | residual |
 | D-0035-13 | P3 | Force multi-child rewrite via `update_item` leaves FTS bookkeeping until reindex | ICS apply path clears FTS; update_item does not | residual polish |
@@ -314,12 +314,29 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0039-03 | — | CLI `report export` headless | Desk export P0 | **0045** |
 | D-0039-04 | — | UTF-8 BOM for Excel | Dual datetime is P0; BOM polish if needed | residual |
 | D-0039-05 | — | Scheduled / email delivery of reports | Never default | residual / SaaS |
-| D-0039-06 | — | Embed report in production package | Optional attach | **0040** residual |
+| D-0039-06 | — | Embed report in production package | Optional attach | residual |
 | D-0039-07 | — | Multi-matter portfolio report | Single matter P0 | residual / **0058** |
 | D-0039-08 | P3 | Full GUI smoke Export matter report | Automated API + unit; operator smoke | operator / polish |
 | D-0039-09 | — | Job engine never stores raw client paths in `error_summary` | Report scrub is P0; source hygiene residual | residual / process-runner polish |
 | D-0039-10 | — | Expand finite `STABLE_CODES` allowlist as new job codes ship | Privacy-first; unknown snake_case redacted | residual polish |
 | D-0038-01 | — | Exportable reports handoff | **Closed in 0039** | — |
+
+## From track 0040-ProductionExport (Completed — Codex luna PASS)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0040-01 | — | TIFF/PDF image productions + OPT/LFP | No image factory P0 | residual / image redaction |
+| D-0040-02 | — | CLI `produce` headless | Desk P0 | **0045** |
+| D-0040-03 | — | Broken-family QC (orphan attach / missing parent) | expand_family default false; desk warning | **0041** |
+| D-0040-04 | — | Privilege log co-export into volume `PRIVILEGE/` | Separate 0031 export remains | residual |
+| D-0040-05 | — | Matter report attach into volume `REPORTS/` | Soft residual (D-0039-06) | residual |
+| D-0040-06 | — | CP1252 single-byte Concordance DAT mode | P0 UTF-8 + BOM | residual |
+| D-0040-07 | — | Space-collapse multi-line field mode | P0 uses Concordance `®` | residual |
+| D-0040-08 | — | Notes opt-in load-file columns | Default exclude | residual |
+| D-0040-09 | P3 | Full GUI smoke Produce dialog / job path | Automated API + unit; operator smoke | operator / polish |
+| D-0040-10 | — | Slip sheets / placeholders for withheld | Skip only P0 | residual |
+| D-0031-01 | — | Withhold fail-closed packaging | **Closed in 0040** | — |
+| D-0032-03 | — | Redacted text packaging | **Closed in 0040** | — |
 
 ## Hygiene
 

@@ -1,0 +1,22 @@
+[package]
+name = "matter-produce"
+version = "0.1.0"
+edition = "2021"
+description = "Matter-level production export: natives + text + Concordance DAT (review set produce)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+matter-core = { path = "../matter-core" }
+dedup-engine = { path = "../dedup-engine" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+camino = { workspace = true }
+csv = { workspace = true }
+sha2 = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+sha2 = { workspace = true }

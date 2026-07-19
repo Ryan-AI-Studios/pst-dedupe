@@ -16,6 +16,23 @@ chip filters `file_category=calendar`. Multi-event ICS → archive parent + sing
 OCR (0036): Settings **Enable local OCR** (off by default) + tool paths; Workspace
 **Run OCR** (`ocr` job) processes needs-OCR PDFs and images via system Tesseract CLI.
 
+### Produce (0040)
+
+Nav **Produce** (or the workspace produce entry) exports the review corpus as a
+production volume: **NATIVES/** + **TEXT/** + Concordance **DAT** (+ CSV twin) under
+`<matter>/exports/productions/<name>/` by default.
+
+| Control | Default / behavior |
+|---|---|
+| Dialog | Name, Bates prefix, fail-if-withheld, expand-family, output folder |
+| Withhold | Skipped by default (`item_is_withheld`); optional **fail if any withheld** aborts before assignment |
+| Family expand | **Off** by default — UI shows a broken-family warning when expand is unchecked (full QC in **0041**) |
+| Job kind | `produce` (alias `production_export`); resumable via process-runner |
+| Load file | UTF-8 BOM, þ/¶ delimiters, ® newlines, UTC dates; **no** privilege descriptions or notes |
+
+Redacted items use `redacted_text_sha256` only (never original extract text). See
+`crates/matter-produce/README.md` for engine contracts.
+
 ### Case Overview (0038)
 
 When a matter is open, Workspace shows a **Overview** panel above the Counts strip:

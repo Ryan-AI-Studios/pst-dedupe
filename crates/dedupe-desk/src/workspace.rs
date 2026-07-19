@@ -238,6 +238,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
         {
             app.open_review();
         }
+        if ui
+            .add_enabled(!busy, egui::Button::new("Produce review set…"))
+            .on_hover_text(
+                "Export in_review items as NATIVES + TEXT + Concordance DAT/CSV. \
+                 Withheld items are skipped (or fail-closed). Family expand is off \
+                 by default — broken-family QC is track 0041.",
+            )
+            .clicked()
+        {
+            app.open_produce_dialog();
+        }
 
         ui.separator();
 

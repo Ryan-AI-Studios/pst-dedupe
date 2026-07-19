@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 19;
+pub const SCHEMA_VERSION: u32 = 20;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -33,6 +33,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (17, MIGRATION_V17),
     (18, MIGRATION_V18),
     (19, MIGRATION_V19),
+    (20, MIGRATION_V20),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -581,6 +582,44 @@ const MIGRATION_V19: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_items_matter_file_category ON items(matter_id, file_category);
 CREATE INDEX IF NOT EXISTS idx_items_matter_custodian ON items(matter_id, custodian);
 CREATE INDEX IF NOT EXISTS idx_items_matter_role ON items(matter_id, role);
+"#;
+
+/// Schema v20: production sets + items for review-set produce (track 0040).
+///
+/// Bates/control assignment, status, and output layout bookkeeping for
+/// natives + text + Concordance DAT packaging.
+const MIGRATION_V20: &str = r#"
+CREATE TABLE production_sets (
+    id TEXT PRIMARY KEY NOT NULL,
+    matter_id TEXT NOT NULL REFERENCES matters(id),
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    bates_prefix TEXT NOT NULL,
+    next_seq INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL,
+    params_json TEXT,
+    output_root TEXT,
+    job_id TEXT
+);
+
+CREATE TABLE production_items (
+    production_set_id TEXT NOT NULL REFERENCES production_sets(id),
+    item_id TEXT NOT NULL REFERENCES items(id),
+    control_number TEXT NOT NULL,
+    native_relpath TEXT,
+    text_relpath TEXT,
+    status TEXT NOT NULL,
+    skip_reason TEXT,
+    error TEXT,
+    produced_at TEXT,
+    PRIMARY KEY (production_set_id, item_id)
+);
+
+CREATE UNIQUE INDEX idx_production_items_control
+    ON production_items(production_set_id, control_number);
+CREATE INDEX idx_production_sets_matter ON production_sets(matter_id);
+CREATE INDEX idx_production_items_item ON production_items(item_id);
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -2524,7 +2563,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v16 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 19);
+        assert_eq!(v, 20);
 
         for col in [
             "ocr_status",
@@ -2628,7 +2667,7 @@ mod tests {
         .expect("item");
 
         let v = migrate(&conn).expect("migrate v17 to current");
-        assert_eq!(v, 19);
+        assert_eq!(v, 20);
         assert_eq!(v, SCHEMA_VERSION);
 
         for col in [
@@ -2693,8 +2732,8 @@ mod tests {
         )
         .expect("matter");
 
-        let v = migrate(&conn).expect("migrate v18 to v19");
-        assert_eq!(v, 19);
+        let v = migrate(&conn).expect("migrate v18 to current");
+        assert_eq!(v, 20);
         assert_eq!(v, SCHEMA_VERSION);
 
         for idx in [
@@ -2715,6 +2754,103 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v18'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v19_to_v20_adds_production_tables() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        for &(target, sql) in MIGRATIONS {
+            if target > 19 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v19', 'V19 Matter', '2020-01-01T00:00:00Z', 19, '/tmp/v19')",
+            [],
+        )
+        .expect("matter");
+
+        let v = migrate(&conn).expect("migrate v19 to v20");
+        assert_eq!(v, 20);
+        assert_eq!(v, SCHEMA_VERSION);
+
+        for table in ["production_sets", "production_items"] {
+            let has: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("table");
+            assert!(has, "expected table {table}");
+        }
+
+        for col in [
+            "id",
+            "matter_id",
+            "name",
+            "created_at",
+            "updated_at",
+            "bates_prefix",
+            "next_seq",
+            "status",
+            "params_json",
+            "output_root",
+            "job_id",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('production_sets') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected production_sets.{col}");
+        }
+
+        for col in [
+            "production_set_id",
+            "item_id",
+            "control_number",
+            "native_relpath",
+            "text_relpath",
+            "status",
+            "skip_reason",
+            "error",
+            "produced_at",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('production_items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected production_items.{col}");
+        }
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v19'",
                 [],
                 |row| row.get(0),
             )

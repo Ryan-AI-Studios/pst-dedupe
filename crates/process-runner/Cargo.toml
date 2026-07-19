@@ -6,7 +6,7 @@ description = "In-process matter job runner: single worker thread, cancel, watch
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["ingest", "extract_pst", "dedupe", "thread", "neardup", "cull", "promote", "fts", "office", "pdf", "calendar", "ocr", "classify"]
+default = ["ingest", "extract_pst", "dedupe", "thread", "neardup", "cull", "promote", "produce", "fts", "office", "pdf", "calendar", "ocr", "classify"]
 ingest = ["dep:ingest-purview"]
 extract_pst = ["dep:extract-pst"]
 dedupe = ["dep:matter-dedupe"]
@@ -14,6 +14,7 @@ thread = ["dep:matter-thread"]
 neardup = ["dep:matter-neardup"]
 cull = ["dep:matter-cull"]
 promote = ["dep:matter-promote"]
+produce = ["dep:matter-produce"]
 fts = ["dep:matter-search"]
 office = ["dep:extract-office"]
 pdf = ["dep:extract-pdf"]
@@ -37,6 +38,7 @@ matter-thread = { path = "../matter-thread", optional = true }
 matter-neardup = { path = "../matter-neardup", optional = true }
 matter-cull = { path = "../matter-cull", optional = true }
 matter-promote = { path = "../matter-promote", optional = true }
+matter-produce = { path = "../matter-produce", optional = true }
 matter-search = { path = "../matter-search", optional = true }
 extract-office = { path = "../extract-office", optional = true }
 extract-pdf = { path = "../extract-pdf", optional = true }

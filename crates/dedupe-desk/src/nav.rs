@@ -11,8 +11,8 @@ pub enum Screen {
     StubReduce,
     /// Review corpus list + body viewer (track 0026).
     Review,
-    /// Placeholder for later tracks.
-    StubProduce,
+    /// Production export (track 0040) — produce dialog + job.
+    Produce,
 }
 
 impl Screen {
@@ -22,12 +22,13 @@ impl Screen {
             Self::Workspace => "Workspace",
             Self::StubReduce => "Reduce",
             Self::Review => "Review",
-            Self::StubProduce => "Produce",
+            Self::Produce => "Produce",
         }
     }
 
     pub fn is_stub(self) -> bool {
-        matches!(self, Self::StubReduce | Self::StubProduce)
+        // Produce screen is live (0040); Reduce remains a placeholder.
+        matches!(self, Self::StubReduce)
     }
 
     /// Whether this screen requires an open matter root.
@@ -91,5 +92,19 @@ mod tests {
     #[test]
     fn reduce_still_stub() {
         assert!(Screen::StubReduce.is_stub());
+    }
+
+    #[test]
+    fn produce_is_live_not_stub() {
+        assert!(!Screen::Produce.is_stub());
+        assert_eq!(Screen::Produce.label(), "Produce");
+        assert_eq!(
+            resolve_nav(Screen::Home, Screen::Produce, false),
+            Screen::Home
+        );
+        assert_eq!(
+            resolve_nav(Screen::Workspace, Screen::Produce, true),
+            Screen::Produce
+        );
     }
 }

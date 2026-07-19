@@ -152,6 +152,35 @@ pub fn promote_params_for_policy(policy: &str) -> String {
     .to_string()
 }
 
+/// Default params for production export (`kind = "produce"`).
+#[allow(dead_code)]
+pub fn produce_default_params() -> String {
+    produce_params("Review Production", "PROD", false, false, None)
+}
+
+/// Build produce job params JSON.
+pub fn produce_params(
+    name: &str,
+    bates_prefix: &str,
+    fail_if_withheld: bool,
+    expand_family: bool,
+    output_dir: Option<&str>,
+) -> String {
+    let mut v = serde_json::json!({
+        "scope": "review_corpus",
+        "name": name,
+        "bates_prefix": bates_prefix,
+        "fail_if_withheld": fail_if_withheld,
+        "export_eml_if_missing_native": true,
+        "include_csv_twin": true,
+        "expand_family": expand_family,
+    });
+    if let Some(dir) = output_dir.map(str::trim).filter(|s| !s.is_empty()) {
+        v["output_dir"] = serde_json::Value::String(dir.to_string());
+    }
+    v.to_string()
+}
+
 /// Default params for FTS index build/update (`kind = "fts_index"`, incremental).
 pub fn fts_index_default_params() -> String {
     serde_json::json!({
@@ -383,6 +412,29 @@ mod tests {
         assert_eq!(v["batch_size"], 500);
         assert_eq!(v["require_dedupe"], false);
         assert_eq!(PROMOTE_POLICIES[0], "auto");
+    }
+
+    #[test]
+    fn produce_default_json_shape() {
+        let j = produce_default_params();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["scope"], "review_corpus");
+        assert_eq!(v["bates_prefix"], "PROD");
+        assert_eq!(v["fail_if_withheld"], false);
+        assert_eq!(v["export_eml_if_missing_native"], true);
+        assert_eq!(v["include_csv_twin"], true);
+        assert_eq!(v["expand_family"], false);
+        assert!(v.get("output_dir").is_none() || v["output_dir"].is_null());
+    }
+
+    #[test]
+    fn produce_params_with_output_dir() {
+        let j = produce_params("P1", "ABC", true, false, Some(r"C:\out\prod"));
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["name"], "P1");
+        assert_eq!(v["bates_prefix"], "ABC");
+        assert_eq!(v["fail_if_withheld"], true);
+        assert_eq!(v["output_dir"], r"C:\out\prod");
     }
 
     #[test]
