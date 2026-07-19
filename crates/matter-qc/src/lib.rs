@@ -36,7 +36,8 @@ pub use params::{
 };
 pub use report::{count_severities, default_qc_report_dir, write_qc_report, QcReportMeta};
 pub use rules::{
-    default_rule_pack, evaluate_candidates, evaluate_candidates_with_cancel, is_email_like,
+    default_rule_pack, empty_selection_finding, evaluate_candidates,
+    evaluate_candidates_with_cancel, evaluate_one_item, is_email_like, only_withheld_finding,
     resolve_rules, QcFinding, ResolvedRules, RULE_BROKEN_FAMILY_INCOMPLETE_PARENT,
     RULE_BROKEN_FAMILY_ORPHAN_CHILD, RULE_EMPTY_SELECTION, RULE_ITEM_STATUS_ERROR,
     RULE_MISSING_NATIVE, RULE_MISSING_TEXT, RULE_ONLY_WITHHELD, RULE_PDF_NEEDS_OCR,

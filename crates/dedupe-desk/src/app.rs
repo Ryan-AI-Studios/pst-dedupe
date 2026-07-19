@@ -730,11 +730,22 @@ impl DeskApp {
     }
 
     /// Start produce job from dialog draft fields.
+    ///
+    /// Always re-evaluates QC soft-gate immediately before start (fail closed).
     pub(crate) fn start_produce(&mut self) {
         let Some(root) = self.matter_root.clone() else {
             self.error_msg = Some("No matter open.".into());
             return;
         };
+        // Fail closed: re-check readiness at click time (selection may have mutated).
+        self.refresh_produce_qc_readiness();
+        if self.produce_require_qc_pass && !self.produce_qc_readiness.allows_produce() {
+            self.error_msg = Some(format!(
+                "Produce blocked: {}",
+                self.produce_qc_readiness.label()
+            ));
+            return;
+        }
         let name = self.produce_name.trim();
         let prefix = self.produce_bates_prefix.trim();
         if name.is_empty() {
@@ -773,6 +784,28 @@ impl DeskApp {
                 self.produce_dialog_open = false;
             }
             Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Open the last QC report directory in the OS file manager (Windows Explorer).
+    pub(crate) fn open_qc_findings_folder(&mut self) {
+        let Some(ref path) = self.last_qc_report_path else {
+            self.error_msg = Some("No QC report path available.".into());
+            return;
+        };
+        let p = Utf8Path::new(path.as_str());
+        if !p.exists() {
+            self.error_msg = Some(format!("QC report folder not found: {path}"));
+            return;
+        }
+        match open_folder_in_explorer(p.as_str()) {
+            Ok(()) => {
+                self.status_msg = Some(format!("Opened findings folder: {path}"));
+                self.error_msg = None;
+            }
+            Err(e) => {
+                self.error_msg = Some(format!("Could not open findings folder: {e}"));
+            }
         }
     }
 
@@ -1192,6 +1225,8 @@ impl DeskApp {
                     if state == "succeeded" || state == "paused" {
                         self.pump_extract_queue();
                     }
+                    // Selection-affecting jobs (promote/cull/etc.) may stale the QC gate.
+                    self.refresh_produce_qc_readiness();
                 }
             }
         }
@@ -1500,6 +1535,13 @@ impl eframe::App for DeskApp {
                      (track 0040). Run production QC first (track 0041).",
                 );
                 ui.add_space(8.0);
+                // Always refresh soft-gate when Produce is shown (selection may have changed).
+                if self.produce_qc_readiness_expand != self.produce_expand_family
+                    || self.produce_qc_readiness_require != self.produce_require_qc_pass
+                    || matches!(self.produce_qc_readiness, ProduceQcReadiness::Unknown)
+                {
+                    self.refresh_produce_qc_readiness();
+                }
                 let busy = self.runner_busy();
                 ui.horizontal(|ui| {
                     if ui
@@ -1526,11 +1568,6 @@ impl eframe::App for DeskApp {
                 });
                 ui.add_space(6.0);
                 // QC summary chips (session + freshness preflight)
-                if self.produce_qc_readiness_expand != self.produce_expand_family
-                    || self.produce_qc_readiness_require != self.produce_require_qc_pass
-                {
-                    self.refresh_produce_qc_readiness();
-                }
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Last QC:").strong());
                     match self.last_qc_passed {
@@ -1619,6 +1656,18 @@ impl eframe::App for DeskApp {
                             self.load_qc_findings_from_report(path);
                             self.qc_findings_show = true;
                         }
+                    }
+                    let report_exists = self
+                        .last_qc_report_path
+                        .as_ref()
+                        .is_some_and(|p| Utf8Path::new(p.as_str()).exists());
+                    if ui
+                        .add_enabled(report_exists, egui::Button::new("Open findings folder"))
+                        .on_hover_text("Open the QC report directory in File Explorer")
+                        .on_disabled_hover_text("No report folder on disk yet")
+                        .clicked()
+                    {
+                        self.open_qc_findings_folder();
                     }
                     if !self.qc_findings.is_empty() {
                         ui.label(format!(
@@ -1839,4 +1888,33 @@ fn which_on_path(name: &str) -> bool {
         }
     }
     false
+}
+
+/// Open a directory in the OS file manager (Windows Explorer).
+fn open_folder_in_explorer(path: &str) -> Result<(), String> {
+    // Prefer explorer on Windows; fall back to `cmd /c start` for the folder path.
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        match Command::new("explorer").arg(path).spawn() {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // Fallback: `start` treats first quoted arg as window title.
+                Command::new("cmd")
+                    .args(["/C", "start", "", path])
+                    .spawn()
+                    .map(|_| ())
+                    .map_err(|e2| format!("explorer: {e}; start: {e2}"))
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use std::process::Command;
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }

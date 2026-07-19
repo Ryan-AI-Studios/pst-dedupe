@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use matter_core::{Item, Matter};
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::params::{QcRuleConfig, QcSeverity, PROFILE_DEFAULT_PRODUCTION_QC_V1};
@@ -25,7 +26,7 @@ pub const RULE_EMPTY_SELECTION: &str = "empty_selection";
 pub const RULE_ONLY_WITHHELD: &str = "only_withheld";
 
 /// One finding from a rule evaluation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QcFinding {
     pub rule_id: String,
     pub severity: QcSeverity,
@@ -171,6 +172,195 @@ fn usable_text(item: &Item) -> bool {
         || digest_present(item.redacted_text_sha256.as_deref())
 }
 
+/// Set-level empty-selection finding (if enabled and selection is empty).
+pub fn empty_selection_finding(rules: &ResolvedRules) -> Option<QcFinding> {
+    if rules.is_enabled(RULE_EMPTY_SELECTION) {
+        Some(QcFinding {
+            rule_id: RULE_EMPTY_SELECTION.into(),
+            severity: rules.severity(RULE_EMPTY_SELECTION),
+            item_id: None,
+            message: "empty selection".into(),
+        })
+    } else {
+        None
+    }
+}
+
+/// Set-level only-withheld finding after a full scan of candidates.
+pub fn only_withheld_finding(
+    rules: &ResolvedRules,
+    candidate_count: u64,
+    withheld_count: u64,
+) -> Option<QcFinding> {
+    if rules.is_enabled(RULE_ONLY_WITHHELD)
+        && candidate_count > 0
+        && withheld_count == candidate_count
+    {
+        Some(QcFinding {
+            rule_id: RULE_ONLY_WITHHELD.into(),
+            severity: rules.severity(RULE_ONLY_WITHHELD),
+            item_id: None,
+            message: "all candidates withheld".into(),
+        })
+    } else {
+        None
+    }
+}
+
+/// Evaluate per-item rules for one candidate (not set-level rules).
+///
+/// `candidate_set` is the frozen full selection (including not-yet-evaluated ids).
+pub fn evaluate_one_item(
+    matter: &Matter,
+    item: &Item,
+    is_withheld: bool,
+    candidate_set: &HashSet<&str>,
+    rules: &ResolvedRules,
+) -> Result<Vec<QcFinding>> {
+    let mut findings = Vec::new();
+    let id = item.id.as_str();
+
+    // orphan child
+    if rules.is_enabled(RULE_BROKEN_FAMILY_ORPHAN_CHILD) {
+        if let Some(parent) = item.parent_item_id.as_deref() {
+            if !candidate_set.contains(parent) {
+                findings.push(QcFinding {
+                    rule_id: RULE_BROKEN_FAMILY_ORPHAN_CHILD.into(),
+                    severity: rules.severity(RULE_BROKEN_FAMILY_ORPHAN_CHILD),
+                    item_id: Some(id.into()),
+                    message: "orphan child: parent not in selection".into(),
+                });
+            }
+        }
+    }
+
+    // incomplete parent: any non-withheld child not in set
+    if rules.is_enabled(RULE_BROKEN_FAMILY_INCOMPLETE_PARENT)
+        && has_missing_non_withheld_child(matter, id, candidate_set)?
+    {
+        findings.push(QcFinding {
+            rule_id: RULE_BROKEN_FAMILY_INCOMPLETE_PARENT.into(),
+            severity: rules.severity(RULE_BROKEN_FAMILY_INCOMPLETE_PARENT),
+            item_id: Some(id.into()),
+            message: "incomplete family: non-withheld child missing from selection".into(),
+        });
+    }
+
+    // withheld in selection
+    if rules.is_enabled(RULE_WITHHELD_IN_SELECTION) && is_withheld {
+        findings.push(QcFinding {
+            rule_id: RULE_WITHHELD_IN_SELECTION.into(),
+            severity: rules.severity(RULE_WITHHELD_IN_SELECTION),
+            item_id: Some(id.into()),
+            message: "withheld item in selection".into(),
+        });
+    }
+
+    // withheld family member (candidate not withheld, parent or child is)
+    if rules.is_enabled(RULE_WITHHELD_FAMILY_MEMBER)
+        && !is_withheld
+        && family_has_withheld_relative(matter, item)?
+    {
+        findings.push(QcFinding {
+            rule_id: RULE_WITHHELD_FAMILY_MEMBER.into(),
+            severity: rules.severity(RULE_WITHHELD_FAMILY_MEMBER),
+            item_id: Some(id.into()),
+            message: "family member withheld".into(),
+        });
+    }
+
+    // redacted text missing
+    if rules.is_enabled(RULE_REDACTED_TEXT_MISSING)
+        && item.redaction_count > 0
+        && !digest_present(item.redacted_text_sha256.as_deref())
+    {
+        findings.push(QcFinding {
+            rule_id: RULE_REDACTED_TEXT_MISSING.into(),
+            severity: rules.severity(RULE_REDACTED_TEXT_MISSING),
+            item_id: Some(id.into()),
+            message: "redaction without redacted text artifact".into(),
+        });
+    }
+
+    // missing native (non-email)
+    if rules.is_enabled(RULE_MISSING_NATIVE)
+        && !digest_present(item.native_sha256.as_deref())
+        && !is_email_like(item)
+    {
+        findings.push(QcFinding {
+            rule_id: RULE_MISSING_NATIVE.into(),
+            severity: rules.severity(RULE_MISSING_NATIVE),
+            item_id: Some(id.into()),
+            message: "missing native for non-email item".into(),
+        });
+    }
+
+    // missing text (taxonomy-aware)
+    if rules.is_enabled(RULE_MISSING_TEXT) && !usable_text(item) {
+        let configured = rules.severity(RULE_MISSING_TEXT);
+        // Off already filtered by is_enabled.
+        // If configured Error → force error; if Warn → use taxonomy.
+        let taxonomy = if missing_text_is_error_category(item.file_category.as_deref()) {
+            QcSeverity::Error
+        } else {
+            QcSeverity::Warn
+        };
+        // Off already filtered by is_enabled; Error forces error; Warn uses taxonomy.
+        if configured != QcSeverity::Off {
+            let severity = if configured == QcSeverity::Error {
+                QcSeverity::Error
+            } else {
+                taxonomy
+            };
+            findings.push(QcFinding {
+                rule_id: RULE_MISSING_TEXT.into(),
+                severity,
+                item_id: Some(id.into()),
+                message: "missing usable text".into(),
+            });
+        }
+    }
+
+    // pdf needs ocr
+    if rules.is_enabled(RULE_PDF_NEEDS_OCR) && item.pdf_needs_ocr == 1 {
+        findings.push(QcFinding {
+            rule_id: RULE_PDF_NEEDS_OCR.into(),
+            severity: rules.severity(RULE_PDF_NEEDS_OCR),
+            item_id: Some(id.into()),
+            message: "pdf needs ocr".into(),
+        });
+    }
+
+    // zero size
+    if rules.is_enabled(RULE_ZERO_SIZE) {
+        if let Some(sz) = item.size_bytes {
+            if sz == 0 {
+                findings.push(QcFinding {
+                    rule_id: RULE_ZERO_SIZE.into(),
+                    severity: rules.severity(RULE_ZERO_SIZE),
+                    item_id: Some(id.into()),
+                    message: "zero size_bytes".into(),
+                });
+            }
+        }
+    }
+
+    // item status error/partial
+    if rules.is_enabled(RULE_ITEM_STATUS_ERROR) {
+        let st = item.status.to_ascii_lowercase();
+        if st == "error" || st == "partial" {
+            findings.push(QcFinding {
+                rule_id: RULE_ITEM_STATUS_ERROR.into(),
+                severity: rules.severity(RULE_ITEM_STATUS_ERROR),
+                item_id: Some(id.into()),
+                message: format!("item status {st}"),
+            });
+        }
+    }
+
+    Ok(findings)
+}
+
 /// Evaluate all enabled rules against the candidate set.
 ///
 /// When `cancel` returns true between items, returns [`crate::QcError::Cancelled`].
@@ -193,186 +383,34 @@ pub fn evaluate_candidates_with_cancel(
     let candidate_set: HashSet<&str> = candidate_ids.iter().map(String::as_str).collect();
 
     // Set-level: empty selection
-    if rules.is_enabled(RULE_EMPTY_SELECTION) && candidate_ids.is_empty() {
-        findings.push(QcFinding {
-            rule_id: RULE_EMPTY_SELECTION.into(),
-            severity: rules.severity(RULE_EMPTY_SELECTION),
-            item_id: None,
-            message: "empty selection".into(),
-        });
+    if candidate_ids.is_empty() {
+        if let Some(f) = empty_selection_finding(rules) {
+            findings.push(f);
+        }
         return Ok(findings);
     }
 
-    // Preload items + withheld flags
-    let mut items: Vec<Item> = Vec::with_capacity(candidate_ids.len());
-    let mut withheld_map: HashMap<String, bool> = HashMap::new();
+    let mut withheld_count: u64 = 0;
     for id in candidate_ids {
         if cancel.map(|c| c()).unwrap_or(false) {
             return Err(crate::QcError::Cancelled);
         }
         let item = matter.get_item(id)?;
-        let withheld = matter.item_is_withheld(id)?;
-        withheld_map.insert(id.clone(), withheld);
-        items.push(item);
+        let is_withheld = matter.item_is_withheld(id)?;
+        if is_withheld {
+            withheld_count += 1;
+        }
+        findings.extend(evaluate_one_item(
+            matter,
+            &item,
+            is_withheld,
+            &candidate_set,
+            rules,
+        )?);
     }
 
-    // Set-level: only withheld
-    if rules.is_enabled(RULE_ONLY_WITHHELD)
-        && !candidate_ids.is_empty()
-        && candidate_ids
-            .iter()
-            .all(|id| *withheld_map.get(id).unwrap_or(&false))
-    {
-        findings.push(QcFinding {
-            rule_id: RULE_ONLY_WITHHELD.into(),
-            severity: rules.severity(RULE_ONLY_WITHHELD),
-            item_id: None,
-            message: "all candidates withheld".into(),
-        });
-    }
-
-    for item in &items {
-        if cancel.map(|c| c()).unwrap_or(false) {
-            return Err(crate::QcError::Cancelled);
-        }
-        let id = item.id.as_str();
-        let is_withheld = *withheld_map.get(id).unwrap_or(&false);
-
-        // orphan child
-        if rules.is_enabled(RULE_BROKEN_FAMILY_ORPHAN_CHILD) {
-            if let Some(parent) = item.parent_item_id.as_deref() {
-                if !candidate_set.contains(parent) {
-                    findings.push(QcFinding {
-                        rule_id: RULE_BROKEN_FAMILY_ORPHAN_CHILD.into(),
-                        severity: rules.severity(RULE_BROKEN_FAMILY_ORPHAN_CHILD),
-                        item_id: Some(id.into()),
-                        message: "orphan child: parent not in selection".into(),
-                    });
-                }
-            }
-        }
-
-        // incomplete parent: any non-withheld child not in set
-        if rules.is_enabled(RULE_BROKEN_FAMILY_INCOMPLETE_PARENT)
-            && has_missing_non_withheld_child(matter, id, &candidate_set)?
-        {
-            findings.push(QcFinding {
-                rule_id: RULE_BROKEN_FAMILY_INCOMPLETE_PARENT.into(),
-                severity: rules.severity(RULE_BROKEN_FAMILY_INCOMPLETE_PARENT),
-                item_id: Some(id.into()),
-                message: "incomplete family: non-withheld child missing from selection".into(),
-            });
-        }
-
-        // withheld in selection
-        if rules.is_enabled(RULE_WITHHELD_IN_SELECTION) && is_withheld {
-            findings.push(QcFinding {
-                rule_id: RULE_WITHHELD_IN_SELECTION.into(),
-                severity: rules.severity(RULE_WITHHELD_IN_SELECTION),
-                item_id: Some(id.into()),
-                message: "withheld item in selection".into(),
-            });
-        }
-
-        // withheld family member (candidate not withheld, parent or child is)
-        if rules.is_enabled(RULE_WITHHELD_FAMILY_MEMBER)
-            && !is_withheld
-            && family_has_withheld_relative(matter, item)?
-        {
-            findings.push(QcFinding {
-                rule_id: RULE_WITHHELD_FAMILY_MEMBER.into(),
-                severity: rules.severity(RULE_WITHHELD_FAMILY_MEMBER),
-                item_id: Some(id.into()),
-                message: "family member withheld".into(),
-            });
-        }
-
-        // redacted text missing
-        if rules.is_enabled(RULE_REDACTED_TEXT_MISSING)
-            && item.redaction_count > 0
-            && !digest_present(item.redacted_text_sha256.as_deref())
-        {
-            findings.push(QcFinding {
-                rule_id: RULE_REDACTED_TEXT_MISSING.into(),
-                severity: rules.severity(RULE_REDACTED_TEXT_MISSING),
-                item_id: Some(id.into()),
-                message: "redaction without redacted text artifact".into(),
-            });
-        }
-
-        // missing native (non-email)
-        if rules.is_enabled(RULE_MISSING_NATIVE)
-            && !digest_present(item.native_sha256.as_deref())
-            && !is_email_like(item)
-        {
-            findings.push(QcFinding {
-                rule_id: RULE_MISSING_NATIVE.into(),
-                severity: rules.severity(RULE_MISSING_NATIVE),
-                item_id: Some(id.into()),
-                message: "missing native for non-email item".into(),
-            });
-        }
-
-        // missing text (taxonomy-aware)
-        if rules.is_enabled(RULE_MISSING_TEXT) && !usable_text(item) {
-            let configured = rules.severity(RULE_MISSING_TEXT);
-            // Off already filtered by is_enabled.
-            // If configured Error → force error; if Warn → use taxonomy;
-            // if somehow other, use taxonomy under warn floor.
-            let taxonomy = if missing_text_is_error_category(item.file_category.as_deref()) {
-                QcSeverity::Error
-            } else {
-                QcSeverity::Warn
-            };
-            let severity = match configured {
-                QcSeverity::Off => continue,
-                QcSeverity::Error => QcSeverity::Error,
-                QcSeverity::Warn => taxonomy,
-            };
-            findings.push(QcFinding {
-                rule_id: RULE_MISSING_TEXT.into(),
-                severity,
-                item_id: Some(id.into()),
-                message: "missing usable text".into(),
-            });
-        }
-
-        // pdf needs ocr
-        if rules.is_enabled(RULE_PDF_NEEDS_OCR) && item.pdf_needs_ocr == 1 {
-            findings.push(QcFinding {
-                rule_id: RULE_PDF_NEEDS_OCR.into(),
-                severity: rules.severity(RULE_PDF_NEEDS_OCR),
-                item_id: Some(id.into()),
-                message: "pdf needs ocr".into(),
-            });
-        }
-
-        // zero size
-        if rules.is_enabled(RULE_ZERO_SIZE) {
-            if let Some(sz) = item.size_bytes {
-                if sz == 0 {
-                    findings.push(QcFinding {
-                        rule_id: RULE_ZERO_SIZE.into(),
-                        severity: rules.severity(RULE_ZERO_SIZE),
-                        item_id: Some(id.into()),
-                        message: "zero size_bytes".into(),
-                    });
-                }
-            }
-        }
-
-        // item status error/partial
-        if rules.is_enabled(RULE_ITEM_STATUS_ERROR) {
-            let st = item.status.to_ascii_lowercase();
-            if st == "error" || st == "partial" {
-                findings.push(QcFinding {
-                    rule_id: RULE_ITEM_STATUS_ERROR.into(),
-                    severity: rules.severity(RULE_ITEM_STATUS_ERROR),
-                    item_id: Some(id.into()),
-                    message: format!("item status {st}"),
-                });
-            }
-        }
+    if let Some(f) = only_withheld_finding(rules, candidate_ids.len() as u64, withheld_count) {
+        findings.push(f);
     }
 
     Ok(findings)

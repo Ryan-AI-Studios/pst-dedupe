@@ -537,3 +537,93 @@ fn evaluate_cancel_between_items() {
     .expect_err("must cancel");
     assert!(matches!(err, QcError::Cancelled));
 }
+
+/// Cancel mid-QC → Paused with checkpoint; resume completes without re-eval from 0 only.
+#[test]
+fn cancel_pause_resume_checkpoint() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use matter_qc::QC_STAGE;
+
+    let (_tmp, matter) = temp_matter("qc-cancel-resume");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+
+    const N: u64 = 20;
+    for i in 0..N {
+        good_doc(&matter, &format!("doc{i:03}.pdf"));
+    }
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let cancel_flag2 = cancel_flag.clone();
+    let params = QcParams::default();
+    let outcome = run_production_qc(
+        &matter,
+        &job.id,
+        &params,
+        Some(&|| cancel_flag2.load(Ordering::SeqCst)),
+        |completed| {
+            // Cancel after first item progress so we always pause mid-scan.
+            if completed >= 1 {
+                cancel_flag.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .expect("run");
+
+    let QcOutcome::Paused(s) = outcome else {
+        panic!("expected Paused after cancel, got {outcome:?}");
+    };
+    assert!(
+        s.completed_count > 0 && s.completed_count < N,
+        "partial progress required for pause: {s:?}"
+    );
+    // Partial cancel must NOT write a authorizing qc_runs row.
+    assert!(
+        matter.load_latest_qc_run().expect("load").is_none(),
+        "partial cancel must not insert qc_runs"
+    );
+
+    let cp = matter
+        .get_checkpoint(&job.id, QC_STAGE)
+        .expect("cp")
+        .expect("checkpoint present after pause");
+    assert_eq!(cp.completed_count as u64, s.completed_count);
+    let cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("checkpoint json");
+    let paused_cursor = cursor["cursor_index"].as_u64().unwrap_or(0);
+    assert_eq!(paused_cursor, s.completed_count);
+    assert!(
+        cursor["ordered_ids"]
+            .as_array()
+            .map(|a| a.len() as u64 == N)
+            .unwrap_or(false),
+        "frozen ordered_ids required: {}",
+        cp.cursor_json
+    );
+
+    // Resume with cancel off → Succeeded; cursor advances; qc_runs written once.
+    let outcome2 = run_production_qc(&matter, &job.id, &params, None, |_| {}).expect("resume");
+    let QcOutcome::Succeeded(r) = outcome2 else {
+        panic!("expected Succeeded on resume, got {outcome2:?}");
+    };
+    assert_eq!(r.candidate_count, N);
+    assert!(r.passed, "good docs should pass: {r:?}");
+    assert!(!r.qc_run_id.is_empty());
+
+    let cp2 = matter
+        .get_checkpoint(&job.id, QC_STAGE)
+        .expect("cp2")
+        .expect("final checkpoint");
+    let cursor2: serde_json::Value =
+        serde_json::from_str(&cp2.cursor_json).expect("checkpoint json");
+    assert_eq!(cursor2["cursor_index"].as_u64().unwrap_or(0), N);
+    assert_eq!(cursor2["phase"].as_str(), Some("done"));
+    assert_eq!(cp2.completed_count as u64, N);
+
+    let run = matter
+        .load_latest_qc_run()
+        .expect("load")
+        .expect("qc_runs after full success");
+    assert_eq!(run.candidate_count, N);
+    assert!(run.passed);
+}
