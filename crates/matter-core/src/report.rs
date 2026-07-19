@@ -45,6 +45,13 @@
 //!
 //! Fail closed if `output_dir` already exists (no silent clobber). Prefer a fresh
 //! stamp from [`default_matter_report_dir`].
+//!
+//! ### Atomic pack write
+//!
+//! Files are written under a sibling `{output_dir}.tmp` directory, then the pack is
+//! renamed into place only after all CSVs are ready and `report.export.complete` audit
+//! succeeds. On failure before rename, the temp directory is removed best-effort so a
+//! retry is not blocked by half-written debris.
 
 use std::fs;
 use std::io::Write;
@@ -308,12 +315,35 @@ fn is_path_end_punct(c: char) -> bool {
     matches!(c, ')' | ']' | '}' | ',' | ';' | '"' | '\'')
 }
 
+/// Once an absolute path starts (drive letter / UNC / Unix), consume aggressively for
+/// privacy: through whitespace (paths with spaces) until end of string, `;`, double
+/// space, sentence-ending `. `, or clear path-end punctuation.
 fn skip_path_chars(chars: &[char], start: usize) -> usize {
     let mut i = start;
     while i < chars.len() {
         let c = chars[i];
-        if c.is_whitespace() || is_path_end_punct(c) {
+        // Hard stop: semicolon (list/detail separator in short job errors).
+        if c == ';' {
             break;
+        }
+        // Double whitespace → end of path blob.
+        if c.is_whitespace() && i + 1 < chars.len() && chars[i + 1].is_whitespace() {
+            break;
+        }
+        // Sentence boundary: ". " (period + space). Extension dots never have a space after.
+        if c == '.' && i + 1 < chars.len() && chars[i + 1].is_whitespace() {
+            break;
+        }
+        // Closing punctuation that commonly terminates a path in prose (keep consuming
+        // spaces so `C:\client data\file.pdf` is fully redacted).
+        if is_path_end_punct(c) && !c.is_whitespace() {
+            // Allow path-internal characters only; `)` etc. end the path.
+            if matches!(c, ')' | ']' | '}' | '"' | '\'') {
+                break;
+            }
+            if matches!(c, ',') {
+                break;
+            }
         }
         i += 1;
     }
@@ -321,7 +351,8 @@ fn skip_path_chars(chars: &[char], start: usize) -> usize {
 }
 
 /// Redact remaining tokens that look like bare filenames with extensions
-/// (e.g. leftover `super_secret_merger.pdf` after path stripping).
+/// (e.g. leftover `super_secret_merger.pdf` after path stripping), or multi-segment
+/// relative path-like tokens (`client_data\acme_deal\memo.eml`).
 fn redact_pathish_tokens(s: &str) -> String {
     s.split_whitespace()
         .map(|tok| {
@@ -331,7 +362,7 @@ fn redact_pathish_tokens(s: &str) -> String {
                     '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
                 )
             });
-            if is_filename_like(bare) {
+            if is_filename_like(bare) || is_relative_pathish(bare) {
                 REDACTED
             } else {
                 tok
@@ -341,12 +372,31 @@ fn redact_pathish_tokens(s: &str) -> String {
         .join(" ")
 }
 
+/// Multi-segment relative path tokens with `\` or `/` (even without a known extension).
+fn is_relative_pathish(tok: &str) -> bool {
+    if tok.is_empty() || tok == REDACTED {
+        return false;
+    }
+    if !(tok.contains('\\') || tok.contains('/')) {
+        return false;
+    }
+    // Skip pure Windows drive roots already handled; still treat multi-segment.
+    let seps = tok.chars().filter(|c| *c == '\\' || *c == '/').count();
+    if seps == 0 {
+        return false;
+    }
+    let segments = tok.split(['\\', '/']).filter(|s| !s.is_empty()).count();
+    segments >= 2
+}
+
 fn is_filename_like(tok: &str) -> bool {
     if tok.is_empty() || tok == REDACTED {
         return false;
     }
+    // Strip multi-segment path down to final component for extension checks.
+    let base = tok.rsplit(['\\', '/']).next().unwrap_or(tok);
     // Must contain a dot extension of 1–10 alnum chars and a basename with a letter.
-    let Some((name, ext)) = tok.rsplit_once('.') else {
+    let Some((name, ext)) = base.rsplit_once('.') else {
         return false;
     };
     if name.is_empty() || ext.is_empty() || ext.len() > 10 {
@@ -367,7 +417,12 @@ fn is_filename_like(tok: &str) -> bool {
         "csv", "zip", "7z", "rar", "tiff", "tif", "png", "jpg", "jpeg", "gif", "html", "htm",
         "mht", "rtf", "ics", "mbox", "nsf", "db", "sqlite", "json", "xml",
     ];
-    DOC_EXTS.contains(&ext_l.as_str()) || name.contains('_') || name.contains('-') || name.len() > 8
+    DOC_EXTS.contains(&ext_l.as_str())
+        || name.contains('_')
+        || name.contains('-')
+        || name.len() > 8
+        || tok.contains('\\')
+        || tok.contains('/')
 }
 
 // ---------------------------------------------------------------------------
@@ -404,12 +459,17 @@ fn status_or_code_label(raw: &str) -> &str {
 
 /// Open a matter and export a progress/metrics report pack.
 ///
+/// Opens via [`Matter::open_for_read`] (no `workspace/temp/` wipe) so desk export can
+/// run safely while extract jobs materialize CAS blobs under temp. Audit append still
+/// uses the normal SQLite connection; only the cleanup_temp flag differs from
+/// [`Matter::open`].
+///
 /// Uses [`load_case_overview_on`] on the opened handle (same metrics as Overview).
 pub fn export_matter_report(
     matter_root: &Utf8Path,
     params: MatterReportParams,
 ) -> Result<MatterReportResult> {
-    let matter = Matter::open(matter_root)?;
+    let matter = Matter::open_for_read(matter_root)?;
     matter.export_matter_report(params)
 }
 
@@ -441,7 +501,7 @@ impl Matter {
     }
 
     fn export_matter_report_inner(&self, params: MatterReportParams) -> Result<MatterReportResult> {
-        let output_dir = params.output_dir;
+        let output_dir = params.output_dir.clone();
         if output_dir.as_str().is_empty() {
             return Err(Error::Other(
                 "matter report output_dir must not be empty".into(),
@@ -457,11 +517,54 @@ impl Matter {
                 fs::create_dir_all(parent.as_std_path())?;
             }
         }
+
+        // Sibling temp pack dir: write fully, audit, then rename → final (no partial pack).
+        let temp_dir = Utf8PathBuf::from(format!("{}.tmp", output_dir.as_str()));
+        if temp_dir.exists() {
+            return Err(Error::Other(format!(
+                "matter report temp directory already exists (refusing): {temp_dir}"
+            )));
+        }
+
+        match self.export_matter_report_write_temp(&temp_dir, &output_dir, &params) {
+            Ok(result) => {
+                if output_dir.exists() {
+                    let _ = fs::remove_dir_all(temp_dir.as_std_path());
+                    return Err(Error::Other(format!(
+                        "matter report output directory already exists (refusing overwrite): {output_dir}"
+                    )));
+                }
+                match fs::rename(temp_dir.as_std_path(), output_dir.as_std_path()) {
+                    Ok(()) => Ok(result),
+                    Err(e) => {
+                        // Audit already recorded complete with intended final path; leave
+                        // temp in place so the pack is not lost, and surface both paths.
+                        Err(Error::Other(format!(
+                            "matter report audit recorded but rename failed ({e}); \
+                             pack left at {temp_dir} (intended {output_dir})"
+                        )))
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = fs::remove_dir_all(temp_dir.as_std_path());
+                Err(e)
+            }
+        }
+    }
+
+    /// Write pack files under `temp_dir`, audit complete with intended `output_dir`.
+    fn export_matter_report_write_temp(
+        &self,
+        temp_dir: &Utf8Path,
+        output_dir: &Utf8Path,
+        params: &MatterReportParams,
+    ) -> Result<MatterReportResult> {
         // create_dir fails if the path already exists (race-safe fail closed).
-        fs::create_dir(output_dir.as_std_path()).map_err(|e| {
+        fs::create_dir(temp_dir.as_std_path()).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
                 Error::Other(format!(
-                    "matter report output directory already exists (refusing overwrite): {output_dir}"
+                    "matter report temp directory already exists (refusing): {temp_dir}"
                 ))
             } else {
                 Error::Io(e)
@@ -478,7 +581,7 @@ impl Matter {
 
         // summary.csv
         write_text_file(
-            &output_dir.join(SUMMARY_FILE),
+            &temp_dir.join(SUMMARY_FILE),
             &build_summary_csv(
                 &info.id,
                 &info.name,
@@ -491,7 +594,7 @@ impl Matter {
 
         // Rollups
         write_text_file(
-            &output_dir.join(BY_CATEGORY_FILE),
+            &temp_dir.join(BY_CATEGORY_FILE),
             &build_label_count_csv(
                 "label",
                 &overview.by_file_category,
@@ -502,7 +605,7 @@ impl Matter {
         files_written.push(BY_CATEGORY_FILE.into());
 
         write_text_file(
-            &output_dir.join(BY_CUSTODIAN_FILE),
+            &temp_dir.join(BY_CUSTODIAN_FILE),
             &build_label_count_csv(
                 "label",
                 &overview.by_custodian,
@@ -513,13 +616,13 @@ impl Matter {
         files_written.push(BY_CUSTODIAN_FILE.into());
 
         write_text_file(
-            &output_dir.join(BY_STATUS_FILE),
+            &temp_dir.join(BY_STATUS_FILE),
             &build_label_count_csv("label", &overview.by_status, status_or_code_label, 0),
         )?;
         files_written.push(BY_STATUS_FILE.into());
 
         write_text_file(
-            &output_dir.join(ERRORS_FILE),
+            &temp_dir.join(ERRORS_FILE),
             &build_label_count_csv(
                 "code",
                 &overview.errors.by_code,
@@ -535,22 +638,24 @@ impl Matter {
         } else {
             build_jobs_csv_from_overview(&overview)
         };
-        write_text_file(&output_dir.join(JOBS_FILE), &jobs_csv)?;
+        write_text_file(&temp_dir.join(JOBS_FILE), &jobs_csv)?;
         files_written.push(JOBS_FILE.into());
 
         // README.txt (nice-to-have)
-        write_text_file(&output_dir.join(README_FILE), &build_readme())?;
+        write_text_file(&temp_dir.join(README_FILE), &build_readme())?;
         files_written.push(README_FILE.into());
 
         // PDF intentionally not written (D-0039-01 deferred).
+        // Result path is the intended final directory (audit + return value).
         let result = MatterReportResult {
             generated_at: generated_at.clone(),
-            output_dir: output_dir.clone(),
+            output_dir: output_dir.to_path_buf(),
             files_written: files_written.clone(),
             overview,
             pdf_written: false,
         };
 
+        // Audit before rename so "complete" means pack is ready; rename is the publish step.
         self.audit_report_export_complete(&result)?;
 
         Ok(result)
@@ -824,6 +929,51 @@ mod unit_tests {
         );
         assert!(!safe.contains(r"C:\"), "drive path leaked: {safe}");
         assert!(safe.contains("Failed") || safe.contains(REDACTED));
+    }
+
+    #[test]
+    fn scrub_redacts_windows_path_with_spaces() {
+        let raw = r"Failed to extract C:\client data\super_secret_merger.pdf";
+        let safe = scrub_error_summary(raw);
+        assert!(!safe.contains("client"), "path segment leaked: {safe}");
+        assert!(!safe.contains("super_secret"), "filename leaked: {safe}");
+        assert!(!safe.contains("merger"), "filename leaked: {safe}");
+        // Extension / path residual must not remain.
+        assert!(
+            !safe.to_ascii_lowercase().contains("pdf"),
+            "pdf residual: {safe}"
+        );
+        assert!(!safe.contains(r"C:\"), "drive path leaked: {safe}");
+        assert!(safe.contains("Failed") || safe.contains(REDACTED));
+    }
+
+    #[test]
+    fn scrub_redacts_relative_multi_segment() {
+        let raw = r"Failed on client_data\acme_deal\memo.eml";
+        let safe = scrub_error_summary(raw);
+        assert!(
+            !safe.contains("client_data"),
+            "relative path leaked: {safe}"
+        );
+        assert!(!safe.contains("acme_deal"), "relative path leaked: {safe}");
+        assert!(!safe.contains("memo"), "filename leaked: {safe}");
+        assert!(!safe.contains(".eml"), "extension residual: {safe}");
+        assert!(safe.contains("Failed") || safe.contains(REDACTED));
+    }
+
+    #[test]
+    fn scrub_redacts_unc_with_spaces() {
+        let raw = r"copy failed \\fileserver\share\client data\deal memo.pdf";
+        let safe = scrub_error_summary(raw);
+        assert!(!safe.contains("fileserver"), "UNC host leaked: {safe}");
+        assert!(!safe.contains("client"), "UNC path leaked: {safe}");
+        assert!(!safe.contains("deal"), "UNC path leaked: {safe}");
+        assert!(!safe.contains("memo"), "filename leaked: {safe}");
+        assert!(
+            !safe.to_ascii_lowercase().contains("pdf"),
+            "pdf residual: {safe}"
+        );
+        assert!(safe.contains("copy") || safe.contains(REDACTED));
     }
 
     #[test]

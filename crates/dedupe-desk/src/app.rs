@@ -275,7 +275,7 @@ impl DeskApp {
         let (tx, rx) = mpsc::channel();
         self.report_export_rx = Some(rx);
         self.report_export_busy = true;
-        self.report_export_status = Some("Writing report…".into());
+        self.report_export_status = Some("Choose folder or cancel for default…".into());
         self.report_export_error = None;
         let _ = thread::Builder::new()
             .name("desk-report-export".into())

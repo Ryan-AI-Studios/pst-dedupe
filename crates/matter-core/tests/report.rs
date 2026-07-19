@@ -1,6 +1,8 @@
 //! Integration tests for matter progress/metrics report export (track 0039).
 
 use std::fs;
+use std::thread;
+use std::time::Duration;
 
 use matter_core::{
     default_matter_report_dir, export_matter_report, item_role, item_status, load_case_overview_on,
@@ -44,6 +46,40 @@ fn summary_value(summary: &str, metric: &str) -> String {
         }
     }
     panic!("metric {metric} not found in summary.csv:\n{summary}");
+}
+
+/// Parse a simple CSV line respecting double-quoted fields (no multi-line fields).
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if in_quotes => {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    cur.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            }
+            '"' => in_quotes = true,
+            ',' if !in_quotes => {
+                fields.push(std::mem::take(&mut cur));
+            }
+            other => cur.push(other),
+        }
+    }
+    fields.push(cur);
+    fields
+}
+
+fn jobs_header_index(header: &str, col: &str) -> usize {
+    let cols = parse_csv_line(header);
+    cols.iter()
+        .position(|c| c == col)
+        .unwrap_or_else(|| panic!("column {col} missing in jobs header: {header}"))
 }
 
 fn assert_not_zero_byte(out: &camino::Utf8Path, name: &str) {
@@ -136,6 +172,43 @@ fn empty_matter_valid_pack_with_sentinels() {
         gen_excel.chars().filter(|c| *c == 'T').count() <= 1,
         "unexpected T in excel datetime: {gen_excel}"
     );
+
+    // No leftover .tmp sibling after successful export
+    assert!(
+        !base.join("report_empty.tmp").exists(),
+        "temp pack dir must not remain after success"
+    );
+}
+
+#[test]
+fn free_export_preserves_workspace_temp_marker() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-temp-marker");
+    let matter = Matter::create(&root, "TempMarker").expect("create");
+    let marker = matter.workspace_temp_dir().join("marker.bin");
+    fs::create_dir_all(matter.workspace_temp_dir().as_std_path()).expect("temp dir");
+    fs::write(marker.as_std_path(), b"live extract residue").expect("write marker");
+    drop(matter);
+
+    let out = base.join("report_marker");
+    export_matter_report(
+        &root,
+        MatterReportParams {
+            output_dir: out.clone(),
+            overview_opts: OverviewOptions::default(),
+            include_pdf: false,
+            export_all_jobs: true,
+        },
+    )
+    .expect("export via free fn (open_for_read)");
+
+    assert!(
+        marker.as_std_path().is_file(),
+        "export_matter_report must not wipe workspace/temp (open_for_read)"
+    );
+    let body = fs::read(marker.as_std_path()).expect("read marker");
+    assert_eq!(body, b"live extract residue");
+    assert!(out.join("summary.csv").exists());
 }
 
 #[test]
@@ -200,10 +273,19 @@ fn seeded_overview_metrics_match_summary() {
         .expect("err");
 
     // Distinctive path in job error_summary for scrub test
+    let known_started = "2026-07-19T10:00:00Z";
     let job = matter.create_job("extract").expect("job");
     matter
         .set_job_state(&job.id, JobState::Running, None)
         .expect("run");
+    // Pin started_at so dual-datetime excel twin is exact and stable.
+    matter
+        .connection()
+        .execute(
+            "UPDATE jobs SET started_at = ?1 WHERE id = ?2",
+            rusqlite::params![known_started, job.id],
+        )
+        .expect("pin started_at");
     matter
         .put_checkpoint(&job.id, "stage", "{}", 7)
         .expect("cp");
@@ -214,6 +296,14 @@ fn seeded_overview_metrics_match_summary() {
             Some(r"Failed to extract C:\client_data\super_secret_merger.pdf"),
         )
         .expect("fail");
+    // set_job_state keeps prior started_at on Pending→Running only; re-pin after fail path.
+    matter
+        .connection()
+        .execute(
+            "UPDATE jobs SET started_at = ?1 WHERE id = ?2",
+            rusqlite::params![known_started, job.id],
+        )
+        .expect("re-pin started_at");
 
     let opts = OverviewOptions::default();
     let ov = load_case_overview_on(&matter, &opts).expect("ov");
@@ -262,7 +352,73 @@ fn seeded_overview_metrics_match_summary() {
     );
     assert_eq!(summary_value(&summary, "matter_name"), "SeededReport");
 
-    // Rollups match overview top-N
+    // Summary KPI: review / dedup / cull / privilege / ocr match overview
+    assert_eq!(
+        summary_value(&summary, "in_review"),
+        ov.review.in_review.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "reviewed_count"),
+        ov.review.reviewed_count.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "unreviewed_count"),
+        ov.review.unreviewed_count.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "dedup_unique"),
+        ov.dedup.unique.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "dedup_duplicate"),
+        ov.dedup.duplicate.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "dedup_skipped"),
+        ov.dedup.skipped.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "dedup_null"),
+        ov.dedup.null_role.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "cull_never_run"),
+        if ov.cull.never_run { "true" } else { "false" }
+    );
+    assert_eq!(
+        summary_value(&summary, "cull_included"),
+        ov.cull.included.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "cull_culled"),
+        ov.cull.culled.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "cull_other"),
+        ov.cull.other.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "privilege_claimed"),
+        ov.privilege.claimed.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "privilege_withhold"),
+        ov.privilege.withhold.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "pdf_needs_ocr"),
+        ov.ocr.pdf_needs_ocr.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "has_text"),
+        ov.ocr.has_text.to_string()
+    );
+    assert_eq!(
+        summary_value(&summary, "has_native"),
+        ov.ocr.has_native.to_string()
+    );
+
+    // Rollups match overview top-N as full label,count rows
     let cat = read_pack_file(&out, "by_file_category.csv");
     for r in &ov.by_file_category {
         let label = if r.label.is_empty() {
@@ -270,9 +426,10 @@ fn seeded_overview_metrics_match_summary() {
         } else {
             r.label.as_str()
         };
+        let expected = format!("{label},{}", r.count);
         assert!(
-            cat.contains(&format!("{label},{}", r.count)),
-            "missing category row {label}:\n{cat}"
+            cat.lines().any(|l| l == expected),
+            "missing full category row {expected}:\n{cat}"
         );
     }
     let cust = read_pack_file(&out, "by_custodian.csv");
@@ -282,29 +439,62 @@ fn seeded_overview_metrics_match_summary() {
         } else {
             r.label.as_str()
         };
+        let expected = format!("{label},{}", r.count);
         assert!(
-            cust.contains(&format!("{label},{}", r.count)),
-            "missing custodian {label}:\n{cust}"
+            cust.lines().any(|l| l == expected),
+            "missing full custodian row {expected}:\n{cust}"
         );
     }
     let status = read_pack_file(&out, "by_status.csv");
     for r in &ov.by_status {
-        assert!(status.contains(&r.count.to_string()));
+        let label = if r.label.is_empty() {
+            "(none)"
+        } else {
+            r.label.as_str()
+        };
+        let expected = format!("{label},{}", r.count);
+        assert!(
+            status.lines().any(|l| l == expected),
+            "missing full status row {expected}:\n{status}"
+        );
     }
     let errs = read_pack_file(&out, "errors_by_code.csv");
     assert!(errs.contains("parse_failed"));
     assert!(!errs.contains("(none),0"), "non-empty should omit sentinel");
 
-    // jobs.csv has seeded job + scrubbed path
+    // jobs.csv: parse columns for completed_count=7 and dual datetime values
     let jobs = read_pack_file(&out, "jobs.csv");
-    assert!(jobs.contains(&job.id));
+    let mut job_lines = jobs.lines();
+    let header = job_lines.next().expect("jobs header");
+    let idx_id = jobs_header_index(header, "job_id");
+    let idx_completed = jobs_header_index(header, "completed_count");
+    let idx_started_rfc = jobs_header_index(header, "started_at_rfc3339");
+    let idx_started_excel = jobs_header_index(header, "started_at_excel");
+    let job_row = job_lines
+        .find(|l| {
+            let cols = parse_csv_line(l);
+            cols.get(idx_id).map(|s| s.as_str()) == Some(job.id.as_str())
+        })
+        .expect("job row");
+    let cols = parse_csv_line(job_row);
+    assert_eq!(
+        cols.get(idx_completed).map(|s| s.as_str()),
+        Some("7"),
+        "completed_count must be 7; row={job_row}"
+    );
+    assert_eq!(
+        cols.get(idx_started_rfc).map(|s| s.as_str()),
+        Some(known_started),
+        "started_at_rfc3339 mismatch; row={job_row}"
+    );
+    assert_eq!(
+        cols.get(idx_started_excel).map(|s| s.as_str()),
+        Some("2026-07-19 10:00:00 UTC"),
+        "started_at_excel twin mismatch; row={job_row}"
+    );
+
     assert!(jobs.contains("extract"));
     assert!(jobs.contains("failed"));
-    assert!(
-        jobs.contains(",7,")
-            || jobs.contains(",7\n")
-            || jobs.lines().any(|l| l.contains(&job.id) && l.contains("7"))
-    );
     assert!(
         !jobs.contains(r"C:\client_data"),
         "path leaked in jobs.csv:\n{jobs}"
@@ -327,7 +517,6 @@ fn seeded_overview_metrics_match_summary() {
     let gen_excel = summary_value(&summary, "generated_at_excel");
     assert!(!gen.is_empty());
     assert!(gen_excel.ends_with(" UTC"));
-    // Job times: failed job should have started_at RFC3339 and excel twin columns present
     assert!(jobs.contains("started_at_excel"));
     assert!(jobs.contains("started_at_rfc3339"));
 
@@ -354,6 +543,103 @@ fn seeded_overview_metrics_match_summary() {
     assert!(params_json.contains(MATTER_REPORT_FORMAT_VERSION));
     assert!(params_json.contains("items_total"));
     assert!(!params_json.contains(secret));
+}
+
+#[test]
+fn jobs_newest_first_in_csv() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-jobs-order");
+    let matter = Matter::create(&root, "JobsOrder").expect("create");
+
+    let older = matter.create_job("extract").expect("older");
+    // Ensure distinct created_at ordering (list_jobs ORDER BY created_at DESC).
+    thread::sleep(Duration::from_millis(15));
+    let newer = matter.create_job("cull").expect("newer");
+
+    // Pin created_at so ordering is deterministic even if clocks are coarse.
+    matter
+        .connection()
+        .execute(
+            "UPDATE jobs SET created_at = '2026-01-01T00:00:00Z' WHERE id = ?1",
+            rusqlite::params![older.id],
+        )
+        .expect("pin older");
+    matter
+        .connection()
+        .execute(
+            "UPDATE jobs SET created_at = '2026-01-02T00:00:00Z' WHERE id = ?1",
+            rusqlite::params![newer.id],
+        )
+        .expect("pin newer");
+
+    let out = base.join("report_jobs_order");
+    matter
+        .export_matter_report(MatterReportParams {
+            output_dir: out.clone(),
+            overview_opts: OverviewOptions::default(),
+            include_pdf: false,
+            export_all_jobs: true,
+        })
+        .expect("export");
+
+    let jobs = read_pack_file(&out, "jobs.csv");
+    let mut lines = jobs.lines();
+    let header = lines.next().expect("header");
+    let idx_id = jobs_header_index(header, "job_id");
+    let first = parse_csv_line(lines.next().expect("first data row"));
+    let second = parse_csv_line(lines.next().expect("second data row"));
+    assert_eq!(
+        first.get(idx_id).map(|s| s.as_str()),
+        Some(newer.id.as_str()),
+        "first data row must be newest job; jobs.csv:\n{jobs}"
+    );
+    assert_eq!(
+        second.get(idx_id).map(|s| s.as_str()),
+        Some(older.id.as_str()),
+        "second data row must be older job; jobs.csv:\n{jobs}"
+    );
+}
+
+#[test]
+fn custodian_label_with_comma_csv_escaped() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-comma-cust");
+    let matter = Matter::create(&root, "CommaCust").expect("create");
+    matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            file_category: Some("pdf".into()),
+            custodian: Some("Smith, Jane".into()),
+            size_bytes: Some(10),
+            ..Default::default()
+        })
+        .expect("item");
+
+    let out = base.join("report_comma");
+    matter
+        .export_matter_report(MatterReportParams {
+            output_dir: out.clone(),
+            overview_opts: OverviewOptions::default(),
+            include_pdf: false,
+            export_all_jobs: true,
+        })
+        .expect("export");
+
+    let cust = read_pack_file(&out, "by_custodian.csv");
+    assert!(
+        cust.contains("\"Smith, Jane\",1")
+            || cust.lines().any(|l| {
+                let cols = parse_csv_line(l);
+                cols.first().map(|s| s.as_str()) == Some("Smith, Jane")
+                    && cols.get(1).map(|s| s.as_str()) == Some("1")
+            }),
+        "custodian with comma must be quoted correctly:\n{cust}"
+    );
+    // Raw unquoted form would split into three CSV fields.
+    assert!(
+        !cust.lines().any(|l| l.starts_with("Smith, Jane,1")),
+        "unquoted comma label would break CSV:\n{cust}"
+    );
 }
 
 #[test]
@@ -449,6 +735,17 @@ fn scrub_and_excel_helpers_public() {
         rfc3339_to_excel_utc("2026-01-02T03:04:05Z"),
         "2026-01-02 03:04:05 UTC"
     );
+
+    let spaced = scrub_error_summary(r"Failed to extract C:\client data\super_secret_merger.pdf");
+    assert!(!spaced.contains("client"));
+    assert!(!spaced.contains("super_secret"));
+    assert!(!spaced.contains("merger"));
+    assert!(!spaced.to_ascii_lowercase().contains("pdf"));
+
+    let relative = scrub_error_summary(r"err client_data\acme_deal\memo.eml");
+    assert!(!relative.contains("client_data"));
+    assert!(!relative.contains("acme_deal"));
+    assert!(!relative.contains("memo"));
 }
 
 #[test]
