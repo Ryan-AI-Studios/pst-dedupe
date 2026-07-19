@@ -18,6 +18,7 @@ members = [
     "crates/matter-search",
     "crates/extract-office",
     "crates/extract-pdf",
+    "crates/ocr-plugin",
     "crates/dedupe-desk",
     "crates/extract-calendar",
 ]

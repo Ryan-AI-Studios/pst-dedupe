@@ -66,3 +66,6 @@ pub use handlers::MatterPdfExtractHandler;
 
 #[cfg(feature = "calendar")]
 pub use handlers::MatterIcsExtractHandler;
+
+#[cfg(feature = "ocr")]
+pub use handlers::MatterOcrHandler;

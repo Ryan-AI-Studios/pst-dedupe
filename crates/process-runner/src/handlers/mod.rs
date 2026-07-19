@@ -33,6 +33,9 @@ pub mod pdf;
 #[cfg(feature = "calendar")]
 pub mod ics;
 
+#[cfg(feature = "ocr")]
+pub mod ocr;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
@@ -65,3 +68,6 @@ pub use pdf::MatterPdfExtractHandler;
 
 #[cfg(feature = "calendar")]
 pub use ics::MatterIcsExtractHandler;
+
+#[cfg(feature = "ocr")]
+pub use ocr::MatterOcrHandler;

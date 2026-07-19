@@ -223,7 +223,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0034-01 | — | OCR for empty **and** low-text PDFs | P0 sets `pdf_needs_ocr=1` (zero + low text-to-page) | **0036** |
+| D-0034-01 | — | OCR for empty **and** low-text PDFs | **Consumed in 0036**: OCR success sets `pdf_needs_ocr=0` + review `text_sha256` | — |
 | D-0034-02 | — | First-page / multi-page **raster preview** | **Locked deferred** — no pure-Rust full renderer in P0; future optional PDFium/MuPDF feature | residual |
 | D-0034-03 | — | PDFium / MuPDF bundled native engine | Forbidden as required P0 dep | residual optional feature |
 | D-0034-04 | — | Geometric PDF redaction burn-in | Not extract track | residual (D-0032-01) |
@@ -252,6 +252,24 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0035-11 | — | Floating times / exotic non-IANA TZIDs | Fail-soft null offset; no invent | residual |
 | D-0035-12 | P3 | Embedded VTIMEZONE not used for offset resolution | IANA chrono-tz only; blobs copied into child natives | residual |
 | D-0035-13 | P3 | Force multi-child rewrite via `update_item` leaves FTS bookkeeping until reindex | ICS apply path clears FTS; update_item does not | residual polish |
+
+## From track 0036-OcrPlugin (Completed — Codex luna PASS WITH DEFERRED P3)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0036-01 | — | Bundle Tesseract/Poppler in Windows installer | P0: operator installs; path in Settings | residual packaging |
+| D-0036-02 | — | In-process leptess / tesseract-rs linking | P0 CLI sidecar only | residual |
+| D-0036-03 | — | Cloud OCR providers | Never default offline product | never / Series G |
+| D-0036-04 | — | Auto-run OCR after pdf_extract | Manual job; profiles later | **0043** |
+| D-0036-05 | — | Multi-language pack UI | P0 `lang` string (default eng) | residual |
+| D-0036-06 | — | Handwriting / layout/table OCR | Plain text Tesseract | residual |
+| D-0036-07 | — | Write OCR text layer back into PDF native | Text CAS only | residual |
+| D-0036-08 | — | OCR after redaction burn-in pipeline | P0 skip when redaction_count>0 | residual / **0040** |
+| D-0036-09 | P3 | Live Tesseract+osd rotated-scan smoke | Mock path automated; operator + real Tesseract | operator / polish |
+| D-0036-10 | P3 | Full GUI smoke enable OCR + Run | Automated job + unit; operator smoke | operator / polish |
+| D-0036-11 | — | Soft per-page timeout (e.g. 120s) | Cancel between pages/items; soft timeout residual | residual polish |
+| D-0036-12 | — | Encrypted matter-scoped temp for page bitmaps | Drop + purge P0; full temp encryption residual | residual |
+| D-0036-13 | P3 | Mid-doc checkpoint resume at exact next page + partial text | Cancel pauses without apply; resume retries item from page 1 (safe) | residual polish |
 
 ## Hygiene
 

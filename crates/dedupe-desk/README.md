@@ -9,10 +9,12 @@ has **Build / Update search index** and **Rebuild search index** (`fts_index`).
 
 Office extract (0033): Workspace **Extract Office text** runs `office_extract`.
 PDF extract (0034): Workspace **Extract PDF text** runs `pdf_extract`; Review shows
-Needs OCR banner when `pdf_needs_ocr=1` (empty/low-text; OCR is **0036**).
+Needs OCR banner when `pdf_needs_ocr=1` (empty/low-text).
 (DOCX/XLSX/PPTX natives → `text_sha256`).
 ICS extract (0035): Workspace **Extract ICS** runs `ics_extract`; Review **Calendar**
 chip filters `file_category=calendar`. Multi-event ICS → archive parent + single-event children.
+OCR (0036): Settings **Enable local OCR** (off by default) + tool paths; Workspace
+**Run OCR** (`ocr` job) processes needs-OCR PDFs and images via system Tesseract CLI.
 
 ## Build / run
 

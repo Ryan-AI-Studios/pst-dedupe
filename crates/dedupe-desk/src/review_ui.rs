@@ -3454,7 +3454,7 @@ fn show_viewer(
         if state.item_pdf_needs_ocr == 1 {
             ui.colored_label(
                 Color32::from_rgb(180, 100, 20),
-                "Little or no embedded text — OCR recommended (0036).",
+                "Little or no embedded text — Run OCR (Workspace) to extract searchable text.",
             );
         }
         if let Some(st) = state.notes_status.clone() {

@@ -261,6 +261,18 @@ pub struct Item {
     pub ics_source_native_sha256: Option<String>,
     pub ics_extracted_at: Option<String>,
     pub ics_extract_error: Option<String>,
+    // --- schema v17 (OCR) ---
+    /// `ok` | `error` | `skipped` | `disabled` | NULL never attempted.
+    pub ocr_status: Option<String>,
+    pub ocr_engine: Option<String>,
+    pub ocr_lang: Option<String>,
+    pub ocr_text_sha256: Option<String>,
+    pub ocr_source_native_sha256: Option<String>,
+    pub ocr_page_count: Option<i64>,
+    pub ocr_at: Option<String>,
+    pub ocr_error: Option<String>,
+    /// Mean confidence when engine provides it; else null.
+    pub ocr_confidence: Option<f64>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -4750,7 +4762,9 @@ const ITEM_COLUMNS: &str =
     cal_organizer, cal_attendees_json, cal_busy_status, cal_is_recurring, \
     cal_recurrence_id, cal_uid, cal_extract_method, \
     ics_extract_status, ics_extract_method, ics_source_native_sha256, \
-    ics_extracted_at, ics_extract_error";
+    ics_extracted_at, ics_extract_error, \
+    ocr_status, ocr_engine, ocr_lang, ocr_text_sha256, ocr_source_native_sha256, \
+    ocr_page_count, ocr_at, ocr_error, ocr_confidence";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -4857,6 +4871,15 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         ics_source_native_sha256: row.get(96)?,
         ics_extracted_at: row.get(97)?,
         ics_extract_error: row.get(98)?,
+        ocr_status: row.get(99)?,
+        ocr_engine: row.get(100)?,
+        ocr_lang: row.get(101)?,
+        ocr_text_sha256: row.get(102)?,
+        ocr_source_native_sha256: row.get(103)?,
+        ocr_page_count: row.get(104)?,
+        ocr_at: row.get(105)?,
+        ocr_error: row.get(106)?,
+        ocr_confidence: row.get(107)?,
     })
 }
 

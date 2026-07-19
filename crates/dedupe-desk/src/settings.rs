@@ -20,6 +20,18 @@ pub struct DeskSettings {
     /// Reviewer name used as coding audit actor (0027). Empty → `"desk"`.
     #[serde(default)]
     pub reviewer_name: String,
+    /// Enable local OCR job (default **false** — opt-in).
+    #[serde(default)]
+    pub ocr_enabled: bool,
+    /// Optional path to `tesseract` / `tesseract.exe`.
+    #[serde(default)]
+    pub tesseract_path: Option<String>,
+    /// Optional tessdata directory (`TESSDATA_PREFIX`).
+    #[serde(default)]
+    pub tessdata_dir: Option<String>,
+    /// Optional path to `pdftoppm` or `mutool` for PDF page render.
+    #[serde(default)]
+    pub pdf_renderer_path: Option<String>,
 }
 
 impl DeskSettings {

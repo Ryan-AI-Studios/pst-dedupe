@@ -3247,6 +3247,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocr-plugin"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "matter-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3630,6 +3644,7 @@ dependencies = [
  "matter-promote",
  "matter-search",
  "matter-thread",
+ "ocr-plugin",
  "serde",
  "serde_json",
  "tempfile",
