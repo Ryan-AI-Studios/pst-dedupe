@@ -321,9 +321,14 @@ impl Matter {
 
     /// List PDF-eligible candidates for the extract job.
     ///
-    /// Stable ordered set: items with `native_sha256` NOT NULL and either
-    /// path/mime looking PDF-ish **or** missing path/mime (CAS-only / sniff).
+    /// Stable ordered set: items with `native_sha256` NOT NULL and either:
+    /// - path/mime looking PDF-ish,
+    /// - missing path/mime (CAS-only / sniff),
+    /// - **or** path/mime not a known exclusive non-PDF type (wrong-meta sniff:
+    ///   e.g. `document.bin` + `text/plain` with `%PDF-` bytes).
+    ///
     /// Does **not** filter on existing extract status — callers skip in-process.
+    /// Non-PDF sniffs are marked `skipped` with source so they are not re-read.
     ///
     /// Using a shrinking "pending only" list with SQL OFFSET is incorrect.
     pub fn list_pdf_candidates(
@@ -337,6 +342,9 @@ impl Matter {
         } else {
             limit as i64
         };
+        // Exclusive non-PDF denylist (office OOXML/legacy, mail containers, common
+        // pure image/audio). Everything else is a sniff candidate when path/mime
+        // is wrong or non-PDF meta (bounded CAS read + magic check in the job).
         let sql = "SELECT id, path, mime_type, native_sha256, text_sha256, \
                     pdf_source_native_sha256, pdf_extract_status, \
                     IFNULL(pdf_needs_ocr, 0), file_category \
@@ -348,6 +356,44 @@ impl Matter {
                  OR IFNULL(mime_type, '') LIKE 'application/pdf%' \
                  OR path IS NULL OR path = '' \
                  OR mime_type IS NULL OR mime_type = '' \
+                 OR NOT ( \
+                   lower(IFNULL(path, '')) LIKE '%.docx' \
+                   OR lower(IFNULL(path, '')) LIKE '%.docm' \
+                   OR lower(IFNULL(path, '')) LIKE '%.xlsx' \
+                   OR lower(IFNULL(path, '')) LIKE '%.xlsm' \
+                   OR lower(IFNULL(path, '')) LIKE '%.pptx' \
+                   OR lower(IFNULL(path, '')) LIKE '%.pptm' \
+                   OR lower(IFNULL(path, '')) LIKE '%.doc' \
+                   OR lower(IFNULL(path, '')) LIKE '%.xls' \
+                   OR lower(IFNULL(path, '')) LIKE '%.ppt' \
+                   OR lower(IFNULL(path, '')) LIKE '%.eml' \
+                   OR lower(IFNULL(path, '')) LIKE '%.msg' \
+                   OR lower(IFNULL(path, '')) LIKE '%.pst' \
+                   OR lower(IFNULL(path, '')) LIKE '%.ost' \
+                   OR lower(IFNULL(path, '')) LIKE '%.png' \
+                   OR lower(IFNULL(path, '')) LIKE '%.jpg' \
+                   OR lower(IFNULL(path, '')) LIKE '%.jpeg' \
+                   OR lower(IFNULL(path, '')) LIKE '%.gif' \
+                   OR lower(IFNULL(path, '')) LIKE '%.webp' \
+                   OR lower(IFNULL(path, '')) LIKE '%.tif' \
+                   OR lower(IFNULL(path, '')) LIKE '%.tiff' \
+                   OR lower(IFNULL(path, '')) LIKE '%.bmp' \
+                   OR lower(IFNULL(path, '')) LIKE '%.mp3' \
+                   OR lower(IFNULL(path, '')) LIKE '%.wav' \
+                   OR lower(IFNULL(path, '')) LIKE '%.m4a' \
+                   OR lower(IFNULL(path, '')) LIKE '%.flac' \
+                   OR lower(IFNULL(path, '')) LIKE '%.mp4' \
+                   OR lower(IFNULL(path, '')) LIKE '%.mov' \
+                   OR lower(IFNULL(path, '')) LIKE '%.avi' \
+                   OR IFNULL(mime_type, '') LIKE '%wordprocessingml%' \
+                   OR IFNULL(mime_type, '') LIKE '%spreadsheetml%' \
+                   OR IFNULL(mime_type, '') LIKE '%presentationml%' \
+                   OR IFNULL(mime_type, '') LIKE '%officedocument%' \
+                   OR IFNULL(mime_type, '') LIKE 'image/%' \
+                   OR IFNULL(mime_type, '') LIKE 'audio/%' \
+                   OR IFNULL(mime_type, '') LIKE 'video/%' \
+                   OR lower(IFNULL(mime_type, '')) LIKE 'message/rfc822%' \
+                 ) \
                ) \
              ORDER BY imported_at ASC, path ASC, id ASC \
              LIMIT ?2 OFFSET ?3";

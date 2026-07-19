@@ -1,4 +1,10 @@
 //! Top-level PDF text extract API.
+//!
+//! Residual: lopdf still loads the full object graph (native size already capped
+//! at 100 MiB). Page-by-page text extract avoids materializing all page strings
+//! up front and allows early break on text/page caps.
+
+use pdf_extract::{output_doc_page, Document, PlainTextOutput};
 
 use crate::detect;
 use crate::error::{Error, Result};
@@ -50,6 +56,8 @@ pub fn count_non_ws_chars(s: &str) -> usize {
 }
 
 /// Classify extracted text given page count (spec thresholds).
+///
+/// Callers must pass **raw** page text only — never display page markers.
 pub fn classify_text(text: &str, page_count: u32) -> TextClass {
     let n = count_non_ws_chars(text);
     if n == 0 {
@@ -102,8 +110,8 @@ pub fn extract_pdf_with_limits(
         return Err(Error::NotPdf("missing %PDF- magic".into()));
     }
 
-    // Load structure for encryption + page count (lopdf via pdf-extract re-export).
-    let doc = match pdf_extract::Document::load_mem(data) {
+    // Load once (structure + text). Do not re-parse via extract_text_from_mem_by_pages.
+    let doc = match Document::load_mem(data) {
         Ok(d) => d,
         Err(e) => {
             return Err(Error::parse(format!("document load failed: {e}")));
@@ -119,56 +127,101 @@ pub fn extract_pdf_with_limits(
     let pages_map = doc.get_pages();
     let total_pages = pages_map.len();
     let page_count_u32 = total_pages.min(u32::MAX as usize) as u32;
+    // Page numbers in document order (BTreeMap keys).
+    let page_nums: Vec<u32> = pages_map.keys().copied().collect();
+    let multi_page = page_nums.len() > 1;
 
-    // Prefer page-ordered extract; fall back to whole-doc extract on failure.
-    let page_texts = match pdf_extract::extract_text_from_mem_by_pages(data) {
-        Ok(v) => v,
-        Err(e) => {
-            // Fallback single blob
-            match pdf_extract::extract_text_from_mem(data) {
-                Ok(t) => vec![t],
-                Err(e2) => {
-                    return Err(Error::parse(format!(
-                        "text extract failed: {e}; fallback: {e2}"
-                    )));
-                }
-            }
-        }
-    };
-
-    let mut buf = TextBuf::with_limit(max_text_bytes);
+    // Display text (optional page markers) vs raw text for classification.
+    let mut display_buf = TextBuf::with_limit(max_text_bytes);
+    let mut raw_parts: Vec<String> = Vec::new();
     let mut pages_used = 0usize;
     let mut page_capped = false;
+    let mut extracted_any = false;
 
-    for (i, page_text) in page_texts.iter().enumerate() {
+    for (idx, &page_num) in page_nums.iter().enumerate() {
         if pages_used >= max_pages {
             page_capped = true;
             break;
         }
-        if buf.is_full() {
+        if display_buf.is_full() {
             break;
         }
-        if pages_used > 0 && !buf.push_str("\n\n") {
+
+        let mut page_s = String::new();
+        let page_result = {
+            let mut output = PlainTextOutput::new(&mut page_s);
+            output_doc_page(&doc, &mut output, page_num)
+        };
+
+        match page_result {
+            Ok(()) => {
+                extracted_any = true;
+            }
+            Err(e) => {
+                // Fallback only when the first page fails entirely.
+                if idx == 0 && !extracted_any {
+                    match pdf_extract::extract_text_from_mem(data) {
+                        Ok(t) => {
+                            // Single-blob fallback: treat as one logical page of raw text.
+                            let class = classify_text(&t, page_count_u32.max(1));
+                            if class == TextClass::Empty {
+                                return Ok(ExtractedPdfText {
+                                    text: String::new(),
+                                    method: methods::PDF_EXTRACT_V1.into(),
+                                    partial: false,
+                                    page_count: page_count_u32,
+                                    class,
+                                });
+                            }
+                            let mut fb = TextBuf::with_limit(max_text_bytes);
+                            fb.push_str(&t);
+                            let (text, text_partial) = fb.into_string();
+                            return Ok(ExtractedPdfText {
+                                text,
+                                method: methods::PDF_EXTRACT_V1.into(),
+                                partial: text_partial || page_capped,
+                                page_count: page_count_u32,
+                                class,
+                            });
+                        }
+                        Err(e2) => {
+                            return Err(Error::parse(format!(
+                                "text extract failed: {e}; fallback: {e2}"
+                            )));
+                        }
+                    }
+                }
+                // Later page failure: treat as empty page text and continue.
+                page_s.clear();
+            }
+        }
+
+        // Raw accumulation (no display markers) — joined later with "\n\n".
+        raw_parts.push(page_s.clone());
+
+        // Display text with optional markers for multi-page readability.
+        if pages_used > 0 && !display_buf.push_str("\n\n") {
             break;
         }
-        // Optional page marker for multi-page readability (skip when empty page).
-        if page_texts.len() > 1 {
-            let marker = format!("--- Page {} ---\n", i + 1);
-            if !buf.push_str(&marker) {
+        if multi_page {
+            // 1-based sequential display index (matches prior enumerate behavior).
+            let marker = format!("--- Page {} ---\n", pages_used + 1);
+            if !display_buf.push_str(&marker) {
                 break;
             }
         }
-        if !buf.push_str(page_text) {
+        if !display_buf.push_str(&page_s) {
+            pages_used += 1;
             break;
         }
         pages_used += 1;
     }
 
-    if pages_used == 0 && page_texts.is_empty() {
+    if pages_used == 0 && page_nums.is_empty() {
         // No pages extracted — still record page_count from structure.
     }
 
-    let (text, text_partial) = buf.into_string();
+    let (display_text, text_partial) = display_buf.into_string();
     let partial = text_partial || page_capped;
     // Prefer structural page count; fall back to pages we saw in text extract.
     let page_count = if page_count_u32 > 0 {
@@ -177,11 +230,11 @@ pub fn extract_pdf_with_limits(
         pages_used.min(u32::MAX as usize) as u32
     };
 
-    // Classification uses full accumulated text (including truncation marker
-    // bytes as content — marker is non-ws so truncated docs rarely classify low).
-    let class = classify_text(&text, page_count.max(1));
+    // Classification uses raw page text only (joined with blank lines).
+    let raw_text = raw_parts.join("\n\n");
+    let class = classify_text(&raw_text, page_count.max(1));
 
-    // Empty: return empty text with Empty class (caller leaves text_sha256 NULL).
+    // Empty: return empty display text (no markers-only CAS).
     if class == TextClass::Empty {
         return Ok(ExtractedPdfText {
             text: String::new(),
@@ -196,7 +249,7 @@ pub fn extract_pdf_with_limits(
     let _ = TRUNCATION_MARKER;
 
     Ok(ExtractedPdfText {
-        text,
+        text: display_text,
         method: methods::PDF_EXTRACT_V1.into(),
         partial,
         page_count,
@@ -261,5 +314,13 @@ mod tests {
     fn classify_ok() {
         let t = "word ".repeat(20); // plenty of non-ws
         assert_eq!(classify_text(&t, 1), TextClass::Ok);
+    }
+
+    #[test]
+    fn classify_ignores_display_markers_when_raw_empty() {
+        // Markers alone must not be classified as low_text if raw is empty.
+        assert_eq!(classify_text("", 3), TextClass::Empty);
+        // Sparse real text stays low even if display would include markers.
+        assert_eq!(classify_text("ab", 2), TextClass::LowText);
     }
 }

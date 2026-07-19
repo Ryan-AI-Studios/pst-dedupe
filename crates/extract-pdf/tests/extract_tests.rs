@@ -32,47 +32,95 @@ fn load_fixture(name: &str) -> Vec<u8> {
     fs::read(&path).unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()))
 }
 
-/// Same generator as `examples/gen_fixtures.rs` (kept local for unit tests).
+/// Same generator as `examples/gen_pdf_fixtures.rs` (kept local for unit tests).
 fn minimal_text_pdf(text: &str) -> Vec<u8> {
-    let escaped = text
-        .replace('\\', "\\\\")
-        .replace('(', "\\(")
-        .replace(')', "\\)");
-    let content = format!("BT\n/F1 12 Tf\n72 720 Td\n({escaped}) Tj\nET\n");
-    build_one_page_pdf(&content)
+    multi_page_text_pdf(&[text])
 }
 
-fn build_one_page_pdf(content: &str) -> Vec<u8> {
-    let content_len = content.len();
+/// Multi-page synthetic PDF: each entry is page text (empty string = no text ops).
+fn multi_page_text_pdf(page_texts: &[&str]) -> Vec<u8> {
+    assert!(!page_texts.is_empty());
+    let n = page_texts.len();
+    let contents: Vec<String> = page_texts
+        .iter()
+        .map(|text| {
+            if text.is_empty() {
+                String::new()
+            } else {
+                let escaped = text
+                    .replace('\\', "\\\\")
+                    .replace('(', "\\(")
+                    .replace(')', "\\)");
+                format!("BT\n/F1 12 Tf\n72 720 Td\n({escaped}) Tj\nET\n")
+            }
+        })
+        .collect();
+
+    // Object layout:
+    // 1 Catalog, 2 Pages, 3..2+n Page, 3+n..2+2n Content, 3+2n Font
+    let font_obj = 3 + 2 * n;
     let mut body: Vec<u8> = Vec::new();
     body.extend_from_slice(b"%PDF-1.4\n%");
     body.extend_from_slice(&[0xE2, 0xE3, 0xCF, 0xD3]);
     body.push(b'\n');
-    let mut offsets = Vec::new();
+    let mut offsets = Vec::with_capacity(font_obj);
+
+    // 1 Catalog
     offsets.push(body.len());
     body.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    // 2 Pages with Kids
+    let mut kids = String::new();
+    for i in 0..n {
+        let page_obj = 3 + i;
+        if i > 0 {
+            kids.push(' ');
+        }
+        kids.push_str(&format!("{page_obj} 0 R"));
+    }
     offsets.push(body.len());
-    body.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    let pages_obj = format!("2 0 obj\n<< /Type /Pages /Kids [{kids}] /Count {n} >>\nendobj\n");
+    body.extend_from_slice(pages_obj.as_bytes());
+
+    // Page objects 3..2+n
+    for i in 0..n {
+        let page_obj = 3 + i;
+        let content_obj = 3 + n + i;
+        offsets.push(body.len());
+        let page = format!(
+            "{page_obj} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+             /Contents {content_obj} 0 R /Resources << /Font << /F1 {font_obj} 0 R >> >> >>\nendobj\n"
+        );
+        body.extend_from_slice(page.as_bytes());
+    }
+
+    // Content streams
+    for (i, content) in contents.iter().enumerate() {
+        let content_obj = 3 + n + i;
+        let content_len = content.len();
+        offsets.push(body.len());
+        let obj = format!(
+            "{content_obj} 0 obj\n<< /Length {content_len} >>\nstream\n{content}endstream\nendobj\n"
+        );
+        body.extend_from_slice(obj.as_bytes());
+    }
+
+    // Font
     offsets.push(body.len());
-    body.extend_from_slice(
-        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
-         /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+    let font = format!(
+        "{font_obj} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
     );
-    offsets.push(body.len());
-    let content_obj =
-        format!("4 0 obj\n<< /Length {content_len} >>\nstream\n{content}endstream\nendobj\n");
-    body.extend_from_slice(content_obj.as_bytes());
-    offsets.push(body.len());
-    body.extend_from_slice(
-        b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
-    );
+    body.extend_from_slice(font.as_bytes());
+
     let xref_pos = body.len();
-    let mut xref = String::from("xref\n0 6\n0000000000 65535 f \n");
+    let obj_count = font_obj + 1; // next free = font_obj + 1; Size = that
+    let mut xref = format!("xref\n0 {obj_count}\n0000000000 65535 f \n");
     for off in &offsets {
         xref.push_str(&format!("{off:010} 00000 n \n"));
     }
     body.extend_from_slice(xref.as_bytes());
-    let trailer = format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n");
+    let trailer =
+        format!("trailer\n<< /Size {obj_count} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n");
     body.extend_from_slice(trailer.as_bytes());
     body
 }
@@ -157,19 +205,99 @@ fn text_cap_early_break() {
     // Inject long text into a synthetic PDF and cap extract size.
     let long = "A".repeat(200);
     let data = minimal_text_pdf(&long);
-    let extracted = extract_pdf_with_limits(&data, Some("long.pdf"), None, 40, 500).expect("cap");
+    let max_bytes = 40usize;
+    assert!(max_bytes >= TRUNCATION_MARKER.len());
+    let extracted =
+        extract_pdf_with_limits(&data, Some("long.pdf"), None, max_bytes, 500).expect("cap");
     assert!(extracted.partial, "text={}", extracted.text);
     assert!(
         extracted.text.contains(TRUNCATION_MARKER),
         "text={}",
         extracted.text
     );
-    assert!(extracted.text.len() < long.len() + TRUNCATION_MARKER.len() + 50);
+    assert!(
+        extracted.text.len() <= max_bytes,
+        "hard cap: len={} > max={max_bytes} text={:?}",
+        extracted.text.len(),
+        extracted.text
+    );
 
     let full =
         extract_pdf_with_limits(&data, Some("long.pdf"), None, MAX_EXTRACTED_TEXT_BYTES, 500)
             .expect("full");
     assert!(full.text.contains(&long[..50]));
+}
+
+#[test]
+fn multi_page_respects_max_pages_early_stop() {
+    let data = multi_page_text_pdf(&[
+        "PAGE_ONE_MARKER_AAAAAAAA",
+        "PAGE_TWO_MARKER_BBBBBBBB",
+        "PAGE_THREE_MARKER_CCCCCC",
+    ]);
+    let extracted =
+        extract_pdf_with_limits(&data, Some("multi.pdf"), None, MAX_EXTRACTED_TEXT_BYTES, 1)
+            .expect("max_pages=1");
+    assert!(
+        extracted.text.contains("PAGE_ONE_MARKER"),
+        "text={}",
+        extracted.text
+    );
+    assert!(
+        !extracted.text.contains("PAGE_TWO_MARKER"),
+        "must not extract page 2 when max_pages=1: {}",
+        extracted.text
+    );
+    assert!(extracted.partial, "page cap should set partial");
+    assert_eq!(extracted.page_count, 3, "structural page count");
+}
+
+#[test]
+fn multi_page_whitespace_only_is_empty_not_low_text() {
+    // Empty content on multiple pages: display markers must not classify as low_text.
+    let data = multi_page_text_pdf(&["", "", ""]);
+    let extracted = extract_pdf(&data, Some("empty-multi.pdf"), None).expect("parse");
+    assert_eq!(
+        extracted.class,
+        TextClass::Empty,
+        "markers must not contaminate classification"
+    );
+    assert!(
+        extracted.text.is_empty(),
+        "empty class must return empty display text, got {:?}",
+        extracted.text
+    );
+    assert!(extracted.class.needs_ocr());
+    assert_eq!(extracted.page_count, 3);
+}
+
+#[test]
+fn multi_page_sparse_text_stays_low_without_marker_inflation() {
+    // Sparse real text; page markers would otherwise inflate non-ws counts.
+    let data = multi_page_text_pdf(&["ab", "cd", "ef"]);
+    let extracted = extract_pdf(&data, Some("sparse.pdf"), None).expect("parse");
+    // Display may include markers for multi-page readability.
+    if extracted.page_count > 1 {
+        assert!(
+            extracted.text.contains("--- Page"),
+            "display should keep markers: {}",
+            extracted.text
+        );
+    }
+    assert_eq!(
+        extracted.class,
+        TextClass::LowText,
+        "raw non-ws is tiny; markers must not push to ok: text={}",
+        extracted.text
+    );
+    // Raw classification unit: markers alone would look non-empty if classified.
+    let markers_only = "--- Page 1 ---\n\n\n--- Page 2 ---\n";
+    assert_eq!(
+        classify_text(markers_only, 2),
+        TextClass::LowText,
+        "marker chars are non-ws — must never be fed to classify"
+    );
+    assert_eq!(classify_text("ab\n\ncd\n\nef", 3), TextClass::LowText);
 }
 
 #[test]
@@ -689,6 +817,54 @@ fn multi_item_cancel_then_resume_completes_all() {
             "item {id} missing text after cancel/resume"
         );
     }
+}
+
+/// Wrong-meta PDF (`document.bin` + `text/plain`) is listed and extracted via sniff.
+#[test]
+fn sniff_only_wrong_meta_pdf_is_candidate_and_extracts() {
+    let dir = tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().join("m")).unwrap();
+    let matter = Matter::create(&root, "PdfSniff").unwrap();
+
+    let data = load_fixture("minimal.pdf");
+    let native = matter.put_bytes(&data).unwrap();
+    let item = matter
+        .insert_item(ItemInput {
+            path: Some("document.bin".into()),
+            mime_type: Some("text/plain".into()),
+            native_sha256: Some(native.clone()),
+            status: "extracted".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let listed = matter
+        .list_pdf_candidates(0, 10, false)
+        .expect("list candidates");
+    assert!(
+        listed.iter().any(|c| c.id == item.id),
+        "document.bin + text/plain must be a sniff candidate; got {listed:?}"
+    );
+
+    let job = matter.create_job(JOB_KIND_PDF_EXTRACT).unwrap();
+    let params = PdfExtractParams::default();
+    let outcome = run_pdf_extract(&matter, &job.id, &params, None, |_| {}).unwrap();
+    match outcome {
+        PdfExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.extracted_count, 1, "summary={s:?}");
+            assert_eq!(s.error_count, 0, "summary={s:?}");
+        }
+        other => panic!("expected success: {other:?}"),
+    }
+
+    let after = matter.get_item(&item.id).unwrap();
+    assert_eq!(after.pdf_extract_status.as_deref(), Some("ok"));
+    let text_sha = after.text_sha256.expect("text CAS");
+    let text = String::from_utf8(matter.get_bytes(&text_sha).unwrap()).unwrap();
+    assert!(
+        text.contains("PDF_TEXT_MARKER"),
+        "sniff path must extract marker text: {text}"
+    );
 }
 
 #[test]

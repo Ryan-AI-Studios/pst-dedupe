@@ -288,7 +288,8 @@ fn process_one(
     };
 
     if already_extracted_ok(cand, native_sha, force) {
-        let _ = matter.apply_pdf_text(ApplyPdfTextInput {
+        // Propagate apply errors — do not silence bookkeeping failures.
+        matter.apply_pdf_text(ApplyPdfTextInput {
             item_id: cand.id.clone(),
             force,
             text: None,

@@ -4,7 +4,7 @@
 //!
 //! | Role | Stack |
 //! |---|---|
-//! | Text operators | **pdf-extract 0.12.0** (`extract_text_from_mem_by_pages`) |
+//! | Text operators | **pdf-extract 0.12.0** (`output_doc_page` / `PlainTextOutput`, page-by-page) |
 //! | Structure / encrypt / pages | **lopdf** (transitive via pdf-extract, 0.42.x) as `pdf_extract::Document` |
 //!
 //! Method id: [`methods::PDF_EXTRACT_V1`] (`pdf_extract_v1`).

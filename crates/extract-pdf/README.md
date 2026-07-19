@@ -19,13 +19,13 @@ Method id: `pdf_extract_v1`.
 
 ## Safety limits
 
-| Limit | Default |
-|---|---|
-| Max native input | 100 MiB |
-| Max pages processed | 500 |
-| Max extracted text | 10 MiB |
-| Min text chars (total non-ws) | 50 |
-| Min text chars / page | 20 |
+| Limit | Default | When exceeded |
+|---|---|---|
+| Max native input | 100 MiB | **Error** `pdf_limit_exceeded` (reject before parse) |
+| Max pages processed | 500 | **Partial success** — status `ok` / `low_text` / `empty`, `partial=true` |
+| Max extracted text | 10 MiB | **Partial success** — same; text capped with truncation marker |
+| Min text chars (total non-ws) | 50 | Classification only (`low_text` vs `ok`) |
+| Min text chars / page | 20 | Classification only |
 
 Truncation marker:
 
@@ -34,7 +34,15 @@ Truncation marker:
 ```
 
 Encrypted PDFs fail closed (`pdf_encrypted`). Corrupt bytes → `pdf_parse_error`
-(or isolated panic → same). Native size over cap → `pdf_limit_exceeded`.
+(or isolated panic → same).
+
+**Native size over limit** is a hard error (`pdf_limit_exceeded`). **Page and text
+caps** are soft: the job still writes whatever was extracted (status
+`ok`/`low_text`/`empty` with partial note), not a limit error.
+
+Page extract is **page-by-page** on a single loaded document (early break on
+page/text caps). Residual: lopdf still materializes the object graph for the
+native (already size-capped).
 
 ## Empty / low-text / needs OCR
 
@@ -69,8 +77,8 @@ Whitespace-only does **not** count as enough text. OCR handoff is track **0036**
 | `pdf_not_pdf` | Missing `%PDF-` / not a PDF |
 | `pdf_encrypted` | Password-encrypted |
 | `pdf_parse_error` | Corrupt / parser panic isolated |
-| `pdf_limit_exceeded` | Size / page / text cap |
-| `pdf_empty_text` | Zero extractable text |
+| `pdf_limit_exceeded` | **Native size** over max only (not page/text soft caps) |
+| `pdf_empty_text` | Zero extractable text (successful empty terminal) |
 
 ## API
 

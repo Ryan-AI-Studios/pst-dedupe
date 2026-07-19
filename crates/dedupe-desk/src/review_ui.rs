@@ -1158,7 +1158,8 @@ impl ReviewState {
         self.item_redaction_count = 0;
         self.item_redacted_text_sha256 = None;
         self.item_redacted_source_digest = None;
-        self.item_pdf_needs_ocr = 0;
+        // Do not clear item_pdf_needs_ocr here — set from item load / annotation
+        // bundle. Annotation failure must not wipe a valid OCR candidacy (P2-007).
         self.stale_persist_key = None;
         self.note_draft.clear();
         self.pending_highlight_id = None;
@@ -1189,8 +1190,13 @@ impl ReviewState {
     fn reload_notes_for_selection(&mut self, matter_root: &Utf8Path) {
         let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
             self.clear_notes_for_selection();
+            self.item_pdf_needs_ocr = 0;
             return;
         };
+        // Prefer item-level OCR flag independently of annotation load success.
+        if let Ok(flag) = load_item_pdf_needs_ocr(matter_root, &item_id) {
+            self.item_pdf_needs_ocr = flag;
+        }
         match load_notes_highlights_redactions(matter_root, &item_id) {
             Ok(bundle) => {
                 self.apply_annotation_bundle(bundle);
@@ -1199,13 +1205,14 @@ impl ReviewState {
                 self.notes_error = None;
             }
             Err(e) => {
+                // Clear notes/highlights/redactions only — keep pdf_needs_ocr
+                // from the item load above (or prior value if that also failed).
                 self.item_notes.clear();
                 self.item_highlights.clear();
                 self.item_redactions.clear();
                 self.item_redaction_count = 0;
                 self.item_redacted_text_sha256 = None;
                 self.item_redacted_source_digest = None;
-                self.item_pdf_needs_ocr = 0;
                 self.stale_persist_key = None;
                 self.notes_error = Some(e);
             }
@@ -2416,6 +2423,13 @@ fn load_notes_highlights_redactions(
         redacted_source_digest: item.redacted_source_digest,
         pdf_needs_ocr: item.pdf_needs_ocr,
     })
+}
+
+/// Load `pdf_needs_ocr` from the item row (independent of annotation queries).
+fn load_item_pdf_needs_ocr(matter_root: &Utf8Path, item_id: &str) -> Result<i64, String> {
+    let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
+    let item = matter.get_item(item_id).map_err(|e| e.to_string())?;
+    Ok(item.pdf_needs_ocr)
 }
 
 pub fn upsert_code_definition_blocking(
