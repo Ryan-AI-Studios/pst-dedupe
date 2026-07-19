@@ -669,10 +669,8 @@ fn extract_one_message(
     let cc = parse_display_list(extracted.display_cc.as_deref());
     let bcc = parse_display_list(extracted.display_bcc.as_deref());
 
-    let is_calendar = extracted
-        .message_class
-        .as_deref()
-        .is_some_and(is_calendar_message_class);
+    let cat = map_pst_message_category(extracted.message_class.as_deref());
+    let is_calendar = cat.is_calendar;
 
     let cal_start_at = extracted.start_date.and_then(filetime_to_rfc3339);
     let cal_end_at = extracted.end_date.and_then(filetime_to_rfc3339);
@@ -749,7 +747,7 @@ fn extract_one_message(
     let (in_reply_to, references_json, conversation_topic, conversation_index_hex) =
         thread_header_fields(&extracted);
 
-    let file_category = if is_calendar { "calendar" } else { "email" };
+    let file_category = cat.file_category;
     let from_addr = if is_calendar {
         // Organizer not available via standard tags in P0; fall back to sender.
         extracted.sender_email.clone()
@@ -799,11 +797,7 @@ fn extract_one_message(
             None
         },
         cal_organizer: if is_calendar { from_addr.clone() } else { None },
-        cal_extract_method: if is_calendar {
-            Some("pst_oxocal_v1".into())
-        } else {
-            None
-        },
+        cal_extract_method: cat.cal_extract_method.map(|s| s.into()),
         extra_json: Some(
             json!({
                 "pst_nid": nid_hex(msg_nid.0),
@@ -1068,6 +1062,34 @@ fn extract_one_message(
     Ok(())
 }
 
+/// Extract-path category mapping from `PidTagMessageClass` (spec §3.2 / §3.9).
+///
+/// Isolated so unit tests can assert `file_category` / `cal_extract_method`
+/// without opening a full PST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PstMessageCategoryMapping {
+    file_category: &'static str,
+    cal_extract_method: Option<&'static str>,
+    is_calendar: bool,
+}
+
+fn map_pst_message_category(message_class: Option<&str>) -> PstMessageCategoryMapping {
+    let is_calendar = message_class.is_some_and(is_calendar_message_class);
+    if is_calendar {
+        PstMessageCategoryMapping {
+            file_category: "calendar",
+            cal_extract_method: Some("pst_oxocal_v1"),
+            is_calendar: true,
+        }
+    } else {
+        PstMessageCategoryMapping {
+            file_category: "email",
+            cal_extract_method: None,
+            is_calendar: false,
+        }
+    }
+}
+
 /// Synthesize review plain-text for calendar items (spec §3.6).
 fn synthesize_calendar_review_text(
     extracted: &ExtractedMessage,
@@ -1284,6 +1306,32 @@ mod tests {
         assert!(text.contains("Bring notes"));
         assert!(is_calendar_message_class("IPM.Appointment"));
         assert!(!is_calendar_message_class("IPM.Note"));
+    }
+
+    /// Spec §3.9 cases 7–8: calendar MessageClass → calendar category; Note stays email.
+    #[test]
+    fn pst_message_category_mapping_calendar_and_note() {
+        let appt = map_pst_message_category(Some("IPM.Appointment"));
+        assert_eq!(appt.file_category, "calendar");
+        assert_eq!(appt.cal_extract_method, Some("pst_oxocal_v1"));
+        assert!(appt.is_calendar);
+        assert!(is_calendar_message_class("IPM.Appointment"));
+
+        let meeting = map_pst_message_category(Some("IPM.Schedule.Meeting.Request"));
+        assert_eq!(meeting.file_category, "calendar");
+        assert_eq!(meeting.cal_extract_method, Some("pst_oxocal_v1"));
+        assert!(meeting.is_calendar);
+
+        let note = map_pst_message_category(Some("IPM.Note"));
+        assert_eq!(note.file_category, "email");
+        assert_eq!(note.cal_extract_method, None);
+        assert!(!note.is_calendar);
+        assert!(!is_calendar_message_class("IPM.Note"));
+
+        let missing = map_pst_message_category(None);
+        assert_eq!(missing.file_category, "email");
+        assert_eq!(missing.cal_extract_method, None);
+        assert!(!missing.is_calendar);
     }
 
     #[test]

@@ -1,18 +1,19 @@
 //! Resumable `ics_extract` job.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use matter_core::{
     compute_non_email_logical_hash, ics_extract_status, item_role, item_status,
-    ApplyIcsExtractInput, AuditEventInput, IcsCandidate, IcsExtractApplyResult, ItemInput, Matter,
-    NonEmailLogicalInput, LOGICAL_HASH_VERSION,
+    ApplyIcsExtractInput, AuditEventInput, IcsCandidate, IcsExtractApplyResult, Item, ItemInput,
+    ItemUpdate, Matter, NonEmailLogicalInput, LOGICAL_HASH_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::detect;
 use crate::error::{Error, Result};
-use crate::extract::extract_ics_catch_unwind;
+use crate::extract::{extract_ics_catch_unwind, ParsedIcs, ParsedVEvent};
 use crate::limits::MAX_NATIVE_INPUT_BYTES;
 use crate::params::IcsExtractParams;
 use crate::text::synthesize_calendar_review_text;
@@ -271,6 +272,76 @@ fn already_extracted_ok(cand: &IcsCandidate, native_sha: &str, force: bool) -> b
     )
 }
 
+/// True when a multi-event container has a full set of isolated calendar children.
+///
+/// A child counts when it is `file_category=calendar`, has a native digest that
+/// is not the parent mega-file, and is at a successful terminal for that native.
+fn multi_expansion_complete(
+    matter: &Matter,
+    parent_id: &str,
+    parent_native: &str,
+    expected_vevents: usize,
+) -> Result<bool> {
+    if expected_vevents == 0 {
+        return Ok(true);
+    }
+    let children = matter.list_attachments(parent_id)?;
+    let mut complete_paths: HashSet<String> = HashSet::new();
+    for c in children {
+        if c.file_category.as_deref() != Some("calendar") {
+            continue;
+        }
+        let Some(child_native) = c.native_sha256.as_deref() else {
+            continue;
+        };
+        if child_native == parent_native {
+            continue;
+        }
+        let child_ok = matches!(
+            c.ics_extract_status.as_deref(),
+            Some(ics_extract_status::OK) | Some(ics_extract_status::SKIPPED)
+        );
+        let source_matches = c.ics_source_native_sha256.as_deref() == Some(child_native);
+        if child_ok && source_matches {
+            if let Some(path) = c.path {
+                complete_paths.insert(path);
+            } else {
+                // Path-less complete child still contributes to count uniquely by id.
+                complete_paths.insert(c.id);
+            }
+        }
+    }
+    Ok(complete_paths.len() == expected_vevents)
+}
+
+fn vevent_count_from_extra_json(extra_json: Option<&str>) -> Option<usize> {
+    let raw = extra_json?;
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    v.get("vevent_count")
+        .and_then(|n| n.as_u64())
+        .map(|n| n as usize)
+}
+
+/// Whether a terminal parent might be an incomplete multi-event expansion that
+/// must be resumed (legacy bug: parent marked ok before children finished).
+fn should_resume_incomplete_container(
+    matter: &Matter,
+    cand: &IcsCandidate,
+    native_sha: &str,
+) -> Result<bool> {
+    // Only archive containers are multi-event parents in this model.
+    if cand.file_category.as_deref() != Some("archive") {
+        return Ok(false);
+    }
+    let item = matter.get_item(&cand.id)?;
+    let expected = vevent_count_from_extra_json(item.extra_json.as_deref());
+    match expected {
+        Some(n) => Ok(!multi_expansion_complete(matter, &cand.id, native_sha, n)?),
+        // Missing vevent_count — re-parse / re-expand to be safe.
+        None => Ok(true),
+    }
+}
+
 fn process_one(
     matter: &Matter,
     cand: &IcsCandidate,
@@ -294,19 +365,25 @@ fn process_one(
     }
 
     if already_extracted_ok(cand, native_sha, force) {
-        matter.apply_ics_extract(ApplyIcsExtractInput {
-            item_id: cand.id.clone(),
-            force,
-            text: None,
-            method: None,
-            status: Some(ics_extract_status::SKIPPED.into()),
-            error: None,
-            source_native_sha256: Some(native_sha.into()),
-            ..Default::default()
-        })?;
-        summary.skipped_count += 1;
-        summary.completed_count += 1;
-        return Ok(());
+        // Incomplete multi-event expansions must resume even if a prior run
+        // incorrectly marked the parent terminal before all children existed.
+        if should_resume_incomplete_container(matter, cand, native_sha)? {
+            // Fall through to CAS load + re-expand (upsert missing children).
+        } else {
+            matter.apply_ics_extract(ApplyIcsExtractInput {
+                item_id: cand.id.clone(),
+                force,
+                text: None,
+                method: None,
+                status: Some(ics_extract_status::SKIPPED.into()),
+                error: None,
+                source_native_sha256: Some(native_sha.into()),
+                ..Default::default()
+            })?;
+            summary.skipped_count += 1;
+            summary.completed_count += 1;
+            return Ok(());
+        }
     }
 
     match matter.cas_len(native_sha) {
@@ -400,151 +477,15 @@ fn process_one(
     let parent_path = cand.path.clone().unwrap_or_else(|| "calendar.ics".into());
 
     if parsed.is_container {
-        // Parent → archive container; children get isolated natives.
-        matter.apply_ics_extract(ApplyIcsExtractInput {
-            item_id: cand.id.clone(),
-            force: true,
-            text: None,
-            method: Some(parsed.method.clone()),
-            status: Some(ics_extract_status::OK.into()),
-            error: None,
-            source_native_sha256: Some(native_sha.into()),
-            file_category: Some("archive".into()),
-            refine_file_category: true,
-            message_class: Some("VCALENDAR".into()),
-            extra_json: Some(
-                json!({
-                    "ics_container": true,
-                    "vevent_count": parsed.events.len(),
-                    "extract_tool": "extract-calendar",
-                    "extract_version": env!("CARGO_PKG_VERSION"),
-                })
-                .to_string(),
-            ),
-            ..Default::default()
-        })?;
-
-        // Ensure parent has a family so children can link (cohesion rule).
-        let parent_item = matter.get_item(&cand.id)?;
-        let family_id = if let Some(fid) = parent_item.family_id.clone() {
-            fid
-        } else {
-            let fam = matter.insert_family("ics-events")?;
-            matter.update_item(
-                &cand.id,
-                matter_core::ItemUpdate {
-                    family_id: Some(Some(fam.id.clone())),
-                    role: Some(Some(item_role::PARENT.into())),
-                    ..Default::default()
-                },
-            )?;
-            fam.id
-        };
-
-        for ev in &parsed.events {
-            let child_native = matter.put_bytes(&ev.single_event_ics)?;
-            // Produce safety: child native ≠ parent mega hash.
-            debug_assert_ne!(child_native, native_sha);
-
-            let (text, partial) = synthesize_calendar_review_text(&ev.fields);
-            let text_sha = if text.is_empty() {
-                None
-            } else {
-                Some(matter.put_bytes(text.as_bytes())?)
-            };
-
-            let leaf = ev
-                .fields
-                .cal_uid
-                .as_deref()
-                .filter(|u| !u.is_empty())
-                .map(sanitize_path_component)
-                .unwrap_or_else(|| format!("vevent-{}", ev.index));
-            let child_path = format!("{parent_path}!/{leaf}.ics");
-
-            let mut extra = json!({
-                "extract_tool": "extract-calendar",
-                "extract_version": env!("CARGO_PKG_VERSION"),
-                "parent_native_sha256": native_sha,
-                "vevent_index": ev.index,
-            });
-            if ev.fields.tz_unresolved {
-                extra["cal_tz_unresolved"] = json!(1);
-                if let Some(ref t) = ev.fields.unresolved_tzid {
-                    extra["unresolved_tzid"] = json!(t);
-                }
-            }
-            if let Some(ref r) = ev.fields.rrule_text {
-                extra["rrule"] = json!(r);
-            }
-            if partial {
-                extra["text_truncated"] = json!(true);
-            }
-
-            let logical = compute_non_email_logical_hash(&NonEmailLogicalInput {
-                category: Some("calendar".into()),
-                title: ev.fields.subject.clone(),
-                author: ev.fields.cal_organizer.clone(),
-                created: ev.fields.cal_start_at.clone(),
-                text: Some(text.clone()),
-                children_native_sha256: vec![],
-            });
-
-            let sent_at = ev.fields.cal_start_at.clone();
-            let to_json = if ev.fields.attendee_addrs.is_empty() {
-                None
-            } else {
-                Some(serde_json::to_string(&ev.fields.attendee_addrs).unwrap_or_default())
-            };
-
-            let child = matter.insert_item(ItemInput {
-                path: Some(child_path),
-                native_sha256: Some(child_native.clone()),
-                status: item_status::EXTRACTED.into(),
-                role: Some(item_role::ATTACHMENT.into()),
-                parent_item_id: Some(cand.id.clone()),
-                family_id: Some(family_id.clone()),
-                mime_type: Some("text/calendar".into()),
-                file_category: Some("calendar".into()),
-                subject: ev.fields.subject.clone(),
-                from_addr: ev.fields.cal_organizer.clone(),
-                to_addrs_json: to_json.clone(),
-                sent_at: sent_at.clone(),
-                size_bytes: Some(ev.single_event_ics.len() as i64),
-                text_sha256: text_sha,
-                logical_hash: Some(logical),
-                logical_hash_version: Some(LOGICAL_HASH_VERSION),
-                message_class: ev.fields.message_class.clone(),
-                cal_start_at: ev.fields.cal_start_at.clone(),
-                cal_end_at: ev.fields.cal_end_at.clone(),
-                cal_all_day: ev.fields.cal_all_day,
-                cal_location: ev.fields.cal_location.clone(),
-                cal_organizer: ev.fields.cal_organizer.clone(),
-                cal_attendees_json: ev.fields.cal_attendees_json.clone(),
-                cal_busy_status: ev.fields.cal_busy_status.clone(),
-                cal_is_recurring: ev.fields.cal_is_recurring,
-                cal_recurrence_id: ev.fields.cal_recurrence_id.clone(),
-                cal_uid: ev.fields.cal_uid.clone(),
-                cal_extract_method: ev.fields.cal_extract_method.clone(),
-                extra_json: Some(extra.to_string()),
-                ..Default::default()
-            })?;
-
-            // Mark child as successfully extracted for this native.
-            matter.apply_ics_extract(ApplyIcsExtractInput {
-                item_id: child.id,
-                force: true,
-                text: None,
-                method: Some(parsed.method.clone()),
-                status: Some(ics_extract_status::OK.into()),
-                source_native_sha256: Some(child_native),
-                refine_file_category: false,
-                ..Default::default()
-            })?;
-            summary.child_count += 1;
-        }
-        summary.extracted_count += 1;
-        summary.completed_count += 1;
+        expand_multi_event_container(
+            matter,
+            cand,
+            native_sha,
+            &parent_path,
+            &parsed,
+            force,
+            summary,
+        )?;
         return Ok(());
     }
 
@@ -614,6 +555,328 @@ fn process_one(
         IcsExtractApplyResult::Error { .. } => summary.error_count += 1,
     }
     summary.completed_count += 1;
+    Ok(())
+}
+
+/// Expand a multi-VEVENT ICS into archive parent + one isolated child per event.
+///
+/// **Terminal parent status (`ok`) is applied only after all children are fully
+/// created** (native CAS + item + ics bookkeeping). Resume creates missing
+/// children by stable path; force upserts by path and detaches extras so
+/// re-runs do not duplicate.
+fn expand_multi_event_container(
+    matter: &Matter,
+    cand: &IcsCandidate,
+    native_sha: &str,
+    parent_path: &str,
+    parsed: &ParsedIcs,
+    force: bool,
+    summary: &mut IcsExtractSummary,
+) -> Result<()> {
+    let vevent_count = parsed.events.len();
+    let parent_extra = json!({
+        "ics_container": true,
+        "vevent_count": vevent_count,
+        "extract_tool": "extract-calendar",
+        "extract_version": env!("CARGO_PKG_VERSION"),
+    })
+    .to_string();
+
+    // Intermediate parent bookkeeping only — do **not** set successful terminal
+    // until every child is committed (crash/resume safety).
+    matter.update_item(
+        &cand.id,
+        ItemUpdate {
+            file_category: Some(Some("archive".into())),
+            message_class: Some(Some("VCALENDAR".into())),
+            extra_json: Some(Some(parent_extra.clone())),
+            ..Default::default()
+        },
+    )?;
+
+    // Ensure parent has a family so children can link (cohesion rule).
+    let parent_item = matter.get_item(&cand.id)?;
+    let family_id = if let Some(fid) = parent_item.family_id.clone() {
+        fid
+    } else {
+        let fam = matter.insert_family("ics-events")?;
+        matter.update_item(
+            &cand.id,
+            ItemUpdate {
+                family_id: Some(Some(fam.id.clone())),
+                role: Some(Some(item_role::PARENT.into())),
+                ..Default::default()
+            },
+        )?;
+        fam.id
+    };
+
+    // Index existing children by stable path; collect path-duplicate extras.
+    let existing = matter.list_attachments(&cand.id)?;
+    let mut by_path: HashMap<String, Item> = HashMap::new();
+    let mut orphan_ids: Vec<String> = Vec::new();
+    for child in existing {
+        match child.path.clone() {
+            Some(path) => match by_path.entry(path) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(child);
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    // Duplicate path from a prior force bug — detach later.
+                    orphan_ids.push(child.id);
+                }
+            },
+            None => orphan_ids.push(child.id),
+        }
+    }
+
+    let mut expected_paths: HashSet<String> = HashSet::new();
+
+    for ev in &parsed.events {
+        let leaf = ev
+            .fields
+            .cal_uid
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .map(sanitize_path_component)
+            .unwrap_or_else(|| format!("vevent-{}", ev.index));
+        let child_path = format!("{parent_path}!/{leaf}.ics");
+        expected_paths.insert(child_path.clone());
+
+        // Resume: keep complete children unless force rewrites them.
+        if !force {
+            if let Some(existing_child) = by_path.get(&child_path) {
+                if child_is_complete(existing_child, native_sha) {
+                    continue;
+                }
+            }
+        }
+
+        upsert_container_child(
+            matter,
+            cand,
+            native_sha,
+            &family_id,
+            parsed,
+            ev,
+            &child_path,
+            by_path.get(&child_path),
+        )?;
+        summary.child_count += 1;
+    }
+
+    // Force (or path-duplicate cleanup): detach children not part of this expansion.
+    // Always detach path duplicates; on force also detach unexpected paths.
+    for (path, child) in &by_path {
+        if force && !expected_paths.contains(path) {
+            orphan_ids.push(child.id.clone());
+        }
+    }
+    for id in orphan_ids {
+        matter.update_item(
+            &id,
+            ItemUpdate {
+                parent_item_id: Some(None),
+                role: Some(Some(item_role::STANDALONE.into())),
+                ..Default::default()
+            },
+        )?;
+    }
+
+    // Verify full expansion before claiming parent terminal success.
+    if !multi_expansion_complete(matter, &cand.id, native_sha, vevent_count)? {
+        // Should not happen after upsert loop; surface as error for retry.
+        record_error(
+            matter,
+            &cand.id,
+            native_sha,
+            &Error::Other(format!(
+                "multi-event expansion incomplete: expected {vevent_count} children"
+            )),
+        )?;
+        summary.error_count += 1;
+        summary.completed_count += 1;
+        return Ok(());
+    }
+
+    // Terminal parent ok only after all children exist.
+    matter.apply_ics_extract(ApplyIcsExtractInput {
+        item_id: cand.id.clone(),
+        force: true,
+        text: None,
+        method: Some(parsed.method.clone()),
+        status: Some(ics_extract_status::OK.into()),
+        error: None,
+        source_native_sha256: Some(native_sha.into()),
+        file_category: Some("archive".into()),
+        refine_file_category: true,
+        message_class: Some("VCALENDAR".into()),
+        extra_json: Some(parent_extra),
+        ..Default::default()
+    })?;
+
+    summary.extracted_count += 1;
+    summary.completed_count += 1;
+    Ok(())
+}
+
+fn child_is_complete(child: &Item, parent_native: &str) -> bool {
+    if child.file_category.as_deref() != Some("calendar") {
+        return false;
+    }
+    let Some(child_native) = child.native_sha256.as_deref() else {
+        return false;
+    };
+    if child_native == parent_native {
+        return false;
+    }
+    let status_ok = matches!(
+        child.ics_extract_status.as_deref(),
+        Some(ics_extract_status::OK) | Some(ics_extract_status::SKIPPED)
+    );
+    status_ok && child.ics_source_native_sha256.as_deref() == Some(child_native)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upsert_container_child(
+    matter: &Matter,
+    cand: &IcsCandidate,
+    native_sha: &str,
+    family_id: &str,
+    parsed: &ParsedIcs,
+    ev: &ParsedVEvent,
+    child_path: &str,
+    existing: Option<&Item>,
+) -> Result<()> {
+    let child_native = matter.put_bytes(&ev.single_event_ics)?;
+    // Produce safety: child native ≠ parent mega hash.
+    debug_assert_ne!(child_native, native_sha);
+
+    let (text, partial) = synthesize_calendar_review_text(&ev.fields);
+    let text_sha = if text.is_empty() {
+        None
+    } else {
+        Some(matter.put_bytes(text.as_bytes())?)
+    };
+
+    let mut extra = json!({
+        "extract_tool": "extract-calendar",
+        "extract_version": env!("CARGO_PKG_VERSION"),
+        "parent_native_sha256": native_sha,
+        "vevent_index": ev.index,
+    });
+    if ev.fields.tz_unresolved {
+        extra["cal_tz_unresolved"] = json!(1);
+        if let Some(ref t) = ev.fields.unresolved_tzid {
+            extra["unresolved_tzid"] = json!(t);
+        }
+    }
+    if let Some(ref r) = ev.fields.rrule_text {
+        extra["rrule"] = json!(r);
+    }
+    if partial {
+        extra["text_truncated"] = json!(true);
+    }
+
+    let logical = compute_non_email_logical_hash(&NonEmailLogicalInput {
+        category: Some("calendar".into()),
+        title: ev.fields.subject.clone(),
+        author: ev.fields.cal_organizer.clone(),
+        created: ev.fields.cal_start_at.clone(),
+        text: Some(text.clone()),
+        children_native_sha256: vec![],
+    });
+
+    let sent_at = ev.fields.cal_start_at.clone();
+    let to_json = if ev.fields.attendee_addrs.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&ev.fields.attendee_addrs).unwrap_or_default())
+    };
+
+    let child_id = if let Some(existing_child) = existing {
+        matter.update_item(
+            &existing_child.id,
+            ItemUpdate {
+                path: Some(Some(child_path.into())),
+                native_sha256: Some(Some(child_native.clone())),
+                status: Some(item_status::EXTRACTED.into()),
+                role: Some(Some(item_role::ATTACHMENT.into())),
+                parent_item_id: Some(Some(cand.id.clone())),
+                family_id: Some(Some(family_id.into())),
+                mime_type: Some(Some("text/calendar".into())),
+                file_category: Some(Some("calendar".into())),
+                subject: Some(ev.fields.subject.clone()),
+                from_addr: Some(ev.fields.cal_organizer.clone()),
+                to_addrs_json: Some(to_json.clone()),
+                sent_at: Some(sent_at.clone()),
+                size_bytes: Some(Some(ev.single_event_ics.len() as i64)),
+                text_sha256: Some(text_sha),
+                logical_hash: Some(Some(logical)),
+                logical_hash_version: Some(LOGICAL_HASH_VERSION),
+                message_class: Some(ev.fields.message_class.clone()),
+                cal_start_at: Some(ev.fields.cal_start_at.clone()),
+                cal_end_at: Some(ev.fields.cal_end_at.clone()),
+                cal_all_day: Some(ev.fields.cal_all_day),
+                cal_location: Some(ev.fields.cal_location.clone()),
+                cal_organizer: Some(ev.fields.cal_organizer.clone()),
+                cal_attendees_json: Some(ev.fields.cal_attendees_json.clone()),
+                cal_busy_status: Some(ev.fields.cal_busy_status.clone()),
+                cal_is_recurring: Some(ev.fields.cal_is_recurring),
+                cal_recurrence_id: Some(ev.fields.cal_recurrence_id.clone()),
+                cal_uid: Some(ev.fields.cal_uid.clone()),
+                cal_extract_method: Some(ev.fields.cal_extract_method.clone()),
+                extra_json: Some(Some(extra.to_string())),
+                ..Default::default()
+            },
+        )?;
+        existing_child.id.clone()
+    } else {
+        let child = matter.insert_item(ItemInput {
+            path: Some(child_path.into()),
+            native_sha256: Some(child_native.clone()),
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            parent_item_id: Some(cand.id.clone()),
+            family_id: Some(family_id.into()),
+            mime_type: Some("text/calendar".into()),
+            file_category: Some("calendar".into()),
+            subject: ev.fields.subject.clone(),
+            from_addr: ev.fields.cal_organizer.clone(),
+            to_addrs_json: to_json.clone(),
+            sent_at: sent_at.clone(),
+            size_bytes: Some(ev.single_event_ics.len() as i64),
+            text_sha256: text_sha,
+            logical_hash: Some(logical),
+            logical_hash_version: Some(LOGICAL_HASH_VERSION),
+            message_class: ev.fields.message_class.clone(),
+            cal_start_at: ev.fields.cal_start_at.clone(),
+            cal_end_at: ev.fields.cal_end_at.clone(),
+            cal_all_day: ev.fields.cal_all_day,
+            cal_location: ev.fields.cal_location.clone(),
+            cal_organizer: ev.fields.cal_organizer.clone(),
+            cal_attendees_json: ev.fields.cal_attendees_json.clone(),
+            cal_busy_status: ev.fields.cal_busy_status.clone(),
+            cal_is_recurring: ev.fields.cal_is_recurring,
+            cal_recurrence_id: ev.fields.cal_recurrence_id.clone(),
+            cal_uid: ev.fields.cal_uid.clone(),
+            cal_extract_method: ev.fields.cal_extract_method.clone(),
+            extra_json: Some(extra.to_string()),
+            ..Default::default()
+        })?;
+        child.id
+    };
+
+    matter.apply_ics_extract(ApplyIcsExtractInput {
+        item_id: child_id,
+        force: true,
+        text: None,
+        method: Some(parsed.method.clone()),
+        status: Some(ics_extract_status::OK.into()),
+        source_native_sha256: Some(child_native),
+        refine_file_category: false,
+        ..Default::default()
+    })?;
     Ok(())
 }
 

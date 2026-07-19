@@ -220,3 +220,195 @@ fn filter_file_category_calendar() {
         .iter()
         .any(|c| c.field == "file_category"));
 }
+
+/// Simulate a crash after parent was marked ok with only 1 of N children, then
+/// re-run without force — must finish expansion without duplicates.
+#[test]
+fn multi_vevent_resume_partial_expansion() {
+    use matter_core::{ics_extract_status, item_role, ApplyIcsExtractInput};
+
+    let data = load_fixture("multi.ics");
+    let p = parse_ics(&data).expect("parse");
+    assert_eq!(p.events.len(), 3);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+    let matter = Matter::create(root.join("m"), "PartialIcs").unwrap();
+    let parent_native = matter.put_bytes(&data).unwrap();
+    let parent_path = "export/calendar.ics";
+
+    let parent = matter
+        .insert_item(ItemInput {
+            path: Some(parent_path.into()),
+            native_sha256: Some(parent_native.clone()),
+            status: item_status::EXTRACTED.into(),
+            mime_type: Some("text/calendar".into()),
+            file_category: Some("attachment".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Simulate legacy bug: parent terminal ok + archive before all children exist.
+    let fam = matter.insert_family("ics-events").unwrap();
+    matter
+        .update_item(
+            &parent.id,
+            matter_core::ItemUpdate {
+                family_id: Some(Some(fam.id.clone())),
+                role: Some(Some(item_role::PARENT.into())),
+                file_category: Some(Some("archive".into())),
+                message_class: Some(Some("VCALENDAR".into())),
+                extra_json: Some(Some(
+                    serde_json::json!({
+                        "ics_container": true,
+                        "vevent_count": 3,
+                        "extract_tool": "extract-calendar",
+                    })
+                    .to_string(),
+                )),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    matter
+        .apply_ics_extract(ApplyIcsExtractInput {
+            item_id: parent.id.clone(),
+            force: true,
+            text: None,
+            method: Some(p.method.clone()),
+            status: Some(ics_extract_status::OK.into()),
+            source_native_sha256: Some(parent_native.clone()),
+            file_category: Some("archive".into()),
+            refine_file_category: true,
+            message_class: Some("VCALENDAR".into()),
+            extra_json: Some(
+                serde_json::json!({
+                    "ics_container": true,
+                    "vevent_count": 3,
+                })
+                .to_string(),
+            ),
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Only first VEVENT child exists (crash mid-loop).
+    let ev0 = &p.events[0];
+    let child_native = matter.put_bytes(&ev0.single_event_ics).unwrap();
+    let leaf = ev0
+        .fields
+        .cal_uid
+        .as_deref()
+        .map(|u| {
+            u.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| "vevent-0".into());
+    let child_path = format!("{parent_path}!/{leaf}.ics");
+    let child = matter
+        .insert_item(ItemInput {
+            path: Some(child_path),
+            native_sha256: Some(child_native.clone()),
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            parent_item_id: Some(parent.id.clone()),
+            family_id: Some(fam.id),
+            mime_type: Some("text/calendar".into()),
+            file_category: Some("calendar".into()),
+            cal_uid: ev0.fields.cal_uid.clone(),
+            subject: ev0.fields.subject.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+    matter
+        .apply_ics_extract(ApplyIcsExtractInput {
+            item_id: child.id,
+            force: true,
+            text: None,
+            method: Some(p.method.clone()),
+            status: Some(ics_extract_status::OK.into()),
+            source_native_sha256: Some(child_native),
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert_eq!(matter.list_attachments(&parent.id).unwrap().len(), 1);
+
+    // Re-run without force — must resume missing children, no duplicates.
+    let job = matter.create_job(JOB_KIND_ICS_EXTRACT).unwrap();
+    let outcome =
+        run_ics_extract(&matter, &job.id, &IcsExtractParams::default(), None, |_| {}).expect("run");
+    assert!(
+        matches!(outcome, IcsExtractOutcome::Succeeded(_)),
+        "{outcome:?}"
+    );
+
+    let children = matter.list_attachments(&parent.id).unwrap();
+    assert_eq!(children.len(), 3, "resume must create all VEVENT children");
+    let mut paths = std::collections::HashSet::new();
+    for c in &children {
+        assert_eq!(c.file_category.as_deref(), Some("calendar"));
+        let path = c.path.as_deref().expect("path");
+        assert!(paths.insert(path.to_string()), "duplicate path {path}");
+        assert_ne!(c.native_sha256.as_deref(), Some(parent_native.as_str()));
+    }
+
+    let parent_after = matter.get_item(&parent.id).unwrap();
+    assert_eq!(parent_after.ics_extract_status.as_deref(), Some("ok"));
+    assert_eq!(parent_after.file_category.as_deref(), Some("archive"));
+}
+
+/// Force re-extract must upsert by path — child count stays == VEVENT count.
+#[test]
+fn multi_vevent_force_twice_no_duplicates() {
+    let data = load_fixture("multi.ics");
+    let tmp = tempfile::tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+    let matter = Matter::create(root.join("m"), "ForceIcs").unwrap();
+    let parent_native = matter.put_bytes(&data).unwrap();
+    let parent = matter
+        .insert_item(ItemInput {
+            path: Some("export/calendar.ics".into()),
+            native_sha256: Some(parent_native),
+            status: item_status::EXTRACTED.into(),
+            mime_type: Some("text/calendar".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let force_params = IcsExtractParams {
+        force: true,
+        batch_size: 50,
+    };
+
+    for i in 0..2 {
+        let job = matter.create_job(JOB_KIND_ICS_EXTRACT).unwrap();
+        let outcome = run_ics_extract(&matter, &job.id, &force_params, None, |_| {})
+            .unwrap_or_else(|e| panic!("force run {i}: {e}"));
+        assert!(
+            matches!(outcome, IcsExtractOutcome::Succeeded(_)),
+            "run {i}: {outcome:?}"
+        );
+        let children = matter.list_attachments(&parent.id).unwrap();
+        assert_eq!(
+            children.len(),
+            3,
+            "force run {i}: child count must equal VEVENT count"
+        );
+        let mut paths = std::collections::HashSet::new();
+        for c in &children {
+            let path = c.path.as_deref().expect("path");
+            assert!(
+                paths.insert(path.to_string()),
+                "force run {i}: duplicate path {path}"
+            );
+        }
+    }
+}
