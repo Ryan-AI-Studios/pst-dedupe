@@ -36,8 +36,8 @@ pub use dat::{
 };
 pub use error::{ProduceError, Result};
 pub use layout::{
-    production_stamp, resolve_output_root, VolumeLayout, DATA_DIR, NATIVES_DIR, PRODUCTIONS_DIR,
-    TEXT_DIR,
+    production_stamp, resolve_output_root, volume_has_production_content, VolumeLayout, DATA_DIR,
+    NATIVES_DIR, PRODUCTIONS_DIR, TEXT_DIR,
 };
 pub use params::{ProduceParams, DEFAULT_BATES_PREFIX, SCOPE_ITEM_IDS, SCOPE_REVIEW_CORPUS};
 pub use run::{

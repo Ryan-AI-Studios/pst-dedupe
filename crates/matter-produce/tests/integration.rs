@@ -1024,3 +1024,370 @@ fn item_ids_scope() {
     let dat = dat_text(&s.output_root);
     assert!(dat.contains(&id1));
 }
+
+/// Redacted email without native: synthetic .eml must use redacted body, not original.
+#[test]
+fn redacted_email_synthetic_eml_uses_redacted_body() {
+    let (_tmp, matter) = temp_matter("rdx-eml");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let body = "Hello SECRET world";
+    let text_sha = put_text(&matter, body);
+    let item_id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("inbox/msg.msg".into()),
+            // no native_sha256 — force export-only EML
+            text_sha256: Some(text_sha.clone()),
+            file_category: Some("email".into()),
+            mime_type: Some("message/rfc822".into()),
+            from_addr: Some("a@x.com".into()),
+            to_addrs_json: Some(r#"["b@y.com"]"#.into()),
+            subject: Some("Redacted mail".into()),
+            message_id: Some("mid-rdx".into()),
+            ..Default::default()
+        },
+    );
+    matter
+        .create_redaction(CreateRedactionInput {
+            item_id: item_id.clone(),
+            start_utf8: 6,
+            end_utf8: 12,
+            exact_quote: "SECRET".into(),
+            display_body: body.into(),
+            body_digest: text_sha,
+            reason: "confidential".into(),
+            label: None,
+            actor: "t".into(),
+        })
+        .expect("redaction");
+    matter
+        .regenerate_redacted_text(&item_id, body, "t")
+        .expect("regen");
+
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("RdxEml".into()),
+            export_eml_if_missing_native: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(s.produced_count, 1);
+
+    let eml = camino::Utf8Path::new(&s.output_root)
+        .join("NATIVES")
+        .join("PROD000001.eml");
+    assert!(eml.as_std_path().exists(), "expected .eml");
+    let eml_body = fs::read_to_string(eml.as_std_path()).expect("read eml");
+    assert!(
+        eml_body.contains(REDACTED_TOKEN),
+        "EML must contain redacted token: {eml_body}"
+    );
+    assert!(
+        !eml_body.contains("SECRET"),
+        "EML must not leak original secret: {eml_body}"
+    );
+
+    let text_path = camino::Utf8Path::new(&s.output_root)
+        .join("TEXT")
+        .join("PROD000001.txt");
+    let text_body = fs::read_to_string(text_path.as_std_path()).unwrap();
+    assert!(text_body.contains(REDACTED_TOKEN));
+    assert!(!text_body.contains("SECRET"));
+
+    let dat = dat_text(&s.output_root);
+    assert!(dat.contains("NATIVES\\PROD000001.eml"));
+    assert!(dat.contains("þemlþ") || dat.contains("eml"));
+    assert!(dat.contains("HAS_REDACTED_TEXT"));
+}
+
+/// Produce, assert withhold on produced item, resume → withheld not in final DAT/NATIVES.
+#[test]
+fn late_withhold_on_resume_excludes_from_volume() {
+    let (_tmp, matter) = temp_matter("late-withhold");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let mut ids = Vec::new();
+    for i in 0..2 {
+        let n = put_native(&matter, format!("native-late-{i}").as_bytes());
+        let id = insert_review_item(
+            &matter,
+            ItemInput {
+                path: Some(format!("l{i}.bin")),
+                native_sha256: Some(n),
+                subject: Some(format!("Late{i}")),
+                ..Default::default()
+            },
+        );
+        ids.push(id);
+    }
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_flag = cancel.clone();
+    let outcome = run_produce(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("LateHold".into()),
+            ..Default::default()
+        },
+        Some(&|| cancel_flag.load(Ordering::SeqCst)),
+        |completed| {
+            if completed >= 1 {
+                cancel_flag.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .expect("run");
+    let paused = match outcome {
+        ProduceOutcome::Paused(s) => s,
+        other => panic!("expected Paused, got {other:?}"),
+    };
+    assert!(paused.produced_count >= 1);
+    let first_id = ids[0].clone();
+
+    // Assert privilege hold after the first item was packaged.
+    matter
+        .upsert_item_privilege(UpsertItemPrivilegeInput {
+            item_id: first_id.clone(),
+            basis: "attorney_client".into(),
+            description: "hold after produce".into(),
+            status: "asserted".into(),
+            withhold: true,
+            include_on_log: true,
+            actor: "t".into(),
+        })
+        .expect("withhold");
+    assert!(matter.item_is_withheld(&first_id).unwrap());
+
+    let s2 = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("LateHold".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(s2.skipped_withheld, 1);
+    assert_eq!(
+        s2.produced_count, 1,
+        "only the second item should remain produced"
+    );
+
+    let dat = dat_text(&s2.output_root);
+    assert!(
+        !dat.contains(&first_id),
+        "withheld item must not appear in DAT: {dat}"
+    );
+    assert!(dat.contains(&ids[1]));
+
+    let natives = camino::Utf8Path::new(&s2.output_root).join("NATIVES");
+    if natives.as_std_path().exists() {
+        for e in fs::read_dir(natives.as_std_path()).unwrap() {
+            let bytes = fs::read(e.unwrap().path()).unwrap();
+            assert_ne!(
+                bytes.as_slice(),
+                b"native-late-0",
+                "withheld native must not remain under NATIVES/"
+            );
+        }
+    }
+    let text_dir = camino::Utf8Path::new(&s2.output_root).join("TEXT");
+    if text_dir.as_std_path().exists() {
+        for e in fs::read_dir(text_dir.as_std_path()).unwrap() {
+            let name = e.unwrap().file_name().to_string_lossy().into_owned();
+            // First control should not leave a text file (none for binary, but guard anyway).
+            assert!(
+                !name.starts_with("PROD000001"),
+                "stale text for withheld control: {name}"
+            );
+        }
+    }
+}
+
+/// After produce + rewound checkpoint + JSONL present, delete native → resume rebuilds.
+#[test]
+fn resume_rebuilds_when_recovered_native_missing() {
+    let (_tmp, matter) = temp_matter("rebuild-native");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let mut ids = Vec::new();
+    for i in 0..2 {
+        let n = put_native(&matter, format!("native-rebuild-{i}").as_bytes());
+        let id = insert_review_item(
+            &matter,
+            ItemInput {
+                path: Some(format!("r{i}.bin")),
+                native_sha256: Some(n),
+                subject: Some(format!("Rebuild{i}")),
+                ..Default::default()
+            },
+        );
+        ids.push(id);
+    }
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_flag = cancel.clone();
+    let outcome = run_produce(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("Rebuild".into()),
+            ..Default::default()
+        },
+        Some(&|| cancel_flag.load(Ordering::SeqCst)),
+        |completed| {
+            if completed >= 1 {
+                cancel_flag.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .expect("run");
+    let paused = match outcome {
+        ProduceOutcome::Paused(s) => s,
+        other => panic!("expected Paused, got {other:?}"),
+    };
+    let first_id = ids[0].clone();
+    let root = paused.output_root.clone();
+
+    // Rewind checkpoint as if crash after JSONL append.
+    let cp = matter
+        .get_checkpoint(&job.id, PRODUCE_STAGE)
+        .unwrap()
+        .expect("checkpoint");
+    let mut cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor");
+    let done = cursor
+        .get_mut("done_item_ids")
+        .and_then(|v| v.as_array_mut())
+        .expect("done_item_ids");
+    done.retain(|v| v.as_str() != Some(first_id.as_str()));
+    cursor["next_seq"] = serde_json::json!(1);
+    cursor["produced_count"] = serde_json::json!(0);
+    cursor["cursor_index"] = serde_json::json!(0);
+    cursor["completed_count"] = serde_json::json!(0);
+    cursor["phase"] = serde_json::json!("work");
+    matter
+        .put_checkpoint(&job.id, PRODUCE_STAGE, &cursor.to_string(), 0)
+        .expect("put checkpoint");
+
+    // Damage volume: delete the recovered native.
+    let native_path = camino::Utf8Path::new(&root)
+        .join("NATIVES")
+        .join("PROD000001.bin");
+    assert!(
+        native_path.as_std_path().exists(),
+        "precondition: native exists before delete"
+    );
+    fs::remove_file(native_path.as_std_path()).expect("delete native");
+
+    let s2 = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("Rebuild".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(s2.produced_count, 2);
+    assert!(
+        native_path.as_std_path().exists(),
+        "native must be rebuilt on resume"
+    );
+    assert_eq!(
+        fs::read(native_path.as_std_path()).unwrap(),
+        b"native-rebuild-0"
+    );
+    let dat = dat_text(&s2.output_root);
+    assert!(dat.contains(&first_id));
+    assert!(dat.contains("NATIVES\\PROD000001.bin") || dat.contains("PROD000001"));
+    // DAT SHA must match the rebuilt file.
+    let disk_sha = sha256_file(native_path.as_std_path());
+    assert!(dat.contains(&disk_sha), "DAT must reference rebuilt SHA");
+}
+
+/// Default named production colliding with a complete volume gets a unique path;
+/// explicit non-empty output_dir is rejected.
+#[test]
+fn output_dir_collision_unique_or_reject() {
+    let (_tmp, matter) = temp_matter("collision");
+    let job1 = matter.create_job(JOB_KIND_PRODUCE).expect("job1");
+    let n = put_native(&matter, b"first-volume-native");
+    insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("a.bin".into()),
+            native_sha256: Some(n),
+            subject: Some("One".into()),
+            ..Default::default()
+        },
+    );
+
+    let s1 = run_ok(
+        &matter,
+        &job1.id,
+        &ProduceParams {
+            name: Some("SameName".into()),
+            ..Default::default()
+        },
+    );
+    let first_root = s1.output_root.clone();
+    let first_native = camino::Utf8Path::new(&first_root)
+        .join("NATIVES")
+        .join("PROD000001.bin");
+    assert_eq!(
+        fs::read(first_native.as_std_path()).unwrap(),
+        b"first-volume-native"
+    );
+
+    // Second production with same default name must not overwrite the first volume.
+    let job2 = matter.create_job(JOB_KIND_PRODUCE).expect("job2");
+    // Need another in_review item (or same corpus still has the item).
+    let s2 = run_ok(
+        &matter,
+        &job2.id,
+        &ProduceParams {
+            name: Some("SameName".into()),
+            ..Default::default()
+        },
+    );
+    assert_ne!(
+        s1.output_root, s2.output_root,
+        "colliding default name must allocate a unique output root"
+    );
+    // First volume intact.
+    assert_eq!(
+        fs::read(first_native.as_std_path()).unwrap(),
+        b"first-volume-native",
+        "prior volume must not be clobbered"
+    );
+
+    // Explicit output_dir pointing at the first complete volume must fail closed.
+    let job3 = matter.create_job(JOB_KIND_PRODUCE).expect("job3");
+    let err = run_produce(
+        &matter,
+        &job3.id,
+        &ProduceParams {
+            name: Some("ExplicitCollide".into()),
+            output_dir: Some(first_root.clone()),
+            ..Default::default()
+        },
+        None,
+        |_| {},
+    );
+    match err {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.to_ascii_lowercase().contains("non-empty")
+                    || msg.to_ascii_lowercase().contains("overwrite")
+                    || msg.to_ascii_lowercase().contains("output_dir"),
+                "expected collision error, got: {msg}"
+            );
+        }
+        Ok(other) => panic!("expected hard error for non-empty output_dir, got {other:?}"),
+    }
+    // Still intact after rejected collision.
+    assert_eq!(
+        fs::read(first_native.as_std_path()).unwrap(),
+        b"first-volume-native"
+    );
+}

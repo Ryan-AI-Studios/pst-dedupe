@@ -17,7 +17,7 @@ use crate::layout::{
     PRODUCTIONS_DIR,
 };
 use crate::params::{ProduceParams, SCOPE_ITEM_IDS, SCOPE_REVIEW_CORPUS};
-use crate::resolve::{resolve_native, resolve_text};
+use crate::resolve::{is_email_like, load_body_for_eml, resolve_native, resolve_text};
 
 /// Job kind string for process-runner.
 pub const JOB_KIND_PRODUCE: &str = "produce";
@@ -179,11 +179,23 @@ pub fn run_produce(
             }
         }
         Err(e) => {
+            // Best-effort: mark production_set failed and include counts from checkpoint.
+            let fail_summary = mark_failed_from_checkpoint(matter, job_id);
             if let Err(ae) = matter.append_audit(AuditEventInput {
                 actor: "system".into(),
                 action: "produce.fail".into(),
                 entity: format!("job:{job_id}"),
-                params_json: json!({ "error": e.to_string() }).to_string(),
+                params_json: json!({
+                    "error": e.to_string(),
+                    "selected": fail_summary.selected_count,
+                    "produced": fail_summary.produced_count,
+                    "skipped_withheld": fail_summary.skipped_withheld,
+                    "skipped_other": fail_summary.skipped_other,
+                    "errors": fail_summary.error_count,
+                    "production_set_id": fail_summary.production_set_id,
+                    "output_root": fail_summary.output_root,
+                })
+                .to_string(),
                 tool_version: env!("CARGO_PKG_VERSION").into(),
             }) {
                 return Err(ProduceError::Other(format!(
@@ -194,6 +206,23 @@ pub fn run_produce(
     }
 
     result
+}
+
+/// On hard `Err` from the inner run, mark any known production set as `failed`
+/// and return the best-known summary for the audit payload.
+fn mark_failed_from_checkpoint(matter: &Matter, job_id: &str) -> ProduceSummary {
+    let Ok(Some(cursor)) = load_prior_checkpoint(matter, job_id) else {
+        return ProduceSummary::default();
+    };
+    if !cursor.production_set_id.is_empty() {
+        let _ = update_production_set_status(
+            matter,
+            &cursor.production_set_id,
+            "failed",
+            cursor.next_seq,
+        );
+    }
+    summary_from_cursor(&cursor)
 }
 
 fn load_prior_checkpoint(matter: &Matter, job_id: &str) -> Result<Option<CheckpointCursor>> {
@@ -333,8 +362,22 @@ fn run_produce_inner(
     let layout = VolumeLayout::create(camino::Utf8Path::new(&cursor.output_root))?;
     // Index existing rows.jsonl so resume after crash-between-append-and-checkpoint
     // does not re-produce / re-append (idempotent by ITEM_ID).
-    let jsonl_by_item = index_rows_jsonl_by_item_id(&layout)?;
+    let mut jsonl_by_item = index_rows_jsonl_by_item_id(&layout)?;
     let mut done: HashSet<String> = cursor.done_item_ids.iter().cloned().collect();
+
+    // Late-withhold sweep: a hold asserted after produce/pause must purge any
+    // prior JSONL row and artifacts before recovery or finalize includes them.
+    if let Some(failed) = apply_late_withhold_sweep(
+        matter,
+        params,
+        &layout,
+        &mut cursor,
+        &mut jsonl_by_item,
+        &mut done,
+    )? {
+        return Ok(failed);
+    }
+
     let total = cursor.ordered_ids.len();
     let mut offset = cursor.cursor_index as usize;
     if offset > total {
@@ -365,22 +408,81 @@ fn run_produce_inner(
             continue;
         }
 
-        // Crash window recovery: JSONL already has a complete row for this ITEM_ID
-        // (append succeeded, checkpoint did not). Reuse that control; do not re-produce.
-        if let Some(existing) = jsonl_by_item.get(&item_id) {
-            recover_done_from_existing_row(
-                &mut cursor,
-                &mut done,
-                params.bates_prefix_clean(),
+        // Withhold gate first — also covers late withhold after a prior produce of this item.
+        // Must run before JSONL recovery so a hold asserted between pause and resume never
+        // leaves the item in the final DAT/NATIVES/TEXT.
+        if matter.item_is_withheld(&item_id)? {
+            if params.fail_if_withheld {
+                // Drop any recovered artifacts/JSONL so partial volumes are not left dirty.
+                if let Some(existing) = jsonl_by_item.remove(&item_id) {
+                    let _ = remove_row_artifacts(&layout, &existing);
+                    rewrite_rows_jsonl_excluding(&layout, &item_id)?;
+                }
+                update_production_set_status(
+                    matter,
+                    &cursor.production_set_id,
+                    "failed",
+                    cursor.next_seq,
+                )?;
+                return Ok(ProduceOutcome::Failed {
+                    message: format!(
+                        "fail_if_withheld: item {item_id} is withheld; aborting production"
+                    ),
+                    summary: summary_from_cursor(&cursor),
+                });
+            }
+            // Invalidate any prior JSONL/native/text for this control.
+            if let Some(existing) = jsonl_by_item.remove(&item_id) {
+                let _ = remove_row_artifacts(&layout, &existing);
+                rewrite_rows_jsonl_excluding(&layout, &item_id)?;
+            }
+            cursor.skipped_withheld += 1;
+            record_production_item(
+                matter,
+                &cursor.production_set_id,
                 &item_id,
-                &existing.control_number,
-            );
+                "",
+                None,
+                None,
+                "skipped",
+                Some("withheld"),
+                None,
+            )?;
+            // Never write natives/text/DAT for withheld.
+            cursor.done_item_ids.push(item_id.clone());
+            done.insert(item_id);
             offset += 1;
             cursor.cursor_index = offset as u64;
             cursor.completed_count = offset as u64;
             save_checkpoint(matter, job_id, &cursor)?;
             progress(cursor.completed_count);
             continue;
+        }
+
+        // Crash window recovery: JSONL already has a complete row for this ITEM_ID
+        // (append succeeded, checkpoint did not). Reuse that control only when
+        // referenced artifacts still exist under the volume (and SHA matches when set).
+        if let Some(existing) = jsonl_by_item.get(&item_id).cloned() {
+            if recovered_artifacts_valid(&layout, &existing) {
+                recover_done_from_existing_row(
+                    &mut cursor,
+                    &mut done,
+                    params.bates_prefix_clean(),
+                    &item_id,
+                    &existing.control_number,
+                );
+                offset += 1;
+                cursor.cursor_index = offset as u64;
+                cursor.completed_count = offset as u64;
+                save_checkpoint(matter, job_id, &cursor)?;
+                progress(cursor.completed_count);
+                continue;
+            }
+            // Invalid / missing artifacts: drop the stale JSONL row and re-produce.
+            jsonl_by_item.remove(&item_id);
+            let _ = remove_row_artifacts(&layout, &existing);
+            rewrite_rows_jsonl_excluding(&layout, &item_id)?;
+            // Fall through — prior control from production_items / existing row is reused.
         }
 
         // production_items status=ok without JSONL: re-use control if recorded, then re-produce
@@ -413,45 +515,6 @@ fn run_produce_inner(
                 continue;
             }
         };
-
-        // Withhold gate (per item — also covers late withhold after start).
-        if matter.item_is_withheld(&item_id)? {
-            if params.fail_if_withheld {
-                update_production_set_status(
-                    matter,
-                    &cursor.production_set_id,
-                    "failed",
-                    cursor.next_seq,
-                )?;
-                return Ok(ProduceOutcome::Failed {
-                    message: format!(
-                        "fail_if_withheld: item {item_id} is withheld; aborting production"
-                    ),
-                    summary: summary_from_cursor(&cursor),
-                });
-            }
-            cursor.skipped_withheld += 1;
-            record_production_item(
-                matter,
-                &cursor.production_set_id,
-                &item_id,
-                "",
-                None,
-                None,
-                "skipped",
-                Some("withheld"),
-                None,
-            )?;
-            // Never write natives/text/DAT for withheld.
-            cursor.done_item_ids.push(item_id.clone());
-            done.insert(item_id);
-            offset += 1;
-            cursor.cursor_index = offset as u64;
-            cursor.completed_count = offset as u64;
-            save_checkpoint(matter, job_id, &cursor)?;
-            progress(cursor.completed_count);
-            continue;
-        }
 
         // Assign control number from next_seq (monotonic; never renumber done rows).
         // If production_items already recorded ok with a control, reuse that control and
@@ -600,8 +663,35 @@ fn produce_one_item(
         }
     };
 
-    let native_result =
-        resolve_native(matter, item, params, layout.natives.as_std_path(), control)?;
+    // When synthetic EML may be generated, load production body from the correct
+    // CAS (redacted when redactions apply) so the .eml matches TEXT/.
+    let needs_eml = item
+        .native_sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+        && params.export_eml_if_missing_native
+        && is_email_like(item);
+    let eml_body = if needs_eml {
+        match load_body_for_eml(matter, item)? {
+            Ok(b) => Some(b),
+            Err(reason) => {
+                return Ok(ProducedOne::Error { message: reason });
+            }
+        }
+    } else {
+        None
+    };
+
+    let native_result = resolve_native(
+        matter,
+        item,
+        params,
+        layout.natives.as_std_path(),
+        control,
+        eml_body,
+    )?;
 
     let (native_art, native_relpath, file_ext, mime, size, sha) = match native_result {
         Ok(art) => {
@@ -866,6 +956,184 @@ fn recover_done_from_existing_row(
         cursor.done_item_ids.push(item_id.to_string());
         done.insert(item_id.to_string());
     }
+}
+
+/// Purge produced artifacts/JSONL for any selected item that is now withheld.
+///
+/// Returns `Some(Failed)` when `fail_if_withheld` trips; otherwise updates cursor
+/// counts and records `production_items` as skipped withheld.
+fn apply_late_withhold_sweep(
+    matter: &Matter,
+    params: &ProduceParams,
+    layout: &VolumeLayout,
+    cursor: &mut CheckpointCursor,
+    jsonl_by_item: &mut HashMap<String, LoadRow>,
+    done: &mut HashSet<String>,
+) -> Result<Option<ProduceOutcome>> {
+    let ids: Vec<String> = cursor.ordered_ids.clone();
+    for item_id in ids {
+        if !matter.item_is_withheld(&item_id)? {
+            continue;
+        }
+        if params.fail_if_withheld {
+            if let Some(existing) = jsonl_by_item.remove(&item_id) {
+                let _ = remove_row_artifacts(layout, &existing);
+                rewrite_rows_jsonl_excluding(layout, &item_id)?;
+            }
+            update_production_set_status(
+                matter,
+                &cursor.production_set_id,
+                "failed",
+                cursor.next_seq,
+            )?;
+            return Ok(Some(ProduceOutcome::Failed {
+                message: format!(
+                    "fail_if_withheld: item {item_id} is withheld; aborting production"
+                ),
+                summary: summary_from_cursor(cursor),
+            }));
+        }
+
+        let had_jsonl = jsonl_by_item.contains_key(&item_id);
+        let was_ok =
+            production_item_ok_control(matter, &cursor.production_set_id, &item_id)?.is_some();
+        if let Some(existing) = jsonl_by_item.remove(&item_id) {
+            let _ = remove_row_artifacts(layout, &existing);
+            rewrite_rows_jsonl_excluding(layout, &item_id)?;
+        }
+        // Un-count as produced when we previously packaged this item.
+        if (had_jsonl || was_ok) && cursor.produced_count > 0 {
+            cursor.produced_count -= 1;
+        }
+        cursor.skipped_withheld += 1;
+        record_production_item(
+            matter,
+            &cursor.production_set_id,
+            &item_id,
+            "",
+            None,
+            None,
+            "skipped",
+            Some("withheld"),
+            None,
+        )?;
+        if !done.contains(&item_id) {
+            cursor.done_item_ids.push(item_id.clone());
+            done.insert(item_id);
+        }
+    }
+    Ok(None)
+}
+
+/// Validate that non-empty NATIVE_PATH / TEXT_PATH from a recovered JSONL row
+/// resolve under the volume root, and that SHA256 matches the native file when set.
+fn recovered_artifacts_valid(layout: &VolumeLayout, row: &LoadRow) -> bool {
+    validate_recovered_artifacts(layout, row).is_ok()
+}
+
+fn validate_recovered_artifacts(layout: &VolumeLayout, row: &LoadRow) -> Result<()> {
+    if !row.native_path.trim().is_empty() {
+        let abs = volume_rel_to_abs(layout, &row.native_path)?;
+        if !abs.exists() {
+            return Err(ProduceError::Other(format!(
+                "missing native artifact for recovered row: {}",
+                row.native_path
+            )));
+        }
+        if !row.sha256.trim().is_empty() {
+            let bytes = std::fs::read(&abs)?;
+            let disk_sha = {
+                let d = Sha256::digest(&bytes);
+                d.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            };
+            if !disk_sha.eq_ignore_ascii_case(row.sha256.trim()) {
+                return Err(ProduceError::Other(format!(
+                    "SHA256 mismatch for recovered native {}: dat={} disk={}",
+                    row.native_path, row.sha256, disk_sha
+                )));
+            }
+            if !row.file_size.trim().is_empty() {
+                if let Ok(expected) = row.file_size.trim().parse::<u64>() {
+                    if expected != bytes.len() as u64 {
+                        return Err(ProduceError::Other(format!(
+                            "size mismatch for recovered native {}: dat={} disk={}",
+                            row.native_path,
+                            expected,
+                            bytes.len()
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    if !row.text_path.trim().is_empty() {
+        let abs = volume_rel_to_abs(layout, &row.text_path)?;
+        if !abs.exists() {
+            return Err(ProduceError::Other(format!(
+                "missing text artifact for recovered row: {}",
+                row.text_path
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Convert a DAT-style relative path (`NATIVES\…` / `TEXT\…`) to an absolute path
+/// under the volume root.
+fn volume_rel_to_abs(layout: &VolumeLayout, rel: &str) -> Result<std::path::PathBuf> {
+    let normalized = rel.replace('/', "\\");
+    let parts: Vec<&str> = normalized.split('\\').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return Err(ProduceError::Other("empty relative path".into()));
+    }
+    // Reject path escape attempts.
+    if parts.iter().any(|p| *p == ".." || p.contains(':')) {
+        return Err(ProduceError::Other(format!(
+            "refusing unsafe relative path: {rel}"
+        )));
+    }
+    let mut abs = layout.root.as_std_path().to_path_buf();
+    for p in parts {
+        abs.push(p);
+    }
+    Ok(abs)
+}
+
+/// Delete native/text files referenced by a recovered row (best-effort).
+fn remove_row_artifacts(layout: &VolumeLayout, row: &LoadRow) -> Result<()> {
+    if !row.native_path.trim().is_empty() {
+        if let Ok(abs) = volume_rel_to_abs(layout, &row.native_path) {
+            let _ = std::fs::remove_file(abs);
+        }
+    }
+    if !row.text_path.trim().is_empty() {
+        if let Ok(abs) = volume_rel_to_abs(layout, &row.text_path) {
+            let _ = std::fs::remove_file(abs);
+        }
+    }
+    Ok(())
+}
+
+/// Rewrite `DATA/rows.jsonl` excluding `item_id` (last-wins map already applied).
+fn rewrite_rows_jsonl_excluding(layout: &VolumeLayout, exclude_item_id: &str) -> Result<()> {
+    let rows = load_rows_from_jsonl(layout)?;
+    let path = layout.data.join("rows.jsonl");
+    // Truncate and rewrite remaining rows.
+    use std::io::Write;
+    let mut f = std::fs::File::create(path.as_std_path())?;
+    for row in rows {
+        if row.item_id == exclude_item_id {
+            continue;
+        }
+        let mut map = serde_json::Map::new();
+        for (name, val) in crate::dat::DAT_FIELDS.iter().zip(row.field_values().iter()) {
+            map.insert((*name).to_string(), json!(val));
+        }
+        let line = serde_json::to_string(&serde_json::Value::Object(map))?;
+        writeln!(f, "{line}")?;
+    }
+    f.flush()?;
+    Ok(())
 }
 
 fn advance_next_seq_for_control(cursor: &mut CheckpointCursor, prefix: &str, control: &str) {

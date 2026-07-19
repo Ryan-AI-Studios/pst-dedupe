@@ -119,13 +119,15 @@ pub fn copy_cas_native(matter: &Matter, digest: &str, dest: &Path) -> Result<Nat
 }
 
 /// Write export-only EML for email without native.
+///
+/// `body` must already be the production text (redacted when redactions apply).
+/// Callers must not pass original text when `redaction_count > 0`.
 pub fn write_synthetic_eml(
     item: &Item,
-    matter: &Matter,
     dest_dir: &Path,
     filename: &str,
+    body: String,
 ) -> Result<NativeArtifact> {
-    let body = load_body_for_eml(matter, item)?;
     let to = join_addrs_json(item.to_addrs_json.as_deref());
     let msg = EmlMessage {
         message_id: item.message_id.clone(),
@@ -152,22 +154,60 @@ pub fn write_synthetic_eml(
     })
 }
 
-fn load_body_for_eml(matter: &Matter, item: &Item) -> Result<String> {
-    if let Some(sha) = item.text_sha256.as_deref() {
-        if let Ok(b) = matter.get_bytes_capped(sha, 16 * 1024 * 1024) {
-            return Ok(String::from_utf8_lossy(&b).into_owned());
+/// Load EML body text from the correct CAS digest.
+///
+/// - `redaction_count > 0` → `redacted_text_sha256` only (fail closed if missing/unavailable)
+/// - else → `text_sha256` when present
+/// - empty body only when no digest is recorded
+///
+/// When a digest exists, CAS read failures are propagated (not swallowed as empty).
+pub fn load_body_for_eml(
+    matter: &Matter,
+    item: &Item,
+) -> Result<std::result::Result<String, String>> {
+    const CAP: u64 = 16 * 1024 * 1024;
+
+    let digest: Option<&str> = if item.redaction_count > 0 {
+        let Some(sha) = item
+            .redacted_text_sha256
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            // Never fall back to original text_sha256.
+            return Ok(Err("redacted_text_missing".into()));
+        };
+        Some(sha)
+    } else {
+        item.text_sha256
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+
+    match digest {
+        Some(sha) => {
+            let b = matter.get_bytes_capped(sha, CAP).map_err(|e| {
+                ProduceError::Other(format!("EML body CAS read failed for {sha}: {e}"))
+            })?;
+            Ok(Ok(String::from_utf8_lossy(&b).into_owned()))
         }
+        None => Ok(Ok(String::new())),
     }
-    Ok(String::new())
 }
 
 /// Resolve and write native for an item. Returns None when missing and cannot EML.
+///
+/// When generating synthetic EML, `eml_body` is used when `Some` (already-resolved
+/// production text, including redacted). When `None`, body is loaded via
+/// [`load_body_for_eml`] (fail-closed for redactions).
 pub fn resolve_native(
     matter: &Matter,
     item: &Item,
     params: &ProduceParams,
     natives_dir: &Path,
     control: &str,
+    eml_body: Option<String>,
 ) -> Result<std::result::Result<NativeArtifact, String>> {
     if let Some(sha) = item
         .native_sha256
@@ -188,8 +228,15 @@ pub fn resolve_native(
     }
 
     if params.export_eml_if_missing_native && is_email_like(item) {
+        let body = match eml_body {
+            Some(b) => b,
+            None => match load_body_for_eml(matter, item)? {
+                Ok(b) => b,
+                Err(reason) => return Ok(Err(reason)),
+            },
+        };
         let filename = format!("{control}.eml");
-        let art = write_synthetic_eml(item, matter, natives_dir, &filename)?;
+        let art = write_synthetic_eml(item, natives_dir, &filename, body)?;
         return Ok(Ok(art));
     }
 

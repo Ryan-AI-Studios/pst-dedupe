@@ -65,6 +65,13 @@ impl VolumeLayout {
 }
 
 /// Resolve default or operator-chosen output root.
+///
+/// - **Default path** (`output_dir` unset): under `exports/productions/<stamp>/`.
+///   If that folder already has production content, a unique timestamp suffix is
+///   appended so a prior complete volume is never silently overwritten.
+/// - **Explicit `output_dir`**: rejected when the directory is non-empty with
+///   production content (NATIVES/TEXT/DATA load files). Incomplete resume of the
+///   *same* job reuses `cursor.output_root` and never calls this function.
 pub fn resolve_output_root(matter: &Matter, params: &ProduceParams) -> Result<Utf8PathBuf> {
     if let Some(dir) = params
         .output_dir
@@ -72,14 +79,68 @@ pub fn resolve_output_root(matter: &Matter, params: &ProduceParams) -> Result<Ut
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        return Ok(Utf8PathBuf::from(dir));
+        let root = Utf8PathBuf::from(dir);
+        if volume_has_production_content(&root) {
+            return Err(crate::error::ProduceError::Other(format!(
+                "output_dir '{}' is non-empty (contains prior production content); \
+                 refuse to overwrite. Choose an empty directory or omit output_dir \
+                 for a unique exports/productions path",
+                root
+            )));
+        }
+        return Ok(root);
     }
     let stamp = production_stamp(params);
-    Ok(matter
+    let base = matter
         .root()
         .join(EXPORTS_DIR)
         .join(PRODUCTIONS_DIR)
-        .join(stamp))
+        .join(&stamp);
+    if volume_has_production_content(&base) {
+        // Unique suffix so named re-runs never clobber a prior complete volume.
+        let unique = format!("{stamp}_{}", Utc::now().timestamp_millis());
+        return Ok(matter
+            .root()
+            .join(EXPORTS_DIR)
+            .join(PRODUCTIONS_DIR)
+            .join(unique));
+    }
+    Ok(base)
+}
+
+/// Whether `root` already looks like a production volume with content that
+/// must not be silently overwritten (load files, natives, text, or mid-flight JSONL).
+pub fn volume_has_production_content(root: &Utf8Path) -> bool {
+    if !root.as_std_path().exists() {
+        return false;
+    }
+    let data = root.join(DATA_DIR);
+    if data.join("load.dat").as_std_path().exists() {
+        return true;
+    }
+    if data.join("load.csv").as_std_path().exists() {
+        return true;
+    }
+    if data.join("rows.jsonl").as_std_path().exists() {
+        return true;
+    }
+    if dir_has_any_file(&root.join(NATIVES_DIR)) {
+        return true;
+    }
+    if dir_has_any_file(&root.join(TEXT_DIR)) {
+        return true;
+    }
+    false
+}
+
+fn dir_has_any_file(dir: &Utf8Path) -> bool {
+    let std = dir.as_std_path();
+    if !std.is_dir() {
+        return false;
+    }
+    fs::read_dir(std)
+        .map(|mut it| it.next().is_some())
+        .unwrap_or(false)
 }
 
 /// Folder name: sanitized production name or UTC stamp.
