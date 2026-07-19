@@ -365,6 +365,91 @@ fn multi_vevent_resume_partial_expansion() {
     assert_eq!(parent_after.file_category.as_deref(), Some("archive"));
 }
 
+/// Distinct VEVENT UIDs that sanitize identically must still get unique children.
+#[test]
+fn multi_vevent_sanitize_uid_collision_unique_paths() {
+    // a/b and a:b both sanitize to a_b without disambiguation.
+    let ics = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\n\
+BEGIN:VEVENT\r\nUID:a/b\r\nSUMMARY:First Collision\r\n\
+DTSTART:20260718T150000Z\r\nDTEND:20260718T160000Z\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:a:b\r\nSUMMARY:Second Collision\r\n\
+DTSTART:20260719T150000Z\r\nDTEND:20260719T160000Z\r\n\
+END:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    let p = parse_ics(ics).expect("parse");
+    assert_eq!(p.events.len(), 2);
+    assert!(p.is_container);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+    let matter = Matter::create(root.join("m"), "UidCollision").unwrap();
+    let parent_native = matter.put_bytes(ics).unwrap();
+    let parent = matter
+        .insert_item(ItemInput {
+            path: Some("export/collide.ics".into()),
+            native_sha256: Some(parent_native.clone()),
+            status: item_status::EXTRACTED.into(),
+            mime_type: Some("text/calendar".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let job = matter.create_job(JOB_KIND_ICS_EXTRACT).unwrap();
+    let outcome =
+        run_ics_extract(&matter, &job.id, &IcsExtractParams::default(), None, |_| {}).expect("run");
+    match outcome {
+        IcsExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.child_count, 2, "both VEVENTs must expand");
+            assert_eq!(s.error_count, 0, "expansion must complete without error");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+
+    let children = matter.list_attachments(&parent.id).unwrap();
+    assert_eq!(children.len(), 2, "two unique children required");
+    let mut paths = std::collections::HashSet::new();
+    for c in &children {
+        let path = c.path.as_deref().expect("path");
+        assert!(
+            paths.insert(path.to_string()),
+            "duplicate child path {path}"
+        );
+        assert_eq!(c.file_category.as_deref(), Some("calendar"));
+        assert_ne!(c.native_sha256.as_deref(), Some(parent_native.as_str()));
+    }
+    let parent_after = matter.get_item(&parent.id).unwrap();
+    assert_eq!(parent_after.ics_extract_status.as_deref(), Some("ok"));
+    assert_eq!(parent_after.file_category.as_deref(), Some("archive"));
+}
+
+/// Oversized single-event native is rejected (limit) without panic.
+#[test]
+fn oversized_single_event_native_rejected() {
+    use extract_calendar::{
+        reject_oversized_single_event_native, reject_oversized_single_event_native_with_max,
+        Error as CalError, MAX_SINGLE_EVENT_NATIVE_BYTES,
+    };
+
+    // Production constant gate.
+    assert!(reject_oversized_single_event_native(MAX_SINGLE_EVENT_NATIVE_BYTES).is_ok());
+    let err = reject_oversized_single_event_native(MAX_SINGLE_EVENT_NATIVE_BYTES + 1).unwrap_err();
+    assert_eq!(err.code(), "ics_limit_exceeded");
+    match err {
+        CalError::LimitExceeded { message, .. } => {
+            assert!(message.contains("single-event"), "{message}");
+            assert!(message.contains(&format!("{}", MAX_SINGLE_EVENT_NATIVE_BYTES + 1)));
+        }
+        other => panic!("expected LimitExceeded, got {other:?}"),
+    }
+
+    // Injectable max for boundary tests (used by container child CAS put gate).
+    assert!(reject_oversized_single_event_native_with_max(64, 64).is_ok());
+    let err = reject_oversized_single_event_native_with_max(65, 64).unwrap_err();
+    assert_eq!(err.code(), "ics_limit_exceeded");
+    assert!(!err.short_message().is_empty());
+}
+
 /// Force re-extract must upsert by path — child count stays == VEVENT count.
 #[test]
 fn multi_vevent_force_twice_no_duplicates() {

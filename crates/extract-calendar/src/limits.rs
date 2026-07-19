@@ -9,6 +9,12 @@ pub const MAX_VEVENTS: usize = 10_000;
 /// Max extracted plain-text output per event (2 MiB).
 pub const MAX_EXTRACTED_TEXT_BYTES: usize = 2 * 1024 * 1024;
 
+/// Max single-event (child) native ICS size written to CAS (5 MiB).
+///
+/// Container input may be up to [`MAX_NATIVE_INPUT_BYTES`], but each isolated
+/// VEVENT child blob must stay small for produce safety and storage bounds.
+pub const MAX_SINGLE_EVENT_NATIVE_BYTES: usize = 5 * 1024 * 1024;
+
 /// Marker appended when text is truncated at the output cap.
 pub const TRUNCATION_MARKER: &str = "\n[… truncated …]\n";
 

@@ -42,12 +42,13 @@ pub use extract::{
     parse_ics_with_limits, CalendarEventFields, ParsedIcs, ParsedVEvent,
 };
 pub use limits::{
-    methods, status, MAX_EXTRACTED_TEXT_BYTES, MAX_NATIVE_INPUT_BYTES, MAX_VEVENTS,
-    TRUNCATION_MARKER,
+    methods, status, MAX_EXTRACTED_TEXT_BYTES, MAX_NATIVE_INPUT_BYTES,
+    MAX_SINGLE_EVENT_NATIVE_BYTES, MAX_VEVENTS, TRUNCATION_MARKER,
 };
 pub use params::IcsExtractParams;
 pub use run::{
-    reject_oversized_native_len, reject_oversized_native_len_with_max, run_ics_extract,
-    IcsExtractOutcome, IcsExtractSummary, ICS_EXTRACT_STAGE, JOB_KIND_ICS_EXTRACT,
+    reject_oversized_native_len, reject_oversized_native_len_with_max,
+    reject_oversized_single_event_native, reject_oversized_single_event_native_with_max,
+    run_ics_extract, IcsExtractOutcome, IcsExtractSummary, ICS_EXTRACT_STAGE, JOB_KIND_ICS_EXTRACT,
 };
 pub use text::synthesize_calendar_review_text;

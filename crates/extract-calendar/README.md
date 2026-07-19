@@ -23,7 +23,7 @@ of a single meeting would package the whole export (data-breach class failure).
 | Rule | Behavior |
 |---|---|
 | Multi-VEVENT source | Parent becomes `file_category=**archive**`, native = full file digest |
-| Per VEVENT | Child `role=attachment`, path `{parent}!/{uid\|vevent-N}.ics` |
+| Per VEVENT | Child `role=attachment`, path `{parent}!/{safe_uid}.ics` (collision → hash/index suffix) |
 | Child native | **Standalone single-event ICS** CAS blob (one VEVENT only) |
 | Single-VEVENT file | Leaf item refined to `file_category=calendar`; original or single-event native OK |
 | RRULE | `cal_is_recurring=1`; **do not expand** |
@@ -39,6 +39,7 @@ of a single meeting would package the whole export (data-breach class failure).
 | `TZID=America/New_York` etc. | Resolved via **chrono-tz** → RFC3339 **with numeric offset** |
 | All-day `DATE` | `cal_all_day=1`; start stored as UTC midnight of that date |
 | Unknown TZID / floating | `cal_start_at` **null**, `extra_json.cal_tz_unresolved=1` — **no invented offset** |
+| Ambiguous local (DST fold) | `cal_start_at` **null**, `extra_json.cal_tz_ambiguous=1` — **no invented offset** |
 
 DST test: same TZID mid-summer vs mid-winter → different offsets.
 
@@ -47,9 +48,13 @@ DST test: same TZID mid-summer vs mid-winter → different offsets.
 | Limit | Default |
 |---|---|
 | Max native input | 50 MiB |
+| Max single-event child native | 5 MiB |
 | Max VEVENTs | 10_000 |
 | Max review text / event | 2 MiB |
 | Panic isolation | `catch_unwind` per file |
+
+Oversized single-event natives are rejected with `ics_limit_exceeded` (retryable
+item error; no panic).
 
 ## Job: `ics_extract`
 

@@ -674,6 +674,11 @@ fn extract_one_message(
 
     let cal_start_at = extracted.start_date.and_then(filetime_to_rfc3339);
     let cal_end_at = extracted.end_date.and_then(filetime_to_rfc3339);
+    let cal_attendees_json = if is_calendar {
+        calendar_attendees_json(&to, &cc)
+    } else {
+        None
+    };
 
     let mut sent_at = extracted.submit_time.and_then(filetime_to_rfc3339);
     let received_at = extracted.delivery_time.and_then(filetime_to_rfc3339);
@@ -684,10 +689,17 @@ fn extract_one_message(
 
     let body_raw = extracted.body_text.clone().unwrap_or_default();
     // Calendar review text: structured summary + description (spec §3.6).
+    // Attendees line: DisplayTo + DisplayCc (best-effort).
     let display_body = if is_calendar {
+        let mut attendees_for_text = to.clone();
+        for c in &cc {
+            if !attendees_for_text.iter().any(|a| a == c) {
+                attendees_for_text.push(c.clone());
+            }
+        }
         synthesize_calendar_review_text(
             &extracted,
-            &to,
+            &attendees_for_text,
             cal_start_at.as_deref(),
             cal_end_at.as_deref(),
         )
@@ -797,6 +809,7 @@ fn extract_one_message(
             None
         },
         cal_organizer: if is_calendar { from_addr.clone() } else { None },
+        cal_attendees_json: cal_attendees_json.clone(),
         cal_extract_method: cat.cal_extract_method.map(|s| s.into()),
         extra_json: Some(
             json!({
@@ -1090,6 +1103,38 @@ fn map_pst_message_category(message_class: Option<&str>) -> PstMessageCategoryMa
     }
 }
 
+/// Serialize DisplayTo / DisplayCc into `cal_attendees_json` (spec §3.1 / §3.3).
+///
+/// Best-effort shape: `[{ "addr", "name?", "role?", "partstat?" }, …]`.
+/// PST Display* strings yield addresses only; role/partstat omitted when unknown.
+fn calendar_attendees_json(to: &[String], cc: &[String]) -> Option<String> {
+    let mut arr = Vec::new();
+    for addr in to {
+        if addr.is_empty() {
+            continue;
+        }
+        arr.push(json!({ "addr": addr }));
+    }
+    for addr in cc {
+        if addr.is_empty() {
+            continue;
+        }
+        // Avoid duplicate when the same person appears on To and Cc.
+        if arr
+            .iter()
+            .any(|v| v.get("addr").and_then(|a| a.as_str()) == Some(addr.as_str()))
+        {
+            continue;
+        }
+        arr.push(json!({ "addr": addr }));
+    }
+    if arr.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&arr).unwrap_or_default())
+    }
+}
+
 /// Synthesize review plain-text for calendar items (spec §3.6).
 fn synthesize_calendar_review_text(
     extracted: &ExtractedMessage,
@@ -1304,8 +1349,57 @@ mod tests {
         assert!(text.contains("Where: Room 1"));
         assert!(text.contains("Class: IPM.Appointment"));
         assert!(text.contains("Bring notes"));
+        assert!(text.contains("Attendees: a@ex.com"));
         assert!(is_calendar_message_class("IPM.Appointment"));
         assert!(!is_calendar_message_class("IPM.Note"));
+    }
+
+    #[test]
+    fn calendar_attendees_json_from_display_to_and_cc() {
+        let to = vec!["alice@ex.com".into(), "bob@ex.com".into()];
+        let cc = vec!["carol@ex.com".into(), "alice@ex.com".into()]; // dup of To
+        let json = calendar_attendees_json(&to, &cc).expect("json");
+        let arr: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(arr.len(), 3, "dedupe To/Cc: {json}");
+        let addrs: Vec<&str> = arr
+            .iter()
+            .filter_map(|o| o.get("addr").and_then(|a| a.as_str()))
+            .collect();
+        assert_eq!(addrs, vec!["alice@ex.com", "bob@ex.com", "carol@ex.com"]);
+        // Empty inputs → None (not empty array).
+        assert!(calendar_attendees_json(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn calendar_path_item_input_includes_attendees_json() {
+        // Persistence shape for calendar ItemInput: cal_attendees_json populated
+        // from DisplayTo when mapping calendar category (unit-level contract).
+        let to = parse_display_list(Some("Alice <alice@ex.com>; Bob <bob@ex.com>"));
+        let cc = parse_display_list(Some("Carol <carol@ex.com>"));
+        let cat = map_pst_message_category(Some("IPM.Appointment"));
+        assert!(cat.is_calendar);
+        let attendees = calendar_attendees_json(&to, &cc).expect("attendees");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8");
+        let matter = Matter::create(root.join("cal-att"), "CalAtt").expect("create");
+        let item = matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                file_category: Some(cat.file_category.into()),
+                cal_extract_method: cat.cal_extract_method.map(|s| s.into()),
+                cal_attendees_json: Some(attendees.clone()),
+                cal_organizer: Some("org@ex.com".into()),
+                message_class: Some("IPM.Appointment".into()),
+                to_addrs_json: Some(serde_json::to_string(&to).unwrap()),
+                ..Default::default()
+            })
+            .expect("insert");
+        let got = matter.get_item(&item.id).expect("get");
+        let json = got.cal_attendees_json.as_deref().expect("persisted json");
+        let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["addr"], "alice@ex.com");
+        assert_eq!(arr[2]["addr"], "carol@ex.com");
     }
 
     /// Spec §3.9 cases 7–8: calendar MessageClass → calendar category; Note stays email.

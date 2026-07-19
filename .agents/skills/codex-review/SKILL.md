@@ -1,7 +1,7 @@
 ---
 name: codex-review
 description: Audit an orchestrator-specified Ledgerful conductor track after implementation and internal fixes. Verify every requirement and Definition of Done, find placeholders, incomplete wiring, regressions, and weak tests, and return evidence-based findings for fix and re-review.
-----------------------------------------------
+---
 
 # Track Completion Review
 
@@ -234,14 +234,26 @@ Default full audit: `gpt-5.6-luna`, high.
 Use Luna/high only for narrow rechecks; Sol/high for security-critical work.
 
 ```powershell
-codex exec -C $PrimaryRepo -s read-only -a never `
+# Current CLI (verified 0.144.x): NO -a / --approval-policy flag on `codex exec`.
+# Read-only sandbox is -s read-only only. Do not invent -a never (fails to parse).
+codex exec -C $PrimaryRepo -s read-only `
   -m $CodexModel -c 'model_reasoning_effort="high"' `
   --add-dir "C:\dev\coordinated" --ephemeral `
   -o "$TrackDir\review.codex.md" $Prompt
 ```
 
-Repeat `--add-dir <repo>` for sibling repos. No `$null |`, `--yolo`, or native
-`codex review`.
+Repeat `--add-dir <repo>` for sibling repos.
+
+**CLI hygiene (do not regress):**
+
+* **No `-a never`** — not a valid `codex exec` option; agents must not re-add it.
+* **No `$null |`**, **no `--yolo`**, **no** `--dangerously-bypass-approvals-and-sandbox`.
+* Prefer this skill's `codex exec … -s read-only` path over native `codex review`
+  for track DoD audits (full prompt + multi-repo `--add-dir`).
+* If PowerShell mangles a long `$Prompt`, pipe via stdin: `$Prompt | codex exec … -`
+  (trailing `-` reads the prompt from stdin).
+* On Windows non-interactive hangs, redirect stdin from NUL only when not piping
+  the prompt: `cmd /c "codex exec … < NUL"`.
 
 ### Claude Fallback / Second
 

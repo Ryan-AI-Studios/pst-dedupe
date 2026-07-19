@@ -14,7 +14,7 @@ use serde_json::json;
 use crate::detect;
 use crate::error::{Error, Result};
 use crate::extract::{extract_ics_catch_unwind, ParsedIcs, ParsedVEvent};
-use crate::limits::MAX_NATIVE_INPUT_BYTES;
+use crate::limits::{MAX_NATIVE_INPUT_BYTES, MAX_SINGLE_EVENT_NATIVE_BYTES};
 use crate::params::IcsExtractParams;
 use crate::text::synthesize_calendar_review_text;
 
@@ -502,6 +502,9 @@ fn process_one(
             extra["unresolved_tzid"] = json!(t);
         }
     }
+    if ev.fields.tz_ambiguous {
+        extra["cal_tz_ambiguous"] = json!(1);
+    }
     if let Some(ref r) = ev.fields.rrule_text {
         extra["rrule"] = json!(r);
     }
@@ -631,16 +634,11 @@ fn expand_multi_event_container(
     }
 
     let mut expected_paths: HashSet<String> = HashSet::new();
+    // Track leafs reserved by this expansion so sanitize collisions get unique paths.
+    let mut reserved_leafs: HashSet<String> = HashSet::new();
 
     for ev in &parsed.events {
-        let leaf = ev
-            .fields
-            .cal_uid
-            .as_deref()
-            .filter(|u| !u.is_empty())
-            .map(sanitize_path_component)
-            .unwrap_or_else(|| format!("vevent-{}", ev.index));
-        let child_path = format!("{parent_path}!/{leaf}.ics");
+        let child_path = unique_child_path(parent_path, ev, &mut reserved_leafs);
         expected_paths.insert(child_path.clone());
 
         // Resume: keep complete children unless force rewrites them.
@@ -652,7 +650,7 @@ fn expand_multi_event_container(
             }
         }
 
-        upsert_container_child(
+        if let Err(e) = upsert_container_child(
             matter,
             cand,
             native_sha,
@@ -661,7 +659,13 @@ fn expand_multi_event_container(
             ev,
             &child_path,
             by_path.get(&child_path),
-        )?;
+        ) {
+            // Item error is retryable (status=error, source not terminal-locked).
+            record_error(matter, &cand.id, native_sha, &e)?;
+            summary.error_count += 1;
+            summary.completed_count += 1;
+            return Ok(());
+        }
         summary.child_count += 1;
     }
 
@@ -748,6 +752,7 @@ fn upsert_container_child(
     child_path: &str,
     existing: Option<&Item>,
 ) -> Result<()> {
+    reject_oversized_single_event_native(ev.single_event_ics.len())?;
     let child_native = matter.put_bytes(&ev.single_event_ics)?;
     // Produce safety: child native ≠ parent mega hash.
     debug_assert_ne!(child_native, native_sha);
@@ -770,6 +775,9 @@ fn upsert_container_child(
         if let Some(ref t) = ev.fields.unresolved_tzid {
             extra["unresolved_tzid"] = json!(t);
         }
+    }
+    if ev.fields.tz_ambiguous {
+        extra["cal_tz_ambiguous"] = json!(1);
     }
     if let Some(ref r) = ev.fields.rrule_text {
         extra["rrule"] = json!(r);
@@ -897,6 +905,59 @@ fn sanitize_path_component(s: &str) -> String {
     }
 }
 
+/// Deterministic unique child path per VEVENT.
+///
+/// Sanitization is non-injective (`a/b` and `a:b` both become `a_b`). When the
+/// sanitized leaf collides with one already reserved in this expansion, append
+/// a short digest of the raw UID (or the event index) so each VEVENT stays unique
+/// and resume-stable.
+fn unique_child_path(
+    parent_path: &str,
+    ev: &ParsedVEvent,
+    reserved_leafs: &mut HashSet<String>,
+) -> String {
+    let raw_uid = ev.fields.cal_uid.as_deref().filter(|u| !u.is_empty());
+    let base = raw_uid
+        .map(sanitize_path_component)
+        .unwrap_or_else(|| format!("vevent-{}", ev.index));
+
+    let mut leaf = base.clone();
+    if reserved_leafs.contains(&leaf) {
+        let disambig = match raw_uid {
+            Some(uid) => short_digest_hex(uid.as_bytes()),
+            None => format!("{}", ev.index),
+        };
+        leaf = format!("{base}-{disambig}");
+        if reserved_leafs.contains(&leaf) {
+            leaf = format!("{base}-{disambig}-{}", ev.index);
+        }
+    }
+    reserved_leafs.insert(leaf.clone());
+    format!("{parent_path}!/{leaf}.ics")
+}
+
+fn short_digest_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let dig = Sha256::digest(bytes);
+    // First 8 hex chars of sha256 — enough for path disambiguation.
+    dig.iter().take(4).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Reject oversized single-event native before CAS put.
+pub fn reject_oversized_single_event_native(len: usize) -> Result<()> {
+    reject_oversized_single_event_native_with_max(len, MAX_SINGLE_EVENT_NATIVE_BYTES)
+}
+
+/// Injectable max for tests.
+pub fn reject_oversized_single_event_native_with_max(len: usize, max: usize) -> Result<()> {
+    if len > max {
+        return Err(Error::limit(format!(
+            "single-event native size {len} exceeds max {max}"
+        )));
+    }
+    Ok(())
+}
+
 fn record_error(matter: &Matter, item_id: &str, native_sha: &str, err: &Error) -> Result<()> {
     matter.apply_ics_extract(ApplyIcsExtractInput {
         item_id: item_id.into(),
@@ -959,5 +1020,63 @@ mod tests {
         assert!(reject_oversized_native_len_with_max(10, 10).is_ok());
         let err = reject_oversized_native_len_with_max(11, 10).unwrap_err();
         assert_eq!(err.code(), "ics_limit_exceeded");
+    }
+
+    #[test]
+    fn reject_oversized_single_event_native_unit() {
+        assert!(reject_oversized_single_event_native_with_max(5, 5).is_ok());
+        let err = reject_oversized_single_event_native_with_max(6, 5).unwrap_err();
+        assert_eq!(err.code(), "ics_limit_exceeded");
+        assert!(err.short_message().contains("single-event"));
+    }
+
+    #[test]
+    fn sanitize_collision_yields_distinct_leafs() {
+        // a/b and a:b both sanitize to a_b — must disambiguate.
+        let mut reserved = HashSet::new();
+        let ev0 = ParsedVEvent {
+            index: 0,
+            fields: crate::extract::CalendarEventFields {
+                cal_uid: Some("a/b".into()),
+                ..Default::default()
+            },
+            single_event_ics: Vec::new(),
+        };
+        let ev1 = ParsedVEvent {
+            index: 1,
+            fields: crate::extract::CalendarEventFields {
+                cal_uid: Some("a:b".into()),
+                ..Default::default()
+            },
+            single_event_ics: Vec::new(),
+        };
+        let p0 = unique_child_path("export.ics", &ev0, &mut reserved);
+        let p1 = unique_child_path("export.ics", &ev1, &mut reserved);
+        assert_ne!(p0, p1, "colliding sanitize must produce unique paths");
+        assert!(p0.ends_with(".ics") && p1.ends_with(".ics"));
+        assert!(p0.starts_with("export.ics!/"));
+        assert!(p1.starts_with("export.ics!/"));
+        // Second path should carry disambiguation digest.
+        assert!(
+            p1.contains('-') || p0.contains('-'),
+            "expected hash suffix on collision: {p0} / {p1}"
+        );
+    }
+
+    #[test]
+    fn unique_child_path_is_stable_for_same_uid() {
+        let mut r1 = HashSet::new();
+        let mut r2 = HashSet::new();
+        let ev = ParsedVEvent {
+            index: 0,
+            fields: crate::extract::CalendarEventFields {
+                cal_uid: Some("stable-uid@ex.com".into()),
+                ..Default::default()
+            },
+            single_event_ics: Vec::new(),
+        };
+        let a = unique_child_path("p.ics", &ev, &mut r1);
+        let b = unique_child_path("p.ics", &ev, &mut r2);
+        assert_eq!(a, b);
     }
 }

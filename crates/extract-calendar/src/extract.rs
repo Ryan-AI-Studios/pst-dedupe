@@ -34,6 +34,8 @@ pub struct CalendarEventFields {
     /// Set when TZID could not be resolved (honest null times).
     pub tz_unresolved: bool,
     pub unresolved_tzid: Option<String>,
+    /// Set when local wall time is ambiguous (DST fold) — time left null.
+    pub tz_ambiguous: bool,
 }
 
 /// One parsed VEVENT with isolated single-event ICS bytes.
@@ -64,6 +66,7 @@ struct ResolvedTime {
     all_day: bool,
     tz_unresolved: bool,
     unresolved_tzid: Option<String>,
+    tz_ambiguous: bool,
 }
 
 /// Parse ICS bytes into structured events (panic-isolated wrapper).
@@ -153,38 +156,9 @@ fn map_event(ev: &Event) -> CalendarEventFields {
         fields.cal_organizer = Some(strip_mailto(org));
     }
 
-    // Attendees
-    let attendees = ev.get_attendees();
-    let mut att_json = Vec::new();
-    let mut addrs = Vec::new();
-    for a in attendees {
-        // Attendee Display: try common accessors via property string form.
-        let raw = format!("{a:?}");
-        let _ = raw; // Debug only fallback
-    }
-    // Prefer multi_properties ATTENDEE values
-    if let Some(props) = ev.multi_properties().get("ATTENDEE") {
-        for p in props {
-            let val = p.value();
-            let addr = strip_mailto(val);
-            addrs.push(addr.clone());
-            let mut obj = json!({ "addr": addr });
-            if let Some(cn) = p.params().get("CN") {
-                obj["name"] = json!(cn.value());
-            }
-            if let Some(role) = p.params().get("ROLE") {
-                obj["role"] = json!(role.value());
-            }
-            if let Some(ps) = p.params().get("PARTSTAT") {
-                obj["partstat"] = json!(ps.value());
-            }
-            att_json.push(obj);
-        }
-    } else if let Some(val) = ev.property_value("ATTENDEE") {
-        let addr = strip_mailto(val);
-        addrs.push(addr.clone());
-        att_json.push(json!({ "addr": addr }));
-    }
+    // Attendees — multi ATTENDEE via multi_properties, then structured
+    // get_attendees(), then single property_value (never drop multi silently).
+    let (att_json, addrs) = collect_attendees(ev);
     if !att_json.is_empty() {
         fields.cal_attendees_json = Some(serde_json::to_string(&att_json).unwrap_or_default());
     }
@@ -227,8 +201,92 @@ fn map_event(ev: &Event) -> CalendarEventFields {
     }
     fields.tz_unresolved = start.tz_unresolved || end.tz_unresolved;
     fields.unresolved_tzid = start.unresolved_tzid.or(end.unresolved_tzid);
+    fields.tz_ambiguous = start.tz_ambiguous || end.tz_ambiguous;
 
     fields
+}
+
+/// Collect ATTENDEE entries as JSON objects + address list.
+fn collect_attendees(ev: &Event) -> (Vec<serde_json::Value>, Vec<String>) {
+    let mut att_json = Vec::new();
+    let mut addrs = Vec::new();
+
+    if let Some(props) = ev.multi_properties().get("ATTENDEE") {
+        for p in props {
+            push_attendee_from_property(&mut att_json, &mut addrs, p);
+        }
+        return (att_json, addrs);
+    }
+
+    // Structured fallback: icalendar Attendee values (also multi when present).
+    let structured = ev.get_attendees();
+    if !structured.is_empty() {
+        for a in structured {
+            let addr = strip_mailto(&a.cal_address);
+            addrs.push(addr.clone());
+            let mut obj = json!({ "addr": addr });
+            if let Some(cn) = a.cn {
+                obj["name"] = json!(cn);
+            }
+            if let Some(role) = a.role {
+                obj["role"] = json!(role_str(role));
+            }
+            if let Some(ps) = a.part_stat {
+                obj["partstat"] = json!(partstat_str(ps));
+            }
+            att_json.push(obj);
+        }
+        return (att_json, addrs);
+    }
+
+    // Last resort: single ATTENDEE in ordinary properties map.
+    if let Some(val) = ev.property_value("ATTENDEE") {
+        let addr = strip_mailto(val);
+        addrs.push(addr.clone());
+        att_json.push(json!({ "addr": addr }));
+    }
+    (att_json, addrs)
+}
+
+fn push_attendee_from_property(
+    att_json: &mut Vec<serde_json::Value>,
+    addrs: &mut Vec<String>,
+    p: &icalendar::Property,
+) {
+    let addr = strip_mailto(p.value());
+    addrs.push(addr.clone());
+    let mut obj = json!({ "addr": addr });
+    if let Some(cn) = p.params().get("CN") {
+        obj["name"] = json!(cn.value());
+    }
+    if let Some(role) = p.params().get("ROLE") {
+        obj["role"] = json!(role.value());
+    }
+    if let Some(ps) = p.params().get("PARTSTAT") {
+        obj["partstat"] = json!(ps.value());
+    }
+    att_json.push(obj);
+}
+
+fn role_str(role: icalendar::Role) -> &'static str {
+    match role {
+        icalendar::Role::Chair => "CHAIR",
+        icalendar::Role::ReqParticipant => "REQ-PARTICIPANT",
+        icalendar::Role::OptParticipant => "OPT-PARTICIPANT",
+        icalendar::Role::NonParticipant => "NON-PARTICIPANT",
+    }
+}
+
+fn partstat_str(ps: icalendar::PartStat) -> &'static str {
+    match ps {
+        icalendar::PartStat::NeedsAction => "NEEDS-ACTION",
+        icalendar::PartStat::Accepted => "ACCEPTED",
+        icalendar::PartStat::Declined => "DECLINED",
+        icalendar::PartStat::Tentative => "TENTATIVE",
+        icalendar::PartStat::Delegated => "DELEGATED",
+        icalendar::PartStat::Completed => "COMPLETED",
+        icalendar::PartStat::InProcess => "IN-PROCESS",
+    }
 }
 
 fn resolve_date_perhaps(dpt: Option<DatePerhapsTime>) -> ResolvedTime {
@@ -238,6 +296,7 @@ fn resolve_date_perhaps(dpt: Option<DatePerhapsTime>) -> ResolvedTime {
             all_day: false,
             tz_unresolved: false,
             unresolved_tzid: None,
+            tz_ambiguous: false,
         };
     };
     match dpt {
@@ -252,6 +311,7 @@ fn resolve_date_perhaps(dpt: Option<DatePerhapsTime>) -> ResolvedTime {
             all_day: true,
             tz_unresolved: false,
             unresolved_tzid: None,
+            tz_ambiguous: false,
         },
         DatePerhapsTime::DateTime(cdt) => resolve_calendar_datetime(cdt),
     }
@@ -264,6 +324,7 @@ fn resolve_calendar_datetime(cdt: CalendarDateTime) -> ResolvedTime {
             all_day: false,
             tz_unresolved: false,
             unresolved_tzid: None,
+            tz_ambiguous: false,
         },
         CalendarDateTime::Floating(ndt) => {
             // Floating local time — do not invent offset; store null + flag via caller.
@@ -273,6 +334,7 @@ fn resolve_calendar_datetime(cdt: CalendarDateTime) -> ResolvedTime {
                 all_day: false,
                 tz_unresolved: true,
                 unresolved_tzid: Some("floating".into()),
+                tz_ambiguous: false,
             }
         }
         CalendarDateTime::WithTimezone { date_time, tzid } => resolve_tzid_local(date_time, &tzid),
@@ -290,19 +352,27 @@ fn resolve_tzid_local(ndt: NaiveDateTime, tzid: &str) -> ResolvedTime {
 
     match cleaned.parse::<Tz>() {
         Ok(tz) => match tz.from_local_datetime(&ndt) {
-            chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {
-                ResolvedTime {
-                    rfc3339: Some(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-                    all_day: false,
-                    tz_unresolved: false,
-                    unresolved_tzid: None,
-                }
-            }
+            chrono::LocalResult::Single(dt) => ResolvedTime {
+                rfc3339: Some(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+                all_day: false,
+                tz_unresolved: false,
+                unresolved_tzid: None,
+                tz_ambiguous: false,
+            },
+            // DST fold: do not invent an offset — leave null + ambiguity flag.
+            chrono::LocalResult::Ambiguous(_, _) => ResolvedTime {
+                rfc3339: None,
+                all_day: false,
+                tz_unresolved: true,
+                unresolved_tzid: Some(cleaned.into()),
+                tz_ambiguous: true,
+            },
             chrono::LocalResult::None => ResolvedTime {
                 rfc3339: None,
                 all_day: false,
                 tz_unresolved: true,
                 unresolved_tzid: Some(cleaned.into()),
+                tz_ambiguous: false,
             },
         },
         Err(_) => ResolvedTime {
@@ -310,6 +380,7 @@ fn resolve_tzid_local(ndt: NaiveDateTime, tzid: &str) -> ResolvedTime {
             all_day: false,
             tz_unresolved: true,
             unresolved_tzid: Some(cleaned.into()),
+            tz_ambiguous: false,
         },
     }
 }
@@ -486,5 +557,53 @@ END:VEVENT\r\nEND:VCALENDAR\r\n";
             .as_deref()
             .unwrap()
             .contains("FREQ=WEEKLY"));
+    }
+
+    #[test]
+    fn multi_attendee_json_has_n_entries() {
+        let ics = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:multi-att\r\nSUMMARY:Meet\r\n\
+DTSTART:20260718T150000Z\r\nDTEND:20260718T160000Z\r\n\
+ATTENDEE;CN=Alice;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:alice@ex.com\r\n\
+ATTENDEE;CN=Bob;ROLE=OPT-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:bob@ex.com\r\n\
+ATTENDEE;CN=Carol;PARTSTAT=DECLINED:mailto:carol@ex.com\r\n\
+END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let p = parse_ics(ics).unwrap();
+        let json = p.events[0]
+            .fields
+            .cal_attendees_json
+            .as_deref()
+            .expect("cal_attendees_json");
+        let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert_eq!(arr.len(), 3, "json={json}");
+        let addrs: Vec<&str> = arr
+            .iter()
+            .filter_map(|o| o.get("addr").and_then(|a| a.as_str()))
+            .collect();
+        assert_eq!(addrs, vec!["alice@ex.com", "bob@ex.com", "carol@ex.com"]);
+        assert_eq!(p.events[0].fields.attendee_addrs.len(), 3);
+        assert_eq!(arr[0]["name"], "Alice");
+        assert_eq!(arr[0]["role"], "REQ-PARTICIPANT");
+        assert_eq!(arr[1]["partstat"], "ACCEPTED");
+    }
+
+    #[test]
+    fn ambiguous_dst_fold_nulls_start_and_flags() {
+        // America/New_York fall-back 2025-11-02 01:30 is ambiguous (EDT then EST).
+        let ics = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:ambig\r\nSUMMARY:Fold\r\n\
+DTSTART;TZID=America/New_York:20251102T013000\r\n\
+DTEND;TZID=America/New_York:20251102T023000\r\n\
+END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let p = parse_ics(ics).unwrap();
+        let f = &p.events[0].fields;
+        assert!(
+            f.cal_start_at.is_none(),
+            "must not invent offset, got {:?}",
+            f.cal_start_at
+        );
+        assert!(f.tz_unresolved);
+        assert!(f.tz_ambiguous, "ambiguous flag required");
+        assert_eq!(f.unresolved_tzid.as_deref(), Some("America/New_York"));
     }
 }
