@@ -219,6 +219,22 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0033-10 | — | Macro-enabled .docm/.xlsm execute | Never execute; text extract best-effort only | never |
 | D-0033-11 | — | calamine still may allocate large range matrices internally | P0 mitigates with early text-cap break + native size cap; streaming sheet API if calamine adds one later | residual polish |
 
+## From track 0034-PdfExtractPreview (planned — Ready)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0034-01 | — | OCR for empty **and** low-text PDFs | P0 sets `pdf_needs_ocr=1` (zero + low text-to-page) | **0036** |
+| D-0034-02 | — | First-page / multi-page **raster preview** | **Locked deferred** — no pure-Rust full renderer in P0; future optional PDFium/MuPDF feature | residual |
+| D-0034-03 | — | PDFium / MuPDF bundled native engine | Forbidden as required P0 dep | residual optional feature |
+| D-0034-04 | — | Geometric PDF redaction burn-in | Not extract track | residual (D-0032-01) |
+| D-0034-05 | — | Multi-page interactive PDF viewer | Residual with preview engine | residual |
+| D-0034-06 | — | Password recovery / owner-password bypass | Encrypted → fail closed | never |
+| D-0034-07 | — | Adversarial glyph/font extract hardening | Document best-effort extract ≠ visual | residual |
+| D-0034-08 | — | PDF portfolio / embedded file tree | Single stream text P0 | residual |
+| D-0034-09 | P3 | Full GUI smoke Extract PDF / needs-OCR chip | Automated job + unit; operator smoke | operator / polish |
+| D-0034-10 | — | Auto-run pdf_extract after pst extract | Manual/job button P0 | residual |
+| D-0034-11 | — | Tunable MIN_TEXT_CHARS thresholds per matter | P0 fixed constants (50 total / 20 per page) | residual |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

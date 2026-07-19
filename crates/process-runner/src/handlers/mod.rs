@@ -27,6 +27,9 @@ pub mod fts;
 #[cfg(feature = "office")]
 pub mod office;
 
+#[cfg(feature = "pdf")]
+pub mod pdf;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
@@ -53,3 +56,6 @@ pub use fts::MatterFtsIndexHandler;
 
 #[cfg(feature = "office")]
 pub use office::MatterOfficeExtractHandler;
+
+#[cfg(feature = "pdf")]
+pub use pdf::MatterPdfExtractHandler;

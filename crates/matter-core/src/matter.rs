@@ -226,6 +226,16 @@ pub struct Item {
     pub office_source_native_sha256: Option<String>,
     pub office_extracted_at: Option<String>,
     pub office_extract_error: Option<String>,
+    // --- schema v15 (pdf extract) ---
+    /// `ok` | `low_text` | `empty` | `skipped` | `error` | NULL never attempted.
+    pub pdf_extract_status: Option<String>,
+    pub pdf_extract_method: Option<String>,
+    pub pdf_source_native_sha256: Option<String>,
+    pub pdf_extracted_at: Option<String>,
+    pub pdf_extract_error: Option<String>,
+    pub pdf_page_count: Option<i64>,
+    /// 0/1 — empty or low-text OCR candidate (0036).
+    pub pdf_needs_ocr: i64,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -4638,7 +4648,9 @@ const ITEM_COLUMNS: &str =
     in_review, review_set_id, review_order, promoted_at, promote_job_id, promote_policy, \
     redaction_count, redacted_text_sha256, redacted_text_at, redacted_source_digest, \
     office_extract_status, office_extract_method, office_source_native_sha256, \
-    office_extracted_at, office_extract_error";
+    office_extracted_at, office_extract_error, \
+    pdf_extract_status, pdf_extract_method, pdf_source_native_sha256, \
+    pdf_extracted_at, pdf_extract_error, pdf_page_count, pdf_needs_ocr";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -4721,6 +4733,13 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         office_source_native_sha256: row.get(72)?,
         office_extracted_at: row.get(73)?,
         office_extract_error: row.get(74)?,
+        pdf_extract_status: row.get(75)?,
+        pdf_extract_method: row.get(76)?,
+        pdf_source_native_sha256: row.get(77)?,
+        pdf_extracted_at: row.get(78)?,
+        pdf_extract_error: row.get(79)?,
+        pdf_page_count: row.get(80)?,
+        pdf_needs_ocr: row.get::<_, Option<i64>>(81)?.unwrap_or(0),
     })
 }
 

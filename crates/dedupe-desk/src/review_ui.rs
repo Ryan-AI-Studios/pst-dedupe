@@ -130,6 +130,8 @@ pub struct FilterDraft {
     pub has_redactions: bool,
     /// `redacted_text_stale eq true` chip (track 0032).
     pub redacted_text_stale: bool,
+    /// `pdf_needs_ocr eq true` chip (track 0034).
+    pub pdf_needs_ocr: bool,
     /// Withhold hold chip (track 0031).
     pub privilege_withheld: bool,
     /// Privilege log incomplete chip (track 0031).
@@ -215,6 +217,16 @@ impl FilterDraft {
         if self.redacted_text_stale {
             conditions.push(FilterCondition {
                 field: "redacted_text_stale".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        if self.pdf_needs_ocr {
+            conditions.push(FilterCondition {
+                field: "pdf_needs_ocr".into(),
                 op: "eq".into(),
                 value: Some(serde_json::Value::Bool(true)),
                 values: None,
@@ -325,6 +337,9 @@ impl FilterDraft {
                 ("redacted_text_stale", "eq") => {
                     d.redacted_text_stale =
                         c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
+                }
+                ("pdf_needs_ocr", "eq") => {
+                    d.pdf_needs_ocr = c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
                 }
                 ("privilege_withhold", "eq") => {
                     d.privilege_withheld =
@@ -441,6 +456,8 @@ pub struct ReviewState {
     item_redaction_count: i64,
     item_redacted_text_sha256: Option<String>,
     item_redacted_source_digest: Option<String>,
+    /// PDF empty/low-text OCR candidate flag (track 0034).
+    item_pdf_needs_ocr: i64,
     /// When true, selection creates redaction (black) not highlight (yellow).
     redact_mode: bool,
     /// Reason for new redactions (ComboBox).
@@ -585,6 +602,7 @@ impl ReviewState {
         self.item_redaction_count = 0;
         self.item_redacted_text_sha256 = None;
         self.item_redacted_source_digest = None;
+        self.item_pdf_needs_ocr = 0;
         self.redact_mode = false;
         self.redact_reason = DEFAULT_REDACTION_REASON.into();
         self.redact_label.clear();
@@ -1140,6 +1158,7 @@ impl ReviewState {
         self.item_redaction_count = 0;
         self.item_redacted_text_sha256 = None;
         self.item_redacted_source_digest = None;
+        self.item_pdf_needs_ocr = 0;
         self.stale_persist_key = None;
         self.note_draft.clear();
         self.pending_highlight_id = None;
@@ -1186,6 +1205,7 @@ impl ReviewState {
                 self.item_redaction_count = 0;
                 self.item_redacted_text_sha256 = None;
                 self.item_redacted_source_digest = None;
+                self.item_pdf_needs_ocr = 0;
                 self.stale_persist_key = None;
                 self.notes_error = Some(e);
             }
@@ -1199,6 +1219,7 @@ impl ReviewState {
         self.item_redaction_count = bundle.redaction_count;
         self.item_redacted_text_sha256 = bundle.redacted_text_sha256;
         self.item_redacted_source_digest = bundle.redacted_source_digest;
+        self.item_pdf_needs_ocr = bundle.pdf_needs_ocr;
     }
 
     fn reload_privilege_for_selection(&mut self, matter_root: &Utf8Path) {
@@ -2374,6 +2395,7 @@ struct AnnotationBundle {
     redaction_count: i64,
     redacted_text_sha256: Option<String>,
     redacted_source_digest: Option<String>,
+    pdf_needs_ocr: i64,
 }
 
 fn load_notes_highlights_redactions(
@@ -2392,6 +2414,7 @@ fn load_notes_highlights_redactions(
         redaction_count: item.redaction_count,
         redacted_text_sha256: item.redacted_text_sha256,
         redacted_source_digest: item.redacted_source_digest,
+        pdf_needs_ocr: item.pdf_needs_ocr,
     })
 }
 
@@ -2980,6 +3003,9 @@ fn show_filter_bar(
             if ui.small_button("Redacted text stale").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_redacted_text_stale());
             }
+            if ui.small_button("Needs OCR").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_pdf_needs_ocr());
+            }
             if ui.small_button("Withheld").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_withheld());
             }
@@ -3012,6 +3038,13 @@ fn show_filter_bar(
                     RichText::new("active: Redacted text stale")
                         .small()
                         .color(Color32::from_rgb(180, 100, 20)),
+                );
+            }
+            if state.filter_draft.pdf_needs_ocr {
+                ui.label(
+                    RichText::new("active: Needs OCR")
+                        .small()
+                        .color(Color32::from_rgb(40, 120, 60)),
                 );
             }
         });
@@ -3395,6 +3428,12 @@ fn show_viewer(
             ui.colored_label(
                 Color32::from_rgb(180, 80, 40),
                 "Redacted text outdated — Regenerate",
+            );
+        }
+        if state.item_pdf_needs_ocr == 1 {
+            ui.colored_label(
+                Color32::from_rgb(180, 100, 20),
+                "Little or no embedded text — OCR recommended (0036).",
             );
         }
         if let Some(st) = state.notes_status.clone() {

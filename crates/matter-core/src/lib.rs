@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v14**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v15**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -22,6 +22,7 @@
 //! - **Privilege** claims + withhold holds + privilege log CSV export (0031)
 //! - **Redaction** regions + true redacted text CAS artifact (0032)
 //! - **Office extract** bookkeeping (`office_*` columns) for OOXML text (0033)
+//! - **PDF extract** bookkeeping (`pdf_*` columns, `pdf_needs_ocr`) for embedded text (0034)
 //!
 //! ## Layout
 //!
@@ -55,6 +56,7 @@ pub mod jobs;
 pub mod logical_hash;
 pub mod matter;
 pub mod office;
+pub mod pdf;
 pub mod privilege;
 pub mod redaction;
 pub mod schema;
@@ -98,6 +100,7 @@ pub use matter::{
 pub use office::{
     office_extract_status, ApplyOfficeTextInput, OfficeCandidate, OfficeExtractApplyResult,
 };
+pub use pdf::{pdf_extract_status, ApplyPdfTextInput, PdfCandidate, PdfExtractApplyResult};
 pub use privilege::{
     basis_label, csv_escape_field, join_addrs_json, path_basename, privilege_basis,
     privilege_log_format, privilege_status, FamilyPrivilegeConsistency, ItemPrivilege,

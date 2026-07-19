@@ -60,3 +60,6 @@ pub use handlers::MatterFtsIndexHandler;
 
 #[cfg(feature = "office")]
 pub use handlers::MatterOfficeExtractHandler;
+
+#[cfg(feature = "pdf")]
+pub use handlers::MatterPdfExtractHandler;

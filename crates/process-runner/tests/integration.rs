@@ -1307,3 +1307,67 @@ fn office_extract_handler_via_process_runner() {
     assert!(item.text_sha256.is_some(), "handler must write text_sha256");
     assert_eq!(item.office_extract_status.as_deref(), Some("ok"));
 }
+
+#[cfg(feature = "pdf")]
+#[test]
+fn pdf_extract_handler_via_process_runner() {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use matter_core::ItemInput;
+    use process_runner::MatterPdfExtractHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-pdf");
+
+    let mut fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fixture.pop();
+    fixture.pop();
+    fixture.push("fixtures");
+    fixture.push("pdf");
+    fixture.push("minimal.pdf");
+    let data = fs::read(&fixture).expect("fixture");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        let native = matter.put_bytes(&data).expect("put");
+        matter
+            .insert_item(ItemInput {
+                path: Some("memo.pdf".into()),
+                native_sha256: Some(native),
+                status: "extracted".into(),
+                file_category: Some("attachment".into()),
+                ..Default::default()
+            })
+            .expect("item");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterPdfExtractHandler::new()));
+
+    let params =
+        JobParams::new(serde_json::json!({ "force": false, "batch_size": 10 }).to_string());
+    let job_id = runner
+        .start(&root, "pdf_extract", params)
+        .expect("start pdf_extract");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "err={:?}",
+        job.error_summary
+    );
+    assert_eq!(job.kind, "pdf_extract");
+
+    let cands = matter
+        .list_pdf_candidates(0, 10, false)
+        .expect("candidates");
+    assert_eq!(cands.len(), 1);
+    let item = matter.get_item(&cands[0].id).expect("item");
+    assert!(item.text_sha256.is_some(), "handler must write text_sha256");
+    assert_eq!(item.pdf_extract_status.as_deref(), Some("ok"));
+    assert_eq!(item.pdf_needs_ocr, 0);
+}
