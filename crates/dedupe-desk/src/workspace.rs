@@ -306,16 +306,23 @@ fn show_overview(ui: &mut egui::Ui, app: &mut DeskApp) {
                 app.spawn_report_export(&ctx);
             }
             if app.report_export_busy {
-                ui.label(egui::RichText::new("Writing report…").italics().weak());
+                let busy = app
+                    .report_export_status
+                    .as_deref()
+                    .unwrap_or("Exporting report…");
+                ui.label(egui::RichText::new(busy).italics().weak());
             }
         });
 
-        if let Some(st) = app.report_export_status.clone() {
-            ui.label(
-                egui::RichText::new(st)
-                    .small()
-                    .color(egui::Color32::DARK_GREEN),
-            );
+        // Success path only (busy status is shown next to the button above).
+        if !app.report_export_busy {
+            if let Some(st) = app.report_export_status.clone() {
+                ui.label(
+                    egui::RichText::new(st)
+                        .small()
+                        .color(egui::Color32::DARK_GREEN),
+                );
+            }
         }
         if let Some(err) = app.report_export_error.clone() {
             ui.colored_label(

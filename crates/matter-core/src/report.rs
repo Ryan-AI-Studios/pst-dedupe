@@ -518,7 +518,8 @@ impl Matter {
             }
         }
 
-        // Sibling temp pack dir: write fully, audit, then rename → final (no partial pack).
+        // Sibling temp pack dir: write fully → rename to final → audit complete.
+        // Audit only after the published path exists so complete detail is truthful.
         let temp_dir = Utf8PathBuf::from(format!("{}.tmp", output_dir.as_str()));
         if temp_dir.exists() {
             return Err(Error::Other(format!(
@@ -535,13 +536,16 @@ impl Matter {
                     )));
                 }
                 match fs::rename(temp_dir.as_std_path(), output_dir.as_std_path()) {
-                    Ok(()) => Ok(result),
+                    Ok(()) => {
+                        // Publish succeeded — record complete against the final path.
+                        self.audit_report_export_complete(&result)?;
+                        Ok(result)
+                    }
                     Err(e) => {
-                        // Audit already recorded complete with intended final path; leave
-                        // temp in place so the pack is not lost, and surface both paths.
+                        // Leave temp so the pack is not lost; operator can recover/rename.
                         Err(Error::Other(format!(
-                            "matter report audit recorded but rename failed ({e}); \
-                             pack left at {temp_dir} (intended {output_dir})"
+                            "matter report rename failed ({e}); pack left at {temp_dir} \
+                             (intended {output_dir})"
                         )))
                     }
                 }
@@ -553,7 +557,8 @@ impl Matter {
         }
     }
 
-    /// Write pack files under `temp_dir`, audit complete with intended `output_dir`.
+    /// Write pack files under `temp_dir`. Result path is the intended final `output_dir`.
+    /// Caller renames then audits complete.
     fn export_matter_report_write_temp(
         &self,
         temp_dir: &Utf8Path,
@@ -646,19 +651,14 @@ impl Matter {
         files_written.push(README_FILE.into());
 
         // PDF intentionally not written (D-0039-01 deferred).
-        // Result path is the intended final directory (audit + return value).
-        let result = MatterReportResult {
+        // Result path is the intended final directory (audit + return value after rename).
+        Ok(MatterReportResult {
             generated_at: generated_at.clone(),
             output_dir: output_dir.to_path_buf(),
-            files_written: files_written.clone(),
+            files_written,
             overview,
             pdf_written: false,
-        };
-
-        // Audit before rename so "complete" means pack is ready; rename is the publish step.
-        self.audit_report_export_complete(&result)?;
-
-        Ok(result)
+        })
     }
 
     fn audit_report_export_complete(&self, result: &MatterReportResult) -> Result<()> {
