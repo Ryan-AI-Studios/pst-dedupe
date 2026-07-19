@@ -1,0 +1,42 @@
+# Line endings and binary safety (repo-wide).
+# Overrides local core.autocrlf so Windows CI checkouts cannot corrupt fixtures.
+# See: https://docs.github.com/en/get-started/getting-started-with-git/configuring-git-to-handle-line-endings
+
+# Default: detect text vs binary; normalize text to LF in the index.
+* text=auto
+
+# --- Source / docs (LF in the repository) ------------------------------------
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+*.csv text eol=lf
+*.ps1 text eol=lf
+*.sh text eol=lf
+*.ics text eol=lf
+
+# --- Binary fixtures / media (never EOL-convert) ------------------------------
+# Synthetic PDFs often lack NULs, so Git's heuristic may treat them as text and
+# apply CRLF smudging under core.autocrlf=true — that breaks xref offsets and
+# fails extract-pdf with "invalid file trailer" on Windows CI.
+*.pdf binary
+*.pst binary
+*.zip binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.doc binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.wasm binary

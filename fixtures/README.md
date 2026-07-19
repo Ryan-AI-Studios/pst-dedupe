@@ -19,7 +19,18 @@ See [`conductor/ROADMAP.md`](../conductor/ROADMAP.md) (Evidence & fixtures polic
 | Path | Role |
 |---|---|
 | `*.pst` | Small Unicode samples for `pst-reader` / extract tests |
+| `pdf/` | Synthetic PDFs for `extract-pdf` (must remain binary — see below) |
+| `office/` | Synthetic OOXML for `extract-office` |
+| `calendar/` | Synthetic ICS for `extract-calendar` |
 | `purview/` | Synthetic Purview-ish package (see `purview/README.md`) |
+
+## Binary fixtures and line endings
+
+Repo root [`.gitattributes`](../.gitattributes) marks `*.pdf`, `*.pst`, OOXML, and archives as **`binary`**.
+
+**Why:** synthetic PDFs often have no `NUL` bytes, so Git may treat them as text. With Windows `core.autocrlf=true` (default + GitHub `windows-latest`), checkout can insert CR bytes, break PDF xref offsets, and fail CI with `invalid file trailer` even when local tests (LF working tree) pass.
+
+Do not strip those attributes; regenerate PDFs with `cargo run -p extract-pdf --example gen_pdf_fixtures` if needed.
 
 ## Creating matters for local smoke
 
