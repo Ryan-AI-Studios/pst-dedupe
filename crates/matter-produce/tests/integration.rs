@@ -1174,6 +1174,21 @@ fn late_withhold_on_resume_excludes_from_volume() {
         "only the second item should remain produced"
     );
 
+    // Extra resume must not re-inflate skipped_withheld (idempotent audit counts).
+    let s3 = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("LateHold".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        s3.skipped_withheld, 1,
+        "multi-resume must not double-count withheld skips"
+    );
+    assert_eq!(s3.produced_count, 1);
+
     let dat = dat_text(&s2.output_root);
     assert!(
         !dat.contains(&first_id),

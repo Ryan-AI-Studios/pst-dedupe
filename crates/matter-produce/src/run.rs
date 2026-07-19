@@ -436,18 +436,21 @@ fn run_produce_inner(
                 let _ = remove_row_artifacts(&layout, &existing);
                 rewrite_rows_jsonl_excluding(&layout, &item_id)?;
             }
-            cursor.skipped_withheld += 1;
-            record_production_item(
-                matter,
-                &cursor.production_set_id,
-                &item_id,
-                "",
-                None,
-                None,
-                "skipped",
-                Some("withheld"),
-                None,
-            )?;
+            // Count once: late-withhold sweep may already have recorded this item.
+            if !production_item_is_skipped_withheld(matter, &cursor.production_set_id, &item_id)? {
+                cursor.skipped_withheld += 1;
+                record_production_item(
+                    matter,
+                    &cursor.production_set_id,
+                    &item_id,
+                    "",
+                    None,
+                    None,
+                    "skipped",
+                    Some("withheld"),
+                    None,
+                )?;
+            }
             // Never write natives/text/DAT for withheld.
             cursor.done_item_ids.push(item_id.clone());
             done.insert(item_id);
@@ -994,6 +997,8 @@ fn apply_late_withhold_sweep(
             }));
         }
 
+        let already_skipped_withheld =
+            production_item_is_skipped_withheld(matter, &cursor.production_set_id, &item_id)?;
         let had_jsonl = jsonl_by_item.contains_key(&item_id);
         let was_ok =
             production_item_ok_control(matter, &cursor.production_set_id, &item_id)?.is_some();
@@ -1005,24 +1010,41 @@ fn apply_late_withhold_sweep(
         if (had_jsonl || was_ok) && cursor.produced_count > 0 {
             cursor.produced_count -= 1;
         }
-        cursor.skipped_withheld += 1;
-        record_production_item(
-            matter,
-            &cursor.production_set_id,
-            &item_id,
-            "",
-            None,
-            None,
-            "skipped",
-            Some("withheld"),
-            None,
-        )?;
+        // Count each withheld item at most once across multi-resume sweeps.
+        if !already_skipped_withheld {
+            cursor.skipped_withheld += 1;
+            record_production_item(
+                matter,
+                &cursor.production_set_id,
+                &item_id,
+                "",
+                None,
+                None,
+                "skipped",
+                Some("withheld"),
+                None,
+            )?;
+        }
         if !done.contains(&item_id) {
             cursor.done_item_ids.push(item_id.clone());
             done.insert(item_id);
         }
     }
     Ok(None)
+}
+
+fn production_item_is_skipped_withheld(
+    matter: &Matter,
+    set_id: &str,
+    item_id: &str,
+) -> Result<bool> {
+    let mut stmt = matter.connection().prepare(
+        "SELECT 1 FROM production_items \
+         WHERE production_set_id = ?1 AND item_id = ?2 \
+           AND status = 'skipped' AND skip_reason = 'withheld' LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![set_id, item_id])?;
+    Ok(rows.next()?.is_some())
 }
 
 /// Validate that non-empty NATIVE_PATH / TEXT_PATH from a recovered JSONL row
