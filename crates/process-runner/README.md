@@ -92,8 +92,9 @@ runner.shutdown(); // or drop
 | `office_extract` | `MatterOfficeExtractHandler` | `{ "force": false, "batch_size": 50, "formats": ["docx","xlsx","pptx"] }` (all optional; defaults apply) | checkpoint `stage=office_extract` cursor |
 | `pdf_extract` | `MatterPdfExtractHandler` | `{ "force": false, "batch_size": 50 }` (all optional; defaults apply) | checkpoint `stage=pdf_extract` cursor |
 | `ocr` | `MatterOcrHandler` | `{ "force": false, "batch_size": 20, "lang": "eng", "max_pages": 500, "dpi": 200, "enabled": false, "engine": "tesseract", ... }` — fails closed when `enabled` is false | checkpoint `stage=ocr` cursor |
+| `classify` | `MatterClassifyHandler` | `{ "force": false, "batch_size": 100, "use_magic": true, "in_review_only": false, "respect_extractor_refine": true }` | checkpoint `stage=classify` cursor |
 
-Register additional handlers with `JobHandler` for future tracks. Features `fts`, `office`, `pdf`, `calendar`, and `ocr` are **default-on**.
+Register additional handlers with `JobHandler` for future tracks. Features `fts`, `office`, `pdf`, `calendar`, `ocr`, and `classify` are **default-on**.
 
 ## Option C (job-id injection)
 

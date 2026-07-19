@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 matter-core = { path = "../matter-core" }
+file-category = { path = "../file-category" }
 calamine = "0.36.0"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 quick-xml = "0.41"

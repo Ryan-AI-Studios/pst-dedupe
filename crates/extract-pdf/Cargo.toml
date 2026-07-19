@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 matter-core = { path = "../matter-core" }
+file-category = { path = "../file-category" }
 # Text extract; re-exports lopdf Document (lopdf 0.42.x transitive).
 pdf-extract = "0.12.0"
 thiserror = { workspace = true }

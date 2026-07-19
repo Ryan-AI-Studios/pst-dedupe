@@ -36,6 +36,9 @@ pub mod ics;
 #[cfg(feature = "ocr")]
 pub mod ocr;
 
+#[cfg(feature = "classify")]
+pub mod classify;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
@@ -71,3 +74,6 @@ pub use ics::MatterIcsExtractHandler;
 
 #[cfg(feature = "ocr")]
 pub use ocr::MatterOcrHandler;
+
+#[cfg(feature = "classify")]
+pub use classify::MatterClassifyHandler;

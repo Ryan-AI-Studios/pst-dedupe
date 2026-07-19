@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 17;
+pub const SCHEMA_VERSION: u32 = 18;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -31,6 +31,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (15, MIGRATION_V15),
     (16, MIGRATION_V16),
     (17, MIGRATION_V17),
+    (18, MIGRATION_V18),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -559,6 +560,18 @@ ALTER TABLE items ADD COLUMN ocr_error TEXT;
 ALTER TABLE items ADD COLUMN ocr_confidence REAL;
 "#;
 
+/// Schema v18: file-category bookkeeping (track 0037).
+///
+/// Records method/taxonomy/status for the `taxonomy_v1` classifier.
+/// `file_category` remains the single filter/cull field.
+const MIGRATION_V18: &str = r#"
+ALTER TABLE items ADD COLUMN category_method TEXT;
+ALTER TABLE items ADD COLUMN category_taxonomy TEXT;
+ALTER TABLE items ADD COLUMN category_status TEXT;
+ALTER TABLE items ADD COLUMN category_error TEXT;
+ALTER TABLE items ADD COLUMN categorized_at TEXT;
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -655,7 +668,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 17);
+        assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v10 FTS bookkeeping columns present
@@ -1540,7 +1553,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v7 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 17);
+        assert_eq!(v, SCHEMA_VERSION);
 
         let in_review: Option<i64> = conn
             .query_row(
@@ -1648,7 +1661,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v8 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 17);
+        assert_eq!(v, SCHEMA_VERSION);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1863,7 +1876,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v10 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 17);
+        assert_eq!(v, SCHEMA_VERSION);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1991,7 +2004,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v11 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 17);
+        assert_eq!(v, SCHEMA_VERSION);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -2110,7 +2123,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v12 to v13");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 17);
+        assert_eq!(v, SCHEMA_VERSION);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -2208,7 +2221,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v13 to v14");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 17);
+        assert_eq!(v, SCHEMA_VERSION);
 
         for col in [
             "office_extract_status",
@@ -2299,7 +2312,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v14 to v15");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 17);
+        assert_eq!(v, SCHEMA_VERSION);
 
         for col in [
             "pdf_extract_status",
@@ -2394,7 +2407,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v15 to v16");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 17);
+        assert_eq!(v, SCHEMA_VERSION);
 
         for col in [
             "message_class",
@@ -2498,9 +2511,9 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v16 to v17");
+        let v = migrate(&conn).expect("migrate v16 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 17);
+        assert_eq!(v, 18);
 
         for col in [
             "ocr_status",
@@ -2512,6 +2525,11 @@ mod tests {
             "ocr_at",
             "ocr_error",
             "ocr_confidence",
+            "category_method",
+            "category_taxonomy",
+            "category_status",
+            "category_error",
+            "categorized_at",
         ] {
             let has: bool = conn
                 .query_row(
@@ -2534,6 +2552,15 @@ mod tests {
             .expect("ocr_status");
         assert!(status.is_none());
 
+        let cat_status: Option<String> = conn
+            .query_row(
+                "SELECT category_status FROM items WHERE id = 'itm_ocr'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("category_status");
+        assert!(cat_status.is_none());
+
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_ocr'", [], |row| {
                 row.get(0)
@@ -2544,6 +2571,86 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v16'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v17_to_v18_adds_category_columns() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        // Apply through v17 only, then migrate to v18.
+        for &(target, sql) in MIGRATIONS {
+            if target > 17 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v17', 'V17 Matter', '2020-01-01T00:00:00Z', 17, '/tmp/v17')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, text_sha256, in_review, \
+             fts_text_sha256, note_count, highlight_count, privilege_withhold, redaction_count, \
+             pdf_needs_ocr) \
+             VALUES ('itm_cat', 'mat_v17', NULL, NULL, 'a.pdf', \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+             NULL, NULL, 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'attachment', 'attachment', 0, NULL, 0, NULL, 0, 0, 0, 0, 0)",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v17 to v18");
+        assert_eq!(v, 18);
+        assert_eq!(v, SCHEMA_VERSION);
+
+        for col in [
+            "category_method",
+            "category_taxonomy",
+            "category_status",
+            "category_error",
+            "categorized_at",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected column {col}");
+        }
+
+        let fc: Option<String> = conn
+            .query_row(
+                "SELECT file_category FROM items WHERE id = 'itm_cat'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fc");
+        assert_eq!(fc.as_deref(), Some("attachment"));
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v17'",
                 [],
                 |row| row.get(0),
             )

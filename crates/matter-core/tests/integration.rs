@@ -381,7 +381,7 @@ fn schema_v12_on_create() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-v12");
     let matter = Matter::create(&root, "V12").expect("create");
-    assert_eq!(SCHEMA_VERSION, 17);
+    assert_eq!(SCHEMA_VERSION, 18);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     assert_eq!(matter.info().expect("info").schema_version, SCHEMA_VERSION);
     // Default coding catalog seeded on create.
@@ -1890,4 +1890,111 @@ fn list_review_thin_family_parent_before_child() {
     assert_eq!(rows[1].id, child.id);
     assert_eq!(rows[1].parent_item_id.as_deref(), Some(parent.id.as_str()));
     assert_eq!(rows[1].family_id.as_deref(), Some(family.id.as_str()));
+}
+
+/// Keyset `list_classify_candidates`: force vs candidate predicate + resume cursor.
+#[test]
+fn list_classify_candidates_keyset_force_and_resume() {
+    use matter_core::{item_status, ApplyClassificationInput, CategoryApplyResult, ItemInput};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-classify-list");
+    let matter = Matter::create(&root, "ClassifyList").expect("create");
+
+    // Decisive taxonomy_v1 pdf — non-force must omit.
+    let good = matter
+        .insert_item(ItemInput {
+            path: Some("good.pdf".into()),
+            status: item_status::EXTRACTED.into(),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        })
+        .expect("good");
+    let applied = matter
+        .apply_classification(ApplyClassificationInput {
+            item_id: good.id.clone(),
+            force: true,
+            category: "pdf".into(),
+            method: "extension".into(),
+            taxonomy: "taxonomy_v1".into(),
+            mime_type: None,
+            status: Some("ok".into()),
+            error: None,
+        })
+        .expect("apply good");
+    assert!(matches!(applied, CategoryApplyResult::Applied { .. }));
+
+    // Legacy attachment — non-force must include.
+    let legacy = matter
+        .insert_item(ItemInput {
+            path: Some("legacy.bin".into()),
+            status: item_status::EXTRACTED.into(),
+            file_category: Some("attachment".into()),
+            ..Default::default()
+        })
+        .expect("legacy");
+
+    // NULL category — non-force must include.
+    let null_cat = matter
+        .insert_item(ItemInput {
+            path: Some("unknown.dat".into()),
+            status: item_status::EXTRACTED.into(),
+            file_category: None,
+            ..Default::default()
+        })
+        .expect("null");
+
+    // Wrong taxonomy on decisive category — non-force must include.
+    let wrong_tax = matter
+        .insert_item(ItemInput {
+            path: Some("old.docx".into()),
+            status: item_status::EXTRACTED.into(),
+            file_category: Some("document".into()),
+            ..Default::default()
+        })
+        .expect("wrong tax item");
+    // Direct SQL: set legacy taxonomy without going through apply (which would set v1).
+    matter
+        .connection()
+        .execute(
+            "UPDATE items SET category_taxonomy = 'taxonomy_v0', category_method = 'extension' \
+             WHERE id = ?1",
+            rusqlite::params![wrong_tax.id],
+        )
+        .expect("set wrong tax");
+
+    let non_force = matter
+        .list_classify_candidates(None, 100, false, false)
+        .expect("non-force list");
+    let nf_ids: Vec<&str> = non_force.iter().map(|c| c.id.as_str()).collect();
+    assert!(
+        !nf_ids.contains(&good.id.as_str()),
+        "taxonomy_v1 decisive not listed when force=false"
+    );
+    assert!(nf_ids.contains(&legacy.id.as_str()));
+    assert!(nf_ids.contains(&null_cat.id.as_str()));
+    assert!(nf_ids.contains(&wrong_tax.id.as_str()));
+    // Stable id order.
+    let mut sorted = nf_ids.clone();
+    sorted.sort();
+    assert_eq!(nf_ids, sorted);
+
+    let forced = matter
+        .list_classify_candidates(None, 100, true, false)
+        .expect("force list");
+    let f_ids: Vec<&str> = forced.iter().map(|c| c.id.as_str()).collect();
+    assert!(
+        f_ids.contains(&good.id.as_str()),
+        "force must list already taxonomy_v1 rows"
+    );
+    assert_eq!(forced.len(), 4);
+
+    // Resume: after first non-force id, do not re-list earlier ids.
+    let first = non_force[0].id.clone();
+    let after = matter
+        .list_classify_candidates(Some(&first), 100, false, false)
+        .expect("after keyset");
+    assert!(after.iter().all(|c| c.id > first));
+    assert!(!after.iter().any(|c| c.id == first));
+    assert_eq!(after.len(), non_force.len() - 1);
 }

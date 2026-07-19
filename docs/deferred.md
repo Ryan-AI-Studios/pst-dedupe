@@ -271,6 +271,22 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0036-12 | — | Encrypted matter-scoped temp for page bitmaps | Drop + purge P0; full temp encryption residual | residual |
 | D-0036-13 | P3 | Mid-doc checkpoint resume at exact next page + partial text | Cancel pauses without apply; resume retries item from page 1 (safe) | residual polish |
 
+## From track 0037-FileCategoryTaxonomy (Completed)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0037-01 | — | Fine-grained `file_type` subtype (e.g. docx vs category document) | P0 is closed `file_category` only | residual |
+| D-0037-02 | — | Full Nuix/Relativity 900–1000+ MIME catalog parity | Never claim; workstation-like families only | never / residual |
+| D-0037-03 | — | Chat / Teams deep type signals | Reserved `chat` category | **0055** |
+| D-0037-04 | — | Mobile / cloud package type packs | Thin reserved categories | residual |
+| D-0037-05 | — | User-editable custom taxonomy UI | Closed vocabulary P0 | residual |
+| D-0037-06 | — | AI content-based classification | Offline metadata only | Series G |
+| D-0037-07 | — | Auto-run classify in processing profiles | Manual/job button P0 | **0043** |
+| D-0037-08 | — | Load-file / QC % unrecognized gates | Taxonomy enables fields | **0040** / **0041** |
+| D-0037-09 | — | Deep CFB CLSID sniff to distinguish .msg vs legacy Office without extension | P0: extension disambiguation after OLE magic (§3.4.1) | residual |
+| D-0037-10 | — | Full ZIP central-directory OOXML detection for renamed containers without office extension | P0: peek when possible + extension tie-break; bare zip → archive | residual polish |
+| (0024) | — | File category taxonomy expansion for cull | **Closed in 0037** (`taxonomy_v1` + classify job + noise_light executable) | — |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

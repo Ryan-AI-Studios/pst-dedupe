@@ -416,7 +416,7 @@ fn process_one(
                 partial: extracted.partial,
                 page_count: Some(extracted.page_count as i64),
                 needs_ocr: Some(needs_ocr),
-                file_category: Some("pdf".into()),
+                file_category: Some(file_category::Category::Pdf.as_str().into()),
                 refine_file_category: true,
             })?;
             match apply {

@@ -226,6 +226,18 @@ pub fn ics_extract_default_params() -> String {
     .to_string()
 }
 
+/// Default params for file-category classify (`kind = "classify"`).
+pub fn classify_default_params() -> String {
+    serde_json::json!({
+        "force": false,
+        "batch_size": 100,
+        "use_magic": true,
+        "in_review_only": false,
+        "respect_extractor_refine": true
+    })
+    .to_string()
+}
+
 /// True when `path` looks like a PST (case-insensitive `.pst` extension).
 pub fn looks_like_pst(path: &str) -> bool {
     Path::new(path)

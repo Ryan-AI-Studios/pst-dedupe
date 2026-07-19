@@ -797,6 +797,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f4c707c6a209cbe82d10abd08e1ea8995e9ea937d2550646e02798948992be0"
 
 [[package]]
+name = "cfb"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d38f2da7a0a2c4ccf0065be06397cc26a81f4e528be095826eee9d4adbb8c60f"
+dependencies = [
+ "byteorder",
+ "fnv",
+ "uuid",
+]
+
+[[package]]
 name = "cff-parser"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1599,6 +1610,7 @@ dependencies = [
  "camino",
  "chrono",
  "chrono-tz",
+ "file-category",
  "icalendar",
  "matter-core",
  "rusqlite",
@@ -1615,6 +1627,7 @@ version = "0.1.0"
 dependencies = [
  "calamine",
  "camino",
+ "file-category",
  "matter-core",
  "proptest",
  "quick-xml 0.41.0",
@@ -1632,6 +1645,7 @@ name = "extract-pdf"
 version = "0.1.0"
 dependencies = [
  "camino",
+ "file-category",
  "matter-core",
  "pdf-extract",
  "proptest",
@@ -1649,6 +1663,7 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "chrono",
+ "file-category",
  "matter-core",
  "pst-reader",
  "serde",
@@ -1710,6 +1725,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fb2907d1f08b2b316b9223ced5b0e89d87028ba8deae9764741dba8ff7f3903"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "file-category"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "infer",
+ "matter-core",
+ "mime_guess",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "zip",
 ]
 
 [[package]]
@@ -2297,11 +2328,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "infer"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a588916bfdfd92e71cacef98a63d9b1f0d74d6599980d11894290e7ddefffcf7"
+dependencies = [
+ "cfb",
+]
+
+[[package]]
 name = "ingest-purview"
 version = "0.1.0"
 dependencies = [
  "camino",
  "encoding_rs",
+ "file-category",
  "matter-core",
  "proptest",
  "serde",
@@ -2765,6 +2806,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "mime_guess"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
+dependencies = [
+ "mime",
+ "unicase",
 ]
 
 [[package]]
@@ -3636,6 +3693,7 @@ dependencies = [
  "extract-office",
  "extract-pdf",
  "extract-pst",
+ "file-category",
  "ingest-purview",
  "matter-core",
  "matter-cull",
@@ -4957,6 +5015,12 @@ name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
+
+[[package]]
+name = "unicase"
+version = "2.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-bidi"

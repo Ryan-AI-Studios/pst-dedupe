@@ -31,9 +31,9 @@ impl OfficeFormat {
 
     pub fn file_category(self) -> &'static str {
         match self {
-            Self::Docx => "document",
-            Self::Xlsx => "spreadsheet",
-            Self::Pptx => "presentation",
+            Self::Docx => file_category::Category::Document.as_str(),
+            Self::Xlsx => file_category::Category::Spreadsheet.as_str(),
+            Self::Pptx => file_category::Category::Presentation.as_str(),
         }
     }
 }

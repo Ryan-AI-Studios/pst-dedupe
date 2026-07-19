@@ -273,6 +273,16 @@ pub struct Item {
     pub ocr_error: Option<String>,
     /// Mean confidence when engine provides it; else null.
     pub ocr_confidence: Option<f64>,
+    // --- schema v18 (file category / taxonomy_v1) ---
+    /// How `file_category` was decided (`message_class` / `magic` / …).
+    pub category_method: Option<String>,
+    /// Taxonomy id (e.g. `taxonomy_v1`).
+    pub category_taxonomy: Option<String>,
+    /// `ok` | `skipped` | `error` | NULL never attempted.
+    pub category_status: Option<String>,
+    pub category_error: Option<String>,
+    /// RFC3339 timestamp of last classify apply.
+    pub categorized_at: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -1146,6 +1156,19 @@ impl Matter {
     /// Get raw bytes only when the on-disk length is `<= max_bytes`.
     pub fn get_bytes_capped(&self, digest_hex: &str, max_bytes: u64) -> Result<Vec<u8>> {
         self.cas.get_bytes_capped(digest_hex, max_bytes)
+    }
+
+    /// Read at most `max_bytes` from the start of a CAS blob (prefix / magic head).
+    ///
+    /// Unlike [`Self::get_bytes_capped`], this never loads the full object when it
+    /// is larger than `max_bytes` — suitable for file-type sniffing.
+    pub fn read_cas_prefix(&self, digest_hex: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        use std::io::Read;
+        let mut file = self.cas.open_read(digest_hex)?;
+        let mut buf = vec![0u8; max_bytes];
+        let n = file.read(&mut buf)?;
+        buf.truncate(n);
+        Ok(buf)
     }
 
     /// Whether a blob with this digest exists.
@@ -4764,7 +4787,8 @@ const ITEM_COLUMNS: &str =
     ics_extract_status, ics_extract_method, ics_source_native_sha256, \
     ics_extracted_at, ics_extract_error, \
     ocr_status, ocr_engine, ocr_lang, ocr_text_sha256, ocr_source_native_sha256, \
-    ocr_page_count, ocr_at, ocr_error, ocr_confidence";
+    ocr_page_count, ocr_at, ocr_error, ocr_confidence, \
+    category_method, category_taxonomy, category_status, category_error, categorized_at";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -4880,6 +4904,11 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         ocr_at: row.get(105)?,
         ocr_error: row.get(106)?,
         ocr_confidence: row.get(107)?,
+        category_method: row.get(108)?,
+        category_taxonomy: row.get(109)?,
+        category_status: row.get(110)?,
+        category_error: row.get(111)?,
+        categorized_at: row.get(112)?,
     })
 }
 

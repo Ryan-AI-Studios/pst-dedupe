@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 matter-core = { path = "../matter-core" }
+file-category = { path = "../file-category" }
 pst-reader = { path = "../pst-reader" }
 camino = { workspace = true }
 thiserror = { workspace = true }

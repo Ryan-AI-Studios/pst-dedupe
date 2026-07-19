@@ -1531,3 +1531,52 @@ fn ocr_handler_disabled_fails_closed() {
     assert!(full.ocr_status.is_none());
     assert!(full.text_sha256.is_none());
 }
+
+/// Thin classify handler smoke: attachment → pdf via path extension.
+#[cfg(feature = "classify")]
+#[test]
+fn classify_handler_via_process_runner() {
+    use matter_core::{item_role, item_status, ItemInput};
+    use process_runner::MatterClassifyHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-classify");
+
+    let item_id = {
+        let matter = Matter::open(&root).expect("open");
+        matter
+            .insert_item(ItemInput {
+                path: Some("report.pdf".into()),
+                status: item_status::EXTRACTED.into(),
+                file_category: Some("attachment".into()),
+                role: Some(item_role::ATTACHMENT.into()),
+                size_bytes: Some(10),
+                ..Default::default()
+            })
+            .expect("item")
+            .id
+    };
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterClassifyHandler::new()));
+
+    let job_id = runner
+        .start(&root, "classify", JobParams::empty())
+        .expect("start classify");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "err={:?}",
+        job.error_summary
+    );
+    assert_eq!(job.kind, "classify");
+
+    let item = matter.get_item(&item_id).expect("item");
+    assert_eq!(item.file_category.as_deref(), Some("pdf"));
+    assert_eq!(item.category_taxonomy.as_deref(), Some("taxonomy_v1"));
+    assert_eq!(item.role.as_deref(), Some(item_role::ATTACHMENT));
+}
