@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 14;
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -28,6 +28,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (12, MIGRATION_V12),
     (13, MIGRATION_V13),
     (14, MIGRATION_V14),
+    (15, MIGRATION_V15),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -502,6 +503,20 @@ ALTER TABLE items ADD COLUMN office_extracted_at TEXT;
 ALTER TABLE items ADD COLUMN office_extract_error TEXT;
 "#;
 
+/// Schema v15: PDF text extract bookkeeping (track 0034).
+///
+/// Includes `pdf_needs_ocr` for empty/low-text handoff to OCR (0036).
+/// Does **not** add preview/raster columns (deferred).
+const MIGRATION_V15: &str = r#"
+ALTER TABLE items ADD COLUMN pdf_extract_status TEXT;
+ALTER TABLE items ADD COLUMN pdf_extract_method TEXT;
+ALTER TABLE items ADD COLUMN pdf_source_native_sha256 TEXT;
+ALTER TABLE items ADD COLUMN pdf_extracted_at TEXT;
+ALTER TABLE items ADD COLUMN pdf_extract_error TEXT;
+ALTER TABLE items ADD COLUMN pdf_page_count INTEGER;
+ALTER TABLE items ADD COLUMN pdf_needs_ocr INTEGER NOT NULL DEFAULT 0;
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -598,7 +613,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 14);
+        assert_eq!(v, 15);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v10 FTS bookkeeping columns present
@@ -1483,7 +1498,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v7 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 14);
+        assert_eq!(v, 15);
 
         let in_review: Option<i64> = conn
             .query_row(
@@ -1591,7 +1606,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v8 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 14);
+        assert_eq!(v, 15);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1806,7 +1821,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v10 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 14);
+        assert_eq!(v, 15);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1934,7 +1949,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v11 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 14);
+        assert_eq!(v, 15);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -2053,7 +2068,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v12 to v13");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 14);
+        assert_eq!(v, 15);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -2151,7 +2166,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v13 to v14");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 14);
+        assert_eq!(v, 15);
 
         for col in [
             "office_extract_status",
@@ -2191,6 +2206,99 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v13'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    /// v14 → v15 adds pdf_* columns including pdf_needs_ocr DEFAULT 0.
+    #[test]
+    fn migrate_v14_to_v15_adds_pdf_columns() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute_batch(MIGRATION_V3).expect("v3");
+        conn.execute_batch(MIGRATION_V4).expect("v4");
+        conn.execute_batch(MIGRATION_V5).expect("v5");
+        conn.execute_batch(MIGRATION_V6).expect("v6");
+        conn.execute_batch(MIGRATION_V7).expect("v7");
+        conn.execute_batch(MIGRATION_V8).expect("v8");
+        conn.execute_batch(MIGRATION_V9).expect("v9");
+        conn.execute_batch(MIGRATION_V10).expect("v10");
+        conn.execute_batch(MIGRATION_V11).expect("v11");
+        conn.execute_batch(MIGRATION_V12).expect("v12");
+        conn.execute_batch(MIGRATION_V13).expect("v13");
+        conn.execute_batch(MIGRATION_V14).expect("v14");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (14)", [])
+            .expect("meta v14");
+        assert_eq!(read_schema_version(&conn).expect("read"), 14);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v14', 'V14 Matter', '2020-01-01T00:00:00Z', 14, '/tmp/v14')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, text_sha256, in_review, \
+             fts_text_sha256, note_count, highlight_count, privilege_withhold, redaction_count) \
+             VALUES ('itm_pdf', 'mat_v14', NULL, NULL, 'docs/a.pdf', \
+             'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', \
+             NULL, NULL, 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'attachment', 'attachment', 0, NULL, 0, NULL, 0, 0, 0, 0)",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v14 to v15");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 15);
+
+        for col in [
+            "pdf_extract_status",
+            "pdf_extract_method",
+            "pdf_source_native_sha256",
+            "pdf_extracted_at",
+            "pdf_extract_error",
+            "pdf_page_count",
+            "pdf_needs_ocr",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected column {col}");
+        }
+
+        let needs: i64 = conn
+            .query_row(
+                "SELECT pdf_needs_ocr FROM items WHERE id = 'itm_pdf'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("needs_ocr");
+        assert_eq!(needs, 0);
+
+        let path: Option<String> = conn
+            .query_row("SELECT path FROM items WHERE id = 'itm_pdf'", [], |row| {
+                row.get(0)
+            })
+            .expect("path");
+        assert_eq!(path.as_deref(), Some("docs/a.pdf"));
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v14'",
                 [],
                 |row| row.get(0),
             )

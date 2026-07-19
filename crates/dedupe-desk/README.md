@@ -7,7 +7,9 @@ corpus (tracks **0020**–**0029**).
 Keyword FTS (0029): Review keyword box composes with metadata filters; Workspace
 has **Build / Update search index** and **Rebuild search index** (`fts_index`).
 
-Office extract (0033): Workspace **Extract Office text** runs `office_extract`
+Office extract (0033): Workspace **Extract Office text** runs `office_extract`.
+PDF extract (0034): Workspace **Extract PDF text** runs `pdf_extract`; Review shows
+Needs OCR banner when `pdf_needs_ocr=1` (empty/low-text; OCR is **0036**).
 (DOCX/XLSX/PPTX natives → `text_sha256`).
 
 ## Build / run

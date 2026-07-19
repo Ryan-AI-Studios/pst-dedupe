@@ -113,6 +113,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
             app.start_office_extract();
         }
         if ui
+            .add_enabled(!busy, egui::Button::new("Extract PDF text"))
+            .on_hover_text(
+                "Extract embedded text from PDF natives in CAS (kind=pdf_extract); low-text → needs OCR",
+            )
+            .clicked()
+        {
+            app.start_pdf_extract();
+        }
+        if ui
             .add_enabled(!busy, egui::Button::new("Build / Update search index"))
             .on_hover_text("Incremental Tantivy FTS index (kind=fts_index, reset:false)")
             .clicked()

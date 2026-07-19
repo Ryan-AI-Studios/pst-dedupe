@@ -226,6 +226,21 @@ impl FilterSpec {
         }
     }
 
+    /// Quick chip: PDF empty/low-text needing OCR (track 0034 / handoff 0036).
+    pub fn preset_pdf_needs_ocr() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "pdf_needs_ocr".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
     /// Quick chip: redactions present but redacted produce artifact missing/outdated (track 0032).
     pub fn preset_redacted_text_stale() -> Self {
         Self {
@@ -660,6 +675,16 @@ fn push_condition(
             } else {
                 where_parts.push(format!(
                     "({alias}.redaction_count = 0 OR {alias}.redaction_count IS NULL)"
+                ));
+            }
+        }
+        ("pdf_needs_ocr", "eq") => {
+            let want = bool_value(cond, "pdf_needs_ocr")?;
+            if want {
+                where_parts.push(format!("{alias}.pdf_needs_ocr = 1"));
+            } else {
+                where_parts.push(format!(
+                    "({alias}.pdf_needs_ocr = 0 OR {alias}.pdf_needs_ocr IS NULL)"
                 ));
             }
         }
