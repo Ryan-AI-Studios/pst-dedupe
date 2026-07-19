@@ -27,6 +27,7 @@
 //! - **OCR** bookkeeping (`ocr_*` columns) for offline Tesseract text (0036)
 //! - **File category** bookkeeping (`category_*` columns) for taxonomy_v1 (0037)
 //! - **Case overview** aggregations (`CaseOverview` / `load_case_overview`) for desk KPIs (0038)
+//! - **Matter report** CSV pack export from `CaseOverview` + jobs (0039; PDF deferred D-0039-01)
 //!
 //! ## Layout
 //!
@@ -67,6 +68,7 @@ pub mod overview;
 pub mod pdf;
 pub mod privilege;
 pub mod redaction;
+pub mod report;
 pub mod schema;
 pub mod thread_headers;
 
@@ -130,6 +132,10 @@ pub use redaction::{
     build_redacted_text, merge_redaction_intervals, redaction_reason, redaction_status,
     resolve_redaction_against_body, CreateRedactionInput, ItemRedaction, RedactedTextResult,
     ResolvedRedaction, REDACTED_TOKEN, REDACTION_CONTEXT_CHARS, REDACTION_QUOTE_MAX_BYTES,
+};
+pub use report::{
+    default_matter_report_dir, export_matter_report, rfc3339_to_excel_utc, scrub_error_summary,
+    MatterReportParams, MatterReportResult, MATTER_REPORT_FORMAT_VERSION,
 };
 pub use schema::SCHEMA_VERSION;
 pub use thread_headers::{

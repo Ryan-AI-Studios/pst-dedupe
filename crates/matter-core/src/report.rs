@@ -1,0 +1,876 @@
+//! Matter progress / metrics report export (track **0039**).
+//!
+//! Serializes a [`CaseOverview`] (from [`load_case_overview`] / [`load_case_overview_on`])
+//! plus job history into a multi-file CSV pack. Metrics are **never** re-rolled with
+//! ad-hoc GROUP BY SQL — the overview snapshot is the single source of truth.
+//!
+//! ## Pack layout (`matter_report_v1`)
+//!
+//! Written under an operator-chosen or default stamped directory
+//! (`exports/reports/matter_report_YYYYMMDD_HHMMSS/`):
+//!
+//! | File | Layout |
+//! |---|---|
+//! | `summary.csv` | Two-column `metric,value` KPIs + matter identity + dual datetimes |
+//! | `by_file_category.csv` | `label,count` (+ `(other),N` remainder) |
+//! | `by_custodian.csv` | `label,count` (+ remainder) |
+//! | `by_status.csv` | `label,count` |
+//! | `errors_by_code.csv` | `code,count` (+ remainder) |
+//! | `jobs.csv` | Job history (all jobs, newest first) with scrubbed errors |
+//! | `README.txt` | Privacy + datetime notes |
+//!
+//! ### Empty tables
+//!
+//! Every rollup CSV always has a header row. When there are no data rows, exactly one
+//! sentinel row is written: label/code = `(none)`, count = `0`. Never 0-byte files.
+//!
+//! ### Dual datetimes
+//!
+//! Summary always includes `generated_at` (RFC3339 UTC) and `generated_at_excel`
+//! (`YYYY-MM-DD HH:MM:SS UTC`). Job times export both Excel-friendly and RFC3339 twins.
+//!
+//! ### Privacy
+//!
+//! Counts, labels, and job metadata only — **no** subjects, bodies, or privilege
+//! descriptions. Job `error_summary` is scrubbed via [`scrub_error_summary`] before
+//! export (paths / filenames / `file://` URIs redacted).
+//!
+//! ### PDF (D-0039-01)
+//!
+//! PDF summary is **deferred**. `include_pdf` is accepted but ignored; `pdf_written`
+//! is always `false`. A later implementation must embed a permissive TTF and never
+//! depend on host fonts.
+//!
+//! ### Overwrite policy
+//!
+//! Fail closed if `output_dir` already exists (no silent clobber). Prefer a fresh
+//! stamp from [`default_matter_report_dir`].
+
+use std::fs;
+use std::io::Write;
+
+use camino::{Utf8Path, Utf8PathBuf};
+use chrono::{DateTime, Utc};
+
+use crate::audit::{self, AuditEventInput};
+use crate::error::{Error, Result};
+use crate::matter::{now_rfc3339, Matter, EXPORTS_DIR};
+use crate::overview::{load_case_overview_on, CaseOverview, LabelCount, OverviewOptions};
+use crate::privilege::csv_escape_field;
+use crate::schema::SCHEMA_VERSION;
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Report pack format version written to `summary.csv` and audit detail.
+pub const MATTER_REPORT_FORMAT_VERSION: &str = "matter_report_v1";
+
+const SUMMARY_FILE: &str = "summary.csv";
+const BY_CATEGORY_FILE: &str = "by_file_category.csv";
+const BY_CUSTODIAN_FILE: &str = "by_custodian.csv";
+const BY_STATUS_FILE: &str = "by_status.csv";
+const ERRORS_FILE: &str = "errors_by_code.csv";
+const JOBS_FILE: &str = "jobs.csv";
+const README_FILE: &str = "README.txt";
+
+const LABEL_NONE: &str = "(none)";
+const LABEL_UNCATEGORIZED: &str = "(uncategorized)";
+const LABEL_OTHER: &str = "(other)";
+const REDACTED: &str = "(redacted)";
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+/// Parameters for [`Matter::export_matter_report`] / [`export_matter_report`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatterReportParams {
+    /// Directory that will receive the pack. Must **not** already exist.
+    pub output_dir: Utf8PathBuf,
+    /// Top-N options for rollup CSVs (same as Overview).
+    pub overview_opts: OverviewOptions,
+    /// PDF summary request. **Ignored in P0** (D-0039-01 deferred); always treated as false.
+    pub include_pdf: bool,
+    /// When true (default), export all jobs. When false, only recent strip from overview.
+    pub export_all_jobs: bool,
+}
+
+impl Default for MatterReportParams {
+    fn default() -> Self {
+        Self {
+            output_dir: Utf8PathBuf::new(),
+            overview_opts: OverviewOptions::default(),
+            include_pdf: false,
+            export_all_jobs: true,
+        }
+    }
+}
+
+/// Result of a successful matter report export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatterReportResult {
+    /// RFC3339 generation timestamp for the pack.
+    pub generated_at: String,
+    /// Absolute or matter-relative output directory written.
+    pub output_dir: Utf8PathBuf,
+    /// Relative file names written into `output_dir`.
+    pub files_written: Vec<String>,
+    /// Snapshot used for metrics (from `load_case_overview*`).
+    pub overview: CaseOverview,
+    /// Always `false` while PDF is deferred (D-0039-01).
+    pub pdf_written: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Path helpers
+// ---------------------------------------------------------------------------
+
+/// Default stamped report directory under `matter_root/exports/reports/`.
+///
+/// Stamp format: `matter_report_YYYYMMDD_HHMMSS` (UTC).
+pub fn default_matter_report_dir(matter_root: &Utf8Path) -> Utf8PathBuf {
+    let stamp = Utc::now().format("%Y%m%d_%H%M%S");
+    matter_root
+        .join(EXPORTS_DIR)
+        .join("reports")
+        .join(format!("matter_report_{stamp}"))
+}
+
+// ---------------------------------------------------------------------------
+// Datetime helpers
+// ---------------------------------------------------------------------------
+
+/// Convert an RFC3339 timestamp to Excel-friendly `YYYY-MM-DD HH:MM:SS UTC`.
+///
+/// Returns empty string when `rfc` is empty or unparseable.
+pub fn rfc3339_to_excel_utc(rfc: &str) -> String {
+    let s = rfc.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return dt
+            .with_timezone(&Utc)
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string();
+    }
+    // `now_rfc3339` uses chrono's to_rfc3339; also accept bare UTC forms without offset parse.
+    if let Ok(dt) = s.parse::<DateTime<Utc>>() {
+        return dt.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+    }
+    String::new()
+}
+
+/// Current UTC as Excel-friendly companion for a known RFC3339 string.
+fn excel_now_from_rfc(rfc: &str) -> String {
+    let excel = rfc3339_to_excel_utc(rfc);
+    if excel.is_empty() {
+        Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string()
+    } else {
+        excel
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path / error scrubber
+// ---------------------------------------------------------------------------
+
+/// Scrub client paths, filenames, and `file://` URIs from a job `error_summary`.
+///
+/// Keeps short codes and generic phrases. If scrubbing empties the string, returns
+/// empty when input was empty/whitespace, otherwise `(redacted)`.
+pub fn scrub_error_summary(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut out = redact_file_uris(trimmed);
+    out = redact_windows_and_unc_paths(&out);
+    out = redact_unix_absolute_paths(&out);
+    out = redact_pathish_tokens(&out);
+
+    // Collapse leftover whitespace and scrub punctuation islands.
+    let cleaned: String = out
+        .split_whitespace()
+        .filter(|t| !t.is_empty() && *t != "-" && *t != "–")
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleaned = cleaned
+        .trim_matches(|c: char| c == ':' || c == ',' || c == ';' || c == '"' || c == '\'')
+        .trim()
+        .to_string();
+
+    if cleaned.is_empty() {
+        REDACTED.to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn redact_file_uris(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if looks_like_file_uri_at(s, i) {
+            // Skip scheme + remainder until whitespace
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            out.push_str(REDACTED);
+        } else {
+            out.push(s[i..].chars().next().unwrap_or('?'));
+            i += s[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        }
+    }
+    out
+}
+
+fn looks_like_file_uri_at(s: &str, i: usize) -> bool {
+    s[i..].len() >= 7
+        && s[i..]
+            .get(..7)
+            .is_some_and(|p| p.eq_ignore_ascii_case("file://"))
+}
+
+fn redact_windows_and_unc_paths(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        // Drive letter path: C:\...
+        if i + 2 < chars.len()
+            && chars[i].is_ascii_alphabetic()
+            && chars[i + 1] == ':'
+            && (chars[i + 2] == '\\' || chars[i + 2] == '/')
+        {
+            i = skip_path_chars(&chars, i);
+            out.push_str(REDACTED);
+            continue;
+        }
+        // UNC: \\server\share\...
+        if i + 1 < chars.len() && chars[i] == '\\' && chars[i + 1] == '\\' {
+            i = skip_path_chars(&chars, i);
+            out.push_str(REDACTED);
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn redact_unix_absolute_paths(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '/'
+            && (i == 0 || chars[i - 1].is_whitespace() || is_path_boundary(chars[i - 1]))
+            && i + 1 < chars.len()
+            && !chars[i + 1].is_whitespace()
+            && looks_like_unix_path_start(&chars, i)
+        {
+            i = skip_path_chars(&chars, i);
+            out.push_str(REDACTED);
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn looks_like_unix_path_start(chars: &[char], i: usize) -> bool {
+    // Require at least one more `/` in the token or a file-like extension later.
+    let mut j = i + 1;
+    let mut saw_sep = false;
+    let mut saw_dot_ext = false;
+    while j < chars.len() && !chars[j].is_whitespace() && !is_path_end_punct(chars[j]) {
+        if chars[j] == '/' {
+            saw_sep = true;
+        }
+        if chars[j] == '.' && j + 1 < chars.len() && chars[j + 1].is_ascii_alphanumeric() {
+            saw_dot_ext = true;
+        }
+        j += 1;
+    }
+    saw_sep || saw_dot_ext
+}
+
+fn is_path_boundary(c: char) -> bool {
+    matches!(c, '"' | '\'' | '(' | '[' | '{' | '=' | ':' | ',' | ';')
+}
+
+fn is_path_end_punct(c: char) -> bool {
+    matches!(c, ')' | ']' | '}' | ',' | ';' | '"' | '\'')
+}
+
+fn skip_path_chars(chars: &[char], start: usize) -> usize {
+    let mut i = start;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() || is_path_end_punct(c) {
+            break;
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Redact remaining tokens that look like bare filenames with extensions
+/// (e.g. leftover `super_secret_merger.pdf` after path stripping).
+fn redact_pathish_tokens(s: &str) -> String {
+    s.split_whitespace()
+        .map(|tok| {
+            let bare = tok.trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
+                )
+            });
+            if is_filename_like(bare) {
+                REDACTED
+            } else {
+                tok
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_filename_like(tok: &str) -> bool {
+    if tok.is_empty() || tok == REDACTED {
+        return false;
+    }
+    // Must contain a dot extension of 1–10 alnum chars and a basename with a letter.
+    let Some((name, ext)) = tok.rsplit_once('.') else {
+        return false;
+    };
+    if name.is_empty() || ext.is_empty() || ext.len() > 10 {
+        return false;
+    }
+    if !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    // Avoid redacting version-like tokens (e.g. v1.2) — require letter in basename
+    // and prefer longer basenames or known document-ish extensions.
+    let has_letter = name.chars().any(|c| c.is_ascii_alphabetic());
+    if !has_letter {
+        return false;
+    }
+    let ext_l = ext.to_ascii_lowercase();
+    const DOC_EXTS: &[&str] = &[
+        "pdf", "eml", "msg", "pst", "ost", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt",
+        "csv", "zip", "7z", "rar", "tiff", "tif", "png", "jpg", "jpeg", "gif", "html", "htm",
+        "mht", "rtf", "ics", "mbox", "nsf", "db", "sqlite", "json", "xml",
+    ];
+    DOC_EXTS.contains(&ext_l.as_str()) || name.contains('_') || name.contains('-') || name.len() > 8
+}
+
+// ---------------------------------------------------------------------------
+// Label display (match Overview UI)
+// ---------------------------------------------------------------------------
+
+fn category_label(raw: &str) -> &str {
+    if raw.is_empty() {
+        LABEL_UNCATEGORIZED
+    } else {
+        raw
+    }
+}
+
+fn custodian_label(raw: &str) -> &str {
+    if raw.is_empty() {
+        LABEL_NONE
+    } else {
+        raw
+    }
+}
+
+fn status_or_code_label(raw: &str) -> &str {
+    if raw.is_empty() {
+        LABEL_NONE
+    } else {
+        raw
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Free entry
+// ---------------------------------------------------------------------------
+
+/// Open a matter and export a progress/metrics report pack.
+///
+/// Uses [`load_case_overview_on`] on the opened handle (same metrics as Overview).
+pub fn export_matter_report(
+    matter_root: &Utf8Path,
+    params: MatterReportParams,
+) -> Result<MatterReportResult> {
+    let matter = Matter::open(matter_root)?;
+    matter.export_matter_report(params)
+}
+
+// ---------------------------------------------------------------------------
+// Matter impl
+// ---------------------------------------------------------------------------
+
+impl Matter {
+    /// Build a matter progress/metrics CSV pack from [`CaseOverview`] + jobs.
+    ///
+    /// # Errors
+    ///
+    /// - Target `output_dir` already exists (fail closed; no silent overwrite).
+    /// - I/O or SQLite failures while loading overview / writing files.
+    ///
+    /// On failure after the matter is open, attempts `report.export.fail` audit.
+    pub fn export_matter_report(&self, params: MatterReportParams) -> Result<MatterReportResult> {
+        // PDF deferred (D-0039-01): `include_pdf` is accepted but ignored.
+        let _requested_pdf = params.include_pdf;
+
+        match self.export_matter_report_inner(params) {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                let msg = e.to_string();
+                let _ = self.audit_report_export_fail(&msg);
+                Err(e)
+            }
+        }
+    }
+
+    fn export_matter_report_inner(&self, params: MatterReportParams) -> Result<MatterReportResult> {
+        let output_dir = params.output_dir;
+        if output_dir.as_str().is_empty() {
+            return Err(Error::Other(
+                "matter report output_dir must not be empty".into(),
+            ));
+        }
+        if output_dir.exists() {
+            return Err(Error::Other(format!(
+                "matter report output directory already exists (refusing overwrite): {output_dir}"
+            )));
+        }
+        if let Some(parent) = output_dir.parent() {
+            if !parent.as_str().is_empty() {
+                fs::create_dir_all(parent.as_std_path())?;
+            }
+        }
+        // create_dir fails if the path already exists (race-safe fail closed).
+        fs::create_dir(output_dir.as_std_path()).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                Error::Other(format!(
+                    "matter report output directory already exists (refusing overwrite): {output_dir}"
+                ))
+            } else {
+                Error::Io(e)
+            }
+        })?;
+
+        let generated_at = now_rfc3339();
+        let generated_at_excel = excel_now_from_rfc(&generated_at);
+
+        let overview = load_case_overview_on(self, &params.overview_opts)?;
+        let info = self.info()?;
+
+        let mut files_written: Vec<String> = Vec::new();
+
+        // summary.csv
+        write_text_file(
+            &output_dir.join(SUMMARY_FILE),
+            &build_summary_csv(
+                &info.id,
+                &info.name,
+                &generated_at,
+                &generated_at_excel,
+                &overview,
+            ),
+        )?;
+        files_written.push(SUMMARY_FILE.into());
+
+        // Rollups
+        write_text_file(
+            &output_dir.join(BY_CATEGORY_FILE),
+            &build_label_count_csv(
+                "label",
+                &overview.by_file_category,
+                category_label,
+                overview.other_categories_count,
+            ),
+        )?;
+        files_written.push(BY_CATEGORY_FILE.into());
+
+        write_text_file(
+            &output_dir.join(BY_CUSTODIAN_FILE),
+            &build_label_count_csv(
+                "label",
+                &overview.by_custodian,
+                custodian_label,
+                overview.other_custodians_count,
+            ),
+        )?;
+        files_written.push(BY_CUSTODIAN_FILE.into());
+
+        write_text_file(
+            &output_dir.join(BY_STATUS_FILE),
+            &build_label_count_csv("label", &overview.by_status, status_or_code_label, 0),
+        )?;
+        files_written.push(BY_STATUS_FILE.into());
+
+        write_text_file(
+            &output_dir.join(ERRORS_FILE),
+            &build_label_count_csv(
+                "code",
+                &overview.errors.by_code,
+                status_or_code_label,
+                overview.errors.other_codes_count,
+            ),
+        )?;
+        files_written.push(ERRORS_FILE.into());
+
+        // jobs.csv
+        let jobs_csv = if params.export_all_jobs {
+            build_jobs_csv_all(self)?
+        } else {
+            build_jobs_csv_from_overview(&overview)
+        };
+        write_text_file(&output_dir.join(JOBS_FILE), &jobs_csv)?;
+        files_written.push(JOBS_FILE.into());
+
+        // README.txt (nice-to-have)
+        write_text_file(&output_dir.join(README_FILE), &build_readme())?;
+        files_written.push(README_FILE.into());
+
+        // PDF intentionally not written (D-0039-01 deferred).
+        let result = MatterReportResult {
+            generated_at: generated_at.clone(),
+            output_dir: output_dir.clone(),
+            files_written: files_written.clone(),
+            overview,
+            pdf_written: false,
+        };
+
+        self.audit_report_export_complete(&result)?;
+
+        Ok(result)
+    }
+
+    fn audit_report_export_complete(&self, result: &MatterReportResult) -> Result<()> {
+        let now = now_rfc3339();
+        let params_json = serde_json::json!({
+            "path": result.output_dir.as_str(),
+            "files": result.files_written,
+            "items_total": result.overview.totals.items_total,
+            "generated_at": result.generated_at,
+            "format_version": MATTER_REPORT_FORMAT_VERSION,
+            "pdf_written": result.pdf_written,
+        })
+        .to_string();
+        audit::append_event(
+            self.connection(),
+            &AuditEventInput {
+                actor: "desk".into(),
+                action: "report.export.complete".into(),
+                entity: format!("matter:{}", self.id()),
+                params_json,
+                tool_version: env!("CARGO_PKG_VERSION").into(),
+            },
+            &now,
+        )?;
+        Ok(())
+    }
+
+    fn audit_report_export_fail(&self, error_message: &str) -> Result<()> {
+        let now = now_rfc3339();
+        // Truncate long I/O messages; never include subjects.
+        let msg = if error_message.len() > 500 {
+            format!("{}…", &error_message[..500])
+        } else {
+            error_message.to_string()
+        };
+        audit::append_event(
+            self.connection(),
+            &AuditEventInput {
+                actor: "desk".into(),
+                action: "report.export.fail".into(),
+                entity: format!("matter:{}", self.id()),
+                params_json: serde_json::json!({
+                    "error": msg,
+                    "format_version": MATTER_REPORT_FORMAT_VERSION,
+                })
+                .to_string(),
+                tool_version: env!("CARGO_PKG_VERSION").into(),
+            },
+            &now,
+        )?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CSV builders
+// ---------------------------------------------------------------------------
+
+fn write_text_file(path: &Utf8Path, content: &str) -> Result<()> {
+    let mut f = fs::File::create(path.as_std_path())?;
+    f.write_all(content.as_bytes())?;
+    f.flush()?;
+    Ok(())
+}
+
+fn csv_line(fields: &[&str]) -> String {
+    fields
+        .iter()
+        .map(|f| csv_escape_field(f))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn build_summary_csv(
+    matter_id: &str,
+    matter_name: &str,
+    generated_at: &str,
+    generated_at_excel: &str,
+    ov: &CaseOverview,
+) -> String {
+    let mut out = String::from("metric,value\n");
+    let mut row = |k: &str, v: &str| {
+        out.push_str(&csv_line(&[k, v]));
+        out.push('\n');
+    };
+
+    row("matter_id", matter_id);
+    row("matter_name", matter_name);
+    row("generated_at", generated_at);
+    row("generated_at_excel", generated_at_excel);
+    row("schema_version", &SCHEMA_VERSION.to_string());
+    row("report_format_version", MATTER_REPORT_FORMAT_VERSION);
+    row("app_version", env!("CARGO_PKG_VERSION"));
+    row("pdf_written", "false");
+
+    row("items_total", &ov.totals.items_total.to_string());
+    row("top_level_items", &ov.totals.top_level_items.to_string());
+    row(
+        "size_bytes_top_level",
+        &ov.totals.size_bytes_top_level.to_string(),
+    );
+    row("sources_total", &ov.totals.sources_total.to_string());
+    row("families_total", &ov.totals.families_total.to_string());
+
+    row("in_review", &ov.review.in_review.to_string());
+    row("reviewed_count", &ov.review.reviewed_count.to_string());
+    row("unreviewed_count", &ov.review.unreviewed_count.to_string());
+
+    row("dedup_unique", &ov.dedup.unique.to_string());
+    row("dedup_duplicate", &ov.dedup.duplicate.to_string());
+    row("dedup_skipped", &ov.dedup.skipped.to_string());
+    row("dedup_null", &ov.dedup.null_role.to_string());
+
+    row(
+        "cull_never_run",
+        if ov.cull.never_run { "true" } else { "false" },
+    );
+    row("cull_included", &ov.cull.included.to_string());
+    row("cull_culled", &ov.cull.culled.to_string());
+    row("cull_other", &ov.cull.other.to_string());
+
+    row("privilege_claimed", &ov.privilege.claimed.to_string());
+    row("privilege_withhold", &ov.privilege.withhold.to_string());
+
+    row("pdf_needs_ocr", &ov.ocr.pdf_needs_ocr.to_string());
+    row("has_text", &ov.ocr.has_text.to_string());
+    row("has_native", &ov.ocr.has_native.to_string());
+
+    row("item_errors_total", &ov.errors.total.to_string());
+
+    row("jobs_pending", &ov.jobs.pending.to_string());
+    row("jobs_running", &ov.jobs.running.to_string());
+    row("jobs_paused", &ov.jobs.paused.to_string());
+    row("jobs_failed", &ov.jobs.failed.to_string());
+    row("jobs_cancelled", &ov.jobs.cancelled.to_string());
+    row("jobs_succeeded", &ov.jobs.succeeded.to_string());
+
+    out
+}
+
+fn build_label_count_csv(
+    header_label: &str,
+    rows: &[LabelCount],
+    label_fn: fn(&str) -> &str,
+    other_count: u64,
+) -> String {
+    let mut out = format!("{header_label},count\n");
+    if rows.is_empty() && other_count == 0 {
+        out.push_str(&csv_line(&[LABEL_NONE, "0"]));
+        out.push('\n');
+        return out;
+    }
+    for r in rows {
+        let label = label_fn(&r.label);
+        out.push_str(&csv_line(&[label, &r.count.to_string()]));
+        out.push('\n');
+    }
+    if other_count > 0 {
+        out.push_str(&csv_line(&[LABEL_OTHER, &other_count.to_string()]));
+        out.push('\n');
+    }
+    out
+}
+
+fn build_jobs_csv_all(matter: &Matter) -> Result<String> {
+    let jobs = matter.list_jobs()?;
+    let mut out = String::from(
+        "job_id,kind,state,started_at_excel,finished_at_excel,started_at_rfc3339,finished_at_rfc3339,completed_count,error_summary_safe\n",
+    );
+    if jobs.is_empty() {
+        out.push_str(&csv_line(&[LABEL_NONE, "", "", "", "", "", "", "0", ""]));
+        out.push('\n');
+        return Ok(out);
+    }
+    for j in jobs {
+        let completed: Option<i64> = matter.connection().query_row(
+            "SELECT MAX(completed_count) FROM job_checkpoints WHERE job_id = ?1",
+            rusqlite::params![j.id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        let started = j.started_at.as_deref().unwrap_or("");
+        let finished = j.finished_at.as_deref().unwrap_or("");
+        let completed_s = completed.map(|c| c.to_string()).unwrap_or_default();
+        let scrubbed = j
+            .error_summary
+            .as_deref()
+            .map(scrub_error_summary)
+            .unwrap_or_default();
+        out.push_str(&csv_line(&[
+            j.id.as_str(),
+            j.kind.as_str(),
+            j.state.as_str(),
+            &rfc3339_to_excel_utc(started),
+            &rfc3339_to_excel_utc(finished),
+            started,
+            finished,
+            completed_s.as_str(),
+            scrubbed.as_str(),
+        ]));
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn build_jobs_csv_from_overview(ov: &CaseOverview) -> String {
+    let mut out = String::from(
+        "job_id,kind,state,started_at_excel,finished_at_excel,started_at_rfc3339,finished_at_rfc3339,completed_count,error_summary_safe\n",
+    );
+    if ov.jobs.recent.is_empty() {
+        out.push_str(&csv_line(&[LABEL_NONE, "", "", "", "", "", "", "0", ""]));
+        out.push('\n');
+        return out;
+    }
+    for j in &ov.jobs.recent {
+        let started = j.started_at.as_deref().unwrap_or("");
+        let finished = j.finished_at.as_deref().unwrap_or("");
+        let completed_s = j.completed_count.map(|c| c.to_string()).unwrap_or_default();
+        let scrubbed = j
+            .error_summary
+            .as_deref()
+            .map(scrub_error_summary)
+            .unwrap_or_default();
+        out.push_str(&csv_line(&[
+            j.id.as_str(),
+            j.kind.as_str(),
+            j.state.as_str(),
+            &rfc3339_to_excel_utc(started),
+            &rfc3339_to_excel_utc(finished),
+            started,
+            finished,
+            completed_s.as_str(),
+            scrubbed.as_str(),
+        ]));
+        out.push('\n');
+    }
+    out
+}
+
+fn build_readme() -> String {
+    format!(
+        "Matter progress/metrics report ({MATTER_REPORT_FORMAT_VERSION})\n\
+         \n\
+         This pack serializes the same KPIs and rollups as the live Case Overview.\n\
+         Privacy: counts, labels, and job metadata only — no email subjects, bodies,\n\
+         or privilege description text. Job error_summary values are path-scrubbed.\n\
+         \n\
+         Datetimes: summary.generated_at is RFC3339 (machines/audit).\n\
+         summary.generated_at_excel and jobs.*_excel use 'YYYY-MM-DD HH:MM:SS UTC'\n\
+         for spreadsheet sort/filter. Empty rollup tables contain header + (none),0.\n\
+         PDF summary is deferred (D-0039-01).\n\
+         Generated with matter-core {ver}.\n",
+        ver = env!("CARGO_PKG_VERSION"),
+    )
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn scrub_redacts_windows_path_and_filename() {
+        let raw = r"Failed to extract C:\client_data\super_secret_merger.pdf";
+        let safe = scrub_error_summary(raw);
+        assert!(!safe.contains("client_data"), "path segment leaked: {safe}");
+        assert!(
+            !safe.contains("super_secret_merger"),
+            "filename leaked: {safe}"
+        );
+        assert!(!safe.contains(r"C:\"), "drive path leaked: {safe}");
+        assert!(safe.contains("Failed") || safe.contains(REDACTED));
+    }
+
+    #[test]
+    fn scrub_redacts_unix_and_file_uri() {
+        let raw = "ocr failed file:///var/data/secret_memo.docx on /home/user/secret_memo.docx";
+        let safe = scrub_error_summary(raw);
+        assert!(!safe.contains("secret_memo"));
+        assert!(!safe.contains("/var/data"));
+        assert!(!safe.contains("/home/user"));
+        assert!(!safe.contains("file://"));
+    }
+
+    #[test]
+    fn scrub_keeps_short_codes() {
+        let raw = "ocr_pdf_renderer_missing";
+        assert_eq!(scrub_error_summary(raw), raw);
+    }
+
+    #[test]
+    fn scrub_empty() {
+        assert_eq!(scrub_error_summary(""), "");
+        assert_eq!(scrub_error_summary("   "), "");
+    }
+
+    #[test]
+    fn excel_datetime_from_rfc3339() {
+        let excel = rfc3339_to_excel_utc("2026-07-19T10:00:00Z");
+        assert_eq!(excel, "2026-07-19 10:00:00 UTC");
+    }
+
+    #[test]
+    fn empty_rollup_has_sentinel() {
+        let csv = build_label_count_csv("code", &[], status_or_code_label, 0);
+        assert!(csv.starts_with("code,count\n"));
+        assert!(csv.contains("(none),0"));
+        assert!(!csv.trim().is_empty());
+    }
+
+    #[test]
+    fn non_empty_rollup_no_spurious_none() {
+        let rows = vec![LabelCount {
+            label: "pdf".into(),
+            count: 3,
+        }];
+        let csv = build_label_count_csv("label", &rows, category_label, 2);
+        assert!(csv.contains("pdf,3"));
+        assert!(csv.contains("(other),2"));
+        assert!(!csv.contains("(none),0"));
+    }
+}

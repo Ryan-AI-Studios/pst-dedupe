@@ -2,7 +2,9 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -45,6 +47,11 @@ pub struct DeskApp {
     pub(crate) case_overview: Option<CaseOverview>,
     pub(crate) overview_loading: bool,
     overview_load: OverviewLoadState,
+    /// Matter report export (track 0039) — background worker state.
+    pub(crate) report_export_busy: bool,
+    pub(crate) report_export_status: Option<String>,
+    pub(crate) report_export_error: Option<String>,
+    report_export_rx: Option<Receiver<Result<String, String>>>,
     pub(crate) selected_pst: Option<String>,
     pub(crate) dialog: DialogState,
     matter_op: MatterOpState,
@@ -97,6 +104,10 @@ impl DeskApp {
             case_overview: None,
             overview_loading: false,
             overview_load: OverviewLoadState::default(),
+            report_export_busy: false,
+            report_export_status: None,
+            report_export_error: None,
+            report_export_rx: None,
             selected_pst: None,
             dialog: DialogState::default(),
             matter_op: MatterOpState::default(),
@@ -215,8 +226,96 @@ impl DeskApp {
         self.case_overview = None;
         self.overview_load.clear();
         self.overview_loading = false;
+        self.report_export_busy = false;
+        self.report_export_status = None;
+        self.report_export_error = None;
+        self.report_export_rx = None;
         self.refresh_matter_lists();
         self.status_msg = Some(format!("Opened matter at {root}"));
+    }
+
+    /// Poll background matter-report export worker.
+    pub(crate) fn poll_report_export(&mut self) {
+        let Some(rx) = self.report_export_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(msg)) => {
+                self.report_export_busy = false;
+                self.report_export_rx = None;
+                self.report_export_status = Some(msg);
+                self.report_export_error = None;
+            }
+            Ok(Err(e)) => {
+                self.report_export_busy = false;
+                self.report_export_rx = None;
+                self.report_export_error = Some(e);
+                self.report_export_status = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.report_export_busy = false;
+                self.report_export_rx = None;
+                self.report_export_error = Some("Report export thread ended unexpectedly.".into());
+            }
+        }
+    }
+
+    /// Spawn matter report CSV pack export on a background thread (rfd folder picker).
+    pub(crate) fn spawn_report_export(&mut self, ctx: &egui::Context) {
+        if self.report_export_busy {
+            return;
+        }
+        let Some(root) = self.matter_root.clone() else {
+            self.report_export_error = Some("No matter open.".into());
+            return;
+        };
+        let default_dir = matter_ui::default_matter_report_output_dir(&root);
+        let ctx = ctx.clone();
+        let (tx, rx) = mpsc::channel();
+        self.report_export_rx = Some(rx);
+        self.report_export_busy = true;
+        self.report_export_status = Some("Writing report…".into());
+        self.report_export_error = None;
+        let _ = thread::Builder::new()
+            .name("desk-report-export".into())
+            .spawn(move || {
+                // Folder picker on background thread (never on egui).
+                // Cancel → fall back to default stamped path under exports/reports/.
+                let chosen = rfd::FileDialog::new()
+                    .set_title("Export matter report folder")
+                    .pick_folder();
+                let output_dir = match chosen {
+                    Some(p) => match Utf8PathBuf::from_path_buf(p) {
+                        Ok(folder) => {
+                            // Operator chose a parent folder; write a fresh stamp subdir
+                            // so we never silently clobber an existing pack.
+                            let stamp = default_dir
+                                .file_name()
+                                .unwrap_or("matter_report")
+                                .to_string();
+                            folder.join(stamp)
+                        }
+                        Err(_) => {
+                            let _ = tx.send(Err("Export path is not valid UTF-8.".into()));
+                            ctx.request_repaint();
+                            return;
+                        }
+                    },
+                    None => default_dir,
+                };
+                let result =
+                    matter_ui::export_matter_report_blocking(&root, &output_dir).map(|r| {
+                        format!(
+                            "Matter report written ({} file(s), items={}) → {}",
+                            r.files_written.len(),
+                            r.overview.totals.items_total,
+                            r.output_dir
+                        )
+                    });
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            });
     }
 
     /// Navigate to Review and force a thin-list reload.
@@ -1059,12 +1158,17 @@ impl eframe::App for DeskApp {
         self.poll_dialog();
         self.poll_matter_op();
         self.poll_overview_load();
+        self.poll_report_export();
         self.on_progress_tick();
 
         let snap = self.progress_rx.borrow().clone();
         progress_ui::request_job_repaint(&ctx, &snap);
-        // Also repaint lightly while a dialog, matter op, or overview load is in flight.
-        if self.dialog.is_open() || self.matter_op.is_busy() || self.overview_load.is_busy() {
+        // Also repaint lightly while a dialog, matter op, overview load, or report export is in flight.
+        if self.dialog.is_open()
+            || self.matter_op.is_busy()
+            || self.overview_load.is_busy()
+            || self.report_export_busy
+        {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 

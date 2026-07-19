@@ -4,7 +4,10 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use matter_core::{load_case_overview, CaseOverview, Matter, OverviewOptions};
+use matter_core::{
+    default_matter_report_dir, export_matter_report, load_case_overview, CaseOverview, Matter,
+    MatterReportParams, MatterReportResult, OverviewOptions,
+};
 
 use crate::params::validate_matter_name;
 
@@ -299,6 +302,34 @@ pub fn format_bytes(n: u64) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Matter report export (track 0039) — blocking helpers for background workers
+// ---------------------------------------------------------------------------
+
+/// Default stamped report directory under `matter_root/exports/reports/`.
+pub fn default_matter_report_output_dir(matter_root: &Utf8Path) -> Utf8PathBuf {
+    default_matter_report_dir(matter_root)
+}
+
+/// Export matter report pack on a background thread (never call from egui).
+///
+/// PDF is deferred (D-0039-01); always `include_pdf: false`.
+pub fn export_matter_report_blocking(
+    matter_root: &Utf8Path,
+    output_dir: &Utf8Path,
+) -> Result<MatterReportResult, String> {
+    export_matter_report(
+        matter_root,
+        MatterReportParams {
+            output_dir: output_dir.to_path_buf(),
+            overview_opts: OverviewOptions::default(),
+            include_pdf: false,
+            export_all_jobs: true,
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,6 +399,21 @@ mod tests {
         assert_eq!(overview_custodian_label("Alice"), "Alice");
         assert_eq!(format_bytes(500), "500 B");
         assert!(format_bytes(5_000_000).contains("MiB") || format_bytes(5_000_000).contains("KiB"));
+    }
+
+    #[test]
+    fn export_matter_report_blocking_writes_pack() {
+        let (_t, base) = utf8_temp();
+        let root = create_matter(&base, "ReportExport").expect("create");
+        let out = base.join("report_out");
+        let result = export_matter_report_blocking(&root, &out).expect("export");
+        assert!(!result.pdf_written);
+        assert!(out.join("summary.csv").exists());
+        assert!(out.join("jobs.csv").exists());
+        assert!(out.join("errors_by_code.csv").exists());
+        let default = default_matter_report_output_dir(&root);
+        assert!(default.as_str().contains("exports"));
+        assert!(default.as_str().contains("reports"));
     }
 
     #[test]
