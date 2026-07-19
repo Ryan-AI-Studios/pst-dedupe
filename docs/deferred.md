@@ -287,6 +287,24 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0037-10 | — | Full ZIP central-directory OOXML detection for renamed containers without office extension | P0: peek when possible + extension tie-break; bare zip → archive | residual polish |
 | (0024) | — | File category taxonomy expansion for cull | **Closed in 0037** (`taxonomy_v1` + classify job + noise_light executable) | — |
 
+## From track 0038-CaseOverviewDashboard
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0038-01 | — | Exportable CSV/PDF progress & matter reports | Overview is live UI only | **0039** |
+| D-0038-02 | — | Materialized overview snapshot table for multi-million items | P0 live GROUP BY + indexes + top-N + concurrent fan-out | residual scale |
+| D-0038-03 | — | Click-through from category/custodian/error-code row → FilterSpec | Tables first | residual / **0028** |
+| D-0038-04 | — | egui_plot bar charts for top types | Optional polish; tables satisfy DoD; pin match eframe 0.34 | residual |
+| D-0038-05 | — | Multi-matter portfolio dashboard | Single matter P0 | residual / **0058** |
+| D-0038-06 | — | Continuous auto-refresh / live per-second charts | Manual + post-job refresh P0 | residual |
+| D-0038-07 | — | Gap analysis (missing mailbox/date vs opposing) | Not overview | **0042** |
+| D-0038-08 | — | People/comms timeline heatmaps | Analytics | **0047** / Series G |
+| D-0038-09 | P3 | Full GUI smoke Overview panel | Automated API + unit; operator smoke local | operator / polish |
+| D-0038-10 | — | Physical source package size (path stat / sources.size column) | P0 top-level item size only | residual |
+| D-0038-11 | — | “Reviewed” beyond codes (opened, notes-only, privilege-only) | P0: ≥1 item_code | residual |
+| D-0038-12 | — | Dedicated connection pool crate (r2d2/sqlx) for overview | P0: multi open_for_read + threads | residual |
+| D-0038-13 | — | Error rollup by stage (in addition to code) | P0 top-N by code | residual |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

@@ -16,6 +16,25 @@ chip filters `file_category=calendar`. Multi-event ICS → archive parent + sing
 OCR (0036): Settings **Enable local OCR** (off by default) + tool paths; Workspace
 **Run OCR** (`ocr` job) processes needs-OCR PDFs and images via system Tesseract CLI.
 
+### Case Overview (0038)
+
+When a matter is open, Workspace shows a **Overview** panel above the Counts strip:
+
+| KPI / table | Source |
+|---|---|
+| Items · Top-level size · Review progress · Errors · Needs OCR · Withhold | `matter_core::CaseOverview` |
+| File categories / Custodians / By status | Top-N rollups (empty → `(uncategorized)` / `(none)`) |
+| Dedup / Cull | unique/duplicate + included/culled |
+| Errors by code | Top-N error codes (actionable ops view) |
+| Jobs strip | Counts by state + last few jobs |
+
+- **Top-level size** tooltip: sum of sizes for standalone + parent only (excludes attachments; no PST double-count).
+- **Review progress**: `reviewed / in_review` where reviewed = ≥1 code on the item.
+- Load path: **background thread only** (`OverviewLoadState` → `load_case_overview`); concurrent SQL fan-out inside matter-core. Never runs overview SQL on the egui thread.
+- Refresh: matter open, post-job refresh, **Refresh**, and **Refresh overview**.
+- Evidence: synthetic tempfile matters only — never put client subjects/paths/bodies in docs or screenshots.
+- **0039** must reuse `CaseOverview` for CSV/PDF reports (no duplicate rollup SQL).
+
 ## Build / run
 
 ```powershell

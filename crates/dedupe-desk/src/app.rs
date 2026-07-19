@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
+use matter_core::CaseOverview;
 use process_runner::{
     ExtractPstHandler, IngestHandler, JobParams, MatterClassifyHandler, MatterCullHandler,
     MatterDedupeHandler, MatterFtsIndexHandler, MatterIcsExtractHandler, MatterNearDupHandler,
@@ -17,7 +18,7 @@ use tokio::sync::watch;
 
 use crate::dialogs::{DialogKind, DialogState};
 use crate::matter_ops::{MatterOpResult, MatterOpState};
-use crate::matter_ui::{self, MatterSnapshot};
+use crate::matter_ui::{self, MatterSnapshot, OverviewLoadResult, OverviewLoadState};
 use crate::nav::{self, Screen};
 use crate::params::{self, format_runner_error, is_transient_sqlite_lock};
 use crate::progress_ui;
@@ -40,6 +41,10 @@ pub struct DeskApp {
     pub(crate) matter_root: Option<Utf8PathBuf>,
     pub(crate) matter_name: Option<String>,
     pub(crate) snapshot: MatterSnapshot,
+    /// Case overview (track 0038); loaded only on a background thread.
+    pub(crate) case_overview: Option<CaseOverview>,
+    pub(crate) overview_loading: bool,
+    overview_load: OverviewLoadState,
     pub(crate) selected_pst: Option<String>,
     pub(crate) dialog: DialogState,
     matter_op: MatterOpState,
@@ -89,6 +94,9 @@ impl DeskApp {
             matter_root: None,
             matter_name: None,
             snapshot: MatterSnapshot::default(),
+            case_overview: None,
+            overview_loading: false,
+            overview_load: OverviewLoadState::default(),
             selected_pst: None,
             dialog: DialogState::default(),
             matter_op: MatterOpState::default(),
@@ -157,6 +165,39 @@ impl DeskApp {
                 }
             }
         }
+        // Overview SQL always off UI thread (concurrent fan-out in matter-core).
+        self.request_overview_refresh();
+    }
+
+    /// Kick a background case-overview load.
+    ///
+    /// If a load is already in flight, the request is coalesced (pending flag) so
+    /// job-completion refreshes are not silently dropped.
+    pub(crate) fn request_overview_refresh(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            return;
+        };
+        self.overview_loading = true;
+        self.overview_load.spawn(root);
+    }
+
+    fn poll_overview_load(&mut self) {
+        if let Some(result) = self.overview_load.try_take() {
+            match result {
+                OverviewLoadResult::Ok(ov) => {
+                    self.case_overview = Some(*ov);
+                }
+                OverviewLoadResult::Err(e) => {
+                    if is_transient_sqlite_lock(&e) {
+                        self.status_msg = Some("Overview busy; will retry…".into());
+                    } else {
+                        self.status_msg = Some(format!("Overview refresh failed: {e}"));
+                    }
+                }
+            }
+            // try_take may have re-spawned a coalesced pending refresh.
+            self.overview_loading = self.overview_load.is_busy();
+        }
     }
 
     fn set_matter(&mut self, root: Utf8PathBuf, name: String) {
@@ -171,6 +212,9 @@ impl DeskApp {
         self.cull_preset = "unique_only".into();
         // Clear review corpus state for the previous matter.
         self.review.clear_for_matter_change();
+        self.case_overview = None;
+        self.overview_load.clear();
+        self.overview_loading = false;
         self.refresh_matter_lists();
         self.status_msg = Some(format!("Opened matter at {root}"));
     }
@@ -1014,12 +1058,13 @@ impl eframe::App for DeskApp {
 
         self.poll_dialog();
         self.poll_matter_op();
+        self.poll_overview_load();
         self.on_progress_tick();
 
         let snap = self.progress_rx.borrow().clone();
         progress_ui::request_job_repaint(&ctx, &snap);
-        // Also repaint lightly while a dialog or matter op is in flight.
-        if self.dialog.is_open() || self.matter_op.is_busy() {
+        // Also repaint lightly while a dialog, matter op, or overview load is in flight.
+        if self.dialog.is_open() || self.matter_op.is_busy() || self.overview_load.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 

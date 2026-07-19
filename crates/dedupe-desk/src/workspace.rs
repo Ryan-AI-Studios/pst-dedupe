@@ -1,9 +1,13 @@
 //! Workspace panels: sources, PST inventory, jobs, stats, process actions.
+//! Case Overview (track 0038) KPIs + rollup tables.
 
 use eframe::egui;
+use matter_core::CaseOverview;
 
 use crate::app::DeskApp;
-use crate::matter_ui::MatterSnapshot;
+use crate::matter_ui::{
+    format_bytes, overview_category_label, overview_custodian_label, MatterSnapshot,
+};
 use crate::params;
 use crate::progress_ui;
 
@@ -257,6 +261,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
         if ui.button("Refresh").clicked() {
             app.refresh_matter_lists();
         }
+        if ui
+            .add_enabled(!app.overview_loading, egui::Button::new("Refresh overview"))
+            .on_hover_text("Reload case overview KPIs (background SQL; concurrent readers)")
+            .clicked()
+        {
+            app.request_overview_refresh();
+        }
     });
 
     if app.dialog.is_open() {
@@ -264,6 +275,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
     }
 
     ui.add_space(8.0);
+    show_overview(ui, app);
+    ui.add_space(6.0);
     show_stats(ui, &app.snapshot);
     ui.add_space(6.0);
     show_sources(ui, &app.snapshot);
@@ -271,6 +284,221 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
     show_psts(ui, app);
     ui.add_space(6.0);
     show_jobs(ui, &app.snapshot);
+}
+
+fn show_overview(ui: &mut egui::Ui, app: &DeskApp) {
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.heading("Overview");
+            if app.overview_loading {
+                ui.label(egui::RichText::new("Loading…").italics().weak());
+            }
+        });
+
+        let Some(ov) = app.case_overview.as_ref() else {
+            if app.overview_loading {
+                ui.label("Loading case overview…");
+            } else {
+                ui.label(
+                    "No overview yet. Click Refresh overview (or Refresh) after opening a matter.",
+                );
+            }
+            return;
+        };
+
+        if ov.totals.items_total == 0 {
+            ui.label("No items yet.");
+        }
+
+        // KPI row
+        ui.horizontal_wrapped(|ui| {
+            kpi_card(ui, "Items", &ov.totals.items_total.to_string(), None);
+            kpi_card(
+                ui,
+                "Top-level size",
+                &format_bytes(ov.totals.size_bytes_top_level),
+                Some(
+                    "Sum of size_bytes for standalone + parent items only \
+                     (role IS NULL or role ≠ attachment). Excludes attachment \
+                     rows so PST/parent + children are not double-counted.",
+                ),
+            );
+            let review_label = if ov.review.in_review == 0 {
+                "0 / 0".to_string()
+            } else {
+                format!(
+                    "{} / {} ({} unreviewed)",
+                    ov.review.reviewed_count, ov.review.in_review, ov.review.unreviewed_count
+                )
+            };
+            kpi_card(
+                ui,
+                "Review progress",
+                &review_label,
+                Some("Reviewed = in-review items with ≥1 code applied."),
+            );
+            kpi_card(
+                ui,
+                "Errors",
+                &ov.errors.total.to_string(),
+                Some("Matter-scoped item_errors rows. See Errors by code table."),
+            );
+            kpi_card(ui, "Needs OCR", &ov.ocr.pdf_needs_ocr.to_string(), None);
+            kpi_card(
+                ui,
+                "Withhold",
+                &ov.privilege.withhold.to_string(),
+                Some(
+                    "Items with privilege_withhold = 1 or an item_privilege withhold flag (union).",
+                ),
+            );
+        });
+
+        ui.add_space(4.0);
+        ui.label(format!(
+            "Top-level items: {} · Sources: {} · Parents: {} · Generated: {}",
+            ov.totals.top_level_items,
+            ov.totals.sources_total,
+            ov.totals.families_total,
+            ov.generated_at
+        ));
+
+        ui.add_space(6.0);
+        ui.columns(3, |cols| {
+            label_count_table(
+                &mut cols[0],
+                "File categories",
+                &ov.by_file_category,
+                overview_category_label,
+                ov.other_categories_count,
+            );
+            label_count_table(
+                &mut cols[1],
+                "Custodians",
+                &ov.by_custodian,
+                overview_custodian_label,
+                ov.other_custodians_count,
+            );
+            label_count_table(
+                &mut cols[2],
+                "By status",
+                &ov.by_status,
+                |s| if s.is_empty() { "(none)" } else { s },
+                0,
+            );
+        });
+
+        ui.add_space(4.0);
+        ui.columns(3, |cols| {
+            show_dedup_cull(&mut cols[0], ov);
+            label_count_table(
+                &mut cols[1],
+                "Errors by code",
+                &ov.errors.by_code,
+                |s| if s.is_empty() { "(none)" } else { s },
+                ov.errors.other_codes_count,
+            );
+            show_overview_jobs(&mut cols[2], ov);
+        });
+    });
+}
+
+fn kpi_card(ui: &mut egui::Ui, title: &str, value: &str, tooltip: Option<&str>) {
+    ui.group(|ui| {
+        ui.set_min_width(110.0);
+        ui.label(egui::RichText::new(title).small().strong());
+        let resp = ui.label(egui::RichText::new(value).heading());
+        if let Some(tip) = tooltip {
+            resp.on_hover_text(tip);
+        }
+    });
+}
+
+fn label_count_table(
+    ui: &mut egui::Ui,
+    title: &str,
+    rows: &[matter_core::LabelCount],
+    label_fn: fn(&str) -> &str,
+    other: u64,
+) {
+    ui.group(|ui| {
+        ui.label(egui::RichText::new(title).strong());
+        if rows.is_empty() {
+            ui.label(egui::RichText::new("—").weak());
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .id_salt(format!("ov_{title}"))
+            .max_height(120.0)
+            .show(ui, |ui| {
+                egui::Grid::new(format!("ov_grid_{title}"))
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("Label");
+                        ui.strong("Count");
+                        ui.end_row();
+                        for r in rows {
+                            ui.label(label_fn(&r.label));
+                            ui.label(r.count.to_string());
+                            ui.end_row();
+                        }
+                        if other > 0 {
+                            ui.label("(other)");
+                            ui.label(other.to_string());
+                            ui.end_row();
+                        }
+                    });
+            });
+    });
+}
+
+fn show_dedup_cull(ui: &mut egui::Ui, ov: &CaseOverview) {
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Dedup / Cull").strong());
+        ui.label(format!(
+            "Dedupe: unique={}  duplicate={}  skipped={}  unset={}",
+            ov.dedup.unique, ov.dedup.duplicate, ov.dedup.skipped, ov.dedup.null_role
+        ));
+        if ov.cull.never_run {
+            ui.label("Cull: never run");
+        } else {
+            ui.label(format!(
+                "Cull: included={}  culled={}  other={}",
+                ov.cull.included, ov.cull.culled, ov.cull.other
+            ));
+        }
+        ui.label(format!(
+            "Privilege claimed (active): {} · Has text: {} · Has native: {}",
+            ov.privilege.claimed, ov.ocr.has_text, ov.ocr.has_native
+        ));
+    });
+}
+
+fn show_overview_jobs(ui: &mut egui::Ui, ov: &CaseOverview) {
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Jobs").strong());
+        ui.label(format!(
+            "pending={} running={} paused={} failed={} cancelled={} succeeded={}",
+            ov.jobs.pending,
+            ov.jobs.running,
+            ov.jobs.paused,
+            ov.jobs.failed,
+            ov.jobs.cancelled,
+            ov.jobs.succeeded
+        ));
+        if ov.jobs.recent.is_empty() {
+            ui.label(egui::RichText::new("No recent jobs.").weak());
+            return;
+        }
+        for j in &ov.jobs.recent {
+            let done = j
+                .completed_count
+                .map(|c| format!(" · done={c}"))
+                .unwrap_or_default();
+            ui.label(format!("{} [{}]{done}", j.kind, j.state));
+        }
+    });
 }
 
 fn show_stats(ui: &mut egui::Ui, snap: &MatterSnapshot) {

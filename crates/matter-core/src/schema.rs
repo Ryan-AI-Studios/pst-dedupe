@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 18;
+pub const SCHEMA_VERSION: u32 = 19;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -32,6 +32,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (16, MIGRATION_V16),
     (17, MIGRATION_V17),
     (18, MIGRATION_V18),
+    (19, MIGRATION_V19),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -570,6 +571,16 @@ ALTER TABLE items ADD COLUMN category_taxonomy TEXT;
 ALTER TABLE items ADD COLUMN category_status TEXT;
 ALTER TABLE items ADD COLUMN category_error TEXT;
 ALTER TABLE items ADD COLUMN categorized_at TEXT;
+"#;
+
+/// Schema v19: supporting indexes for case overview rollups (track 0038).
+///
+/// Speeds `GROUP BY file_category` / `custodian` and top-level role filters.
+/// No overview cache table (live SQL only).
+const MIGRATION_V19: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_items_matter_file_category ON items(matter_id, file_category);
+CREATE INDEX IF NOT EXISTS idx_items_matter_custodian ON items(matter_id, custodian);
+CREATE INDEX IF NOT EXISTS idx_items_matter_role ON items(matter_id, role);
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -2513,7 +2524,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v16 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 18);
+        assert_eq!(v, 19);
 
         for col in [
             "ocr_status",
@@ -2616,8 +2627,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v17 to v18");
-        assert_eq!(v, 18);
+        let v = migrate(&conn).expect("migrate v17 to current");
+        assert_eq!(v, 19);
         assert_eq!(v, SCHEMA_VERSION);
 
         for col in [
@@ -2651,6 +2662,59 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v17'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v18_to_v19_adds_overview_indexes() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        for &(target, sql) in MIGRATIONS {
+            if target > 18 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v18', 'V18 Matter', '2020-01-01T00:00:00Z', 18, '/tmp/v18')",
+            [],
+        )
+        .expect("matter");
+
+        let v = migrate(&conn).expect("migrate v18 to v19");
+        assert_eq!(v, 19);
+        assert_eq!(v, SCHEMA_VERSION);
+
+        for idx in [
+            "idx_items_matter_file_category",
+            "idx_items_matter_custodian",
+            "idx_items_matter_role",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name=?1",
+                    [idx],
+                    |row| row.get(0),
+                )
+                .expect("idx");
+            assert!(has, "expected index {idx}");
+        }
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v18'",
                 [],
                 |row| row.get(0),
             )
