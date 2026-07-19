@@ -75,6 +75,37 @@ pub struct ExtractedMessage {
     pub conversation_index_bytes: Option<Vec<u8>>,
     /// PidTagConversationIndex as string (Base64 Thread-Index) when binary absent.
     pub conversation_index_string: Option<String>,
+    /// PidTagMessageClass (e.g. IPM.Note, IPM.Appointment).
+    pub message_class: Option<String>,
+    /// PidTagStartDate as raw FILETIME (appointment).
+    pub start_date: Option<i64>,
+    /// PidTagEndDate as raw FILETIME (appointment).
+    pub end_date: Option<i64>,
+    /// PidTagLocation string when present (standard tag; named-prop residual).
+    pub location: Option<String>,
+}
+
+/// True when `class` is a P0 calendar / meeting message class (MS-OXOCAL).
+///
+/// Matches:
+/// - `IPM.Appointment`
+/// - `IPM.Schedule.Meeting.Request`
+/// - `IPM.Schedule.Meeting.Resp.*`
+/// - `IPM.Schedule.Meeting.Canceled`
+pub fn is_calendar_message_class(class: &str) -> bool {
+    let c = class.trim();
+    if c.eq_ignore_ascii_case("IPM.Appointment") {
+        return true;
+    }
+    if c.eq_ignore_ascii_case("IPM.Schedule.Meeting.Request") {
+        return true;
+    }
+    if c.eq_ignore_ascii_case("IPM.Schedule.Meeting.Canceled") {
+        return true;
+    }
+    // Meeting responses: Accept / Tent / Decline etc.
+    let lower = c.to_ascii_lowercase();
+    lower.starts_with("ipm.schedule.meeting.resp")
 }
 
 /// Convert Windows FILETIME (100ns since 1601-01-01) to Unix seconds.
@@ -196,6 +227,12 @@ impl PstFile {
             None
         };
 
+        let message_class = prop_ctx.get_string(nid::PID_TAG_MESSAGE_CLASS)?;
+        let start_date = prop_ctx.get_time(nid::PID_TAG_START_DATE)?;
+        let end_date = prop_ctx.get_time(nid::PID_TAG_END_DATE)?;
+        // Best-effort standard location tag; PidLidLocation is residual when absent.
+        let location = prop_ctx.get_string(nid::PID_TAG_LOCATION)?;
+
         Ok(ExtractedMessage {
             nid: message_nid,
             message_id,
@@ -215,6 +252,10 @@ impl PstFile {
             conversation_topic,
             conversation_index_bytes,
             conversation_index_string,
+            message_class,
+            start_date,
+            end_date,
+            location,
         })
     }
 }
@@ -243,5 +284,19 @@ mod tests {
             filetime_to_rfc3339(ft).as_deref(),
             Some("2020-01-02T03:04:05Z")
         );
+    }
+
+    #[test]
+    fn calendar_message_class_detection() {
+        assert!(is_calendar_message_class("IPM.Appointment"));
+        assert!(is_calendar_message_class("ipm.appointment"));
+        assert!(is_calendar_message_class("IPM.Schedule.Meeting.Request"));
+        assert!(is_calendar_message_class("IPM.Schedule.Meeting.Resp.Pos"));
+        assert!(is_calendar_message_class("IPM.Schedule.Meeting.Resp.Neg"));
+        assert!(is_calendar_message_class("IPM.Schedule.Meeting.Resp.Tent"));
+        assert!(is_calendar_message_class("IPM.Schedule.Meeting.Canceled"));
+        assert!(!is_calendar_message_class("IPM.Note"));
+        assert!(!is_calendar_message_class("IPM.Task"));
+        assert!(!is_calendar_message_class(""));
     }
 }

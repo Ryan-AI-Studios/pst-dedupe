@@ -1,13 +1,13 @@
 //! Blocking PST extract → Normalized Items.
 
 use matter_core::{
-    compute_email_logical_hash, item_role, item_status, normalize_body,
-    normalize_conversation_index_to_hex, normalize_message_id, parse_in_reply_to,
+    compute_email_logical_hash, compute_non_email_logical_hash, item_role, item_status,
+    normalize_body, normalize_conversation_index_to_hex, normalize_message_id, parse_in_reply_to,
     parse_references_header, references_to_json, AuditEventInput, ConversationIndexInput,
     EmailLogicalInput, Item, ItemErrorInput, ItemInput, ItemUpdate, JobState, LogicalAttachment,
-    Matter, FAMILY_KIND_EMAIL_ATTACHMENTS, LOGICAL_HASH_VERSION,
+    Matter, NonEmailLogicalInput, FAMILY_KIND_EMAIL_ATTACHMENTS, LOGICAL_HASH_VERSION,
 };
-use pst_reader::{filetime_to_rfc3339, ExtractedMessage, NodeId};
+use pst_reader::{filetime_to_rfc3339, is_calendar_message_class, ExtractedMessage, NodeId};
 use serde_json::json;
 
 use crate::checkpoint::{nid_hex, ExtractCursor};
@@ -669,11 +669,34 @@ fn extract_one_message(
     let cc = parse_display_list(extracted.display_cc.as_deref());
     let bcc = parse_display_list(extracted.display_bcc.as_deref());
 
-    let sent_at = extracted.submit_time.and_then(filetime_to_rfc3339);
+    let is_calendar = extracted
+        .message_class
+        .as_deref()
+        .is_some_and(is_calendar_message_class);
+
+    let cal_start_at = extracted.start_date.and_then(filetime_to_rfc3339);
+    let cal_end_at = extracted.end_date.and_then(filetime_to_rfc3339);
+
+    let mut sent_at = extracted.submit_time.and_then(filetime_to_rfc3339);
     let received_at = extracted.delivery_time.and_then(filetime_to_rfc3339);
+    // Prefer cal_start_at for sort when email sent time missing (calendar path).
+    if is_calendar && sent_at.is_none() {
+        sent_at = cal_start_at.clone();
+    }
 
     let body_raw = extracted.body_text.clone().unwrap_or_default();
-    let body_for_hash = normalize_body(&body_raw);
+    // Calendar review text: structured summary + description (spec §3.6).
+    let display_body = if is_calendar {
+        synthesize_calendar_review_text(
+            &extracted,
+            &to,
+            cal_start_at.as_deref(),
+            cal_end_at.as_deref(),
+        )
+    } else {
+        body_raw.clone()
+    };
+    let body_for_hash = normalize_body(&display_body);
     let body_bytes = body_for_hash.as_bytes();
 
     let text_sha256 = if body_bytes.is_empty() {
@@ -693,7 +716,10 @@ fn extract_one_message(
         )
     };
 
-    let html_sha256 = if let Some(ref html) = extracted.body_html {
+    let html_sha256 = if is_calendar {
+        // Calendar path stores synthesized plain text only.
+        None
+    } else if let Some(ref html) = extracted.body_html {
         if html.is_empty() {
             None
         } else if (html.len() as u64) <= limits.max_in_memory_put_bytes {
@@ -723,6 +749,14 @@ fn extract_one_message(
     let (in_reply_to, references_json, conversation_topic, conversation_index_hex) =
         thread_header_fields(&extracted);
 
+    let file_category = if is_calendar { "calendar" } else { "email" };
+    let from_addr = if is_calendar {
+        // Organizer not available via standard tags in P0; fall back to sender.
+        extracted.sender_email.clone()
+    } else {
+        extracted.sender_email.clone()
+    };
+
     // Insert parent shell first so family can link.
     let family = matter.insert_family(FAMILY_KIND_EMAIL_ATTACHMENTS)?;
     let parent = matter.insert_item(ItemInput {
@@ -732,10 +766,10 @@ fn extract_one_message(
         status: item_status::PARTIAL.to_string(),
         role: Some(item_role::PARENT.to_string()),
         mime_type: Some("application/vnd.ms-outlook".into()),
-        file_category: Some("email".into()),
+        file_category: Some(file_category.into()),
         message_id: mid.clone(),
         subject: extracted.subject.clone(),
-        from_addr: extracted.sender_email.clone(),
+        from_addr: from_addr.clone(),
         to_addrs_json: Some(serde_json::to_string(&to)?),
         cc_addrs_json: Some(serde_json::to_string(&cc)?),
         bcc_addrs_json: Some(serde_json::to_string(&bcc)?),
@@ -748,6 +782,28 @@ fn extract_one_message(
         references_json,
         conversation_topic,
         conversation_index_hex,
+        message_class: extracted.message_class.clone(),
+        cal_start_at: if is_calendar {
+            cal_start_at.clone()
+        } else {
+            None
+        },
+        cal_end_at: if is_calendar {
+            cal_end_at.clone()
+        } else {
+            None
+        },
+        cal_location: if is_calendar {
+            extracted.location.clone()
+        } else {
+            None
+        },
+        cal_organizer: if is_calendar { from_addr.clone() } else { None },
+        cal_extract_method: if is_calendar {
+            Some("pst_oxocal_v1".into())
+        } else {
+            None
+        },
         extra_json: Some(
             json!({
                 "pst_nid": nid_hex(msg_nid.0),
@@ -755,6 +811,7 @@ fn extract_one_message(
                 "extract_tool": "extract-pst",
                 "extract_version": env!("CARGO_PKG_VERSION"),
                 "native_format": NATIVE_FORMAT_V1,
+                "message_class": extracted.message_class,
             })
             .to_string(),
         ),
@@ -954,20 +1011,37 @@ fn extract_one_message(
         .put_bytes(&native_bytes)
         .map_err(|e| Error::CasPutFailed(e.to_string()))?;
 
-    // Logical hash via matter-core (always pass bcc).
-    let logical_input = EmailLogicalInput {
-        message_id: extracted.message_id.clone(),
-        subject: extracted.subject.clone(),
-        from: extracted.sender_email.clone(),
-        to: to.clone(),
-        cc: cc.clone(),
-        bcc: bcc.clone(),
-        sent: sent_at.clone(),
-        received: received_at.clone(),
-        body: Some(body_for_hash.clone()),
-        attachments: logical_atts,
+    // Logical hash: email MID path when Message-ID present; pure calendar without
+    // Message-ID uses non-email preimage (spec §3.7). Meeting requests that also
+    // carry Message-ID keep the email path for exact dups of the message.
+    let logical_hash = if is_calendar && mid.is_none() {
+        let child_digests: Vec<String> = logical_atts
+            .iter()
+            .map(|a| a.native_sha256.clone())
+            .collect();
+        compute_non_email_logical_hash(&NonEmailLogicalInput {
+            category: Some("calendar".into()),
+            title: extracted.subject.clone(),
+            author: from_addr.clone(),
+            created: cal_start_at.clone().or(sent_at.clone()),
+            text: Some(body_for_hash.clone()),
+            children_native_sha256: child_digests,
+        })
+    } else {
+        // Email path (IPM.Note etc.) and calendar-with-MID: always pass bcc.
+        compute_email_logical_hash(&EmailLogicalInput {
+            message_id: extracted.message_id.clone(),
+            subject: extracted.subject.clone(),
+            from: extracted.sender_email.clone(),
+            to: to.clone(),
+            cc: cc.clone(),
+            bcc: bcc.clone(),
+            sent: sent_at.clone(),
+            received: received_at.clone(),
+            body: Some(body_for_hash.clone()),
+            attachments: logical_atts,
+        })
     };
-    let logical_hash = compute_email_logical_hash(&logical_input);
 
     let status = if parent_partial || attach_err > 0 {
         item_status::PARTIAL
@@ -992,6 +1066,38 @@ fn extract_one_message(
 
     let _ = job_id; // used in error paths
     Ok(())
+}
+
+/// Synthesize review plain-text for calendar items (spec §3.6).
+fn synthesize_calendar_review_text(
+    extracted: &ExtractedMessage,
+    attendees: &[String],
+    start: Option<&str>,
+    end: Option<&str>,
+) -> String {
+    let subject = extracted.subject.as_deref().unwrap_or("");
+    let when = match (start, end) {
+        (Some(s), Some(e)) => format!("{s} – {e}"),
+        (Some(s), None) => s.to_string(),
+        (None, Some(e)) => format!("– {e}"),
+        (None, None) => String::new(),
+    };
+    let where_ = extracted.location.as_deref().unwrap_or("");
+    let organizer = extracted.sender_email.as_deref().unwrap_or("");
+    let att_line = attendees.join("; ");
+    let class = extracted.message_class.as_deref().unwrap_or("");
+    let description = extracted.body_text.as_deref().unwrap_or("");
+    format!(
+        "Subject: {subject}\n\
+         When: {when}\n\
+         Where: {where_}\n\
+         Organizer: {organizer}\n\
+         Attendees: {att_line}\n\
+         Busy: \n\
+         Class: {class}\n\
+         ---\n\
+         {description}"
+    )
 }
 
 /// Normalize reply-chain / conversation header fields for parent insert.
@@ -1090,6 +1196,10 @@ mod tests {
             conversation_topic: Some("  Topic  ".into()),
             conversation_index_bytes: Some(vec![0x01, 0x02, 0x03]),
             conversation_index_string: None,
+            message_class: None,
+            start_date: None,
+            end_date: None,
+            location: None,
         };
         let (irt, refs, topic, ci) = thread_header_fields(&msg);
         assert_eq!(irt.as_deref(), Some("parent@ex.com"));
@@ -1127,9 +1237,53 @@ mod tests {
             conversation_topic: None,
             conversation_index_bytes: None,
             conversation_index_string: None,
+            message_class: None,
+            start_date: None,
+            end_date: None,
+            location: None,
         };
         let (a, b, c, d) = thread_header_fields(&msg);
         assert!(a.is_none() && b.is_none() && c.is_none() && d.is_none());
+    }
+
+    #[test]
+    fn calendar_review_text_contains_markers() {
+        let msg = ExtractedMessage {
+            nid: NodeId(1),
+            message_id: None,
+            subject: Some("Standup".into()),
+            sender_email: Some("org@ex.com".into()),
+            display_to: Some("a@ex.com".into()),
+            display_cc: None,
+            display_bcc: None,
+            submit_time: None,
+            delivery_time: None,
+            body_text: Some("Bring notes".into()),
+            body_html: None,
+            message_size: None,
+            has_attachments: None,
+            in_reply_to: None,
+            references: None,
+            conversation_topic: None,
+            conversation_index_bytes: None,
+            conversation_index_string: None,
+            message_class: Some("IPM.Appointment".into()),
+            start_date: None,
+            end_date: None,
+            location: Some("Room 1".into()),
+        };
+        let text = synthesize_calendar_review_text(
+            &msg,
+            &["a@ex.com".into()],
+            Some("2026-07-18T14:00:00Z"),
+            Some("2026-07-18T14:30:00Z"),
+        );
+        assert!(text.contains("Subject: Standup"));
+        assert!(text.contains("Where: Room 1"));
+        assert!(text.contains("Class: IPM.Appointment"));
+        assert!(text.contains("Bring notes"));
+        assert!(is_calendar_message_class("IPM.Appointment"));
+        assert!(!is_calendar_message_class("IPM.Note"));
     }
 
     #[test]
@@ -1176,6 +1330,10 @@ mod tests {
             conversation_topic: Some("Topic".into()),
             conversation_index_bytes: Some(vec![0xaa, 0xbb]),
             conversation_index_string: None,
+            message_class: None,
+            start_date: None,
+            end_date: None,
+            location: None,
         };
         refresh_thread_headers(&matter, &parent.id, &extracted).expect("refresh");
 

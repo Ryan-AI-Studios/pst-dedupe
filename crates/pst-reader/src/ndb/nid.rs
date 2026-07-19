@@ -140,8 +140,21 @@ pub const PID_TAG_DISPLAY_NAME: u16 = 0x3001;
 /// PidTagContentCount — number of messages in folder (PtypInteger32)
 pub const PID_TAG_CONTENT_COUNT: u16 = 0x3602;
 
+/// PidTagMessageClass (PtypString) — e.g. IPM.Note, IPM.Appointment
+pub const PID_TAG_MESSAGE_CLASS: u16 = 0x001A;
+
 /// PidTagSubject (PtypString)
 pub const PID_TAG_SUBJECT: u16 = 0x0037;
+
+/// PidTagStartDate (PtypTime / FILETIME) — appointment start when present
+pub const PID_TAG_START_DATE: u16 = 0x0060;
+
+/// PidTagEndDate (PtypTime / FILETIME) — appointment end when present
+pub const PID_TAG_END_DATE: u16 = 0x0061;
+
+/// PidTagLocation (PtypString) — best-effort standard tag (0x3A0D).
+/// MS-OXOCAL primarily uses PidLidLocation named prop; residual if absent.
+pub const PID_TAG_LOCATION: u16 = 0x3A0D;
 
 /// PidTagClientSubmitTime (PtypTime / FILETIME)
 pub const PID_TAG_CLIENT_SUBMIT_TIME: u16 = 0x0039;
