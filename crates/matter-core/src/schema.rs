@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -29,6 +29,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (13, MIGRATION_V13),
     (14, MIGRATION_V14),
     (15, MIGRATION_V15),
+    (16, MIGRATION_V16),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -517,6 +518,30 @@ ALTER TABLE items ADD COLUMN pdf_page_count INTEGER;
 ALTER TABLE items ADD COLUMN pdf_needs_ocr INTEGER NOT NULL DEFAULT 0;
 "#;
 
+/// Schema v16: Calendar appointment fields + ICS extract bookkeeping (track 0035).
+///
+/// Structured cal_* columns for PST appointments / ICS VEVENTs, plus
+/// `ics_*` job bookkeeping (mirrors office/pdf). Does **not** expand RRULEs.
+const MIGRATION_V16: &str = r#"
+ALTER TABLE items ADD COLUMN message_class TEXT;
+ALTER TABLE items ADD COLUMN cal_start_at TEXT;
+ALTER TABLE items ADD COLUMN cal_end_at TEXT;
+ALTER TABLE items ADD COLUMN cal_all_day INTEGER;
+ALTER TABLE items ADD COLUMN cal_location TEXT;
+ALTER TABLE items ADD COLUMN cal_organizer TEXT;
+ALTER TABLE items ADD COLUMN cal_attendees_json TEXT;
+ALTER TABLE items ADD COLUMN cal_busy_status TEXT;
+ALTER TABLE items ADD COLUMN cal_is_recurring INTEGER;
+ALTER TABLE items ADD COLUMN cal_recurrence_id TEXT;
+ALTER TABLE items ADD COLUMN cal_uid TEXT;
+ALTER TABLE items ADD COLUMN cal_extract_method TEXT;
+ALTER TABLE items ADD COLUMN ics_extract_status TEXT;
+ALTER TABLE items ADD COLUMN ics_extract_method TEXT;
+ALTER TABLE items ADD COLUMN ics_source_native_sha256 TEXT;
+ALTER TABLE items ADD COLUMN ics_extracted_at TEXT;
+ALTER TABLE items ADD COLUMN ics_extract_error TEXT;
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -613,7 +638,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 15);
+        assert_eq!(v, 16);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v10 FTS bookkeeping columns present
@@ -1498,7 +1523,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v7 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 15);
+        assert_eq!(v, 16);
 
         let in_review: Option<i64> = conn
             .query_row(
@@ -1606,7 +1631,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v8 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 15);
+        assert_eq!(v, 16);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1821,7 +1846,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v10 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 15);
+        assert_eq!(v, 16);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1949,7 +1974,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v11 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 15);
+        assert_eq!(v, 16);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -2068,7 +2093,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v12 to v13");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 15);
+        assert_eq!(v, 16);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -2166,7 +2191,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v13 to v14");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 15);
+        assert_eq!(v, 16);
 
         for col in [
             "office_extract_status",
@@ -2257,7 +2282,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v14 to v15");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 15);
+        assert_eq!(v, 16);
 
         for col in [
             "pdf_extract_status",
@@ -2299,6 +2324,111 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v14'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    /// v15 → v16 adds calendar fields + ics_* bookkeeping columns.
+    #[test]
+    fn migrate_v15_to_v16_adds_calendar_columns() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute_batch(MIGRATION_V3).expect("v3");
+        conn.execute_batch(MIGRATION_V4).expect("v4");
+        conn.execute_batch(MIGRATION_V5).expect("v5");
+        conn.execute_batch(MIGRATION_V6).expect("v6");
+        conn.execute_batch(MIGRATION_V7).expect("v7");
+        conn.execute_batch(MIGRATION_V8).expect("v8");
+        conn.execute_batch(MIGRATION_V9).expect("v9");
+        conn.execute_batch(MIGRATION_V10).expect("v10");
+        conn.execute_batch(MIGRATION_V11).expect("v11");
+        conn.execute_batch(MIGRATION_V12).expect("v12");
+        conn.execute_batch(MIGRATION_V13).expect("v13");
+        conn.execute_batch(MIGRATION_V14).expect("v14");
+        conn.execute_batch(MIGRATION_V15).expect("v15");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (15)", [])
+            .expect("meta v15");
+        assert_eq!(read_schema_version(&conn).expect("read"), 15);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v15', 'V15 Matter', '2020-01-01T00:00:00Z', 15, '/tmp/v15')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, text_sha256, in_review, \
+             fts_text_sha256, note_count, highlight_count, privilege_withhold, redaction_count, \
+             pdf_needs_ocr) \
+             VALUES ('itm_cal', 'mat_v15', NULL, NULL, 'meetings/a.ics', \
+             'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', \
+             NULL, NULL, 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'standalone', 'attachment', 0, NULL, 0, NULL, 0, 0, 0, 0, 0)",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v15 to v16");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 16);
+
+        for col in [
+            "message_class",
+            "cal_start_at",
+            "cal_end_at",
+            "cal_all_day",
+            "cal_location",
+            "cal_organizer",
+            "cal_attendees_json",
+            "cal_busy_status",
+            "cal_is_recurring",
+            "cal_recurrence_id",
+            "cal_uid",
+            "cal_extract_method",
+            "ics_extract_status",
+            "ics_extract_method",
+            "ics_source_native_sha256",
+            "ics_extracted_at",
+            "ics_extract_error",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected column {col}");
+        }
+
+        let start: Option<String> = conn
+            .query_row(
+                "SELECT cal_start_at FROM items WHERE id = 'itm_cal'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("cal_start");
+        assert!(start.is_none());
+
+        let path: Option<String> = conn
+            .query_row("SELECT path FROM items WHERE id = 'itm_cal'", [], |row| {
+                row.get(0)
+            })
+            .expect("path");
+        assert_eq!(path.as_deref(), Some("meetings/a.ics"));
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v15'",
                 [],
                 |row| row.get(0),
             )

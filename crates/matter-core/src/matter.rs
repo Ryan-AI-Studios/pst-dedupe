@@ -236,6 +236,31 @@ pub struct Item {
     pub pdf_page_count: Option<i64>,
     /// 0/1 — empty or low-text OCR candidate (0036).
     pub pdf_needs_ocr: i64,
+    // --- schema v16 (calendar / ICS) ---
+    /// Raw MAPI message class or `VEVENT` / `ics`.
+    pub message_class: Option<String>,
+    /// RFC3339 with offset when known.
+    pub cal_start_at: Option<String>,
+    pub cal_end_at: Option<String>,
+    /// 0/1 all-day flag.
+    pub cal_all_day: Option<i64>,
+    pub cal_location: Option<String>,
+    pub cal_organizer: Option<String>,
+    /// JSON array of `{ "addr", "name?", "role?", "partstat?" }`.
+    pub cal_attendees_json: Option<String>,
+    pub cal_busy_status: Option<String>,
+    /// 0/1 when recurrence/RRULE present (not expanded).
+    pub cal_is_recurring: Option<i64>,
+    pub cal_recurrence_id: Option<String>,
+    pub cal_uid: Option<String>,
+    /// e.g. `pst_oxocal_v1` / `ics_icalendar_v1`.
+    pub cal_extract_method: Option<String>,
+    /// `ok` | `skipped` | `error` | NULL never attempted.
+    pub ics_extract_status: Option<String>,
+    pub ics_extract_method: Option<String>,
+    pub ics_source_native_sha256: Option<String>,
+    pub ics_extracted_at: Option<String>,
+    pub ics_extract_error: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -314,6 +339,19 @@ pub struct ItemInput {
     pub promoted_at: Option<String>,
     pub promote_job_id: Option<String>,
     pub promote_policy: Option<String>,
+    // --- schema v16 (calendar) — set by extract-pst / extract-calendar ---
+    pub message_class: Option<String>,
+    pub cal_start_at: Option<String>,
+    pub cal_end_at: Option<String>,
+    pub cal_all_day: Option<i64>,
+    pub cal_location: Option<String>,
+    pub cal_organizer: Option<String>,
+    pub cal_attendees_json: Option<String>,
+    pub cal_busy_status: Option<String>,
+    pub cal_is_recurring: Option<i64>,
+    pub cal_recurrence_id: Option<String>,
+    pub cal_uid: Option<String>,
+    pub cal_extract_method: Option<String>,
 }
 
 /// Thin row for matter-level email parent dedupe (no body text).
@@ -853,6 +891,19 @@ pub struct ItemUpdate {
     pub promoted_at: Option<Option<String>>,
     pub promote_job_id: Option<Option<String>>,
     pub promote_policy: Option<Option<String>>,
+    // --- schema v16 (calendar) ---
+    pub message_class: Option<Option<String>>,
+    pub cal_start_at: Option<Option<String>>,
+    pub cal_end_at: Option<Option<String>>,
+    pub cal_all_day: Option<Option<i64>>,
+    pub cal_location: Option<Option<String>>,
+    pub cal_organizer: Option<Option<String>>,
+    pub cal_attendees_json: Option<Option<String>>,
+    pub cal_busy_status: Option<Option<String>>,
+    pub cal_is_recurring: Option<Option<i64>>,
+    pub cal_recurrence_id: Option<Option<String>>,
+    pub cal_uid: Option<Option<String>>,
+    pub cal_extract_method: Option<Option<String>>,
 }
 
 /// An open matter: directory layout + SQLite connection + CAS handle.
@@ -1319,7 +1370,10 @@ impl Matter {
                 near_dup_method, near_duped_at, near_dup_job_id, \
                 cull_status, cull_reasons_json, cull_preset_id, cull_preset_name, \
                 culled_at, cull_job_id, \
-                in_review, review_set_id, review_order, promoted_at, promote_job_id, promote_policy\
+                in_review, review_set_id, review_order, promoted_at, promote_job_id, promote_policy, \
+                message_class, cal_start_at, cal_end_at, cal_all_day, cal_location, \
+                cal_organizer, cal_attendees_json, cal_busy_status, cal_is_recurring, \
+                cal_recurrence_id, cal_uid, cal_extract_method\
              ) VALUES (\
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, \
@@ -1328,7 +1382,8 @@ impl Matter {
                 ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, \
                 ?48, ?49, ?50, ?51, ?52, ?53, ?54, \
                 ?55, ?56, ?57, ?58, ?59, ?60, \
-                ?61, ?62, ?63, ?64, ?65, ?66\
+                ?61, ?62, ?63, ?64, ?65, ?66, \
+                ?67, ?68, ?69, ?70, ?71, ?72, ?73, ?74, ?75, ?76, ?77, ?78\
              )",
             params![
                 id,
@@ -1397,6 +1452,18 @@ impl Matter {
                 input.promoted_at,
                 input.promote_job_id,
                 input.promote_policy,
+                input.message_class,
+                input.cal_start_at,
+                input.cal_end_at,
+                input.cal_all_day,
+                input.cal_location,
+                input.cal_organizer,
+                input.cal_attendees_json,
+                input.cal_busy_status,
+                input.cal_is_recurring,
+                input.cal_recurrence_id,
+                input.cal_uid,
+                input.cal_extract_method,
             ],
         )?;
 
@@ -1502,6 +1569,18 @@ impl Matter {
         let promoted_at = apply_opt2(update.promoted_at, current.promoted_at);
         let promote_job_id = apply_opt2(update.promote_job_id, current.promote_job_id);
         let promote_policy = apply_opt2(update.promote_policy, current.promote_policy);
+        let message_class = apply_opt2(update.message_class, current.message_class);
+        let cal_start_at = apply_opt2(update.cal_start_at, current.cal_start_at);
+        let cal_end_at = apply_opt2(update.cal_end_at, current.cal_end_at);
+        let cal_all_day = apply_opt2(update.cal_all_day, current.cal_all_day);
+        let cal_location = apply_opt2(update.cal_location, current.cal_location);
+        let cal_organizer = apply_opt2(update.cal_organizer, current.cal_organizer);
+        let cal_attendees_json = apply_opt2(update.cal_attendees_json, current.cal_attendees_json);
+        let cal_busy_status = apply_opt2(update.cal_busy_status, current.cal_busy_status);
+        let cal_is_recurring = apply_opt2(update.cal_is_recurring, current.cal_is_recurring);
+        let cal_recurrence_id = apply_opt2(update.cal_recurrence_id, current.cal_recurrence_id);
+        let cal_uid = apply_opt2(update.cal_uid, current.cal_uid);
+        let cal_extract_method = apply_opt2(update.cal_extract_method, current.cal_extract_method);
 
         let mut family_id = family_id;
         if let Some(ref parent_id) = parent_item_id {
@@ -1552,8 +1631,12 @@ impl Matter {
                 promoted_at = ?61, promote_job_id = ?62, promote_policy = ?63, \
                 redacted_text_sha256 = CASE WHEN ?64 THEN NULL ELSE redacted_text_sha256 END, \
                 redacted_text_at = CASE WHEN ?64 THEN NULL ELSE redacted_text_at END, \
-                redacted_source_digest = CASE WHEN ?64 THEN NULL ELSE redacted_source_digest END \
-             WHERE id = ?65",
+                redacted_source_digest = CASE WHEN ?64 THEN NULL ELSE redacted_source_digest END, \
+                message_class = ?65, cal_start_at = ?66, cal_end_at = ?67, cal_all_day = ?68, \
+                cal_location = ?69, cal_organizer = ?70, cal_attendees_json = ?71, \
+                cal_busy_status = ?72, cal_is_recurring = ?73, cal_recurrence_id = ?74, \
+                cal_uid = ?75, cal_extract_method = ?76 \
+             WHERE id = ?77",
             params![
                 source_id,
                 family_id,
@@ -1619,6 +1702,18 @@ impl Matter {
                 promote_job_id,
                 promote_policy,
                 body_digest_changed,
+                message_class,
+                cal_start_at,
+                cal_end_at,
+                cal_all_day,
+                cal_location,
+                cal_organizer,
+                cal_attendees_json,
+                cal_busy_status,
+                cal_is_recurring,
+                cal_recurrence_id,
+                cal_uid,
+                cal_extract_method,
                 item_id,
             ],
         )?;
@@ -4650,7 +4745,12 @@ const ITEM_COLUMNS: &str =
     office_extract_status, office_extract_method, office_source_native_sha256, \
     office_extracted_at, office_extract_error, \
     pdf_extract_status, pdf_extract_method, pdf_source_native_sha256, \
-    pdf_extracted_at, pdf_extract_error, pdf_page_count, pdf_needs_ocr";
+    pdf_extracted_at, pdf_extract_error, pdf_page_count, pdf_needs_ocr, \
+    message_class, cal_start_at, cal_end_at, cal_all_day, cal_location, \
+    cal_organizer, cal_attendees_json, cal_busy_status, cal_is_recurring, \
+    cal_recurrence_id, cal_uid, cal_extract_method, \
+    ics_extract_status, ics_extract_method, ics_source_native_sha256, \
+    ics_extracted_at, ics_extract_error";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -4740,6 +4840,23 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         pdf_extract_error: row.get(79)?,
         pdf_page_count: row.get(80)?,
         pdf_needs_ocr: row.get::<_, Option<i64>>(81)?.unwrap_or(0),
+        message_class: row.get(82)?,
+        cal_start_at: row.get(83)?,
+        cal_end_at: row.get(84)?,
+        cal_all_day: row.get(85)?,
+        cal_location: row.get(86)?,
+        cal_organizer: row.get(87)?,
+        cal_attendees_json: row.get(88)?,
+        cal_busy_status: row.get(89)?,
+        cal_is_recurring: row.get(90)?,
+        cal_recurrence_id: row.get(91)?,
+        cal_uid: row.get(92)?,
+        cal_extract_method: row.get(93)?,
+        ics_extract_status: row.get(94)?,
+        ics_extract_method: row.get(95)?,
+        ics_source_native_sha256: row.get(96)?,
+        ics_extracted_at: row.get(97)?,
+        ics_extract_error: row.get(98)?,
     })
 }
 
