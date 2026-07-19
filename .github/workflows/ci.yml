@@ -1,6 +1,10 @@
 # Windows-only CI for pst-dedupe.
 # Adapted from Ledgerful's hygiene gates (fmt / clippy / test) without multi-OS
 # or Ledgerful product-specific jobs (web SPA, nextest tiers, cargo-deny, etc.).
+#
+# Action Node runtimes: prefer actions that natively target Node.js 24
+# (Node 20 is deprecated on GitHub-hosted runners).
+# See: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
 
 name: CI
 
@@ -22,11 +26,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      # v5+ runs on Node.js 24 (v4 targeted Node 20 — deprecated).
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
+      # v2.9+ migrates the action runtime to Node.js 24.
+      - uses: Swatinem/rust-cache@v2.9.1
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
@@ -35,11 +41,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.1
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -48,9 +54,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.1
       - name: cargo test
         run: cargo test --workspace
 
