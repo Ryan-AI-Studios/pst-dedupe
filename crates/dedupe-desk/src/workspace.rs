@@ -121,6 +121,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
         {
             app.start_pdf_extract();
         }
+        {
+            let ocr_ok = app.ocr_run_enabled();
+            let tip = app.ocr_run_tooltip();
+            let ocr_btn = ui
+                .add_enabled(!busy && ocr_ok, egui::Button::new("Run OCR"))
+                .on_hover_text(tip);
+            if ocr_btn.clicked() {
+                app.start_ocr();
+            }
+        }
         if ui
             .add_enabled(!busy, egui::Button::new("Extract ICS"))
             .on_hover_text(

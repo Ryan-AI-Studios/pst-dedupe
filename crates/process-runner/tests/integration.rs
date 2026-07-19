@@ -1371,3 +1371,163 @@ fn pdf_extract_handler_via_process_runner() {
     assert_eq!(item.pdf_extract_status.as_deref(), Some("ok"));
     assert_eq!(item.pdf_needs_ocr, 0);
 }
+
+#[cfg(feature = "ocr")]
+#[test]
+fn ocr_handler_rejects_production_mock_engine() {
+    use matter_core::ItemInput;
+    use ocr_plugin::minimal_png_bytes;
+    use process_runner::MatterOcrHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-ocr-mock-reject");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        let native = matter.put_bytes(&minimal_png_bytes()).expect("put");
+        matter
+            .insert_item(ItemInput {
+                path: Some("scan.png".into()),
+                native_sha256: Some(native),
+                status: "extracted".into(),
+                mime_type: Some("image/png".into()),
+                file_category: Some("image".into()),
+                ..Default::default()
+            })
+            .expect("item");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterOcrHandler::new()));
+
+    // Production path must reject engine=mock (no fabricated OCR via job JSON).
+    let params = JobParams::new(
+        serde_json::json!({
+            "force": false,
+            "batch_size": 10,
+            "lang": "eng",
+            "enabled": true,
+            "engine": "mock"
+        })
+        .to_string(),
+    );
+    let job_id = runner.start(&root, "ocr", params).expect("start ocr");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Failed,
+        "mock must fail: {:?}",
+        job.error_summary
+    );
+    assert!(
+        job.error_summary
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("mock"),
+        "err={:?}",
+        job.error_summary
+    );
+
+    let item = matter
+        .list_ocr_candidates(0, 10, true)
+        .expect("candidates")
+        .into_iter()
+        .next()
+        .expect("item");
+    let after = matter.get_item(&item.id).expect("get");
+    assert!(after.ocr_status.is_none(), "no item mutation");
+    assert!(after.text_sha256.is_none());
+}
+
+#[cfg(feature = "ocr")]
+#[test]
+fn ocr_plugin_mock_via_injection_works() {
+    // Mock success is only via run_ocr_with_engine (tests), not production handler.
+    use matter_core::ItemInput;
+    use ocr_plugin::{
+        minimal_png_bytes, run_ocr_with_engine, MockOcrEngine, OcrParams, JOB_KIND_OCR,
+    };
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-ocr-inject");
+    let matter = Matter::open(&root).expect("open");
+    let native = matter.put_bytes(&minimal_png_bytes()).expect("put");
+    let item = matter
+        .insert_item(ItemInput {
+            path: Some("scan.png".into()),
+            native_sha256: Some(native),
+            status: "extracted".into(),
+            mime_type: Some("image/png".into()),
+            file_category: Some("image".into()),
+            ..Default::default()
+        })
+        .expect("item");
+    let job = matter.create_job(JOB_KIND_OCR).expect("job");
+    let engine = MockOcrEngine::new("INJECTED_MOCK_OK");
+    let params = OcrParams {
+        enabled: true,
+        engine: "tesseract".into(), // injection ignores engine string for selection
+        ..OcrParams::default()
+    };
+    let outcome =
+        run_ocr_with_engine(&matter, &job.id, &params, &engine, None, |_| {}).expect("run");
+    assert!(matches!(outcome, ocr_plugin::OcrOutcome::Succeeded(_)));
+    let after = matter.get_item(&item.id).expect("get");
+    assert_eq!(after.ocr_status.as_deref(), Some("ok"));
+    assert!(after.text_sha256.is_some());
+}
+
+#[cfg(feature = "ocr")]
+#[test]
+fn ocr_handler_disabled_fails_closed() {
+    use matter_core::ItemInput;
+    use ocr_plugin::minimal_png_bytes;
+    use process_runner::MatterOcrHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-ocr-off");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        let native = matter.put_bytes(&minimal_png_bytes()).expect("put");
+        matter
+            .insert_item(ItemInput {
+                path: Some("scan.png".into()),
+                native_sha256: Some(native),
+                status: "extracted".into(),
+                mime_type: Some("image/png".into()),
+                ..Default::default()
+            })
+            .expect("item");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterOcrHandler::new()));
+
+    let params = JobParams::new(
+        serde_json::json!({
+            "enabled": false,
+            "engine": "mock"
+        })
+        .to_string(),
+    );
+    let job_id = runner.start(&root, "ocr", params).expect("start ocr");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(job.state, JobState::Failed, "expected fail closed");
+    let item = matter
+        .list_ocr_candidates(0, 10, false)
+        .expect("c")
+        .into_iter()
+        .next()
+        .expect("cand");
+    let full = matter.get_item(&item.id).expect("item");
+    assert!(full.ocr_status.is_none());
+    assert!(full.text_sha256.is_none());
+}

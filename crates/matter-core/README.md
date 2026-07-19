@@ -21,7 +21,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 17. **Redaction** regions + true redacted text CAS artifact (0032)
 18. **Office extract** bookkeeping (`office_*`) for OOXML text fill (0033)
 
-Schema version: **16** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, text redaction, and office extract bookkeeping, and PDF extract bookkeeping (`pdf_needs_ocr`), and calendar/ICS fields (`cal_*`, `ics_*`). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+Schema version: **17** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, text redaction, office extract bookkeeping, PDF extract bookkeeping (`pdf_needs_ocr`), calendar/ICS fields (`cal_*`, `ics_*`), and OCR bookkeeping (`ocr_*`). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
 
 ## Layout
 

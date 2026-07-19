@@ -9,7 +9,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
 use process_runner::{
     ExtractPstHandler, IngestHandler, JobParams, MatterCullHandler, MatterDedupeHandler,
-    MatterFtsIndexHandler, MatterIcsExtractHandler, MatterNearDupHandler,
+    MatterFtsIndexHandler, MatterIcsExtractHandler, MatterNearDupHandler, MatterOcrHandler,
     MatterOfficeExtractHandler, MatterPdfExtractHandler, MatterPromoteHandler, MatterThreadHandler,
     ProcessRunner, RunnerConfig,
 };
@@ -77,6 +77,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterOfficeExtractHandler::new()));
         runner.register(Arc::new(MatterPdfExtractHandler::new()));
         runner.register(Arc::new(MatterIcsExtractHandler::new()));
+        runner.register(Arc::new(MatterOcrHandler::new()));
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 
@@ -471,6 +472,69 @@ impl DeskApp {
         }
     }
 
+    /// Tooltip / enablement for Workspace **Run OCR** (enable + tool paths).
+    pub(crate) fn ocr_run_tooltip(&self) -> String {
+        if !self.settings.ocr_enabled {
+            return "Enable local OCR in Settings (Home) first — off by default".into();
+        }
+        if !self.ocr_tesseract_looks_available() {
+            return "Tesseract not found — set Tesseract path in Settings or add to PATH".into();
+        }
+        "Run local Tesseract OCR on needs-OCR PDFs and images (kind=ocr). PDF pages also need pdftoppm/mutool.".into()
+    }
+
+    /// True when OCR is enabled and a Tesseract binary appears resolvable.
+    pub(crate) fn ocr_run_enabled(&self) -> bool {
+        self.settings.ocr_enabled && self.ocr_tesseract_looks_available()
+    }
+
+    fn ocr_tesseract_looks_available(&self) -> bool {
+        if let Some(p) = self.settings.tesseract_path.as_deref().map(str::trim) {
+            if !p.is_empty() {
+                return std::path::Path::new(p).is_file();
+            }
+        }
+        // Cheap PATH probe (not a full preflight — job still fails closed).
+        which_on_path("tesseract") || which_on_path("tesseract.exe")
+    }
+
+    /// Run local OCR (`ocr`) — fails closed when Settings OCR is disabled.
+    pub(crate) fn start_ocr(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        if !self.settings.ocr_enabled {
+            self.error_msg =
+                Some("OCR is disabled. Enable local OCR in Settings (Home) before running.".into());
+            return;
+        }
+        if !self.ocr_tesseract_looks_available() {
+            self.error_msg = Some(
+                "Tesseract not found. Set the executable path in Settings or install and add to PATH."
+                    .into(),
+            );
+            return;
+        }
+        let params = JobParams::new(params::ocr_default_params(
+            self.settings.ocr_enabled,
+            self.settings.tesseract_path.as_deref(),
+            self.settings.tessdata_dir.as_deref(),
+            self.settings.pdf_renderer_path.as_deref(),
+        ));
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "ocr", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started OCR job {job_id}"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
     /// Extract calendar events from ICS natives (`ics_extract`).
     pub(crate) fn start_ics_extract(&mut self) {
         let Some(root) = self.matter_root.clone() else {
@@ -782,6 +846,75 @@ impl DeskApp {
                 .small(),
         );
 
+        ui.add_space(8.0);
+        ui.heading("Local OCR (optional)");
+        let ocr_resp = ui.checkbox(
+            &mut self.settings.ocr_enabled,
+            "Enable local OCR (Tesseract CLI)",
+        );
+        if ocr_resp.changed() {
+            self.settings.save();
+        }
+        ui.label(
+            egui::RichText::new(
+                "Off by default. Requires system Tesseract with OSD (osd.traineddata). \
+                 PDF OCR also needs pdftoppm (Poppler) or mutool (MuPDF). No cloud OCR.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Tesseract path:");
+            let mut path = self.settings.tesseract_path.clone().unwrap_or_default();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut path)
+                    .desired_width(280.0)
+                    .hint_text("optional — uses PATH if empty"),
+            );
+            if r.changed() || r.lost_focus() {
+                self.settings.tesseract_path = if path.trim().is_empty() {
+                    None
+                } else {
+                    Some(path.trim().to_string())
+                };
+                self.settings.save();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Tessdata dir:");
+            let mut path = self.settings.tessdata_dir.clone().unwrap_or_default();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut path)
+                    .desired_width(280.0)
+                    .hint_text("optional TESSDATA_PREFIX"),
+            );
+            if r.changed() || r.lost_focus() {
+                self.settings.tessdata_dir = if path.trim().is_empty() {
+                    None
+                } else {
+                    Some(path.trim().to_string())
+                };
+                self.settings.save();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("PDF renderer:");
+            let mut path = self.settings.pdf_renderer_path.clone().unwrap_or_default();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut path)
+                    .desired_width(280.0)
+                    .hint_text("optional pdftoppm or mutool"),
+            );
+            if r.changed() || r.lost_focus() {
+                self.settings.pdf_renderer_path = if path.trim().is_empty() {
+                    None
+                } else {
+                    Some(path.trim().to_string())
+                };
+                self.settings.save();
+            }
+        });
+
         ui.add_space(12.0);
         ui.heading("Recent");
         if self.settings.recent_matters.is_empty() {
@@ -959,4 +1092,16 @@ impl Drop for DeskApp {
         // Belt-and-suspenders: join worker even if on_exit was skipped.
         self.runner.shutdown();
     }
+}
+
+fn which_on_path(name: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path_var) {
+        if dir.join(name).is_file() {
+            return true;
+        }
+    }
+    false
 }

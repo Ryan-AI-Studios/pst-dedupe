@@ -193,6 +193,30 @@ pub fn pdf_extract_default_params() -> String {
     .to_string()
 }
 
+/// Default params for OCR (`kind = "ocr"`).
+///
+/// Pass desk enable flag and tool paths so the job fails closed when OCR is off.
+pub fn ocr_default_params(
+    enabled: bool,
+    tesseract_path: Option<&str>,
+    tessdata_dir: Option<&str>,
+    pdf_renderer_path: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "force": false,
+        "batch_size": 20,
+        "lang": "eng",
+        "max_pages": 500,
+        "dpi": 200,
+        "enabled": enabled,
+        "tesseract_path": tesseract_path,
+        "tessdata_dir": tessdata_dir,
+        "pdf_renderer_path": pdf_renderer_path,
+        "engine": "tesseract"
+    })
+    .to_string()
+}
+
 /// Default params for ICS calendar extract (`kind = "ics_extract"`).
 pub fn ics_extract_default_params() -> String {
     serde_json::json!({
@@ -381,6 +405,34 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["force"], false);
         assert_eq!(v["batch_size"], 50);
+    }
+
+    #[test]
+    fn ocr_params_shape_fail_closed_by_default() {
+        let j = ocr_default_params(false, None, None, None);
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["enabled"], false);
+        assert_eq!(v["force"], false);
+        assert_eq!(v["batch_size"], 20);
+        assert_eq!(v["lang"], "eng");
+        assert_eq!(v["max_pages"], 500);
+        assert_eq!(v["dpi"], 200);
+        assert_eq!(v["engine"], "tesseract");
+    }
+
+    #[test]
+    fn ocr_params_paths_when_enabled() {
+        let j = ocr_default_params(
+            true,
+            Some(r"C:\tools\tesseract.exe"),
+            Some(r"C:\tessdata"),
+            Some(r"C:\tools\pdftoppm.exe"),
+        );
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["tesseract_path"], r"C:\tools\tesseract.exe");
+        assert_eq!(v["tessdata_dir"], r"C:\tessdata");
+        assert_eq!(v["pdf_renderer_path"], r"C:\tools\pdftoppm.exe");
     }
 
     #[test]

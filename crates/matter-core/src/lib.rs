@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v16**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v17**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -24,6 +24,7 @@
 //! - **Office extract** bookkeeping (`office_*` columns) for OOXML text (0033)
 //! - **PDF extract** bookkeeping (`pdf_*` columns, `pdf_needs_ocr`) for embedded text (0034)
 //! - **Calendar** fields (`cal_*`, `message_class`) + ICS extract bookkeeping (0035)
+//! - **OCR** bookkeeping (`ocr_*` columns) for offline Tesseract text (0036)
 //!
 //! ## Layout
 //!
@@ -57,6 +58,7 @@ pub mod item_errors;
 pub mod jobs;
 pub mod logical_hash;
 pub mod matter;
+pub mod ocr;
 pub mod office;
 pub mod pdf;
 pub mod privilege;
@@ -100,6 +102,7 @@ pub use matter::{
     HIGHLIGHT_QUOTE_MAX_BYTES, INDEX_DIR, LOGS_DIR, NOTE_BODY_MAX_BYTES, WORKSPACE_DIR,
     WORKSPACE_TEMP_DIR,
 };
+pub use ocr::{ocr_status, ApplyOcrTextInput, OcrApplyResult, OcrCandidate};
 pub use office::{
     office_extract_status, ApplyOfficeTextInput, OfficeCandidate, OfficeExtractApplyResult,
 };

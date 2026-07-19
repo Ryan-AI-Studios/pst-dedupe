@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 16;
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -30,6 +30,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (14, MIGRATION_V14),
     (15, MIGRATION_V15),
     (16, MIGRATION_V16),
+    (17, MIGRATION_V17),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -245,7 +246,7 @@ CREATE INDEX IF NOT EXISTS idx_cull_presets_matter ON cull_presets(matter_id);
 
 /// Schema v7: review-set membership for promote-to-review (track 0025).
 ///
-/// Nullable item columns + `review_sets` table. Flag-only membership â€” never
+/// Nullable item columns + `review_sets` table. Flag-only membership Ã¢â‚¬â€ never
 /// deletes items/CAS. Partial unique index enforces at most one default set
 /// per matter (`is_default = 1`).
 const MIGRATION_V7: &str = r#"
@@ -281,9 +282,9 @@ CREATE INDEX IF NOT EXISTS idx_items_review_set_id ON items(review_set_id);
 CREATE INDEX IF NOT EXISTS idx_items_review_set_order ON items(review_set_id, review_order);
 "#;
 
-/// Schema v8: coding catalog + item↔code membership (track 0027).
+/// Schema v8: coding catalog + itemâ†”code membership (track 0027).
 ///
-/// Matter-scoped code definitions and membership rows only — never deletes
+/// Matter-scoped code definitions and membership rows only â€” never deletes
 /// items/CAS. Inactive definitions remain for historical membership display.
 const MIGRATION_V8: &str = r#"
 CREATE TABLE code_definitions (
@@ -349,7 +350,7 @@ CREATE INDEX IF NOT EXISTS idx_items_review_list_order
 ///
 /// Nullable `fts_*` columns on items track which CAS digest was last indexed.
 /// `saved_searches.keyword` stores the optional body keyword query beside
-/// metadata `filter_json`. Tantivy segments live under `index/` on disk — never
+/// metadata `filter_json`. Tantivy segments live under `index/` on disk â€” never
 /// in SQLite (no FTS5 primary).
 const MIGRATION_V10: &str = r#"
 ALTER TABLE items ADD COLUMN fts_text_sha256 TEXT;
@@ -360,7 +361,7 @@ ALTER TABLE saved_searches ADD COLUMN keyword TEXT;
 
 /// Schema v11: stand-off notes + text highlights (track 0030).
 ///
-/// Work-product annotations beside the document — never rewrite CAS body text.
+/// Work-product annotations beside the document â€” never rewrite CAS body text.
 /// Highlights store UTF-8 **char** indices + TextQuoteSelector-style fields.
 /// Denormalized `note_count` / `highlight_count` on items keep list badges fast.
 /// Hard-delete is OK; audit retains body / range snapshots.
@@ -542,6 +543,22 @@ ALTER TABLE items ADD COLUMN ics_extracted_at TEXT;
 ALTER TABLE items ADD COLUMN ics_extract_error TEXT;
 "#;
 
+/// Schema v17: OCR bookkeeping (track 0036).
+///
+/// Records engine/lang/page stats and CAS digests for offline OCR text.
+/// Consumes `pdf_needs_ocr` handoff from extract-pdf (0034).
+const MIGRATION_V17: &str = r#"
+ALTER TABLE items ADD COLUMN ocr_status TEXT;
+ALTER TABLE items ADD COLUMN ocr_engine TEXT;
+ALTER TABLE items ADD COLUMN ocr_lang TEXT;
+ALTER TABLE items ADD COLUMN ocr_text_sha256 TEXT;
+ALTER TABLE items ADD COLUMN ocr_source_native_sha256 TEXT;
+ALTER TABLE items ADD COLUMN ocr_page_count INTEGER;
+ALTER TABLE items ADD COLUMN ocr_at TEXT;
+ALTER TABLE items ADD COLUMN ocr_error TEXT;
+ALTER TABLE items ADD COLUMN ocr_confidence REAL;
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -638,7 +655,7 @@ mod tests {
         configure_connection(&conn).expect("configure");
         let v = migrate(&conn).expect("migrate");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 16);
+        assert_eq!(v, 17);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
         // v10 FTS bookkeeping columns present
@@ -845,7 +862,7 @@ mod tests {
             .expect("read drifted");
         assert_eq!(drifted, 0);
 
-        // schema_meta already at SCHEMA_VERSION â€” migrate is a no-op for steps
+        // schema_meta already at SCHEMA_VERSION Ã¢â‚¬â€ migrate is a no-op for steps
         // but must still re-sync the denormalized column.
         let v = migrate(&conn).expect("re-migrate");
         assert_eq!(v, SCHEMA_VERSION);
@@ -860,7 +877,7 @@ mod tests {
         assert_eq!(synced, SCHEMA_VERSION);
     }
 
-    /// v1 fixture (0016-style inventory) â†’ migrate to v2 â†’ data intact + new columns.
+    /// v1 fixture (0016-style inventory) Ã¢â€ â€™ migrate to v2 Ã¢â€ â€™ data intact + new columns.
     #[test]
     fn migrate_v1_inventory_to_v2_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -915,7 +932,7 @@ mod tests {
             .expect("pragma");
         assert!(!role_exists);
 
-        let v = migrate(&conn).expect("migrate v1â†’v6");
+        let v = migrate(&conn).expect("migrate v1Ã¢â€ â€™v6");
         assert_eq!(v, SCHEMA_VERSION);
 
         // Inventory data intact.
@@ -939,7 +956,7 @@ mod tests {
             .expect("count");
         assert_eq!(count, 2);
 
-        // New nullable columns readable as NULL (pre-v2 inventory; NULL role â‰¡
+        // New nullable columns readable as NULL (pre-v2 inventory; NULL role Ã¢â€°Â¡
         // standalone for consumers until classified).
         let role: Option<String> = conn
             .query_row("SELECT role FROM items WHERE id = 'itm_a'", [], |row| {
@@ -1023,7 +1040,7 @@ mod tests {
         }
     }
 
-    /// v2 fixture â†’ migrate to current â†’ data intact + dedupe/thread columns.
+    /// v2 fixture Ã¢â€ â€™ migrate to current Ã¢â€ â€™ data intact + dedupe/thread columns.
     #[test]
     fn migrate_v2_to_v3_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -1053,7 +1070,7 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v2â†’v6");
+        let v = migrate(&conn).expect("migrate v2Ã¢â€ â€™v6");
         assert_eq!(v, SCHEMA_VERSION);
 
         let (status, mid, dedup): (String, Option<String>, Option<String>) = conn
@@ -1077,7 +1094,7 @@ mod tests {
         assert_eq!(ms, SCHEMA_VERSION);
     }
 
-    /// v3 fixture â†’ migrate to current â†’ data intact + thread columns present.
+    /// v3 fixture Ã¢â€ â€™ migrate to current Ã¢â€ â€™ data intact + thread columns present.
     #[test]
     fn migrate_v3_to_v4_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -1108,7 +1125,7 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v3â†’v6");
+        let v = migrate(&conn).expect("migrate v3Ã¢â€ â€™v6");
         assert_eq!(v, SCHEMA_VERSION);
 
         let (status, mid, dedup, thread_id, in_reply): (
@@ -1160,7 +1177,7 @@ mod tests {
         }
     }
 
-    /// v4 fixture â†’ migrate to v5 â†’ data intact + near-dup columns present.
+    /// v4 fixture Ã¢â€ â€™ migrate to v5 Ã¢â€ â€™ data intact + near-dup columns present.
     #[test]
     fn migrate_v4_to_v5_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -1192,7 +1209,7 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v4â†’v6");
+        let v = migrate(&conn).expect("migrate v4Ã¢â€ â€™v6");
         assert_eq!(v, SCHEMA_VERSION);
 
         let status: String = conn
@@ -1265,7 +1282,7 @@ mod tests {
         }
     }
 
-    /// v5 fixture â†’ migrate to v6 â†’ data intact + cull columns + cull_presets table.
+    /// v5 fixture Ã¢â€ â€™ migrate to v6 Ã¢â€ â€™ data intact + cull columns + cull_presets table.
     #[test]
     fn migrate_v5_to_v6_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -1298,7 +1315,7 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v5â†’current");
+        let v = migrate(&conn).expect("migrate v5Ã¢â€ â€™current");
         assert_eq!(v, SCHEMA_VERSION);
 
         let near_role: Option<String> = conn
@@ -1349,7 +1366,7 @@ mod tests {
         }
     }
 
-    /// v6 fixture â†’ migrate to v7 â†’ data intact + review columns + review_sets.
+    /// v6 fixture Ã¢â€ â€™ migrate to v7 Ã¢â€ â€™ data intact + review columns + review_sets.
     #[test]
     fn migrate_v6_to_v7_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -1478,7 +1495,7 @@ mod tests {
         }
     }
 
-    /// v7 fixture → migrate to current → data intact + coding tables.
+    /// v7 fixture â†’ migrate to current â†’ data intact + coding tables.
     #[test]
     fn migrate_v7_to_v8_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -1523,7 +1540,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v7 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 16);
+        assert_eq!(v, 17);
 
         let in_review: Option<i64> = conn
             .query_row(
@@ -1585,7 +1602,7 @@ mod tests {
         );
     }
 
-    /// v8 fixture → migrate to v9 → data intact + saved_searches + list index.
+    /// v8 fixture â†’ migrate to v9 â†’ data intact + saved_searches + list index.
     #[test]
     fn migrate_v8_to_v9_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -1631,7 +1648,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v8 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 16);
+        assert_eq!(v, 17);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1710,7 +1727,7 @@ mod tests {
         );
     }
 
-    /// v9 fixture → migrate to current → data intact + fts_* + keyword columns.
+    /// v9 fixture â†’ migrate to current â†’ data intact + fts_* + keyword columns.
     #[test]
     fn migrate_v9_to_v10_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -1803,7 +1820,7 @@ mod tests {
         assert_eq!(ms, SCHEMA_VERSION);
     }
 
-    /// v10 fixture → migrate to v11 → data intact + notes/highlights tables + counts.
+    /// v10 fixture â†’ migrate to v11 â†’ data intact + notes/highlights tables + counts.
     #[test]
     fn migrate_v10_to_v11_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -1846,7 +1863,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v10 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 16);
+        assert_eq!(v, 17);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -1922,7 +1939,7 @@ mod tests {
         assert!(has_priv);
     }
 
-    /// v11 fixture → migrate to v12 → data intact + privilege tables + withhold cache.
+    /// v11 fixture â†’ migrate to v12 â†’ data intact + privilege tables + withhold cache.
     #[test]
     fn migrate_v11_to_v12_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -1974,7 +1991,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v11 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 16);
+        assert_eq!(v, 17);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -2038,7 +2055,7 @@ mod tests {
         assert_eq!(ms, SCHEMA_VERSION);
     }
 
-    /// v12 fixture → migrate to v13 → data intact + redaction tables + bookkeeping.
+    /// v12 fixture â†’ migrate to v13 â†’ data intact + redaction tables + bookkeeping.
     #[test]
     fn migrate_v12_to_v13_preserves_rows() {
         let conn = Connection::open_in_memory().expect("open");
@@ -2093,7 +2110,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v12 to v13");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 16);
+        assert_eq!(v, 17);
 
         let path: Option<String> = conn
             .query_row("SELECT path FROM items WHERE id = 'itm_mail'", [], |row| {
@@ -2148,7 +2165,7 @@ mod tests {
         assert_eq!(ms, SCHEMA_VERSION);
     }
 
-    /// v13 → v14 adds office_* columns without disturbing existing item rows.
+    /// v13 â†’ v14 adds office_* columns without disturbing existing item rows.
     #[test]
     fn migrate_v13_to_v14_adds_office_columns() {
         let conn = Connection::open_in_memory().expect("open");
@@ -2191,7 +2208,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v13 to v14");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 16);
+        assert_eq!(v, 17);
 
         for col in [
             "office_extract_status",
@@ -2238,7 +2255,7 @@ mod tests {
         assert_eq!(ms, SCHEMA_VERSION);
     }
 
-    /// v14 → v15 adds pdf_* columns including pdf_needs_ocr DEFAULT 0.
+    /// v14 â†’ v15 adds pdf_* columns including pdf_needs_ocr DEFAULT 0.
     #[test]
     fn migrate_v14_to_v15_adds_pdf_columns() {
         let conn = Connection::open_in_memory().expect("open");
@@ -2282,7 +2299,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v14 to v15");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 16);
+        assert_eq!(v, 17);
 
         for col in [
             "pdf_extract_status",
@@ -2331,7 +2348,7 @@ mod tests {
         assert_eq!(ms, SCHEMA_VERSION);
     }
 
-    /// v15 → v16 adds calendar fields + ics_* bookkeeping columns.
+    /// v15 â†’ v16 adds calendar fields + ics_* bookkeeping columns.
     #[test]
     fn migrate_v15_to_v16_adds_calendar_columns() {
         let conn = Connection::open_in_memory().expect("open");
@@ -2377,7 +2394,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v15 to v16");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 16);
+        assert_eq!(v, 17);
 
         for col in [
             "message_class",
@@ -2436,6 +2453,104 @@ mod tests {
         assert_eq!(ms, SCHEMA_VERSION);
     }
 
+    /// v16 â†’ v17 adds OCR bookkeeping columns.
+    #[test]
+    fn migrate_v16_to_v17_adds_ocr_columns() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        conn.execute_batch(MIGRATION_V1).expect("v1");
+        conn.execute_batch(MIGRATION_V2).expect("v2");
+        conn.execute_batch(MIGRATION_V3).expect("v3");
+        conn.execute_batch(MIGRATION_V4).expect("v4");
+        conn.execute_batch(MIGRATION_V5).expect("v5");
+        conn.execute_batch(MIGRATION_V6).expect("v6");
+        conn.execute_batch(MIGRATION_V7).expect("v7");
+        conn.execute_batch(MIGRATION_V8).expect("v8");
+        conn.execute_batch(MIGRATION_V9).expect("v9");
+        conn.execute_batch(MIGRATION_V10).expect("v10");
+        conn.execute_batch(MIGRATION_V11).expect("v11");
+        conn.execute_batch(MIGRATION_V12).expect("v12");
+        conn.execute_batch(MIGRATION_V13).expect("v13");
+        conn.execute_batch(MIGRATION_V14).expect("v14");
+        conn.execute_batch(MIGRATION_V15).expect("v15");
+        conn.execute_batch(MIGRATION_V16).expect("v16");
+        conn.execute("INSERT INTO schema_meta (version) VALUES (16)", [])
+            .expect("meta v16");
+        assert_eq!(read_schema_version(&conn).expect("read"), 16);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v16', 'V16 Matter', '2020-01-01T00:00:00Z', 16, '/tmp/v16')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, source_id, family_id, path, native_sha256, \
+             logical_hash, message_id, status, size_bytes, created_at, modified_at, imported_at, \
+             role, file_category, logical_hash_version, text_sha256, in_review, \
+             fts_text_sha256, note_count, highlight_count, privilege_withhold, redaction_count, \
+             pdf_needs_ocr) \
+             VALUES ('itm_ocr', 'mat_v16', NULL, NULL, 'scans/a.png', \
+             'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff', \
+             NULL, NULL, 'extracted', 10, NULL, NULL, '2020-01-01T00:00:01Z', \
+             'standalone', 'attachment', 0, NULL, 0, NULL, 0, 0, 0, 0, 1)",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v16 to v17");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 17);
+
+        for col in [
+            "ocr_status",
+            "ocr_engine",
+            "ocr_lang",
+            "ocr_text_sha256",
+            "ocr_source_native_sha256",
+            "ocr_page_count",
+            "ocr_at",
+            "ocr_error",
+            "ocr_confidence",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected column {col}");
+        }
+
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT ocr_status FROM items WHERE id = 'itm_ocr'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("ocr_status");
+        assert!(status.is_none());
+
+        let path: Option<String> = conn
+            .query_row("SELECT path FROM items WHERE id = 'itm_ocr'", [], |row| {
+                row.get(0)
+            })
+            .expect("path");
+        assert_eq!(path.as_deref(), Some("scans/a.png"));
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v16'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
     /// Each migration step updates schema_meta only after the full batch commits
     /// in the same transaction (smoke: completed migrate leaves version==SCHEMA_VERSION).
     #[test]
@@ -2443,7 +2558,7 @@ mod tests {
         let conn = Connection::open_in_memory().expect("open");
         configure_connection(&conn).expect("configure");
 
-        // Apply v1 only, then remaining via migrate — version and columns must agree.
+        // Apply v1 only, then remaining via migrate â€” version and columns must agree.
         conn.execute_batch(MIGRATION_V1).expect("v1");
         conn.execute("INSERT INTO schema_meta (version) VALUES (1)", [])
             .expect("meta v1");
