@@ -48,11 +48,30 @@ fn insert_review_item(matter: &Matter, mut input: ItemInput) -> String {
     matter.insert_item(input).expect("insert").id
 }
 
+/// Packaging tests opt out of the 0041 QC gate (covered in dedicated gate tests).
+fn no_qc_gate(mut params: ProduceParams) -> ProduceParams {
+    params.require_qc_pass = false;
+    params
+}
+
 fn run_ok(matter: &Matter, job_id: &str, params: &ProduceParams) -> matter_produce::ProduceSummary {
-    match run_produce(matter, job_id, params, None, |_| {}).expect("run") {
+    let p = no_qc_gate(params.clone());
+    match run_produce(matter, job_id, &p, None, |_| {}).expect("run") {
         ProduceOutcome::Succeeded(s) => s,
         other => panic!("expected Succeeded, got {other:?}"),
     }
+}
+
+/// Direct `run_produce` with QC gate disabled (0040 packaging tests).
+fn run_produce_pkg(
+    matter: &Matter,
+    job_id: &str,
+    params: &ProduceParams,
+    cancel: Option<&dyn Fn() -> bool>,
+    progress: impl Fn(u64),
+) -> Result<ProduceOutcome, matter_produce::ProduceError> {
+    let p = no_qc_gate(params.clone());
+    run_produce(matter, job_id, &p, cancel, progress)
 }
 
 fn read_dat(root: &str) -> Vec<u8> {
@@ -79,7 +98,7 @@ fn sha256_file(path: &std::path::Path) -> String {
 #[test]
 fn schema_v20_production_tables() {
     let (_tmp, matter) = temp_matter("schema-v20");
-    assert_eq!(SCHEMA_VERSION, 20);
+    assert_eq!(SCHEMA_VERSION, 21);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     for table in ["production_sets", "production_items"] {
         let has: bool = matter
@@ -326,7 +345,7 @@ fn fail_if_withheld_aborts() {
         })
         .expect("priv");
 
-    let outcome = run_produce(
+    let outcome = run_produce_pkg(
         &matter,
         &job.id,
         &ProduceParams {
@@ -765,7 +784,7 @@ fn crash_resume_jsonl_without_checkpoint_no_duplicate() {
     // Produce first item only, then pause.
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_flag = cancel.clone();
-    let outcome = run_produce(
+    let outcome = run_produce_pkg(
         &matter,
         &job.id,
         &ProduceParams {
@@ -881,7 +900,7 @@ fn cancel_resume_no_renumber() {
 
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_flag = cancel.clone();
-    let outcome = run_produce(
+    let outcome = run_produce_pkg(
         &matter,
         &job.id,
         &ProduceParams {
@@ -941,7 +960,7 @@ fn cancel_resume_no_renumber() {
 fn empty_selection_fails() {
     let (_tmp, matter) = temp_matter("empty");
     let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
-    let outcome = run_produce(
+    let outcome = run_produce_pkg(
         &matter,
         &job.id,
         &ProduceParams {
@@ -1143,7 +1162,7 @@ fn late_withhold_on_resume_excludes_from_volume() {
 
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_flag = cancel.clone();
-    let outcome = run_produce(
+    let outcome = run_produce_pkg(
         &matter,
         &job.id,
         &ProduceParams {
@@ -1261,7 +1280,7 @@ fn resume_rebuilds_when_recovered_native_missing() {
 
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_flag = cancel.clone();
-    let outcome = run_produce(
+    let outcome = run_produce_pkg(
         &matter,
         &job.id,
         &ProduceParams {
@@ -1396,7 +1415,7 @@ fn output_dir_collision_unique_or_reject() {
 
     // Explicit output_dir pointing at the first complete volume must fail closed.
     let job3 = matter.create_job(JOB_KIND_PRODUCE).expect("job3");
-    let err = run_produce(
+    let err = run_produce_pkg(
         &matter,
         &job3.id,
         &ProduceParams {
@@ -1442,7 +1461,7 @@ fn output_dir_collision_unique_or_reject() {
 
     // Resume after pre-layout hard fail re-enters setup (does not write under empty root).
     // Checkpoint freezes the prior colliding output_dir, so resume fails closed again.
-    let err_resume = run_produce(
+    let err_resume = run_produce_pkg(
         &matter,
         &job3.id,
         &ProduceParams {
@@ -1469,7 +1488,7 @@ fn output_dir_collision_unique_or_reject() {
     fs::create_dir_all(cluttered.as_std_path()).unwrap();
     fs::write(cluttered.join("README.txt").as_std_path(), b"not empty").unwrap();
     let job4 = matter.create_job(JOB_KIND_PRODUCE).expect("job4");
-    let err = run_produce(
+    let err = run_produce_pkg(
         &matter,
         &job4.id,
         &ProduceParams {
@@ -1520,7 +1539,7 @@ fn late_withhold_after_db_ok_without_jsonl_purges_bytes() {
 
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_flag = cancel.clone();
-    let outcome = run_produce(
+    let outcome = run_produce_pkg(
         &matter,
         &job.id,
         &ProduceParams {
@@ -1676,7 +1695,7 @@ fn resume_rebuilds_when_recovered_text_truncated() {
 
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_flag = cancel.clone();
-    let outcome = run_produce(
+    let outcome = run_produce_pkg(
         &matter,
         &job.id,
         &ProduceParams {
@@ -1744,4 +1763,226 @@ fn resume_rebuilds_when_recovered_text_truncated() {
     let rebuilt = fs::read_to_string(text_path.as_std_path()).unwrap();
     assert_eq!(rebuilt, "full-text-body-for-item-0");
     assert_ne!(rebuilt, "", "rebuilt TEXT must be non-empty");
+}
+
+// ---------------------------------------------------------------------------
+// 0041 QC gate
+// ---------------------------------------------------------------------------
+
+/// 13. Produce gate: failed QC prevents produce.
+#[test]
+fn qc_gate_failed_blocks_produce() {
+    use matter_core::{selection_fingerprint, InsertQcRunInput};
+
+    let (_tmp, matter) = temp_matter("qc-fail-gate");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let n = put_native(&matter, b"n");
+    let t = put_text(&matter, "body");
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("a.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t),
+            file_category: Some("document".into()),
+            ..Default::default()
+        },
+    );
+    let ids = vec![id];
+    let fp = selection_fingerprint(&ids);
+    matter
+        .insert_qc_run(InsertQcRunInput {
+            profile: "default_production_qc_v1".into(),
+            passed: false,
+            error_count: 2,
+            warn_count: 0,
+            candidate_count: 1,
+            selection_fingerprint: fp,
+            scope: "review_corpus".into(),
+            scope_json: None,
+            report_path: None,
+            job_id: None,
+            rules_json: None,
+        })
+        .expect("qc_run");
+
+    let outcome = run_produce(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("Blocked".into()),
+            require_qc_pass: true,
+            ..Default::default()
+        },
+        None,
+        |_| {},
+    )
+    .expect("run");
+    match outcome {
+        ProduceOutcome::Failed { message, .. } => {
+            assert!(
+                message.contains("QC failed") || message.contains("QC required"),
+                "msg={message}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+/// 14. Stale QC: pass QC then add item → produce blocked.
+#[test]
+fn qc_gate_stale_blocks_produce() {
+    use matter_core::{selection_fingerprint, InsertQcRunInput};
+
+    let (_tmp, matter) = temp_matter("qc-stale-gate");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let n = put_native(&matter, b"n1");
+    let t = put_text(&matter, "body1");
+    let id1 = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("a.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t),
+            file_category: Some("document".into()),
+            ..Default::default()
+        },
+    );
+    let ids = vec![id1];
+    let fp = selection_fingerprint(&ids);
+    matter
+        .insert_qc_run(InsertQcRunInput {
+            profile: "default_production_qc_v1".into(),
+            passed: true,
+            error_count: 0,
+            warn_count: 0,
+            candidate_count: 1,
+            selection_fingerprint: fp,
+            scope: "review_corpus".into(),
+            scope_json: None,
+            report_path: None,
+            job_id: None,
+            rules_json: None,
+        })
+        .expect("qc_run");
+
+    // Selection change: add another in_review item.
+    let n2 = put_native(&matter, b"n2");
+    let t2 = put_text(&matter, "body2");
+    insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("b.pdf".into()),
+            native_sha256: Some(n2),
+            text_sha256: Some(t2),
+            file_category: Some("document".into()),
+            ..Default::default()
+        },
+    );
+
+    let outcome = run_produce(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("Stale".into()),
+            require_qc_pass: true,
+            ..Default::default()
+        },
+        None,
+        |_| {},
+    )
+    .expect("run");
+    match outcome {
+        ProduceOutcome::Failed { message, .. } => {
+            assert!(
+                message.contains("QC stale") || message.contains("selection changed"),
+                "msg={message}"
+            );
+        }
+        other => panic!("expected Failed stale, got {other:?}"),
+    }
+}
+
+/// require_qc_pass=false allows produce without QC.
+#[test]
+fn qc_gate_disabled_allows_produce() {
+    let (_tmp, matter) = temp_matter("qc-off");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let n = put_native(&matter, b"n");
+    let t = put_text(&matter, "body");
+    insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("a.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t),
+            file_category: Some("document".into()),
+            ..Default::default()
+        },
+    );
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("NoQc".into()),
+            require_qc_pass: false,
+            ..Default::default()
+        },
+    );
+    assert_eq!(s.produced_count, 1);
+}
+
+/// Fresh passed QC allows produce when require_qc_pass=true.
+#[test]
+fn qc_gate_fresh_pass_allows_produce() {
+    use matter_core::{selection_fingerprint, InsertQcRunInput};
+
+    let (_tmp, matter) = temp_matter("qc-fresh-ok");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let n = put_native(&matter, b"n");
+    let t = put_text(&matter, "body");
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("a.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t),
+            file_category: Some("document".into()),
+            ..Default::default()
+        },
+    );
+    let ids = vec![id];
+    let fp = selection_fingerprint(&ids);
+    matter
+        .insert_qc_run(InsertQcRunInput {
+            profile: "default_production_qc_v1".into(),
+            passed: true,
+            error_count: 0,
+            warn_count: 1,
+            candidate_count: 1,
+            selection_fingerprint: fp,
+            scope: "review_corpus".into(),
+            scope_json: None,
+            report_path: None,
+            job_id: None,
+            rules_json: None,
+        })
+        .expect("qc_run");
+
+    let outcome = run_produce(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("Ok".into()),
+            require_qc_pass: true,
+            ..Default::default()
+        },
+        None,
+        |_| {},
+    )
+    .expect("run");
+    match outcome {
+        ProduceOutcome::Succeeded(s) => assert_eq!(s.produced_count, 1),
+        other => panic!("expected Succeeded, got {other:?}"),
+    }
 }

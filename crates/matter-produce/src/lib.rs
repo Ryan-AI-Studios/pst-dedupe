@@ -15,6 +15,7 @@
 //! - Privilege descriptions and notes are **never** load-file fields
 //! - EML is packaging only — not `native_sha256` identity
 //! - `expand_family=false` default; broken-family QC owned by **0041**
+//! - `require_qc_pass=true` default — refuses produce without a fresh passed QC run
 //!
 //! ## Job
 //!

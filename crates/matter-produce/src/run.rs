@@ -5,7 +5,9 @@ use std::fs;
 use std::time::Instant;
 
 use chrono::Utc;
-use matter_core::{join_addrs_json, path_basename, AuditEventInput, Item, Matter, EXPORTS_DIR};
+use matter_core::{
+    join_addrs_json, path_basename, qc_run_is_fresh, AuditEventInput, Item, Matter, EXPORTS_DIR,
+};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -303,6 +305,16 @@ fn run_produce_inner(
                         .into(),
                 summary: summary_from_cursor(&cursor),
             });
+        }
+
+        // 0041: require fresh passed QC before packaging (fail closed).
+        if params.require_qc_pass {
+            if let Some(msg) = qc_gate_block_message(matter, &params.scope, &ordered)? {
+                return Ok(ProduceOutcome::Failed {
+                    message: msg,
+                    summary: summary_from_cursor(&cursor),
+                });
+            }
         }
 
         // Populate selection before any fallible layout/output step so hard-error
@@ -1438,6 +1450,41 @@ fn production_item_ok_control(
 
 fn format_control(prefix: &str, seq: u64, width: u32) -> String {
     format!("{prefix}{seq:0width$}", width = width as usize)
+}
+
+/// Fail-closed QC gate message when `require_qc_pass` and run missing/failed/stale.
+fn qc_gate_block_message(
+    matter: &Matter,
+    scope: &str,
+    current_candidate_ids: &[String],
+) -> Result<Option<String>> {
+    let stored = match matter.load_latest_qc_run_for_scope(Some(scope))? {
+        Some(r) => r,
+        None => match matter.load_latest_qc_run()? {
+            Some(r) => r,
+            None => {
+                return Ok(Some(
+                    "QC required: no production QC run found; run production QC before produce"
+                        .into(),
+                ));
+            }
+        },
+    };
+    if qc_run_is_fresh(&stored, scope, current_candidate_ids) {
+        return Ok(None);
+    }
+    if !stored.passed {
+        return Ok(Some(format!(
+            "QC failed: last run {} has {} error(s), {} warning(s); fix findings and re-run QC",
+            stored.id, stored.error_count, stored.warn_count
+        )));
+    }
+    Ok(Some(format!(
+        "QC stale: selection changed since run {} (was {} candidates, now {}); re-run QC",
+        stored.id,
+        stored.candidate_count,
+        current_candidate_ids.len()
+    )))
 }
 
 fn select_item_ids(matter: &Matter, params: &ProduceParams) -> Result<Vec<String>> {

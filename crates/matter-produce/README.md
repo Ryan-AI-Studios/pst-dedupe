@@ -8,7 +8,7 @@ Production export for Dedupe Desk (track **0040**): package a review set as **na
 |---|---|
 | Kind | `produce` (alias `production_export`) |
 | Stage | `produce` |
-| Default params | `scope=review_corpus`, `bates_prefix=PROD`, `fail_if_withheld=false`, `export_eml_if_missing_native=true`, `include_csv_twin=true`, `expand_family=false` |
+| Default params | `scope=review_corpus`, `bates_prefix=PROD`, `fail_if_withheld=false`, `export_eml_if_missing_native=true`, `include_csv_twin=true`, `expand_family=false`, `require_qc_pass=true` |
 
 ```json
 {
@@ -19,6 +19,7 @@ Production export for Dedupe Desk (track **0040**): package a review set as **na
   "export_eml_if_missing_native": true,
   "include_csv_twin": true,
   "expand_family": false,
+  "require_qc_pass": true,
   "output_dir": null
 }
 ```
@@ -70,10 +71,11 @@ Load-file paths are **Windows-style relative** (e.g. `NATIVES\PROD000001.eml`).
 | ICS child | Uses that item's `native_sha256` only |
 | EML | Export-only packaging when native missing (not CAS identity) |
 | Family expand | Default **off**; broken-family QC → track **0041** |
+| **QC pass** (`require_qc_pass`, default **true**) | Requires a fresh passed `qc_runs` row for the same scope + selection fingerprint (count + sorted-id SHA-256). Missing / failed / **stale** QC → fail closed. Run `matter-qc` first. Set `require_qc_pass=false` only when deliberately bypassing. |
 
 ## Schema
 
-Requires matter-core **schema v20** tables `production_sets` / `production_items`.
+Requires matter-core **schema v20** tables `production_sets` / `production_items`, and **v21** `qc_runs` when `require_qc_pass` is used.
 
 ## Audit
 
