@@ -291,7 +291,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0038-01 | — | Exportable CSV/PDF progress & matter reports | Overview is live UI only | **0039** |
+| D-0038-01 | — | Exportable CSV/PDF progress & matter reports | **Closed in 0039** (`export_matter_report` CSV pack; PDF → D-0039-01) | — |
 | D-0038-02 | — | Materialized overview snapshot table for multi-million items | P0 live GROUP BY + indexes + top-N + concurrent fan-out | residual scale |
 | D-0038-03 | — | Click-through from category/custodian/error-code row → FilterSpec | Tables first | residual / **0028** |
 | D-0038-04 | — | egui_plot bar charts for top types | Optional polish; tables satisfy DoD; pin match eframe 0.34 | residual |
@@ -304,6 +304,22 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0038-11 | — | “Reviewed” beyond codes (opened, notes-only, privilege-only) | P0: ≥1 item_code | residual |
 | D-0038-12 | — | Dedicated connection pool crate (r2d2/sqlx) for overview | P0: multi open_for_read + threads | residual |
 | D-0038-13 | — | Error rollup by stage (in addition to code) | P0 top-N by code | residual |
+
+## From track 0039-ProgressReporting (Completed — Codex luna PASS)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0039-01 | — | Pure-Rust PDF summary of matter report | CSV shipped; if later: **embedded TTF** required (§3.5.1) | residual |
+| D-0039-02 | — | Full per-row item_errors detail CSV | Size risk; scrub paths if ever shipped | residual |
+| D-0039-03 | — | CLI `report export` headless | Desk export P0 | **0045** |
+| D-0039-04 | — | UTF-8 BOM for Excel | Dual datetime is P0; BOM polish if needed | residual |
+| D-0039-05 | — | Scheduled / email delivery of reports | Never default | residual / SaaS |
+| D-0039-06 | — | Embed report in production package | Optional attach | **0040** residual |
+| D-0039-07 | — | Multi-matter portfolio report | Single matter P0 | residual / **0058** |
+| D-0039-08 | P3 | Full GUI smoke Export matter report | Automated API + unit; operator smoke | operator / polish |
+| D-0039-09 | — | Job engine never stores raw client paths in `error_summary` | Report scrub is P0; source hygiene residual | residual / process-runner polish |
+| D-0039-10 | — | Expand finite `STABLE_CODES` allowlist as new job codes ship | Privacy-first; unknown snake_case redacted | residual polish |
+| D-0038-01 | — | Exportable reports handoff | **Closed in 0039** | — |
 
 ## Hygiene
 
