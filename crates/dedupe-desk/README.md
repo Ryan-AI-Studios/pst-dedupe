@@ -33,7 +33,7 @@ When a matter is open, Workspace shows a **Overview** panel above the Counts str
 - Load path: **background thread only** (`OverviewLoadState` → `load_case_overview`); concurrent SQL fan-out inside matter-core. Never runs overview SQL on the egui thread.
 - Refresh: matter open, post-job refresh, **Refresh**, and **Refresh overview**.
 - Evidence: synthetic tempfile matters only — never put client subjects/paths/bodies in docs or screenshots.
-- **0039** must reuse `CaseOverview` for CSV/PDF reports (no duplicate rollup SQL).
+- **Export matter report…** (0039): Overview button writes a CSV pack from the same `CaseOverview` metrics (no re-rollup SQL). Background worker + optional folder picker; default path `exports/reports/matter_report_<stamp>/`. Pack = `summary.csv` + category/custodian/status/errors rollups + `jobs.csv` (path-scrubbed errors). Privacy: no subjects/bodies/privilege descriptions. PDF summary deferred (**D-0039-01**).
 
 ## Build / run
 

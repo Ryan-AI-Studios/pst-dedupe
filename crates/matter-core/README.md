@@ -152,6 +152,33 @@ Do **not** re-implement these queries in 0039 — serialize `CaseOverview` inste
 
 Empty labels are returned as `""`; UI maps category → `(uncategorized)`, custodian → `(none)`.
 
+## Matter report export (0039)
+
+Exportable progress/metrics CSV pack built **only** from `CaseOverview` + `list_jobs`
+(no re-implemented rollup SQL). Desk: Overview → **Export matter report…**.
+
+| API | Purpose |
+|---|---|
+| `export_matter_report(root, params)` / `Matter::export_matter_report` | Write pack under `params.output_dir` (must not already exist) |
+| `default_matter_report_dir(root)` | `exports/reports/matter_report_YYYYMMDD_HHMMSS/` |
+| `scrub_error_summary` | Redact paths/`file://`/filenames from job errors before CSV write |
+| `rfc3339_to_excel_utc` | Dual datetime helper for Excel-friendly columns |
+| `MATTER_REPORT_FORMAT_VERSION` | `matter_report_v1` |
+
+### Pack files
+
+| File | Notes |
+|---|---|
+| `summary.csv` | Two-column `metric,value` — KPIs, dual `generated_at` / `generated_at_excel`, job state counts |
+| `by_file_category.csv` / `by_custodian.csv` / `by_status.csv` | `label,count` (+ `(other),N`); empty → header + `(none),0` |
+| `errors_by_code.csv` | `code,count`; zero errors still have sentinel (never 0-byte) |
+| `jobs.csv` | All jobs newest-first; dual times; `error_summary_safe` (scrubbed) |
+| `README.txt` | Privacy + datetime note |
+
+**Privacy:** counts, labels, job metadata only — no subjects, bodies, or privilege descriptions.
+**Overwrite:** fail closed if target dir exists. **PDF:** deferred (**D-0039-01**); `include_pdf` ignored, `pdf_written=false`.
+**Audit:** `report.export.complete` on success; `report.export.fail` on failure.
+
 ## Schema v4 — Email threading (0022)
 
 Nullable columns on `items` (does **not** overload `status` or `dedup_*`):

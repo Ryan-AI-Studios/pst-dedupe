@@ -286,14 +286,50 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
     show_jobs(ui, &app.snapshot);
 }
 
-fn show_overview(ui: &mut egui::Ui, app: &DeskApp) {
+fn show_overview(ui: &mut egui::Ui, app: &mut DeskApp) {
     ui.group(|ui| {
         ui.horizontal(|ui| {
             ui.heading("Overview");
             if app.overview_loading {
                 ui.label(egui::RichText::new("Loading…").italics().weak());
             }
+            let export_enabled = !app.report_export_busy && app.matter_root.is_some();
+            if ui
+                .add_enabled(export_enabled, egui::Button::new("Export matter report…"))
+                .on_hover_text(
+                    "Write CSV progress/metrics pack (summary + rollups + jobs) under \
+                     exports/reports/ or a chosen folder. No subjects/bodies. PDF deferred.",
+                )
+                .clicked()
+            {
+                let ctx = ui.ctx().clone();
+                app.spawn_report_export(&ctx);
+            }
+            if app.report_export_busy {
+                let busy = app
+                    .report_export_status
+                    .as_deref()
+                    .unwrap_or("Exporting report…");
+                ui.label(egui::RichText::new(busy).italics().weak());
+            }
         });
+
+        // Success path only (busy status is shown next to the button above).
+        if !app.report_export_busy {
+            if let Some(st) = app.report_export_status.clone() {
+                ui.label(
+                    egui::RichText::new(st)
+                        .small()
+                        .color(egui::Color32::DARK_GREEN),
+                );
+            }
+        }
+        if let Some(err) = app.report_export_error.clone() {
+            ui.colored_label(
+                egui::Color32::from_rgb(200, 60, 60),
+                format!("Report export: {err}"),
+            );
+        }
 
         let Some(ov) = app.case_overview.as_ref() else {
             if app.overview_loading {
