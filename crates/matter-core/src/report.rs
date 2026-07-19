@@ -33,7 +33,8 @@
 //!
 //! Counts, labels, and job metadata only — **no** subjects, bodies, or privilege
 //! descriptions. Job `error_summary` is scrubbed via [`scrub_error_summary`] before
-//! export (paths / filenames / `file://` URIs redacted).
+//! export (paths / filenames / `file://` URIs redacted, then an allowlist keeps only
+//! stable error codes and short generic phrases).
 //!
 //! ### PDF (D-0039-01)
 //!
@@ -49,9 +50,10 @@
 //! ### Atomic pack write
 //!
 //! Files are written under a sibling `{output_dir}.tmp` directory, then the pack is
-//! renamed into place only after all CSVs are ready and `report.export.complete` audit
-//! succeeds. On failure before rename, the temp directory is removed best-effort so a
-//! retry is not blocked by half-written debris.
+//! **renamed into place**, then `report.export.complete` is audited. On failure before
+//! rename, the temp directory is removed best-effort so a retry is not blocked by
+//! half-written debris. If rename succeeds but audit fails, the pack remains at the
+//! final path and the error is returned (honest: the published pack exists).
 
 use std::fs;
 use std::io::Write;
@@ -183,10 +185,15 @@ fn excel_now_from_rfc(rfc: &str) -> String {
 // Path / error scrubber
 // ---------------------------------------------------------------------------
 
-/// Scrub client paths, filenames, and `file://` URIs from a job `error_summary`.
+/// Scrub client paths, filenames, and free-text from a job `error_summary`.
 ///
-/// Keeps short codes and generic phrases. If scrubbing empties the string, returns
-/// empty when input was empty/whitespace, otherwise `(redacted)`.
+/// Pipeline:
+/// 1. Redact `file://` URIs, Windows/UNC/Unix absolute paths, and path-like tokens.
+/// 2. Allowlist remaining tokens: lowercase snake_case error codes
+///    (`^[a-z][a-z0-9_]{0,64}$` with at least one `_`) or a small set of generic
+///    words (case-insensitive).
+/// 3. If nothing remains → `(redacted)` (unless the original input was empty/whitespace
+///    → empty).
 pub fn scrub_error_summary(s: &str) -> String {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -198,7 +205,7 @@ pub fn scrub_error_summary(s: &str) -> String {
     out = redact_unix_absolute_paths(&out);
     out = redact_pathish_tokens(&out);
 
-    // Collapse leftover whitespace and scrub punctuation islands.
+    // Collapse leftover whitespace; drop punctuation-only islands.
     let cleaned: String = out
         .split_whitespace()
         .filter(|t| !t.is_empty() && *t != "-" && *t != "–")
@@ -209,11 +216,87 @@ pub fn scrub_error_summary(s: &str) -> String {
         .trim()
         .to_string();
 
-    if cleaned.is_empty() {
+    // Privacy allowlist: drop subject-like / free text that survived path redaction.
+    let allowed = filter_error_summary_allowlist(&cleaned);
+    if allowed.is_empty() {
         REDACTED.to_string()
     } else {
-        cleaned
+        allowed
     }
+}
+
+/// Keep only stable error-code tokens and short generic error words.
+fn filter_error_summary_allowlist(s: &str) -> String {
+    s.split_whitespace()
+        .filter(|tok| token_is_allowed_error_summary(tok))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn token_is_allowed_error_summary(tok: &str) -> bool {
+    let bare = tok.trim_matches(|c: char| {
+        matches!(
+            c,
+            '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':' | '.' | '!' | '?'
+        )
+    });
+    if bare.is_empty() || bare == REDACTED {
+        return false;
+    }
+    if is_error_code_shape(bare) {
+        return true;
+    }
+    is_generic_error_word(bare)
+}
+
+/// Stable machine codes: lowercase snake/alphanum matching
+/// `^[a-z][a-z0-9_]{0,64}$` **and** containing at least one `_`.
+///
+/// Plain English words (`while`, `extract`, `processing`) also match the bare
+/// character class; requiring an underscore keeps real codes
+/// (`ocr_pdf_renderer_missing`, `parse_failed`) while dropping free text.
+/// Single-word status phrases are covered by [`is_generic_error_word`].
+fn is_error_code_shape(tok: &str) -> bool {
+    let b = tok.as_bytes();
+    if b.is_empty() || b.len() > 65 {
+        return false;
+    }
+    if !b[0].is_ascii_lowercase() {
+        return false;
+    }
+    if !b
+        .iter()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+    {
+        return false;
+    }
+    tok.contains('_')
+}
+
+fn is_generic_error_word(tok: &str) -> bool {
+    const GENERIC: &[&str] = &[
+        "failed",
+        "error",
+        "errors",
+        "timeout",
+        "missing",
+        "not",
+        "found",
+        "refused",
+        "cancelled",
+        "canceled",
+        "aborted",
+        "unknown",
+        "unsupported",
+        "invalid",
+        "empty",
+        "none",
+        "ok",
+        "skipped",
+        "partial",
+    ];
+    let lower = tok.to_ascii_lowercase();
+    GENERIC.contains(&lower.as_str())
 }
 
 fn redact_file_uris(s: &str) -> String {
@@ -291,20 +374,12 @@ fn redact_unix_absolute_paths(s: &str) -> String {
 }
 
 fn looks_like_unix_path_start(chars: &[char], i: usize) -> bool {
-    // Require at least one more `/` in the token or a file-like extension later.
-    let mut j = i + 1;
-    let mut saw_sep = false;
-    let mut saw_dot_ext = false;
-    while j < chars.len() && !chars[j].is_whitespace() && !is_path_end_punct(chars[j]) {
-        if chars[j] == '/' {
-            saw_sep = true;
-        }
-        if chars[j] == '.' && j + 1 < chars.len() && chars[j + 1].is_ascii_alphanumeric() {
-            saw_dot_ext = true;
-        }
-        j += 1;
-    }
-    saw_sep || saw_dot_ext
+    // Any absolute token starting with `/` after a boundary is treated as a path,
+    // including root-level single segments (`/client_secret`) with no second `/`
+    // and no file extension. Caller already requires a non-whitespace next char.
+    let _ = chars;
+    let _ = i;
+    true
 }
 
 fn is_path_boundary(c: char) -> bool {
@@ -903,7 +978,8 @@ fn build_readme() -> String {
          \n\
          This pack serializes the same KPIs and rollups as the live Case Overview.\n\
          Privacy: counts, labels, and job metadata only — no email subjects, bodies,\n\
-         or privilege description text. Job error_summary values are path-scrubbed.\n\
+         or privilege description text. Job error_summary values are path-scrubbed\n\
+         and allowlist-filtered to stable codes / short generic phrases.\n\
          \n\
          Datetimes: summary.generated_at is RFC3339 (machines/audit).\n\
          summary.generated_at_excel and jobs.*_excel use 'YYYY-MM-DD HH:MM:SS UTC'\n\
@@ -928,7 +1004,12 @@ mod unit_tests {
             "filename leaked: {safe}"
         );
         assert!(!safe.contains(r"C:\"), "drive path leaked: {safe}");
-        assert!(safe.contains("Failed") || safe.contains(REDACTED));
+        assert!(!safe.to_ascii_lowercase().contains("extract"));
+        // Allowlist keeps generic "Failed"; free text dropped.
+        assert!(
+            safe.eq_ignore_ascii_case("failed") || safe == REDACTED,
+            "{safe}"
+        );
     }
 
     #[test]
@@ -944,7 +1025,10 @@ mod unit_tests {
             "pdf residual: {safe}"
         );
         assert!(!safe.contains(r"C:\"), "drive path leaked: {safe}");
-        assert!(safe.contains("Failed") || safe.contains(REDACTED));
+        assert!(
+            safe.eq_ignore_ascii_case("failed") || safe == REDACTED,
+            "{safe}"
+        );
     }
 
     #[test]
@@ -958,7 +1042,10 @@ mod unit_tests {
         assert!(!safe.contains("acme_deal"), "relative path leaked: {safe}");
         assert!(!safe.contains("memo"), "filename leaked: {safe}");
         assert!(!safe.contains(".eml"), "extension residual: {safe}");
-        assert!(safe.contains("Failed") || safe.contains(REDACTED));
+        assert!(
+            safe.eq_ignore_ascii_case("failed") || safe == REDACTED,
+            "{safe}"
+        );
     }
 
     #[test]
@@ -973,7 +1060,15 @@ mod unit_tests {
             !safe.to_ascii_lowercase().contains("pdf"),
             "pdf residual: {safe}"
         );
-        assert!(safe.contains("copy") || safe.contains(REDACTED));
+        // "copy" is free text — allowlist drops it; only generic "failed" remains.
+        assert!(
+            !safe.to_ascii_lowercase().contains("copy"),
+            "free text: {safe}"
+        );
+        assert!(
+            safe.eq_ignore_ascii_case("failed") || safe == REDACTED,
+            "{safe}"
+        );
     }
 
     #[test]
@@ -984,12 +1079,55 @@ mod unit_tests {
         assert!(!safe.contains("/var/data"));
         assert!(!safe.contains("/home/user"));
         assert!(!safe.contains("file://"));
+        // Bare "ocr" is free text (no underscore); "failed" is generic allowlist.
+        assert!(!safe.contains("ocr") || safe.contains("ocr_"));
+        assert!(
+            safe.eq_ignore_ascii_case("failed") || safe == REDACTED,
+            "{safe}"
+        );
+    }
+
+    #[test]
+    fn scrub_redacts_unix_root_level_path() {
+        let safe = scrub_error_summary("failed /client_secret");
+        assert!(
+            !safe.contains("client_secret"),
+            "root-level unix path leaked: {safe}"
+        );
+        assert!(
+            safe.eq_ignore_ascii_case("failed") || safe == REDACTED,
+            "{safe}"
+        );
+    }
+
+    #[test]
+    fn scrub_drops_subject_like_free_text() {
+        let safe = scrub_error_summary("failed while processing CONFIDENTIAL_SUBJECT_XYZ");
+        assert!(
+            !safe.to_ascii_uppercase().contains("CONFIDENTIAL"),
+            "subject leaked: {safe}"
+        );
+        assert!(
+            !safe.to_ascii_uppercase().contains("SUBJECT"),
+            "subject leaked: {safe}"
+        );
+        assert!(!safe.contains("XYZ"), "subject leaked: {safe}");
+        assert!(!safe.to_ascii_lowercase().contains("while"));
+        assert!(!safe.to_ascii_lowercase().contains("processing"));
+        assert!(
+            safe.eq_ignore_ascii_case("failed") || safe == REDACTED,
+            "expected only failed or (redacted), got: {safe}"
+        );
     }
 
     #[test]
     fn scrub_keeps_short_codes() {
         let raw = "ocr_pdf_renderer_missing";
         assert_eq!(scrub_error_summary(raw), raw);
+        assert_eq!(
+            scrub_error_summary("parse_failed timeout"),
+            "parse_failed timeout"
+        );
     }
 
     #[test]

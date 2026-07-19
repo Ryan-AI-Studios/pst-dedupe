@@ -98,11 +98,46 @@ pub fn compute_entry_hash(fields: &AuditHashFields<'_>) -> String {
 }
 
 /// Append one audit event. Returns the stored row including hashes.
+///
+/// Reads the latest link and inserts the next row inside a single
+/// `BEGIN IMMEDIATE` transaction when the connection is not already inside one.
+/// Nested callers (already in `with_transaction`) recompute under the outer txn
+/// without opening a nested BEGIN.
 pub(crate) fn append_event(
     conn: &Connection,
     input: &AuditEventInput,
     ts: &str,
 ) -> Result<AuditEvent> {
+    // Own a writer lock only when not already inside an outer transaction.
+    let own_txn = conn.is_autocommit();
+    if own_txn {
+        conn.execute("BEGIN IMMEDIATE", [])?;
+    }
+
+    let result = append_event_in_txn(conn, input, ts);
+
+    if own_txn {
+        match &result {
+            Ok(_) => {
+                if let Err(e) = conn.execute("COMMIT", []) {
+                    let _ = conn.execute("ROLLBACK", []);
+                    return Err(e.into());
+                }
+            }
+            Err(_) => {
+                let _ = conn.execute("ROLLBACK", []);
+            }
+        }
+    }
+
+    result
+}
+
+/// Compute next seq / prev_hash and insert. Must run under a write transaction
+/// (or SQLite autocommit single-statement mode is insufficient for the pair).
+fn append_event_in_txn(conn: &Connection, input: &AuditEventInput, ts: &str) -> Result<AuditEvent> {
+    // Recompute link inside the transaction so concurrent writers serialize on
+    // BEGIN IMMEDIATE and never collide on seq / prev_hash.
     let (next_seq, prev_hash) = latest_link(conn)?;
 
     let entry_hash = compute_entry_hash(&AuditHashFields {

@@ -87,6 +87,64 @@ fn assert_not_zero_byte(out: &camino::Utf8Path, name: &str) {
     assert!(meta.len() > 0, "{name} must not be 0-byte");
 }
 
+/// Assert CSV body is header + exact ordered `label,count` rows matching `rows`,
+/// plus `(other),N` when `other_count > 0` (and no extra data rows).
+fn assert_exact_label_count_csv(
+    csv: &str,
+    rows: &[matter_core::LabelCount],
+    label_fn: fn(&str) -> &str,
+    other_count: u64,
+) {
+    let mut lines = csv.lines().filter(|l| !l.is_empty());
+    let header = lines.next().expect("header");
+    assert!(
+        header.ends_with(",count") || header.contains("count"),
+        "unexpected header: {header}"
+    );
+
+    let mut expected: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let label = label_fn(&r.label);
+            // Match pack CSV escaping for labels that need quotes.
+            format!("{},{}", csv_escape_for_test(label), r.count)
+        })
+        .collect();
+    if other_count > 0 {
+        expected.push(format!("(other),{other_count}"));
+    }
+    if expected.is_empty() {
+        expected.push("(none),0".into());
+    }
+
+    let actual: Vec<&str> = lines.collect();
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "row count mismatch.\nexpected:\n{}\nactual:\n{}",
+        expected.join("\n"),
+        actual.join("\n")
+    );
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(
+            *a,
+            e,
+            "row {i} mismatch.\nexpected:\n{}\nactual csv:\n{csv}",
+            expected.join("\n")
+        );
+    }
+}
+
+/// Minimal CSV field escape matching matter-core's `csv_escape_field` rules
+/// (quote when comma/quote/newline present; double internal quotes).
+fn csv_escape_for_test(field: &str) -> String {
+    if field.contains(',') || field.contains('"') || field.contains('\n') || field.contains('\r') {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
+}
+
 #[test]
 fn empty_matter_valid_pack_with_sentinels() {
     let (_tmp, base) = utf8_tempdir();
@@ -418,46 +476,46 @@ fn seeded_overview_metrics_match_summary() {
         ov.ocr.has_native.to_string()
     );
 
-    // Rollups match overview top-N as full label,count rows
+    // Rollups: exact ordered label,count rows match overview (+ remainder when present)
     let cat = read_pack_file(&out, "by_file_category.csv");
-    for r in &ov.by_file_category {
-        let label = if r.label.is_empty() {
-            "(uncategorized)"
-        } else {
-            r.label.as_str()
-        };
-        let expected = format!("{label},{}", r.count);
-        assert!(
-            cat.lines().any(|l| l == expected),
-            "missing full category row {expected}:\n{cat}"
-        );
-    }
+    assert_exact_label_count_csv(
+        &cat,
+        &ov.by_file_category,
+        |raw| {
+            if raw.is_empty() {
+                "(uncategorized)"
+            } else {
+                raw
+            }
+        },
+        ov.other_categories_count,
+    );
     let cust = read_pack_file(&out, "by_custodian.csv");
-    for r in &ov.by_custodian {
-        let label = if r.label.is_empty() {
-            "(none)"
-        } else {
-            r.label.as_str()
-        };
-        let expected = format!("{label},{}", r.count);
-        assert!(
-            cust.lines().any(|l| l == expected),
-            "missing full custodian row {expected}:\n{cust}"
-        );
-    }
+    assert_exact_label_count_csv(
+        &cust,
+        &ov.by_custodian,
+        |raw| {
+            if raw.is_empty() {
+                "(none)"
+            } else {
+                raw
+            }
+        },
+        ov.other_custodians_count,
+    );
     let status = read_pack_file(&out, "by_status.csv");
-    for r in &ov.by_status {
-        let label = if r.label.is_empty() {
-            "(none)"
-        } else {
-            r.label.as_str()
-        };
-        let expected = format!("{label},{}", r.count);
-        assert!(
-            status.lines().any(|l| l == expected),
-            "missing full status row {expected}:\n{status}"
-        );
-    }
+    assert_exact_label_count_csv(
+        &status,
+        &ov.by_status,
+        |raw| {
+            if raw.is_empty() {
+                "(none)"
+            } else {
+                raw
+            }
+        },
+        0,
+    );
     let errs = read_pack_file(&out, "errors_by_code.csv");
     assert!(errs.contains("parse_failed"));
     assert!(!errs.contains("(none),0"), "non-empty should omit sentinel");
@@ -504,6 +562,17 @@ fn seeded_overview_metrics_match_summary() {
         "filename leaked in jobs.csv:\n{jobs}"
     );
     assert!(!jobs.contains("super_secret_merger.pdf"), "filename leaked");
+    // Path error free-text residues (e.g. "to extract") must not survive scrub allowlist.
+    let idx_err = jobs_header_index(header, "error_summary_safe");
+    let err_cell = cols.get(idx_err).map(|s| s.as_str()).unwrap_or("");
+    assert!(
+        !err_cell.to_ascii_lowercase().contains("extract"),
+        "free text leaked in error_summary_safe: {err_cell}"
+    );
+    assert!(
+        err_cell.eq_ignore_ascii_case("failed") || err_cell == "(redacted)",
+        "expected allowlisted scrub result, got: {err_cell}"
+    );
 
     // Privacy: subject must not appear in any pack file
     let secret = "CONFIDENTIAL_SUBJECT_XYZ_PRIVACY";
@@ -731,6 +800,8 @@ fn scrub_and_excel_helpers_public() {
     let safe = scrub_error_summary(r"boom at D:\cases\acme\file.msg");
     assert!(!safe.contains("acme"));
     assert!(!safe.contains("file.msg"));
+    // Free text "boom"/"at" dropped by allowlist → (redacted)
+    assert_eq!(safe, "(redacted)");
     assert_eq!(
         rfc3339_to_excel_utc("2026-01-02T03:04:05Z"),
         "2026-01-02 03:04:05 UTC"
@@ -741,11 +812,24 @@ fn scrub_and_excel_helpers_public() {
     assert!(!spaced.contains("super_secret"));
     assert!(!spaced.contains("merger"));
     assert!(!spaced.to_ascii_lowercase().contains("pdf"));
+    assert!(spaced.eq_ignore_ascii_case("failed") || spaced == "(redacted)");
 
     let relative = scrub_error_summary(r"err client_data\acme_deal\memo.eml");
     assert!(!relative.contains("client_data"));
     assert!(!relative.contains("acme_deal"));
     assert!(!relative.contains("memo"));
+    // Bare "err" is free text (codes require snake_case `_`); path redacted → (redacted).
+    assert_eq!(relative, "(redacted)");
+
+    let subjectish = scrub_error_summary("failed while processing CONFIDENTIAL_SUBJECT_XYZ");
+    assert!(!subjectish.to_ascii_uppercase().contains("CONFIDENTIAL"));
+    assert!(!subjectish.to_ascii_uppercase().contains("SUBJECT"));
+    assert!(!subjectish.contains("XYZ"));
+    assert!(subjectish.eq_ignore_ascii_case("failed") || subjectish == "(redacted)");
+
+    let root_unix = scrub_error_summary("failed /client_secret");
+    assert!(!root_unix.contains("client_secret"));
+    assert!(root_unix.eq_ignore_ascii_case("failed") || root_unix == "(redacted)");
 }
 
 #[test]
@@ -754,6 +838,7 @@ fn remainder_other_row_when_other_count() {
     let root = base.join("matter-other");
     let matter = Matter::create(&root, "Other").expect("create");
     // Seed more categories than top_n=2
+    // counts: a=1, b=2, c=3, d=4 → top 2 by count desc: d,c; other = a+b = 3
     for (i, cat) in ["a", "b", "c", "d"].iter().enumerate() {
         for _ in 0..=i {
             matter
@@ -766,23 +851,120 @@ fn remainder_other_row_when_other_count() {
                 .expect("item");
         }
     }
+    let opts = OverviewOptions {
+        top_categories: 2,
+        top_custodians: 25,
+        top_error_codes: 15,
+        recent_jobs: 5,
+    };
+    let ov = load_case_overview_on(&matter, &opts).expect("overview");
     let out = base.join("report_other");
     matter
         .export_matter_report(MatterReportParams {
             output_dir: out.clone(),
-            overview_opts: OverviewOptions {
-                top_categories: 2,
-                top_custodians: 25,
-                top_error_codes: 15,
-                recent_jobs: 5,
-            },
+            overview_opts: opts,
             include_pdf: false,
             export_all_jobs: true,
         })
         .expect("export");
     let cat = read_pack_file(&out, "by_file_category.csv");
     assert!(
-        cat.contains("(other),"),
-        "expected (other) remainder:\n{cat}"
+        ov.other_categories_count > 0,
+        "fixture must produce remainder"
+    );
+    assert_exact_label_count_csv(
+        &cat,
+        &ov.by_file_category,
+        |raw| {
+            if raw.is_empty() {
+                "(uncategorized)"
+            } else {
+                raw
+            }
+        },
+        ov.other_categories_count,
+    );
+    // Explicit remainder-only shape check for this fixture.
+    assert!(
+        cat.lines()
+            .any(|l| l == format!("(other),{}", ov.other_categories_count)),
+        "expected exact (other),{} row:\n{cat}",
+        ov.other_categories_count
+    );
+}
+
+#[test]
+fn error_summary_free_text_absent_from_pack() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-scrub-freetext");
+    let matter = Matter::create(&root, "ScrubFree").expect("create");
+    let job = matter.create_job("extract").expect("job");
+    matter
+        .set_job_state(&job.id, JobState::Running, None)
+        .expect("run");
+    matter
+        .set_job_state(
+            &job.id,
+            JobState::Failed,
+            Some("failed while processing CONFIDENTIAL_SUBJECT_XYZ"),
+        )
+        .expect("fail");
+
+    let out = base.join("report_freetext");
+    matter
+        .export_matter_report(MatterReportParams {
+            output_dir: out.clone(),
+            overview_opts: OverviewOptions::default(),
+            include_pdf: false,
+            export_all_jobs: true,
+        })
+        .expect("export");
+
+    // Distinctive free-text tokens from the seeded job error (not README words
+    // like "subjects").
+    let forbidden = [
+        "CONFIDENTIAL",
+        "CONFIDENTIAL_SUBJECT_XYZ",
+        "SUBJECT_XYZ",
+        "processing",
+    ];
+    for name in pack_files(&out) {
+        let body = read_pack_file(&out, &name);
+        let upper = body.to_ascii_uppercase();
+        let lower = body.to_ascii_lowercase();
+        for token in forbidden {
+            if token.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+                assert!(
+                    !upper.contains(&token.to_ascii_uppercase()),
+                    "{token} leaked in {name}:\n{body}"
+                );
+            } else {
+                assert!(
+                    !lower.contains(&token.to_ascii_lowercase()),
+                    "{token} leaked in {name}:\n{body}"
+                );
+            }
+        }
+        // "while" only as free-text residue — skip README which has no "while".
+        if name == "jobs.csv" {
+            assert!(
+                !lower.contains("while"),
+                "free text 'while' leaked in jobs.csv:\n{body}"
+            );
+        }
+    }
+
+    let jobs = read_pack_file(&out, "jobs.csv");
+    let mut lines = jobs.lines();
+    let header = lines.next().expect("header");
+    let idx_err = jobs_header_index(header, "error_summary_safe");
+    let row = lines
+        .find(|l| l.contains(job.id.as_str()))
+        .expect("job row");
+    let cols = parse_csv_line(row);
+    let err = cols.get(idx_err).map(|s| s.as_str()).unwrap_or("");
+    assert!(
+        err.eq_ignore_ascii_case("failed") || err == "(redacted)",
+        "error_summary_safe should be allowlisted only: {err}"
     );
 }
