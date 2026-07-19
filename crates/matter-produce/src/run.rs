@@ -304,12 +304,16 @@ fn run_produce_inner(
             });
         }
 
-        // Populate selected_count before fail_if_withheld so fail audit reports it.
+        // Populate selection before any fallible layout/output step so hard-error
+        // audit (mark_failed_from_checkpoint) reports selected_count > 0.
         cursor.selected_count = ordered.len() as u64;
+        cursor.ordered_ids = ordered;
+        cursor.next_seq = 1;
+        save_checkpoint(matter, job_id, &cursor)?;
 
         // Fail-closed withhold scan before any assignment when requested.
         if params.fail_if_withheld {
-            for id in &ordered {
+            for id in &cursor.ordered_ids {
                 if matter.item_is_withheld(id)? {
                     return Ok(ProduceOutcome::Failed {
                         message: format!(
@@ -353,11 +357,9 @@ fn run_produce_inner(
             output_root.as_str(),
         )?;
 
-        cursor.ordered_ids = ordered;
         cursor.production_set_id = set_id;
         cursor.production_name = name;
         cursor.output_root = output_root.to_string();
-        cursor.next_seq = 1;
         save_checkpoint(matter, job_id, &cursor)?;
     }
 

@@ -1419,6 +1419,21 @@ fn output_dir_collision_unique_or_reject() {
         }
         Ok(other) => panic!("expected hard error for non-empty output_dir, got {other:?}"),
     }
+    // Selection was checkpointed before the hard layout failure so fail audit
+    // can report selected > 0 (not ProduceSummary::default zeros).
+    let cp = matter
+        .get_checkpoint(&job3.id, PRODUCE_STAGE)
+        .expect("cp")
+        .expect("checkpoint after pre-layout fail");
+    let v: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("json");
+    let selected = v
+        .get("selected_count")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    assert!(
+        selected >= 1,
+        "hard fail before layout must still checkpoint selected_count, got {selected}"
+    );
     // Still intact after rejected collision.
     assert_eq!(
         fs::read(first_native.as_std_path()).unwrap(),
