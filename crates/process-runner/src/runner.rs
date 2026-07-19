@@ -26,6 +26,14 @@ const PROGRESS_STAGES: &[&str] = &[
     "neardup",
     "cull",
     "promote",
+    "produce",
+    "qc",
+    "fts",
+    "office",
+    "pdf",
+    "ics",
+    "ocr",
+    "classify",
 ];
 
 /// Clone an error for channel delivery (Matter errors become `Other` text).
@@ -694,15 +702,28 @@ fn load_resume_params(matter: &Matter, job: &Job) -> String {
     // Restore full frozen params from checkpoint when present (dedupe stores
     // use_message_id / family_policy / batch_size under cursor.params). Fall
     // back to source_id-only for expand/extract cursors.
-    let stages = [
-        "expand",
-        "pst_extract",
-        "dedupe",
-        "thread",
-        "neardup",
-        "cull",
-        "promote",
-    ];
+    // Prefer the checkpoint stage matching this job kind (qc/produce/etc.),
+    // then fall back to the full stage list so resume restores frozen params.
+    let kind_stage = match job.kind.as_str() {
+        "qc" => Some("qc"),
+        "produce" | "production_export" => Some("produce"),
+        "dedupe" => Some("dedupe"),
+        "thread" => Some("thread"),
+        "neardup" => Some("neardup"),
+        "cull" => Some("cull"),
+        "promote" => Some("promote"),
+        "fts_index" | "fts" => Some("fts"),
+        other => Some(other),
+    };
+    let mut stages: Vec<&str> = Vec::new();
+    if let Some(s) = kind_stage {
+        stages.push(s);
+    }
+    for s in PROGRESS_STAGES {
+        if !stages.contains(s) {
+            stages.push(s);
+        }
+    }
     for stage in stages {
         if let Ok(Some(cp)) = matter.get_checkpoint(&job.id, stage) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cp.cursor_json) {
@@ -719,6 +740,7 @@ fn load_resume_params(matter: &Matter, job: &Job) -> String {
                 {
                     return v.to_string();
                 }
+                // QC/produce cursors may only carry nested params; empty object → keep looking.
                 if let Some(sid) = v.get("source_id").and_then(|x| x.as_str()) {
                     return serde_json::json!({ "source_id": sid }).to_string();
                 }

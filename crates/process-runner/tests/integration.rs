@@ -1580,3 +1580,145 @@ fn classify_handler_via_process_runner() {
     assert_eq!(item.category_taxonomy.as_deref(), Some("taxonomy_v1"));
     assert_eq!(item.role.as_deref(), Some(item_role::ATTACHMENT));
 }
+
+/// Thin production QC handler smoke (`kind = "qc"`).
+#[cfg(feature = "qc")]
+#[test]
+fn qc_handler_via_process_runner() {
+    use matter_core::{item_role, item_status, ItemInput};
+    use process_runner::MatterQcHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-qc");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        let native = matter.put_bytes(b"native").expect("put");
+        let text = matter.put_bytes(b"plain text body").expect("put text");
+        matter
+            .insert_item(ItemInput {
+                path: Some("memo.pdf".into()),
+                native_sha256: Some(native),
+                text_sha256: Some(text),
+                status: item_status::EXTRACTED.into(),
+                file_category: Some("document".into()),
+                role: Some(item_role::STANDALONE.into()),
+                in_review: Some(1),
+                size_bytes: Some(6),
+                ..Default::default()
+            })
+            .expect("item");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterQcHandler::new()));
+
+    let params = JobParams::new(
+        serde_json::json!({
+            "scope": "review_corpus",
+            "expand_family_for_scan": false,
+            "profile": "default_production_qc_v1",
+            "rules": []
+        })
+        .to_string(),
+    );
+    let job_id = runner.start(&root, "qc", params).expect("start qc");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "err={:?}",
+        job.error_summary
+    );
+    assert_eq!(job.kind, "qc");
+    let run = matter.load_latest_qc_run().expect("load").expect("qc_run");
+    assert!(run.passed, "clean doc should pass QC");
+    assert_eq!(run.candidate_count, 1);
+}
+
+/// Resume must restore non-default QC params from the `qc` checkpoint stage
+/// (not fall back to `{}` / defaults which would fail params_match and restart).
+#[test]
+fn qc_resume_restores_checkpoint_params() {
+    use matter_core::{item_role, item_status, ItemInput, JobState};
+    use process_runner::MatterQcHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-qc-resume");
+
+    let params_json = serde_json::json!({
+        "scope": "review_corpus",
+        "expand_family_for_scan": true,
+        "profile": "default_production_qc_v1",
+        "rules": [],
+        "item_ids": [],
+        "report_dir": null
+    });
+
+    let job_id = {
+        let matter = Matter::open(&root).expect("open");
+        let native = matter.put_bytes(b"native").expect("put");
+        let text = matter.put_bytes(b"plain text body").expect("put text");
+        matter
+            .insert_item(ItemInput {
+                path: Some("memo.pdf".into()),
+                native_sha256: Some(native),
+                text_sha256: Some(text),
+                status: item_status::EXTRACTED.into(),
+                file_category: Some("document".into()),
+                role: Some(item_role::STANDALONE.into()),
+                in_review: Some(1),
+                size_bytes: Some(6),
+                ..Default::default()
+            })
+            .expect("item");
+
+        let job = matter.create_job("qc").expect("create job");
+        matter
+            .set_job_state(&job.id, JobState::Running, None)
+            .expect("running");
+        matter
+            .set_job_state(&job.id, JobState::Paused, Some("cancelled"))
+            .expect("pause");
+        // Partial checkpoint mid-eval with non-default expand_family_for_scan.
+        let cursor = serde_json::json!({
+            "phase": "eval",
+            "cursor_index": 0,
+            "completed_count": 0,
+            "candidate_count": 1,
+            "params": params_json,
+            "ordered_ids": [],
+            "findings": [],
+            "error_count": 0,
+            "warn_count": 0,
+            "withheld_count": 0,
+            "selection_fingerprint": "",
+            "profile": "default_production_qc_v1",
+            "scope": "review_corpus"
+        });
+        matter
+            .put_checkpoint(&job.id, "qc", &cursor.to_string(), 0)
+            .expect("checkpoint");
+        job.id
+    };
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterQcHandler::new()));
+    runner.resume(&root, &job_id).expect("resume qc");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "err={:?}",
+        job.error_summary
+    );
+    let run = matter.load_latest_qc_run().expect("load").expect("qc_run");
+    assert!(run.passed);
+    assert_eq!(run.candidate_count, 1);
+}

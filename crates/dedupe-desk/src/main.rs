@@ -13,6 +13,7 @@ mod matter_ops;
 mod matter_ui;
 mod nav;
 mod params;
+mod produce_qc;
 mod progress_ui;
 mod review_body;
 mod review_nav;

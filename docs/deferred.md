@@ -191,7 +191,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0032-01 | — | Full PDF/image geometric redaction + content burn-in | P0 is text-body regions + redacted text CAS only | **0034** / residual |
 | D-0032-02 | — | Native DOCX/XLSX redaction | Text path only | **0033**+ |
 | D-0032-03 | — | Production packaging of redacted text + load file | **Closed in 0040** (`redacted_text_sha256` only when redactions; never original; synthetic EML uses redacted body) | — |
-| D-0032-04 | — | QC fail produce if stale redactions / missing artifact | Filters expose stale; engine later | **0041** |
+| D-0032-04 | — | QC fail produce if stale redactions / missing artifact | **Closed in 0041** (`redacted_text_missing` error + produce `require_qc_pass`) | — |
 | D-0032-05 | — | AI suggested redaction ranges | Human-only P0 | Series G |
 | D-0032-06 | — | Metadata header field redaction | Body display text only | residual |
 | D-0032-07 | — | Inverse / full-page redaction tools | Relativity-style | residual |
@@ -327,7 +327,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 |---|---|---|---|---|
 | D-0040-01 | — | TIFF/PDF image productions + OPT/LFP | No image factory P0 | residual / image redaction |
 | D-0040-02 | — | CLI `produce` headless | Desk P0 | **0045** |
-| D-0040-03 | — | Broken-family QC (orphan attach / missing parent) | expand_family default false; desk warning | **0041** |
+| D-0040-03 | — | Broken-family QC (orphan attach / missing parent) | **Closed in 0041** (orphan error; incomplete_parent any missing non-withheld child warn) | — |
 | D-0040-04 | — | Privilege log co-export into volume `PRIVILEGE/` | Separate 0031 export remains | residual |
 | D-0040-05 | — | Matter report attach into volume `REPORTS/` | Soft residual (D-0039-06) | residual |
 | D-0040-06 | — | CP1252 single-byte Concordance DAT mode | P0 UTF-8 + BOM | residual |
@@ -337,6 +337,26 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0040-10 | — | Slip sheets / placeholders for withheld | Skip only P0 | residual |
 | D-0031-01 | — | Withhold fail-closed packaging | **Closed in 0040** | — |
 | D-0032-03 | — | Redacted text packaging | **Closed in 0040** | — |
+
+## From track 0041-ProductionQcRules (Completed — PASS WITH DEFERRED P3)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0041-01 | — | Post-volume path/file existence QC | P0 pre-produce selection rules | residual |
+| D-0041-02 | — | TEXT folder privilege-term search | Human/residual | residual |
+| D-0041-03 | — | Auto-fix (auto expand family, auto regenerate redacted, auto slip-sheet) | Report-only P0 | residual |
+| D-0041-04 | — | Custom user-defined QC SQL rules | Builtin pack P0 | residual |
+| D-0041-05 | — | Multi-jurisdiction QC packs | | **0060** |
+| D-0041-06 | — | Sampling / multi-reviewer QC UI | | **0058** residual |
+| D-0041-07 | — | CLI `qc run` | Desk + job P0 | **0045** |
+| D-0041-08 | — | Full findings table in SQLite | CSV + qc_runs + fingerprint enough P0 | residual |
+| D-0041-09 | P3 | Full GUI smoke Run QC / produce block / stale | Automated engine + unit; operator smoke | operator / polish |
+| D-0041-10 | — | QC max-age TTL in addition to fingerprint | Fingerprint is hard P0 invariant | residual |
+| D-0041-11 | — | Raise incomplete_parent default to error | P0 warn (protocol-dependent) | residual |
+| D-0041-12 | P3 | Jump-to-Review when item not in loaded list | Falls back to first row; filter/not-in-review residual | residual / polish |
+| D-0041-13 | P3 | Soft-gate continuous re-poll while Produce open | Mitigated by start_produce recheck + job terminal + hard gate | residual / polish |
+| D-0040-03 | — | Broken-family QC handoff | **Closed in 0041** | — |
+| D-0032-04 | — | Stale redaction produce QC | **Closed in 0041** | — |
 
 ## Hygiene
 

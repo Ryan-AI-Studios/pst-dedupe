@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 process-runner = { path = "../process-runner" }
 matter-core = { path = "../matter-core" }
+matter-qc = { path = "../matter-qc" }
 matter-search = { path = "../matter-search" }
 eframe = { workspace = true }
 rfd = { workspace = true }

@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 20;
+pub const SCHEMA_VERSION: u32 = 21;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -34,6 +34,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (18, MIGRATION_V18),
     (19, MIGRATION_V19),
     (20, MIGRATION_V20),
+    (21, MIGRATION_V21),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -620,6 +621,31 @@ CREATE UNIQUE INDEX idx_production_items_control
     ON production_items(production_set_id, control_number);
 CREATE INDEX idx_production_sets_matter ON production_sets(matter_id);
 CREATE INDEX idx_production_items_item ON production_items(item_id);
+"#;
+
+/// Schema v21: production QC run history for pre-produce gate (track 0041).
+///
+/// Stores pass/fail counts and a selection fingerprint so produce can refuse
+/// stale QC (selection changed after the last pass).
+const MIGRATION_V21: &str = r#"
+CREATE TABLE qc_runs (
+    id TEXT PRIMARY KEY NOT NULL,
+    matter_id TEXT NOT NULL REFERENCES matters(id),
+    profile TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    passed INTEGER NOT NULL,
+    error_count INTEGER NOT NULL,
+    warn_count INTEGER NOT NULL,
+    candidate_count INTEGER NOT NULL,
+    selection_fingerprint TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_json TEXT,
+    report_path TEXT,
+    job_id TEXT,
+    rules_json TEXT
+);
+
+CREATE INDEX idx_qc_runs_matter_created ON qc_runs(matter_id, created_at);
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -2563,7 +2589,6 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v16 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 20);
 
         for col in [
             "ocr_status",
@@ -2667,7 +2692,6 @@ mod tests {
         .expect("item");
 
         let v = migrate(&conn).expect("migrate v17 to current");
-        assert_eq!(v, 20);
         assert_eq!(v, SCHEMA_VERSION);
 
         for col in [
@@ -2733,7 +2757,6 @@ mod tests {
         .expect("matter");
 
         let v = migrate(&conn).expect("migrate v18 to current");
-        assert_eq!(v, 20);
         assert_eq!(v, SCHEMA_VERSION);
 
         for idx in [
@@ -2785,8 +2808,7 @@ mod tests {
         )
         .expect("matter");
 
-        let v = migrate(&conn).expect("migrate v19 to v20");
-        assert_eq!(v, 20);
+        let v = migrate(&conn).expect("migrate v19 to current");
         assert_eq!(v, SCHEMA_VERSION);
 
         for table in ["production_sets", "production_items"] {
@@ -2851,6 +2873,91 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v19'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v20_to_v21_adds_qc_runs() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        for &(target, sql) in MIGRATIONS {
+            if target > 20 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v20', 'V20 Matter', '2020-01-01T00:00:00Z', 20, '/tmp/v20')",
+            [],
+        )
+        .expect("matter");
+
+        let v = migrate(&conn).expect("migrate v20 to v21");
+        assert_eq!(v, 21);
+        assert_eq!(v, SCHEMA_VERSION);
+
+        let has: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='qc_runs'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table");
+        assert!(has, "expected table qc_runs");
+
+        for col in [
+            "id",
+            "matter_id",
+            "profile",
+            "created_at",
+            "passed",
+            "error_count",
+            "warn_count",
+            "candidate_count",
+            "selection_fingerprint",
+            "scope",
+            "scope_json",
+            "report_path",
+            "job_id",
+            "rules_json",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('qc_runs') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected qc_runs.{col}");
+        }
+
+        let has_idx: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master \
+                 WHERE type='index' AND name='idx_qc_runs_matter_created'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("idx");
+        assert!(has_idx, "expected idx_qc_runs_matter_created");
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v20'",
                 [],
                 |row| row.get(0),
             )

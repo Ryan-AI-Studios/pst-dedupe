@@ -1213,6 +1213,7 @@ dependencies = [
  "camino",
  "eframe",
  "matter-core",
+ "matter-qc",
  "matter-search",
  "process-runner",
  "rfd",
@@ -2733,6 +2734,7 @@ dependencies = [
  "csv",
  "dedup-engine",
  "matter-core",
+ "matter-qc",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2750,6 +2752,22 @@ dependencies = [
  "matter-core",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "matter-qc"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "csv",
+ "matter-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
 ]
@@ -3718,6 +3736,7 @@ dependencies = [
  "matter-neardup",
  "matter-produce",
  "matter-promote",
+ "matter-qc",
  "matter-search",
  "matter-thread",
  "ocr-plugin",

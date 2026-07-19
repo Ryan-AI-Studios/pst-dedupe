@@ -305,6 +305,17 @@ fn run_produce_inner(
             });
         }
 
+        // 0041: require fresh passed QC before packaging (fail closed).
+        // Uses matter-qc gate helpers so desk preflight and produce stay aligned.
+        if params.require_qc_pass {
+            if let Some(block) = matter_qc::check_qc_gate(matter, &params.scope, &ordered)? {
+                return Ok(ProduceOutcome::Failed {
+                    message: block.message(),
+                    summary: summary_from_cursor(&cursor),
+                });
+            }
+        }
+
         // Populate selection before any fallible layout/output step so hard-error
         // audit (mark_failed_from_checkpoint) reports selected_count > 0.
         cursor.selected_count = ordered.len() as u64;

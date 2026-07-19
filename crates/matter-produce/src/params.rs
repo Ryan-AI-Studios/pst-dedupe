@@ -45,6 +45,10 @@ pub struct ProduceParams {
     /// Output root; when null, `exports/productions/<name_or_stamp>/` under matter.
     #[serde(default)]
     pub output_dir: Option<String>,
+    /// Require a fresh passed production QC run for the same selection (track 0041).
+    /// Default **true** (fail closed).
+    #[serde(default = "default_true")]
+    pub require_qc_pass: bool,
 }
 
 fn default_scope() -> String {
@@ -76,6 +80,7 @@ impl Default for ProduceParams {
             include_csv_twin: true,
             expand_family: false,
             output_dir: None,
+            require_qc_pass: true,
         }
     }
 }
@@ -151,6 +156,7 @@ mod tests {
         assert!(p.include_csv_twin);
         assert!(!p.expand_family);
         assert!(p.output_dir.is_none());
+        assert!(p.require_qc_pass);
     }
 
     #[test]

@@ -24,6 +24,9 @@ pub mod promote;
 #[cfg(feature = "produce")]
 pub mod produce;
 
+#[cfg(feature = "qc")]
+pub mod qc;
+
 #[cfg(feature = "fts")]
 pub mod fts;
 
@@ -65,6 +68,9 @@ pub use promote::MatterPromoteHandler;
 
 #[cfg(feature = "produce")]
 pub use produce::{MatterProduceHandler, MatterProductionExportHandler};
+
+#[cfg(feature = "qc")]
+pub use qc::MatterQcHandler;
 
 #[cfg(feature = "fts")]
 pub use fts::MatterFtsIndexHandler;

@@ -14,8 +14,8 @@ use process_runner::{
     ExtractPstHandler, IngestHandler, JobParams, MatterClassifyHandler, MatterCullHandler,
     MatterDedupeHandler, MatterFtsIndexHandler, MatterIcsExtractHandler, MatterNearDupHandler,
     MatterOcrHandler, MatterOfficeExtractHandler, MatterPdfExtractHandler, MatterProduceHandler,
-    MatterProductionExportHandler, MatterPromoteHandler, MatterThreadHandler, ProcessRunner,
-    RunnerConfig,
+    MatterProductionExportHandler, MatterPromoteHandler, MatterQcHandler, MatterThreadHandler,
+    ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -24,6 +24,10 @@ use crate::matter_ops::{MatterOpResult, MatterOpState};
 use crate::matter_ui::{self, MatterSnapshot, OverviewLoadResult, OverviewLoadState};
 use crate::nav::{self, Screen};
 use crate::params::{self, format_runner_error, is_transient_sqlite_lock};
+use crate::produce_qc::{
+    evaluate_produce_qc_readiness, hydrate_last_qc_summary, load_findings_csv, ProduceQcReadiness,
+    QcFindingRow, FINDINGS_DISPLAY_CAP,
+};
 use crate::progress_ui;
 use crate::review_ui::{self, ReviewState};
 use crate::settings::DeskSettings;
@@ -78,7 +82,23 @@ pub struct DeskApp {
     pub(crate) produce_bates_prefix: String,
     pub(crate) produce_fail_if_withheld: bool,
     pub(crate) produce_expand_family: bool,
+    pub(crate) produce_require_qc_pass: bool,
     pub(crate) produce_output_dir: String,
+    /// Last production QC summary (from job message / status / hydrated qc_runs).
+    pub(crate) last_qc_status: Option<String>,
+    pub(crate) last_qc_report_path: Option<String>,
+    pub(crate) last_qc_passed: Option<bool>,
+    pub(crate) last_qc_error_count: Option<u64>,
+    pub(crate) last_qc_warn_count: Option<u64>,
+    /// Soft-gate readiness from matter_qc (freshness vs current selection).
+    pub(crate) produce_qc_readiness: ProduceQcReadiness,
+    /// Flags last used when computing `produce_qc_readiness` (detect checkbox drift).
+    produce_qc_readiness_expand: bool,
+    produce_qc_readiness_require: bool,
+    /// Loaded findings.csv rows for the desk panel (capped).
+    pub(crate) qc_findings: Vec<QcFindingRow>,
+    pub(crate) qc_findings_error: Option<String>,
+    pub(crate) qc_findings_show: bool,
     /// Review screen state (thin list + body loader).
     pub(crate) review: ReviewState,
 }
@@ -95,6 +115,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterPromoteHandler::new()));
         runner.register(Arc::new(MatterProduceHandler::new()));
         runner.register(Arc::new(MatterProductionExportHandler::new()));
+        runner.register(Arc::new(MatterQcHandler::new()));
         runner.register(Arc::new(MatterFtsIndexHandler::new()));
         runner.register(Arc::new(MatterOfficeExtractHandler::new()));
         runner.register(Arc::new(MatterPdfExtractHandler::new()));
@@ -137,7 +158,19 @@ impl DeskApp {
             produce_bates_prefix: "PROD".into(),
             produce_fail_if_withheld: false,
             produce_expand_family: false,
+            produce_require_qc_pass: true,
             produce_output_dir: String::new(),
+            last_qc_status: None,
+            last_qc_report_path: None,
+            last_qc_passed: None,
+            last_qc_error_count: None,
+            last_qc_warn_count: None,
+            produce_qc_readiness: ProduceQcReadiness::Unknown,
+            produce_qc_readiness_expand: false,
+            produce_qc_readiness_require: true,
+            qc_findings: Vec::new(),
+            qc_findings_error: None,
+            qc_findings_show: false,
             review: ReviewState::default(),
         }
     }
@@ -246,8 +279,68 @@ impl DeskApp {
         self.report_export_status = None;
         self.report_export_error = None;
         self.report_export_rx = None;
+        self.last_qc_status = None;
+        self.last_qc_report_path = None;
+        self.last_qc_passed = None;
+        self.last_qc_error_count = None;
+        self.last_qc_warn_count = None;
+        self.produce_qc_readiness = ProduceQcReadiness::Unknown;
+        self.qc_findings.clear();
+        self.qc_findings_error = None;
+        self.qc_findings_show = false;
+        self.hydrate_qc_from_matter();
+        self.refresh_produce_qc_readiness();
         self.refresh_matter_lists();
         self.status_msg = Some(format!("Opened matter at {root}"));
+    }
+
+    /// Hydrate session QC fields from `qc_runs` so reopen is not forced re-QC when fresh.
+    fn hydrate_qc_from_matter(&mut self) {
+        let Some(root) = self.matter_root.as_ref() else {
+            return;
+        };
+        let h = hydrate_last_qc_summary(root);
+        if h.passed.is_some() {
+            self.last_qc_passed = h.passed;
+            self.last_qc_error_count = h.error_count;
+            self.last_qc_warn_count = h.warn_count;
+            self.last_qc_report_path = h.report_path;
+            self.last_qc_status = h.status;
+            if let Some(ref path) = self.last_qc_report_path.clone() {
+                self.load_qc_findings_from_report(path);
+            }
+        }
+    }
+
+    /// Recompute soft-gate using current produce flags (cheap open_for_read + SQL).
+    pub(crate) fn refresh_produce_qc_readiness(&mut self) {
+        let Some(root) = self.matter_root.as_ref() else {
+            self.produce_qc_readiness = ProduceQcReadiness::Unknown;
+            return;
+        };
+        self.produce_qc_readiness_expand = self.produce_expand_family;
+        self.produce_qc_readiness_require = self.produce_require_qc_pass;
+        self.produce_qc_readiness = evaluate_produce_qc_readiness(
+            root,
+            self.produce_require_qc_pass,
+            self.produce_expand_family,
+        );
+    }
+
+    /// Load findings.csv into the scrollable panel (cap [`FINDINGS_DISPLAY_CAP`]).
+    fn load_qc_findings_from_report(&mut self, report_path: &str) {
+        match load_findings_csv(report_path, FINDINGS_DISPLAY_CAP) {
+            Ok(rows) => {
+                self.qc_findings = rows;
+                self.qc_findings_error = None;
+                self.qc_findings_show = !self.qc_findings.is_empty();
+            }
+            Err(e) => {
+                self.qc_findings.clear();
+                self.qc_findings_error = Some(e);
+                self.qc_findings_show = false;
+            }
+        }
     }
 
     /// Poll background matter-report export worker.
@@ -341,6 +434,21 @@ impl DeskApp {
         }
         self.review.request_reload();
         self.screen = Screen::Review;
+    }
+
+    /// Navigate to Review and select a specific item id (QC findings → Review).
+    pub(crate) fn open_review_item(&mut self, item_id: &str) {
+        if self.matter_root.is_none() {
+            return;
+        }
+        let id = item_id.trim();
+        if id.is_empty() {
+            self.open_review();
+            return;
+        }
+        self.review.request_jump_to_item(id);
+        self.screen = Screen::Review;
+        self.status_msg = Some(format!("Review: jump to {id}"));
     }
 
     fn create_matter_at(&mut self, parent: PathBuf) {
@@ -561,15 +669,98 @@ impl DeskApp {
             self.produce_bates_prefix = "PROD".into();
         }
         // Default empty output → engine uses exports/productions/<name_or_stamp>/.
+        self.refresh_produce_qc_readiness();
         self.produce_dialog_open = true;
     }
 
+    /// Start production QC job on the review corpus.
+    ///
+    /// Uses the same `expand_family` flag as produce so the QC selection
+    /// fingerprint matches produce when Require QC pass is on.
+    pub(crate) fn start_production_qc(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params_json = params::qc_params("review_corpus", self.produce_expand_family, None);
+        let params = JobParams::new(params_json);
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "qc", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!(
+                    "Started production QC job {job_id} (expand_family={})",
+                    self.produce_expand_family
+                ));
+                self.error_msg = None;
+                self.last_qc_status = Some("running…".into());
+            }
+            Err(e) => {
+                self.error_msg = Some(format_runner_error(&e));
+            }
+        }
+    }
+
+    /// Capture last QC outcome from runner progress message (best-effort parse).
+    pub(crate) fn note_qc_progress_message(&mut self, message: &str) {
+        // Example: "qc passed=true errors=0 warns=1 candidates=12 → C:\...\qc_..."
+        if !message.contains("qc passed=") && !message.contains("errors=") {
+            return;
+        }
+        self.last_qc_status = Some(message.to_string());
+        if let Some(idx) = message.find("passed=") {
+            let rest = &message[idx + "passed=".len()..];
+            let token = rest.split_whitespace().next().unwrap_or("");
+            self.last_qc_passed = Some(token.starts_with("true") || token.starts_with('1'));
+        }
+        if let Some(idx) = message.find("errors=") {
+            let rest = &message[idx + "errors=".len()..];
+            if let Some(n) = rest.split([' ', '=']).next().and_then(|s| s.parse().ok()) {
+                self.last_qc_error_count = Some(n);
+            }
+        }
+        if let Some(idx) = message.find("warns=") {
+            let rest = &message[idx + "warns=".len()..];
+            if let Some(n) = rest.split([' ', '=']).next().and_then(|s| s.parse().ok()) {
+                self.last_qc_warn_count = Some(n);
+            }
+        }
+        if let Some(idx) = message.find('→') {
+            let path = message[idx + '→'.len_utf8()..].trim();
+            if !path.is_empty() {
+                self.last_qc_report_path = Some(path.to_string());
+            }
+        } else if let Some(idx) = message.find("->") {
+            let path = message[idx + 2..].trim();
+            if !path.is_empty() {
+                self.last_qc_report_path = Some(path.to_string());
+            }
+        }
+        if let Some(ref path) = self.last_qc_report_path.clone() {
+            self.load_qc_findings_from_report(path);
+        }
+        self.refresh_produce_qc_readiness();
+    }
+
     /// Start produce job from dialog draft fields.
+    ///
+    /// Always re-evaluates QC soft-gate immediately before start (fail closed).
     pub(crate) fn start_produce(&mut self) {
         let Some(root) = self.matter_root.clone() else {
             self.error_msg = Some("No matter open.".into());
             return;
         };
+        // Fail closed: re-check readiness at click time (selection may have mutated).
+        self.refresh_produce_qc_readiness();
+        if self.produce_require_qc_pass && !self.produce_qc_readiness.allows_produce() {
+            self.error_msg = Some(format!(
+                "Produce blocked: {}",
+                self.produce_qc_readiness.label()
+            ));
+            return;
+        }
         let name = self.produce_name.trim();
         let prefix = self.produce_bates_prefix.trim();
         if name.is_empty() {
@@ -591,6 +782,7 @@ impl DeskApp {
             prefix,
             self.produce_fail_if_withheld,
             self.produce_expand_family,
+            self.produce_require_qc_pass,
             output_opt,
         );
         let params = JobParams::new(params_json);
@@ -607,6 +799,28 @@ impl DeskApp {
                 self.produce_dialog_open = false;
             }
             Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Open the last QC report directory in the OS file manager (Windows Explorer).
+    pub(crate) fn open_qc_findings_folder(&mut self) {
+        let Some(ref path) = self.last_qc_report_path else {
+            self.error_msg = Some("No QC report path available.".into());
+            return;
+        };
+        let p = Utf8Path::new(path.as_str());
+        if !p.exists() {
+            self.error_msg = Some(format!("QC report folder not found: {path}"));
+            return;
+        }
+        match open_folder_in_explorer(p.as_str()) {
+            Ok(()) => {
+                self.status_msg = Some(format!("Opened findings folder: {path}"));
+                self.error_msg = None;
+            }
+            Err(e) => {
+                self.error_msg = Some(format!("Could not open findings folder: {e}"));
+            }
         }
     }
 
@@ -997,6 +1211,22 @@ impl DeskApp {
         if state != self.last_progress_state {
             let prev = self.last_progress_state.clone();
             self.last_progress_state = state.clone();
+            // Capture QC summary from terminal job messages.
+            if prev == "running"
+                && (state == "succeeded" || state == "failed")
+                && snap.stage.as_deref() == Some("qc")
+            {
+                if let Some(ref msg) = snap.message {
+                    self.note_qc_progress_message(msg);
+                }
+            } else if prev == "running" && (state == "succeeded" || state == "failed") {
+                // Fallback: message itself indicates QC outcome.
+                if let Some(ref msg) = snap.message {
+                    if msg.contains("qc passed=") {
+                        self.note_qc_progress_message(msg);
+                    }
+                }
+            }
             // Refresh lists when a job ends or starts.
             if prev == "running" || state == "succeeded" || state == "paused" || state == "failed" {
                 self.refresh_matter_lists();
@@ -1010,6 +1240,8 @@ impl DeskApp {
                     if state == "succeeded" || state == "paused" {
                         self.pump_extract_queue();
                     }
+                    // Selection-affecting jobs (promote/cull/etc.) may stale the QC gate.
+                    self.refresh_produce_qc_readiness();
                 }
             }
         }
@@ -1315,26 +1547,205 @@ impl eframe::App for DeskApp {
                 ui.heading("Produce");
                 ui.label(
                     "Export the review corpus as natives + text + Concordance DAT/CSV \
-                     (track 0040).",
+                     (track 0040). Run production QC first (track 0041).",
                 );
                 ui.add_space(8.0);
-                let busy = self.runner_busy();
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Produce review set…"))
-                    .on_hover_text(
-                        "Withheld items skipped by default. Family expand off — \
-                         broken-family QC is track 0041.",
-                    )
-                    .clicked()
+                // Always refresh soft-gate when Produce is shown (selection may have changed).
+                if self.produce_qc_readiness_expand != self.produce_expand_family
+                    || self.produce_qc_readiness_require != self.produce_require_qc_pass
+                    || matches!(self.produce_qc_readiness, ProduceQcReadiness::Unknown)
                 {
-                    self.open_produce_dialog();
+                    self.refresh_produce_qc_readiness();
+                }
+                let busy = self.runner_busy();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Run production QC"))
+                        .on_hover_text(
+                            "Scan the review corpus for broken families, withheld items, \
+                             missing natives/text, redaction gaps, and more. Writes \
+                             exports/qc/ findings CSV.",
+                        )
+                        .clicked()
+                    {
+                        self.start_production_qc();
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Produce review set…"))
+                        .on_hover_text(
+                            "Withheld items skipped by default. Family expand off. \
+                             Require QC pass is on by default.",
+                        )
+                        .clicked()
+                    {
+                        self.open_produce_dialog();
+                    }
+                });
+                ui.add_space(6.0);
+                // QC summary chips (session + freshness preflight)
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Last QC:").strong());
+                    match self.last_qc_passed {
+                        Some(true) => {
+                            ui.colored_label(egui::Color32::from_rgb(40, 140, 70), "passed");
+                        }
+                        Some(false) => {
+                            ui.colored_label(egui::Color32::from_rgb(180, 50, 50), "failed");
+                        }
+                        None => {
+                            ui.label(egui::RichText::new("none").weak());
+                        }
+                    }
+                    if let Some(e) = self.last_qc_error_count {
+                        ui.label(format!("errors={e}"));
+                    }
+                    if let Some(w) = self.last_qc_warn_count {
+                        ui.label(format!("warns={w}"));
+                    }
+                });
+                // Freshness chip (Missing / Failed / Stale / Passed)
+                if self.produce_require_qc_pass {
+                    let (color, text) = match &self.produce_qc_readiness {
+                        ProduceQcReadiness::Allowed => (
+                            egui::Color32::from_rgb(40, 140, 70),
+                            "Gate: Passed (fresh)".to_string(),
+                        ),
+                        ProduceQcReadiness::Missing => (
+                            egui::Color32::from_rgb(180, 50, 50),
+                            "Gate: Missing".to_string(),
+                        ),
+                        ProduceQcReadiness::Failed { .. } => (
+                            egui::Color32::from_rgb(180, 50, 50),
+                            "Gate: Failed".to_string(),
+                        ),
+                        ProduceQcReadiness::Stale { .. } => (
+                            egui::Color32::from_rgb(180, 120, 40),
+                            "Gate: Stale — Selection changed since last QC — re-run QC".to_string(),
+                        ),
+                        ProduceQcReadiness::Unknown => (
+                            egui::Color32::from_rgb(120, 120, 120),
+                            "Gate: unknown".to_string(),
+                        ),
+                        ProduceQcReadiness::Unavailable(msg) => (
+                            egui::Color32::from_rgb(180, 120, 40),
+                            format!("Gate: unavailable ({msg})"),
+                        ),
+                    };
+                    ui.colored_label(color, text);
+                    if !matches!(
+                        self.produce_qc_readiness,
+                        ProduceQcReadiness::Allowed | ProduceQcReadiness::Unknown
+                    ) {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(180, 120, 40),
+                            self.produce_qc_readiness.label(),
+                        );
+                    }
+                }
+                if let Some(ref path) = self.last_qc_report_path {
+                    ui.label(
+                        egui::RichText::new(format!("Report: {path}"))
+                            .weak()
+                            .small(),
+                    );
+                }
+                if let Some(ref st) = self.last_qc_status {
+                    ui.label(egui::RichText::new(st.clone()).small());
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            self.last_qc_report_path.is_some(),
+                            egui::Button::new(if self.qc_findings_show {
+                                "Hide findings"
+                            } else {
+                                "Show findings"
+                            }),
+                        )
+                        .on_hover_text("Load findings.csv from the last QC report (capped)")
+                        .clicked()
+                    {
+                        if self.qc_findings_show {
+                            self.qc_findings_show = false;
+                        } else if let Some(ref path) = self.last_qc_report_path.clone() {
+                            self.load_qc_findings_from_report(path);
+                            self.qc_findings_show = true;
+                        }
+                    }
+                    let report_exists = self
+                        .last_qc_report_path
+                        .as_ref()
+                        .is_some_and(|p| Utf8Path::new(p.as_str()).exists());
+                    if ui
+                        .add_enabled(report_exists, egui::Button::new("Open findings folder"))
+                        .on_hover_text("Open the QC report directory in File Explorer")
+                        .on_disabled_hover_text("No report folder on disk yet")
+                        .clicked()
+                    {
+                        self.open_qc_findings_folder();
+                    }
+                    if !self.qc_findings.is_empty() {
+                        ui.label(format!(
+                            "{} finding(s){}",
+                            self.qc_findings.len(),
+                            if self.qc_findings.len() >= FINDINGS_DISPLAY_CAP {
+                                " (capped)"
+                            } else {
+                                ""
+                            }
+                        ));
+                    }
+                });
+                if let Some(ref err) = self.qc_findings_error {
+                    ui.colored_label(egui::Color32::from_rgb(180, 50, 50), err);
+                }
+                if self.qc_findings_show && !self.qc_findings.is_empty() {
+                    let mut jump_item: Option<String> = None;
+                    egui::ScrollArea::vertical()
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new("qc_findings_grid")
+                                .num_columns(4)
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new("rule").strong().small());
+                                    ui.label(egui::RichText::new("sev").strong().small());
+                                    ui.label(egui::RichText::new("item").strong().small());
+                                    ui.label(egui::RichText::new("message").strong().small());
+                                    ui.end_row();
+                                    for row in &self.qc_findings {
+                                        ui.label(egui::RichText::new(&row.rule_id).small());
+                                        ui.label(egui::RichText::new(&row.severity).small());
+                                        if row.item_id.is_empty() {
+                                            ui.label(egui::RichText::new("—").small());
+                                        } else if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(&row.item_id).small(),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .on_hover_text("Open in Review")
+                                            .clicked()
+                                        {
+                                            jump_item = Some(row.item_id.clone());
+                                        }
+                                        ui.label(egui::RichText::new(&row.message).small());
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                    if let Some(id) = jump_item {
+                        self.open_review_item(&id);
+                    }
                 }
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(
                         "Default output: <matter>/exports/productions/<name>/\n\
                          DAT: UTF-8 BOM, þ/¶ delimiters, ® newlines, UTC dates.\n\
-                         Privilege descriptions and notes are never included.",
+                         Privilege descriptions and notes are never included.\n\
+                         QC expand_family must match produce expand (same checkbox).",
                     )
                     .weak()
                     .small(),
@@ -1343,6 +1754,12 @@ impl eframe::App for DeskApp {
         });
 
         if self.produce_dialog_open {
+            // Keep preflight aligned with checkboxes while dialog is open.
+            if self.produce_qc_readiness_expand != self.produce_expand_family
+                || self.produce_qc_readiness_require != self.produce_require_qc_pass
+            {
+                self.refresh_produce_qc_readiness();
+            }
             egui::Window::new("Produce review set")
                 .collapsible(false)
                 .resizable(true)
@@ -1376,8 +1793,52 @@ impl eframe::App for DeskApp {
                         ui.colored_label(
                             egui::Color32::from_rgb(180, 120, 40),
                             "Family expand is OFF — ensure review membership is family-complete \
-                             or accept orphan/broken-family risk (QC in track 0041).",
+                             or run production QC for orphan/broken-family findings.",
                         );
+                    }
+                    ui.checkbox(
+                        &mut self.produce_require_qc_pass,
+                        "Require QC pass (fresh selection fingerprint)",
+                    );
+                    if self.produce_require_qc_pass {
+                        match &self.produce_qc_readiness {
+                            ProduceQcReadiness::Allowed => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(40, 140, 70),
+                                    "QC fresh pass — produce allowed.",
+                                );
+                            }
+                            ProduceQcReadiness::Missing => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(180, 50, 50),
+                                    "No QC run yet — run production QC before produce.",
+                                );
+                            }
+                            ProduceQcReadiness::Failed { .. } => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(180, 50, 50),
+                                    "Last QC failed — fix errors and re-run QC before produce.",
+                                );
+                            }
+                            ProduceQcReadiness::Stale { .. } => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(180, 120, 40),
+                                    "Selection changed since last QC — re-run QC",
+                                );
+                            }
+                            ProduceQcReadiness::Unknown => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(180, 120, 40),
+                                    "QC status unknown — refresh or run QC.",
+                                );
+                            }
+                            ProduceQcReadiness::Unavailable(msg) => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(180, 50, 50),
+                                    format!("QC preflight failed: {msg}"),
+                                );
+                            }
+                        }
                     }
                     ui.horizontal(|ui| {
                         ui.label("Output folder:");
@@ -1397,10 +1858,21 @@ impl eframe::App for DeskApp {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let busy = self.runner_busy();
-                        if ui
-                            .add_enabled(!busy, egui::Button::new("Start produce"))
-                            .clicked()
-                        {
+                        // Soft-gate: require fresh pass (not merely last_qc_passed session flag).
+                        let gate_blocks = self.produce_require_qc_pass
+                            && !self.produce_qc_readiness.allows_produce();
+                        let can_start = !busy && !gate_blocks;
+                        let hover = if busy {
+                            "A job is running.".to_string()
+                        } else if gate_blocks {
+                            self.produce_qc_readiness.label()
+                        } else {
+                            "Start packaging the review corpus.".into()
+                        };
+                        let start = ui
+                            .add_enabled(can_start, egui::Button::new("Start produce"))
+                            .on_disabled_hover_text(hover);
+                        if start.clicked() {
                             self.start_produce();
                         }
                         if ui.button("Cancel").clicked() {
@@ -1448,4 +1920,33 @@ fn which_on_path(name: &str) -> bool {
         }
     }
     false
+}
+
+/// Open a directory in the OS file manager (Windows Explorer).
+fn open_folder_in_explorer(path: &str) -> Result<(), String> {
+    // Prefer explorer on Windows; fall back to `cmd /c start` for the folder path.
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        match Command::new("explorer").arg(path).spawn() {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // Fallback: `start` treats first quoted arg as window title.
+                Command::new("cmd")
+                    .args(["/C", "start", "", path])
+                    .spawn()
+                    .map(|_| ())
+                    .map_err(|e2| format!("explorer: {e}; start: {e2}"))
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use std::process::Command;
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }
