@@ -1,5 +1,11 @@
 //! Extract limits and summary types.
 
+/// Max UTF-8 bytes for calendar review text (spec §3.6; mirror extract-calendar).
+pub const MAX_CALENDAR_REVIEW_TEXT_BYTES: usize = 2 * 1024 * 1024;
+
+/// Marker appended when calendar review text is truncated.
+pub const CALENDAR_TEXT_TRUNCATION_MARKER: &str = "\n[… truncated …]\n";
+
 /// Limits for a PST extract run.
 #[derive(Debug, Clone)]
 pub struct ExtractLimits {

@@ -690,7 +690,7 @@ fn extract_one_message(
     let body_raw = extracted.body_text.clone().unwrap_or_default();
     // Calendar review text: structured summary + description (spec §3.6).
     // Attendees line: DisplayTo + DisplayCc (best-effort).
-    let display_body = if is_calendar {
+    let (display_body, calendar_text_truncated) = if is_calendar {
         let mut attendees_for_text = to.clone();
         for c in &cc {
             if !attendees_for_text.iter().any(|a| a == c) {
@@ -704,7 +704,7 @@ fn extract_one_message(
             cal_end_at.as_deref(),
         )
     } else {
-        body_raw.clone()
+        (body_raw.clone(), false)
     };
     let body_for_hash = normalize_body(&display_body);
     let body_bytes = body_for_hash.as_bytes();
@@ -811,17 +811,22 @@ fn extract_one_message(
         cal_organizer: if is_calendar { from_addr.clone() } else { None },
         cal_attendees_json: cal_attendees_json.clone(),
         cal_extract_method: cat.cal_extract_method.map(|s| s.into()),
-        extra_json: Some(
-            json!({
+        extra_json: {
+            let mut extra = json!({
                 "pst_nid": nid_hex(msg_nid.0),
                 "folder": folder_path,
                 "extract_tool": "extract-pst",
                 "extract_version": env!("CARGO_PKG_VERSION"),
                 "native_format": NATIVE_FORMAT_V1,
                 "message_class": extracted.message_class,
-            })
-            .to_string(),
-        ),
+            });
+            if is_calendar && calendar_text_truncated {
+                if let Some(obj) = extra.as_object_mut() {
+                    obj.insert("calendar_text_truncated".into(), json!(true));
+                }
+            }
+            Some(extra.to_string())
+        },
         ..Default::default()
     })?;
 
@@ -1136,12 +1141,18 @@ fn calendar_attendees_json(to: &[String], cc: &[String]) -> Option<String> {
 }
 
 /// Synthesize review plain-text for calendar items (spec §3.6).
+///
+/// Returns `(text, truncated)`. Text is capped at
+/// [`crate::limits::MAX_CALENDAR_REVIEW_TEXT_BYTES`] with a truncation marker
+/// (mirrors extract-calendar).
 fn synthesize_calendar_review_text(
     extracted: &ExtractedMessage,
     attendees: &[String],
     start: Option<&str>,
     end: Option<&str>,
-) -> String {
+) -> (String, bool) {
+    use crate::limits::{CALENDAR_TEXT_TRUNCATION_MARKER, MAX_CALENDAR_REVIEW_TEXT_BYTES};
+
     let subject = extracted.subject.as_deref().unwrap_or("");
     let when = match (start, end) {
         (Some(s), Some(e)) => format!("{s} – {e}"),
@@ -1154,7 +1165,7 @@ fn synthesize_calendar_review_text(
     let att_line = attendees.join("; ");
     let class = extracted.message_class.as_deref().unwrap_or("");
     let description = extracted.body_text.as_deref().unwrap_or("");
-    format!(
+    let mut full = format!(
         "Subject: {subject}\n\
          When: {when}\n\
          Where: {where_}\n\
@@ -1164,7 +1175,20 @@ fn synthesize_calendar_review_text(
          Class: {class}\n\
          ---\n\
          {description}"
-    )
+    );
+    let mut truncated = false;
+    if full.len() > MAX_CALENDAR_REVIEW_TEXT_BYTES {
+        truncated = true;
+        let keep =
+            MAX_CALENDAR_REVIEW_TEXT_BYTES.saturating_sub(CALENDAR_TEXT_TRUNCATION_MARKER.len());
+        let mut end = keep.min(full.len());
+        while end > 0 && !full.is_char_boundary(end) {
+            end -= 1;
+        }
+        full.truncate(end);
+        full.push_str(CALENDAR_TEXT_TRUNCATION_MARKER);
+    }
+    (full, truncated)
 }
 
 /// Normalize reply-chain / conversation header fields for parent insert.
@@ -1339,12 +1363,13 @@ mod tests {
             end_date: None,
             location: Some("Room 1".into()),
         };
-        let text = synthesize_calendar_review_text(
+        let (text, truncated) = synthesize_calendar_review_text(
             &msg,
             &["a@ex.com".into()],
             Some("2026-07-18T14:00:00Z"),
             Some("2026-07-18T14:30:00Z"),
         );
+        assert!(!truncated);
         assert!(text.contains("Subject: Standup"));
         assert!(text.contains("Where: Room 1"));
         assert!(text.contains("Class: IPM.Appointment"));
@@ -1352,6 +1377,49 @@ mod tests {
         assert!(text.contains("Attendees: a@ex.com"));
         assert!(is_calendar_message_class("IPM.Appointment"));
         assert!(!is_calendar_message_class("IPM.Note"));
+    }
+
+    #[test]
+    fn calendar_review_text_large_body_is_capped() {
+        use crate::limits::{CALENDAR_TEXT_TRUNCATION_MARKER, MAX_CALENDAR_REVIEW_TEXT_BYTES};
+        let huge = "X".repeat(MAX_CALENDAR_REVIEW_TEXT_BYTES + 50_000);
+        let msg = ExtractedMessage {
+            nid: NodeId(1),
+            message_id: None,
+            subject: Some("Big".into()),
+            sender_email: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            submit_time: None,
+            delivery_time: None,
+            body_text: Some(huge),
+            body_html: None,
+            message_size: None,
+            has_attachments: None,
+            in_reply_to: None,
+            references: None,
+            conversation_topic: None,
+            conversation_index_bytes: None,
+            conversation_index_string: None,
+            message_class: Some("IPM.Appointment".into()),
+            start_date: None,
+            end_date: None,
+            location: None,
+        };
+        let (text, truncated) = synthesize_calendar_review_text(&msg, &[], None, None);
+        assert!(truncated, "large body must set truncated");
+        assert!(
+            text.len() <= MAX_CALENDAR_REVIEW_TEXT_BYTES,
+            "capped len {}",
+            text.len()
+        );
+        assert!(
+            text.ends_with(CALENDAR_TEXT_TRUNCATION_MARKER)
+                || text.contains(CALENDAR_TEXT_TRUNCATION_MARKER),
+            "must include truncation marker"
+        );
+        assert!(text.contains("Subject: Big"));
     }
 
     #[test]
