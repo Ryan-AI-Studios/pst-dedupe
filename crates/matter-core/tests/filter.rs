@@ -2,7 +2,7 @@
 
 use matter_core::{
     item_role, item_status, ApplyCodesInput, FilterCondition, FilterSpec, ItemInput, Matter,
-    SavedSearchInput, SCHEMA_VERSION, SCOPE_REVIEW_CORPUS,
+    SavedSearchInput, SCHEMA_VERSION, SCOPE_ENTIRE_MATTER, SCOPE_REVIEW_CORPUS,
 };
 use tempfile::tempdir;
 
@@ -877,6 +877,55 @@ fn filter_has_notes_and_note_text() {
     let j = serde_json::to_string(&has).expect("ser");
     let back: FilterSpec = serde_json::from_str(&j).expect("de");
     assert_eq!(back, has);
+}
+
+#[test]
+fn filter_pdf_needs_ocr_preset() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-pdf-ocr-filter");
+    let matter = Matter::create(&root, "PdfOcr").expect("create");
+
+    let needs = matter
+        .insert_item(ItemInput {
+            path: Some("scan.pdf".into()),
+            status: item_status::EXTRACTED.into(),
+            ..Default::default()
+        })
+        .expect("needs");
+    let plain = matter
+        .insert_item(ItemInput {
+            path: Some("ok.pdf".into()),
+            status: item_status::EXTRACTED.into(),
+            ..Default::default()
+        })
+        .expect("plain");
+
+    matter
+        .connection()
+        .execute(
+            "UPDATE items SET pdf_needs_ocr = 1 WHERE id = ?1",
+            rusqlite::params![needs.id],
+        )
+        .expect("set needs");
+    matter
+        .connection()
+        .execute(
+            "UPDATE items SET pdf_needs_ocr = 0 WHERE id = ?1",
+            rusqlite::params![plain.id],
+        )
+        .expect("set plain");
+
+    let mut spec = FilterSpec::preset_pdf_needs_ocr();
+    spec.scope = SCOPE_ENTIRE_MATTER.into();
+    let rows = matter
+        .list_items_filtered_thin(&spec, 100, 0)
+        .expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, needs.id);
+
+    let j = serde_json::to_string(&spec).expect("ser");
+    let back: FilterSpec = serde_json::from_str(&j).expect("de");
+    assert_eq!(back, spec);
 }
 
 #[test]

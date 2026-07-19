@@ -437,9 +437,12 @@ fn process_one(
 }
 
 fn record_error(matter: &Matter, item_id: &str, native_sha: &str, err: &Error) -> Result<()> {
+    // Error path: status=error, do not claim successful source (apply leaves
+    // pdf_source_native_sha256 untouched) and do not pass needs_ocr so prior
+    // empty/low_text OCR candidacy survives a failed re-extract.
     matter.apply_pdf_text(ApplyPdfTextInput {
         item_id: item_id.into(),
-        force: true,
+        force: true, // allow writing error bookkeeping even when text present
         text: None,
         method: None,
         status: Some(matter_core::pdf_extract_status::ERROR.into()),
@@ -447,7 +450,7 @@ fn record_error(matter: &Matter, item_id: &str, native_sha: &str, err: &Error) -
         source_native_sha256: Some(native_sha.into()),
         partial: false,
         page_count: None,
-        needs_ocr: Some(0),
+        needs_ocr: None,
         file_category: None,
         refine_file_category: false,
     })?;

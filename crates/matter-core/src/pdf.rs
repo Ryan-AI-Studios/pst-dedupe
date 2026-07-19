@@ -150,6 +150,7 @@ impl Matter {
                 };
                 // Empty is a successful terminal: set source, needs_ocr=1, no text CAS.
                 // Clear FTS bookkeeping (body became empty / no searchable text).
+                // Always NULL redacted_* when text_sha256 is cleared (digest change).
                 self.connection().execute(
                     "UPDATE items SET text_sha256 = NULL, \
                             pdf_extract_status = ?1, pdf_extract_error = ?2, \
@@ -159,6 +160,9 @@ impl Matter {
                             pdf_page_count = COALESCE(?6, pdf_page_count), \
                             pdf_needs_ocr = ?7, \
                             file_category = COALESCE(?8, file_category), \
+                            redacted_text_sha256 = NULL, \
+                            redacted_text_at = NULL, \
+                            redacted_source_digest = NULL, \
                             fts_text_sha256 = NULL, fts_indexed_at = NULL, fts_error = NULL \
                      WHERE id = ?9 AND matter_id = ?10",
                     params![
@@ -198,22 +202,21 @@ impl Matter {
                 return Ok(PdfExtractApplyResult::Skipped);
             }
 
-            // Error: do **not** overwrite pdf_source_native_sha256.
-            let needs = input.needs_ocr.unwrap_or(0);
+            // Error: do **not** overwrite pdf_source_native_sha256 (retryable)
+            // and do **not** wipe pdf_needs_ocr (prior empty/low_text OCR candidacy
+            // must survive a failed re-extract).
             self.connection().execute(
                 "UPDATE items SET pdf_extract_status = ?1, pdf_extract_error = ?2, \
                         pdf_extracted_at = ?3, \
                         pdf_extract_method = COALESCE(?4, pdf_extract_method), \
-                        pdf_page_count = COALESCE(?5, pdf_page_count), \
-                        pdf_needs_ocr = ?6 \
-                 WHERE id = ?7 AND matter_id = ?8",
+                        pdf_page_count = COALESCE(?5, pdf_page_count) \
+                 WHERE id = ?6 AND matter_id = ?7",
                 params![
                     status,
                     err,
                     now,
                     input.method,
                     input.page_count,
-                    needs,
                     input.item_id,
                     self.id()
                 ],

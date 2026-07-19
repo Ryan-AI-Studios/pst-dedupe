@@ -235,6 +235,8 @@ fn apply_pdf_text_idempotent_and_side_effects() {
     );
     assert_eq!(reloaded.file_category.as_deref(), Some("pdf"));
     assert!(reloaded.redacted_text_sha256.is_none());
+    assert!(reloaded.redacted_text_at.is_none());
+    assert!(reloaded.redacted_source_digest.is_none());
     let fts: Option<String> = matter
         .connection()
         .query_row(
@@ -263,6 +265,31 @@ fn apply_pdf_text_idempotent_and_side_effects() {
         })
         .unwrap();
     assert!(matches!(skip, PdfExtractApplyResult::Skipped));
+
+    // Force re-extract updates text
+    let force = matter
+        .apply_pdf_text(ApplyPdfTextInput {
+            item_id: item.id.clone(),
+            force: true,
+            text: Some(format!("{}\nforce", extracted.text)),
+            method: Some(extracted.method),
+            status: Some(pdf_extract_status::OK.into()),
+            error: None,
+            source_native_sha256: Some(native),
+            partial: false,
+            page_count: None,
+            needs_ocr: Some(0),
+            file_category: None,
+            refine_file_category: false,
+        })
+        .unwrap();
+    assert!(matches!(
+        force,
+        PdfExtractApplyResult::Applied {
+            text_changed: true,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -327,6 +354,343 @@ fn apply_empty_and_low_text_needs_ocr() {
     assert_eq!(r2.pdf_needs_ocr, 1);
 }
 
+/// Empty success clears prior text + redacted_* + FTS (force path).
+#[test]
+fn apply_empty_invalidates_redacted_and_fts() {
+    let dir = tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().join("m")).unwrap();
+    let matter = Matter::create(&root, "PdfEmptyRedacted").unwrap();
+    let native = matter.put_bytes(b"%PDF-1.4 prior-body").unwrap();
+    let prior_text = matter.put_bytes(b"prior extracted body").unwrap();
+    let item = matter
+        .insert_item(ItemInput {
+            path: Some("was-text.pdf".into()),
+            native_sha256: Some(native.clone()),
+            text_sha256: Some(prior_text),
+            status: "extracted".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    matter
+        .connection()
+        .execute(
+            "UPDATE items SET fts_text_sha256 = 'deadbeef', fts_indexed_at = 't', \
+                    redacted_text_sha256 = 'redacteddead', redacted_text_at = 't', \
+                    redacted_source_digest = 'old' WHERE id = ?1",
+            rusqlite::params![item.id],
+        )
+        .unwrap();
+
+    let empty = matter
+        .apply_pdf_text(ApplyPdfTextInput {
+            item_id: item.id.clone(),
+            force: true,
+            text: None,
+            method: Some(methods::PDF_EXTRACT_V1.into()),
+            status: Some(pdf_extract_status::EMPTY.into()),
+            error: Some("pdf_empty_text".into()),
+            source_native_sha256: Some(native.clone()),
+            partial: false,
+            page_count: Some(1),
+            needs_ocr: Some(1),
+            file_category: None,
+            refine_file_category: false,
+        })
+        .unwrap();
+    assert!(matches!(empty, PdfExtractApplyResult::Empty { .. }));
+
+    let r = matter.get_item(&item.id).unwrap();
+    assert!(r.text_sha256.is_none());
+    assert_eq!(r.pdf_extract_status.as_deref(), Some("empty"));
+    assert_eq!(r.pdf_needs_ocr, 1);
+    assert_eq!(r.pdf_source_native_sha256.as_deref(), Some(native.as_str()));
+    assert!(r.redacted_text_sha256.is_none());
+    assert!(r.redacted_text_at.is_none());
+    assert!(r.redacted_source_digest.is_none());
+    let fts: Option<String> = matter
+        .connection()
+        .query_row(
+            "SELECT fts_text_sha256 FROM items WHERE id = ?1",
+            rusqlite::params![item.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(fts.is_none());
+}
+
+/// Error bookkeeping must not wipe prior empty/low_text OCR candidacy.
+#[test]
+fn apply_error_preserves_needs_ocr() {
+    let dir = tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().join("m")).unwrap();
+    let matter = Matter::create(&root, "PdfNeedsOcrSurvive").unwrap();
+    let native = matter.put_bytes(b"%PDF-1.4 scan").unwrap();
+    let item = matter
+        .insert_item(ItemInput {
+            path: Some("scan.pdf".into()),
+            native_sha256: Some(native.clone()),
+            status: "extracted".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    matter
+        .apply_pdf_text(ApplyPdfTextInput {
+            item_id: item.id.clone(),
+            force: false,
+            text: None,
+            method: Some(methods::PDF_EXTRACT_V1.into()),
+            status: Some(pdf_extract_status::EMPTY.into()),
+            error: Some("pdf_empty_text".into()),
+            source_native_sha256: Some(native.clone()),
+            partial: false,
+            page_count: Some(1),
+            needs_ocr: Some(1),
+            file_category: None,
+            refine_file_category: false,
+        })
+        .unwrap();
+    assert_eq!(matter.get_item(&item.id).unwrap().pdf_needs_ocr, 1);
+
+    let err = matter
+        .apply_pdf_text(ApplyPdfTextInput {
+            item_id: item.id.clone(),
+            force: true,
+            text: None,
+            method: None,
+            status: Some(pdf_extract_status::ERROR.into()),
+            error: Some("pdf_parse_error: boom".into()),
+            source_native_sha256: Some(native),
+            partial: false,
+            page_count: None,
+            needs_ocr: Some(0), // even if caller wrongly passes 0, column must stay
+            file_category: None,
+            refine_file_category: false,
+        })
+        .unwrap();
+    assert!(matches!(err, PdfExtractApplyResult::Error { .. }));
+
+    let r = matter.get_item(&item.id).unwrap();
+    assert_eq!(r.pdf_extract_status.as_deref(), Some("error"));
+    assert_eq!(
+        r.pdf_needs_ocr, 1,
+        "error must not wipe prior empty OCR candidacy"
+    );
+}
+
+/// Pure error apply does not claim successful source (retry-eligible).
+#[test]
+fn apply_error_does_not_set_source_native() {
+    let dir = tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().join("m")).unwrap();
+    let matter = Matter::create(&root, "PdfErrSource").unwrap();
+    let native = matter.put_bytes(b"%PDF-1.4 broken").unwrap();
+    let item = matter
+        .insert_item(ItemInput {
+            path: Some("broken.pdf".into()),
+            native_sha256: Some(native.clone()),
+            status: "extracted".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let err = matter
+        .apply_pdf_text(ApplyPdfTextInput {
+            item_id: item.id.clone(),
+            force: true,
+            text: None,
+            method: None,
+            status: Some(pdf_extract_status::ERROR.into()),
+            error: Some("pdf_parse_error: corrupt".into()),
+            source_native_sha256: Some(native.clone()),
+            partial: false,
+            page_count: None,
+            needs_ocr: None,
+            file_category: None,
+            refine_file_category: false,
+        })
+        .unwrap();
+    assert!(matches!(err, PdfExtractApplyResult::Error { .. }));
+
+    let r = matter.get_item(&item.id).unwrap();
+    assert_eq!(r.pdf_extract_status.as_deref(), Some("error"));
+    assert!(
+        r.pdf_source_native_sha256.is_none(),
+        "error must not set pdf_source_native_sha256"
+    );
+}
+
+/// Job path: corrupt native → error status, source NULL; second non-force still retries.
+#[test]
+fn job_corrupt_error_no_source_retries() {
+    let dir = tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().join("m")).unwrap();
+    let matter = Matter::create(&root, "PdfCorruptJob").unwrap();
+
+    let corrupt = load_fixture("corrupt.pdf");
+    let native = matter.put_bytes(&corrupt).unwrap();
+    let item = matter
+        .insert_item(ItemInput {
+            path: Some("corrupt.pdf".into()),
+            native_sha256: Some(native),
+            status: "extracted".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let params = PdfExtractParams::default();
+    let job1 = matter.create_job(JOB_KIND_PDF_EXTRACT).unwrap();
+    let o1 = run_pdf_extract(&matter, &job1.id, &params, None, |_| {}).unwrap();
+    match o1 {
+        PdfExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.error_count, 1, "summary={s:?}");
+            assert_eq!(s.skipped_count, 0, "must not skip on first failure");
+        }
+        other => panic!("expected Succeeded: {other:?}"),
+    }
+    let after1 = matter.get_item(&item.id).unwrap();
+    assert_eq!(after1.pdf_extract_status.as_deref(), Some("error"));
+    assert!(after1.pdf_source_native_sha256.is_none());
+
+    let job2 = matter.create_job(JOB_KIND_PDF_EXTRACT).unwrap();
+    let o2 = run_pdf_extract(&matter, &job2.id, &params, None, |_| {}).unwrap();
+    match o2 {
+        PdfExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.error_count, 1, "second run must retry, not skip: {s:?}");
+            assert_eq!(s.skipped_count, 0, "second run must not skip: {s:?}");
+        }
+        other => panic!("expected Succeeded: {other:?}"),
+    }
+    let after2 = matter.get_item(&item.id).unwrap();
+    assert_eq!(after2.pdf_extract_status.as_deref(), Some("error"));
+    assert!(after2.pdf_source_native_sha256.is_none());
+}
+
+/// Regression: non-force + batch_size 1 must extract **all** N items.
+///
+/// Old bug: pending-only SQL + OFFSET into a shrinking list processed A, skipped
+/// B, processed C (or stopped early). Stable list + OFFSET visits every row.
+#[test]
+fn multi_item_batch_size_one_extracts_all() {
+    const N: usize = 3;
+    let dir = tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().join("m")).unwrap();
+    let matter = Matter::create(&root, "PdfMulti").unwrap();
+
+    let data = load_fixture("minimal.pdf");
+    let native = matter.put_bytes(&data).unwrap();
+    let mut ids = Vec::with_capacity(N);
+    for i in 0..N {
+        let item = matter
+            .insert_item(ItemInput {
+                path: Some(format!("memo-{i}.pdf")),
+                native_sha256: Some(native.clone()),
+                status: "extracted".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        ids.push(item.id);
+    }
+
+    let job = matter.create_job(JOB_KIND_PDF_EXTRACT).unwrap();
+    let params = PdfExtractParams {
+        force: false,
+        batch_size: 1,
+    };
+    let outcome = run_pdf_extract(&matter, &job.id, &params, None, |_| {}).unwrap();
+    match outcome {
+        PdfExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.extracted_count, N as u64, "summary={s:?}");
+            assert_eq!(s.completed_count, N as u64, "summary={s:?}");
+            assert_eq!(s.error_count, 0, "summary={s:?}");
+        }
+        other => panic!("expected success: {other:?}"),
+    }
+
+    for id in &ids {
+        let item = matter.get_item(id).unwrap();
+        assert!(
+            item.text_sha256.is_some(),
+            "item {id} missing text_sha256 after multi-item extract"
+        );
+        assert_eq!(
+            item.pdf_source_native_sha256.as_deref(),
+            Some(native.as_str())
+        );
+    }
+}
+
+/// Cancel after one item → Paused; resume same job → remaining finish.
+#[test]
+fn multi_item_cancel_then_resume_completes_all() {
+    const N: usize = 3;
+    let dir = tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().join("m")).unwrap();
+    let matter = Matter::create(&root, "PdfResume").unwrap();
+
+    let data = load_fixture("minimal.pdf");
+    let native = matter.put_bytes(&data).unwrap();
+    let mut ids = Vec::with_capacity(N);
+    for i in 0..N {
+        let item = matter
+            .insert_item(ItemInput {
+                path: Some(format!("resume-{i}.pdf")),
+                native_sha256: Some(native.clone()),
+                status: "extracted".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        ids.push(item.id);
+    }
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let job = matter.create_job(JOB_KIND_PDF_EXTRACT).unwrap();
+    let params = PdfExtractParams {
+        force: false,
+        batch_size: 1,
+    };
+
+    let done = Arc::new(AtomicU64::new(0));
+    let done_cancel = done.clone();
+    let cancel_fn = move || done_cancel.load(Ordering::SeqCst) >= 1;
+    let done_progress = done.clone();
+    let paused = run_pdf_extract(&matter, &job.id, &params, Some(&cancel_fn), |c| {
+        done_progress.store(c, Ordering::SeqCst)
+    })
+    .unwrap();
+    match paused {
+        PdfExtractOutcome::Paused(s) => {
+            assert_eq!(
+                s.completed_count, 1,
+                "expected cancel after first item: {s:?}"
+            );
+            assert_eq!(s.extracted_count, 1, "summary={s:?}");
+        }
+        other => panic!("expected Paused after 1 item, got {other:?}"),
+    }
+
+    let resumed = run_pdf_extract(&matter, &job.id, &params, None, |_| {}).unwrap();
+    match resumed {
+        PdfExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.completed_count, N as u64, "summary={s:?}");
+            assert_eq!(s.extracted_count, N as u64, "summary={s:?}");
+            assert_eq!(s.error_count, 0, "summary={s:?}");
+        }
+        other => panic!("expected Succeeded on resume: {other:?}"),
+    }
+
+    for id in &ids {
+        let item = matter.get_item(id).unwrap();
+        assert!(
+            item.text_sha256.is_some(),
+            "item {id} missing text after cancel/resume"
+        );
+    }
+}
+
 #[test]
 fn job_run_extracts_and_skips() {
     let dir = tempdir().unwrap();
@@ -361,8 +725,25 @@ fn job_run_extracts_and_skips() {
         PdfExtractOutcome::Succeeded(s) => {
             assert_eq!(s.extracted_count, 0);
             assert_eq!(s.skipped_count, 1);
+            assert_eq!(s.completed_count, 1);
         }
         other => panic!("expected skip: {other:?}"),
+    }
+
+    // Force re-extract job path
+    let job3 = matter.create_job(JOB_KIND_PDF_EXTRACT).unwrap();
+    let force = PdfExtractParams {
+        force: true,
+        ..Default::default()
+    };
+    let outcome3 = run_pdf_extract(&matter, &job3.id, &force, None, |_| {}).unwrap();
+    match outcome3 {
+        PdfExtractOutcome::Succeeded(s) => {
+            assert_eq!(s.extracted_count, 1, "force must re-extract: {s:?}");
+            assert_eq!(s.skipped_count, 0, "force must not skip: {s:?}");
+            assert_eq!(s.error_count, 0, "summary={s:?}");
+        }
+        other => panic!("expected force success: {other:?}"),
     }
 }
 
