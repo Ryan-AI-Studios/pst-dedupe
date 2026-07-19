@@ -1,0 +1,21 @@
+[package]
+name = "extract-calendar"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust ICS calendar extract + ics_extract job (track 0035)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+matter-core = { path = "../matter-core" }
+icalendar = { version = "0.17", default-features = false, features = ["parser", "chrono-tz"] }
+chrono = { workspace = true }
+chrono-tz = "0.10"
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+camino = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rusqlite = { workspace = true }
