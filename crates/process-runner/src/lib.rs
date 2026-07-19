@@ -63,3 +63,6 @@ pub use handlers::MatterOfficeExtractHandler;
 
 #[cfg(feature = "pdf")]
 pub use handlers::MatterPdfExtractHandler;
+
+#[cfg(feature = "calendar")]
+pub use handlers::MatterIcsExtractHandler;

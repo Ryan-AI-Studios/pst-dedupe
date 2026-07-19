@@ -3024,6 +3024,9 @@ fn show_filter_bar(
             if ui.small_button("Needs OCR").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_pdf_needs_ocr());
             }
+            if ui.small_button("Calendar").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_calendar());
+            }
             if ui.small_button("Withheld").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_withheld());
             }
