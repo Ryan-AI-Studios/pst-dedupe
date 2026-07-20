@@ -28,6 +28,7 @@ members = [
     "crates/matter-entity",
     "crates/matter-people",
     "crates/matter-cluster",
+    "crates/matter-sentiment",
 ]
 
 [workspace.dependencies]

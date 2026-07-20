@@ -300,6 +300,29 @@ pub struct Item {
     pub concept_cluster_set_id: Option<String>,
     /// When default-set membership was last written.
     pub concept_clustered_at: Option<String>,
+    // --- schema v28 (sentiment / tone) ---
+    /// Primary extreme-unit compound ∈ [-1, 1]; NULL = unscored.
+    pub sentiment_compound: Option<f64>,
+    /// Most negative unit compound across scored units.
+    pub sentiment_compound_min: Option<f64>,
+    /// Most positive unit compound across scored units.
+    pub sentiment_compound_max: Option<f64>,
+    /// pos/neu/neg proportions from the winning (extreme) unit.
+    pub sentiment_pos: Option<f64>,
+    pub sentiment_neu: Option<f64>,
+    pub sentiment_neg: Option<f64>,
+    /// `positive` | `neutral` | `negative`; NULL = unscored (not the same as neutral).
+    pub sentiment_polarity: Option<String>,
+    /// Scoring method id (e.g. `vader_lexicon_v1`).
+    pub sentiment_method: Option<String>,
+    /// Snapshot of pos threshold used for polarity.
+    pub sentiment_pos_threshold: Option<f64>,
+    /// Snapshot of neg threshold used for polarity.
+    pub sentiment_neg_threshold: Option<f64>,
+    /// Body `text_sha256` last used for a successful score write.
+    pub sentiment_scanned_text_sha256: Option<String>,
+    pub sentiment_scanned_at: Option<String>,
+    pub sentiment_job_id: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -4840,7 +4863,11 @@ const ITEM_COLUMNS: &str =
     ocr_page_count, ocr_at, ocr_error, ocr_confidence, \
     category_method, category_taxonomy, category_status, category_error, categorized_at, \
     entity_flags, entity_scan_at, entity_scan_job_id, entity_hit_count, entity_scanned_text_sha256, \
-    concept_cluster_id, concept_cluster_set_id, concept_clustered_at";
+    concept_cluster_id, concept_cluster_set_id, concept_clustered_at, \
+    sentiment_compound, sentiment_compound_min, sentiment_compound_max, \
+    sentiment_pos, sentiment_neu, sentiment_neg, sentiment_polarity, sentiment_method, \
+    sentiment_pos_threshold, sentiment_neg_threshold, sentiment_scanned_text_sha256, \
+    sentiment_scanned_at, sentiment_job_id";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -4969,6 +4996,19 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         concept_cluster_id: row.get(118)?,
         concept_cluster_set_id: row.get(119)?,
         concept_clustered_at: row.get(120)?,
+        sentiment_compound: row.get(121)?,
+        sentiment_compound_min: row.get(122)?,
+        sentiment_compound_max: row.get(123)?,
+        sentiment_pos: row.get(124)?,
+        sentiment_neu: row.get(125)?,
+        sentiment_neg: row.get(126)?,
+        sentiment_polarity: row.get(127)?,
+        sentiment_method: row.get(128)?,
+        sentiment_pos_threshold: row.get(129)?,
+        sentiment_neg_threshold: row.get(130)?,
+        sentiment_scanned_text_sha256: row.get(131)?,
+        sentiment_scanned_at: row.get(132)?,
+        sentiment_job_id: row.get(133)?,
     })
 }
 

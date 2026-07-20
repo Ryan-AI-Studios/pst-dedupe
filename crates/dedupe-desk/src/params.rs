@@ -310,6 +310,22 @@ pub fn entity_scan_default_params() -> String {
     .to_string()
 }
 
+/// Default params for offline sentiment / tone (`kind = "sentiment"`).
+///
+/// Opt-in job — lexicon heuristic; not privilege / auto-coding.
+pub fn sentiment_default_params() -> String {
+    serde_json::json!({
+        "pos_threshold": 0.05,
+        "neg_threshold": -0.05,
+        "max_text_bytes": 200_000,
+        "max_units": 200,
+        "reset": false,
+        "batch_size": 100,
+        "scope": "all"
+    })
+    .to_string()
+}
+
 /// Default params for people–comms graph (`kind = "people_graph"`).
 ///
 /// Opt-in job — headers primary. `include_entity_emails` must stay `false`

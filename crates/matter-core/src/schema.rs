@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 27;
+pub const SCHEMA_VERSION: u32 = 28;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -41,6 +41,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (25, MIGRATION_V25),
     (26, MIGRATION_V26),
     (27, MIGRATION_V27),
+    (28, MIGRATION_V28),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -942,6 +943,31 @@ ALTER TABLE items ADD COLUMN concept_cluster_set_id TEXT;
 ALTER TABLE items ADD COLUMN concept_clustered_at TEXT;
 CREATE INDEX idx_items_concept_cluster ON items(concept_cluster_id)
   WHERE concept_cluster_id IS NOT NULL;
+"#;
+
+/// Sentiment / tone scores (track 0049).
+///
+/// NULL `sentiment_polarity` means **unscored** (not neutral). Threshold snapshot
+/// columns enable relabel-on-threshold-change without CAS re-read.
+const MIGRATION_V28: &str = r#"
+ALTER TABLE items ADD COLUMN sentiment_compound REAL;
+ALTER TABLE items ADD COLUMN sentiment_compound_min REAL;
+ALTER TABLE items ADD COLUMN sentiment_compound_max REAL;
+ALTER TABLE items ADD COLUMN sentiment_pos REAL;
+ALTER TABLE items ADD COLUMN sentiment_neu REAL;
+ALTER TABLE items ADD COLUMN sentiment_neg REAL;
+ALTER TABLE items ADD COLUMN sentiment_polarity TEXT;
+ALTER TABLE items ADD COLUMN sentiment_method TEXT;
+ALTER TABLE items ADD COLUMN sentiment_pos_threshold REAL;
+ALTER TABLE items ADD COLUMN sentiment_neg_threshold REAL;
+ALTER TABLE items ADD COLUMN sentiment_scanned_text_sha256 TEXT;
+ALTER TABLE items ADD COLUMN sentiment_scanned_at TEXT;
+ALTER TABLE items ADD COLUMN sentiment_job_id TEXT;
+
+CREATE INDEX idx_items_sentiment_polarity
+  ON items(sentiment_polarity) WHERE sentiment_polarity IS NOT NULL;
+CREATE INDEX idx_items_sentiment_compound
+  ON items(sentiment_compound) WHERE sentiment_compound IS NOT NULL;
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -3509,7 +3535,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v23 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 27);
+        assert_eq!(v, 28);
 
         let has_table: bool = conn
             .query_row(
@@ -3630,7 +3656,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v24 to v25");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 27);
+        assert_eq!(v, 28);
 
         for col in [
             "entity_flags",
@@ -3765,7 +3791,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v25 onward");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 27);
+        assert_eq!(v, 28);
 
         for col in [
             "people_graph_built_at",
@@ -3920,9 +3946,9 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v26 to v27");
+        let v = migrate(&conn).expect("migrate v26 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 27);
+        assert_eq!(v, 28);
 
         for table in [
             "concept_cluster_sets",
@@ -4019,6 +4045,103 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v26'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v27_to_v28_adds_sentiment_columns() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        for &(target, sql) in MIGRATIONS {
+            if target > 27 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v27', 'V27 Matter', '2020-01-01T00:00:00Z', 27, '/tmp/v27')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, status, imported_at) \
+             VALUES ('it_v27', 'mat_v27', 'extracted', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v27 to v28");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 28);
+
+        for col in [
+            "sentiment_compound",
+            "sentiment_compound_min",
+            "sentiment_compound_max",
+            "sentiment_pos",
+            "sentiment_neu",
+            "sentiment_neg",
+            "sentiment_polarity",
+            "sentiment_method",
+            "sentiment_pos_threshold",
+            "sentiment_neg_threshold",
+            "sentiment_scanned_text_sha256",
+            "sentiment_scanned_at",
+            "sentiment_job_id",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected items.{col}");
+        }
+
+        for idx in [
+            "idx_items_sentiment_polarity",
+            "idx_items_sentiment_compound",
+        ] {
+            let has_idx: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='{idx}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("idx");
+            assert!(has_idx, "expected {idx}");
+        }
+
+        // NULL polarity = unscored (column present, value null).
+        let pol: Option<String> = conn
+            .query_row(
+                "SELECT sentiment_polarity FROM items WHERE id = 'it_v27'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pol");
+        assert!(pol.is_none());
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v27'",
                 [],
                 |row| row.get(0),
             )

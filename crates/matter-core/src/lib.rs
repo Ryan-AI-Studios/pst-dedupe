@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v27**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v28**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -36,6 +36,7 @@
 //! - **Entity / PII hits** (`item_entity_hits` + `entity_*` rollup columns, schema v25) (0046)
 //! - **People–comms graph** (`people`, `item_participants`, `people_edges`, `people_timeline`, schema v26) (0047)
 //! - **Concept clustering** (`concept_cluster_sets` / `concept_clusters` / `item_concept_membership`, schema v27) (0048)
+//! - **Sentiment / tone** (`sentiment_*` item columns, schema v28) (0049)
 //!
 //! ## Layout
 //!
@@ -84,6 +85,7 @@ pub mod qc;
 pub mod redaction;
 pub mod report;
 pub mod schema;
+pub mod sentiment;
 pub mod thread_headers;
 pub mod workflow;
 
@@ -182,6 +184,10 @@ pub use report::{
     MatterReportParams, MatterReportResult, MATTER_REPORT_FORMAT_VERSION,
 };
 pub use schema::SCHEMA_VERSION;
+pub use sentiment::{
+    sentiment_polarity, ClearItemSentimentInput, RelabelItemSentimentInput, SentimentCandidate,
+    WriteItemSentimentInput,
+};
 pub use thread_headers::{
     normalize_conversation_index_to_hex, parse_in_reply_to, parse_references_header,
     parse_references_json, references_to_json, unfold_header_value, ConversationIndexInput,

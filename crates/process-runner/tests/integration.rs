@@ -1635,6 +1635,57 @@ fn entity_scan_handler_via_process_runner() {
     }
 }
 
+/// Thin sentiment handler smoke: clear positive → positive polarity.
+#[cfg(feature = "sentiment")]
+#[test]
+fn sentiment_handler_via_process_runner() {
+    use matter_core::{item_status, ItemInput};
+    use process_runner::MatterSentimentHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-sentiment");
+
+    let item_id = {
+        let matter = Matter::open(&root).expect("open");
+        let text = matter
+            .put_bytes(b"This is wonderful amazing excellent fantastic great news!!!")
+            .expect("put");
+        matter
+            .insert_item(ItemInput {
+                path: Some("msg.txt".into()),
+                status: item_status::EXTRACTED.into(),
+                text_sha256: Some(text),
+                subject: Some("Good news".into()),
+                ..Default::default()
+            })
+            .expect("item")
+            .id
+    };
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterSentimentHandler::new()));
+
+    let job_id = runner
+        .start(&root, "sentiment", JobParams::empty())
+        .expect("start sentiment");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "err={:?}",
+        job.error_summary
+    );
+    assert_eq!(job.kind, "sentiment");
+
+    let item = matter.get_item(&item_id).expect("item");
+    assert_eq!(item.sentiment_polarity.as_deref(), Some("positive"));
+    assert!(item.sentiment_compound.is_some());
+    assert_eq!(item.sentiment_method.as_deref(), Some("vader_lexicon_v1"));
+}
+
 /// people_graph via ProcessRunner + register_default_handlers: job succeeds, people/edges, audit.
 #[cfg(feature = "people")]
 #[test]

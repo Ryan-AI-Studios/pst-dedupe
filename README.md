@@ -92,6 +92,11 @@ $m = "C:\Matters\cli-smoke"
 # not embeddings (0050), not Relativity LSI Conceptual Analytics, not privilege detection.
 # See crates/matter-cluster/README.md for prep strip / caps / FilterSpec.
 .\target\release\pst-dedup.exe job run --path $m --kind concept_cluster --json
+# Sentiment / tone (opt-in; schema v28; method vader_lexicon_v1)
+# Honesty: offline lexicon heuristic; unit-extreme + footer strip; Unscored ≠ Neutral;
+# not privilege/coding; sarcasm and dilution imperfect.
+# See crates/matter-sentiment/README.md for license tree + limits.
+.\target\release\pst-dedup.exe job run --path $m --kind sentiment --json
 .\target\release\pst-dedup.exe job list --path $m --json
 .\target\release\pst-dedup.exe job status --path $m --job-id <id> --json
 .\target\release\pst-dedup.exe job cancel --path $m --job-id <id> --json
@@ -202,7 +207,7 @@ Small Aspose/sample fixtures live under `fixtures/` (see `fixtures/README.md`). 
 | `pst-dedup-cli` | CLI surface: inspect / scan / dups (JSON + CSV) |
 | `pst-dedup-gui` | egui app and background scan worker |
 | `pst-writer` | Experimental/fixture PST writing and EML import helpers |
-| `matter-core` | Matter layout + SQLite (schema v27: Normalized Item + dedupe/thread/neardup/cull/promote + `review_sets` + coding + `saved_searches` + review-list index + metadata filters + entity hits / `entity_flags` + people–comms graph + concept cluster tables) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + logical_hash v1 + `workspace/temp/` |
+| `matter-core` | Matter layout + SQLite (schema v28: Normalized Item + dedupe/thread/neardup/cull/promote + `review_sets` + coding + `saved_searches` + review-list index + metadata filters + entity hits / `entity_flags` + people–comms graph + concept cluster tables + `sentiment_*` tone columns) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + logical_hash v1 + `workspace/temp/` |
 | `ingest-purview` | Purview/package/ZIP detect + safe expand + resumable inventory (blocking worker API; `*_on_job` for runner) |
 | `extract-pst` | PST → Normalized Items + families + logical_hash; `pst-native-message-v1` native (not EML); mid-folder resume (blocking; `*_on_job` for runner) |
 | `process-runner` | In-process job runner: single matter worker, cancel, watch progress, Option C job-id authority |
@@ -211,6 +216,7 @@ Small Aspose/sample fixtures live under `fixtures/` (see `fixtures/README.md`). 
 | `matter-entity` | Offline entity/PII packs (`entity_scan`): regex + Luhn, mask+hash hits only (schema v25) |
 | `matter-people` | Offline people–comms graph (`people_graph`): participants + directed edges + timeline (schema v26); BCC separate; two-pass |
 | `matter-cluster` | Offline concept clustering (`concept_cluster`): `tfidf_kmeans_v1` + c-TF-IDF/ICF labels (schema v27); not near-dup / not embeddings |
+| `matter-sentiment` | Offline sentiment / tone (`sentiment`): `vader_lexicon_v1` + unit-extreme aggregation (schema v28); Unscored ≠ Neutral |
 
 **Matter layout** (Desk foundation): `matter.db`, `blobs/sha256/<aa>/<hex>`, reserved `index/` / `exports/` / `logs/`, `workspace/temp/`.
 See [`crates/matter-core/README.md`](crates/matter-core/README.md), [`crates/ingest-purview/README.md`](crates/ingest-purview/README.md), [`crates/extract-pst/README.md`](crates/extract-pst/README.md), [`crates/process-runner/README.md`](crates/process-runner/README.md), [`crates/matter-entity/README.md`](crates/matter-entity/README.md), [`crates/matter-people/README.md`](crates/matter-people/README.md), and [`ARCHITECTURE.md`](ARCHITECTURE.md).
