@@ -3,21 +3,13 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
 use matter_core::CaseOverview;
-use process_runner::{
-    ExtractPstHandler, IngestHandler, JobParams, MatterClassifyHandler, MatterCullHandler,
-    MatterDedupeHandler, MatterFtsIndexHandler, MatterGapHandler, MatterIcsExtractHandler,
-    MatterNearDupHandler, MatterOcrHandler, MatterOfficeExtractHandler, MatterPdfExtractHandler,
-    MatterProduceHandler, MatterProductionExportHandler, MatterProfileRunHandler,
-    MatterPromoteHandler, MatterQcHandler, MatterThreadHandler, MatterWorkflowRunHandler,
-    ProcessRunner, RunnerConfig,
-};
+use process_runner::{register_default_handlers, JobParams, ProcessRunner, RunnerConfig};
 use tokio::sync::watch;
 
 use crate::dialogs::{DialogKind, DialogState};
@@ -120,25 +112,7 @@ pub struct DeskApp {
 impl DeskApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let mut runner = ProcessRunner::new(RunnerConfig::default());
-        runner.register(Arc::new(IngestHandler::new()));
-        runner.register(Arc::new(ExtractPstHandler::new()));
-        runner.register(Arc::new(MatterDedupeHandler::new()));
-        runner.register(Arc::new(MatterThreadHandler::new()));
-        runner.register(Arc::new(MatterNearDupHandler::new()));
-        runner.register(Arc::new(MatterCullHandler::new()));
-        runner.register(Arc::new(MatterPromoteHandler::new()));
-        runner.register(Arc::new(MatterProduceHandler::new()));
-        runner.register(Arc::new(MatterProductionExportHandler::new()));
-        runner.register(Arc::new(MatterQcHandler::new()));
-        runner.register(Arc::new(MatterGapHandler::new()));
-        runner.register(Arc::new(MatterFtsIndexHandler::new()));
-        runner.register(Arc::new(MatterOfficeExtractHandler::new()));
-        runner.register(Arc::new(MatterPdfExtractHandler::new()));
-        runner.register(Arc::new(MatterIcsExtractHandler::new()));
-        runner.register(Arc::new(MatterOcrHandler::new()));
-        runner.register(Arc::new(MatterClassifyHandler::new()));
-        runner.register(Arc::new(MatterProfileRunHandler::with_default_handlers()));
-        runner.register(Arc::new(MatterWorkflowRunHandler::with_default_handlers()));
+        register_default_handlers(&mut runner);
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 

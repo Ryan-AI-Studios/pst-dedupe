@@ -15,7 +15,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0016-06 | — | PST message extract | **Done in 0018** (`extract-pst`) | — |
 | D-0016-07 | — | Full Normalized Item model | **Done in 0017** | — |
 | D-0016-08 | — | Blocking worker pool / process runner | **Done in 0019** (`process-runner`) | — |
-| D-0016-09 | — | CLI `ingest` smoke subcommand | Optional nice-to-have | future |
+| D-0016-09 | — | CLI `ingest` smoke subcommand | **Closed in 0045** (`pst-dedup ingest`) | — |
 
 ## From track 0017-NormalizedItem
 
@@ -41,11 +41,11 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0019-01 | — | Multi-job parallel stages per matter | **Partial close in 0044**: sequential multi-job orchestration (`workflow_run` / `profile_run` child rows). **True parallel** stages remain residual (SQLite single-writer) | residual / **D-0044-02** |
-| D-0019-02 | — | Full CLI `job run|resume|cancel` | `examples/run_job.rs` smoke only | future |
+| D-0019-02 | — | Full CLI `job run|resume|cancel` | **Closed in 0045** (`job run|resume|cancel|status|list` + profile/workflow) | — |
 | D-0019-03 | P3 | Extract cancel→resume via runner | Ingest path proven; extract fixture success proven | future polish |
 | D-0019-04 | — | Rayon pure-CPU stages without Matter | Forbidden for Matter path P0 | later |
 
-| D-0018-05 | — | CLI `extract` subcommand | Optional | future |
+| D-0018-05 | — | CLI `extract` subcommand | **Closed in 0045** via `job run --kind extract_pst` | — |
 
 ## From track 0020-DeskShellUx
 
@@ -311,7 +311,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 |---|---|---|---|---|
 | D-0039-01 | — | Pure-Rust PDF summary of matter report | CSV shipped; if later: **embedded TTF** required (§3.5.1) | residual |
 | D-0039-02 | — | Full per-row item_errors detail CSV | Size risk; scrub paths if ever shipped | residual |
-| D-0039-03 | — | CLI `report export` headless | Desk export P0 | **0045** |
+| D-0039-03 | — | CLI `report export` headless | **Closed in 0045** (`report export`) | — |
 | D-0039-04 | — | UTF-8 BOM for Excel | Dual datetime is P0; BOM polish if needed | residual |
 | D-0039-05 | — | Scheduled / email delivery of reports | Never default | residual / SaaS |
 | D-0039-06 | — | Embed report in production package | Optional attach | residual |
@@ -326,7 +326,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0040-01 | — | TIFF/PDF image productions + OPT/LFP | No image factory P0 | residual / image redaction |
-| D-0040-02 | — | CLI `produce` headless | Desk P0 | **0045** |
+| D-0040-02 | — | CLI `produce` headless | **Closed in 0045** (`produce run` / `job run --kind produce`) | — |
 | D-0040-03 | — | Broken-family QC (orphan attach / missing parent) | **Closed in 0041** (orphan error; incomplete_parent any missing non-withheld child warn) | — |
 | D-0040-04 | — | Privilege log co-export into volume `PRIVILEGE/` | Separate 0031 export remains | residual |
 | D-0040-05 | — | Matter report attach into volume `REPORTS/` | Soft residual (D-0039-06) | residual |
@@ -348,7 +348,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0041-04 | — | Custom user-defined QC SQL rules | Builtin pack P0 | residual |
 | D-0041-05 | — | Multi-jurisdiction QC packs | | **0060** |
 | D-0041-06 | — | Sampling / multi-reviewer QC UI | | **0058** residual |
-| D-0041-07 | — | CLI `qc run` | Desk + job P0 | **0045** |
+| D-0041-07 | — | CLI `qc run` | **Closed in 0045** (`qc run`) | — |
 | D-0041-08 | — | Full findings table in SQLite | CSV + qc_runs + fingerprint enough P0 | residual |
 | D-0041-09 | P3 | Full GUI smoke Run QC / produce block / stale | Automated engine + unit; operator smoke | operator / polish |
 | D-0041-10 | — | QC max-age TTL in addition to fingerprint | Fingerprint is hard P0 invariant | residual |
@@ -368,7 +368,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0042-04 | — | Day-level date holes / heatmap UI | **Forbidden P0**; week/month only | residual |
 | D-0042-05 | — | Purview legal-hold / hold-notice roster sync | Manual expected list P0 | residual |
 | D-0042-06 | — | OPT/image opposing productions | DAT metadata P0 | residual |
-| D-0042-07 | — | CLI `gap run` | Desk P0 | **0045** |
+| D-0042-07 | — | CLI `gap run` | **Closed in 0045** (`gap run`) | — |
 | D-0042-08 | P3 | Full GUI smoke Gap panel | Automated + operator smoke | operator / polish |
 | D-0042-09 | — | Emit `MESSAGE_ID` on 0040 produce DAT for foreign-style re-import | Self-compare uses ITEM_ID/CONTROL P0 | residual / produce polish |
 | D-0042-10 | — | Raise missing_custodian default to error after alias table ships | P0 locked **warn** | residual |
@@ -399,6 +399,22 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0044-07 | P3 | Desk CRUD for user workflows (JSON editor) | Select/run P0; upsert via API | residual polish |
 | D-0019-01 | — | Multi-job parallel stages | **Partial closed in 0044** (sequential); true parallel → D-0044-02 | residual |
 | D-0043-01 | — | parent_job_id | **Closed in 0044** | — |
+
+## From track 0045-CliAutomationParity (Completed — see conductor review)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0045-01 | — | Fire-and-forget / `--no-wait` detach | P0 always waits for terminal | residual |
+| D-0045-02 | — | Cross-process cancel of in-flight job | `job cancel` marks DB; SIGINT cancels in-process runner | residual |
+| D-0045-03 | — | Binary rename to `dedupe-cli` | Keep `pst-dedup` P0 | residual |
+| D-0045-04 | P3 | Schema-driven path tags beyond known key list | Known keys preflight P0 | residual polish |
+| D-0019-02 | — | Full CLI job control | **Closed in 0045** | — |
+| D-0016-09 | — | CLI ingest | **Closed in 0045** | — |
+| D-0018-05 | — | CLI extract | **Closed in 0045** via `job run --kind extract_pst` | — |
+| D-0039-03 | — | CLI report export | **Closed in 0045** | — |
+| D-0040-02 | — | CLI produce | **Closed in 0045** | — |
+| D-0041-07 | — | CLI qc | **Closed in 0045** | — |
+| D-0042-07 | — | CLI gap | **Closed in 0045** | — |
 
 ## Hygiene
 

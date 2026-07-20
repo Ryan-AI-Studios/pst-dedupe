@@ -39,7 +39,10 @@ const PROGRESS_STAGES: &[&str] = &[
     "workflow_run",
 ];
 
-/// Clone an error for channel delivery (Matter errors become `Other` text).
+/// Clone an error for channel delivery across the worker reply mpsc.
+///
+/// `RunnerError::Matter` is not `Clone`; re-encode as [`RunnerError::MatterOpen`]
+/// so CLI/exit-code mapping keeps exit **5** (not generic 1).
 fn clone_for_reply(err: &RunnerError) -> RunnerError {
     match err {
         RunnerError::Busy { job_id } => RunnerError::Busy {
@@ -57,7 +60,12 @@ fn clone_for_reply(err: &RunnerError) -> RunnerError {
         RunnerError::CancelFailed(m) => RunnerError::CancelFailed(m.clone()),
         RunnerError::ShutDown => RunnerError::ShutDown,
         RunnerError::WorkerGone => RunnerError::WorkerGone,
-        RunnerError::Matter(e) => RunnerError::Other(e.to_string()),
+        // Preserve matter-IO classification across the reply channel (CLI exit 5).
+        // `Matter` is not Clone; re-encode as MatterOpen so callers can map exit codes.
+        RunnerError::Matter(e) => RunnerError::MatterOpen {
+            path: String::new(),
+            message: e.to_string(),
+        },
         RunnerError::Other(m) => RunnerError::Other(m.clone()),
     }
 }
@@ -865,4 +873,36 @@ fn finalize_job(
         error_summary,
         updated_at: now_rfc3339_approx(),
     });
+}
+
+#[cfg(test)]
+mod clone_for_reply_tests {
+    use super::clone_for_reply;
+    use crate::RunnerError;
+
+    #[test]
+    fn matter_replies_as_matter_open_not_other() {
+        let err = RunnerError::Matter(matter_core::Error::DatabaseMissing("broken.db".into()));
+        let cloned = clone_for_reply(&err);
+        match cloned {
+            RunnerError::MatterOpen { path, message } => {
+                assert!(path.is_empty());
+                assert!(
+                    message.contains("broken.db")
+                        || message.to_ascii_lowercase().contains("matter"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected MatterOpen, got {other}"),
+        }
+    }
+
+    #[test]
+    fn other_stays_other() {
+        let err = RunnerError::Other("generic".into());
+        match clone_for_reply(&err) {
+            RunnerError::Other(m) => assert_eq!(m, "generic"),
+            other => panic!("expected Other, got {other}"),
+        }
+    }
 }
