@@ -81,3 +81,5 @@ pub use handlers::MatterOcrHandler;
 
 #[cfg(feature = "classify")]
 pub use handlers::MatterClassifyHandler;
+
+pub use handlers::MatterProfileRunHandler;

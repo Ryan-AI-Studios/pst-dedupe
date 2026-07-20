@@ -214,7 +214,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0033-05 | — | Native Office redaction (DOCX/XLSX) | Text redaction is 0032; natives untouched | residual (D-0032-02) |
 | D-0033-06 | — | Full Office preview / WYSIWYG | Review shows extracted plain text | residual |
 | D-0033-07 | — | LibreOffice convert sidecar | Forbidden P0 | residual |
-| D-0033-08 | — | Auto-run office_extract after pst extract | Manual/job button P0 | residual |
+| D-0033-08 | — | Auto-run office_extract after pst extract | **Partial 0043:** office_extract stage in built-in profiles / `profile_run` (not silent auto after every extract_pst) | residual / partial **0043** |
 | D-0033-09 | P3 | Full GUI smoke for Extract Office text | Automated job + unit; operator smoke | operator / polish |
 | D-0033-10 | — | Macro-enabled .docm/.xlsm execute | Never execute; text extract best-effort only | never |
 | D-0033-11 | — | calamine still may allocate large range matrices internally | P0 mitigates with early text-cap break + native size cap; streaming sheet API if calamine adds one later | residual polish |
@@ -232,7 +232,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0034-07 | — | Adversarial glyph/font extract hardening | Document best-effort extract ≠ visual | residual |
 | D-0034-08 | — | PDF portfolio / embedded file tree | Single stream text P0 | residual |
 | D-0034-09 | P3 | Full GUI smoke Extract PDF / needs-OCR chip | Automated job + unit; operator smoke | operator / polish |
-| D-0034-10 | — | Auto-run pdf_extract after pst extract | Manual/job button P0 | residual |
+| D-0034-10 | — | Auto-run pdf_extract after pst extract | **Partial 0043:** pdf_extract stage in built-in profiles / `profile_run` (not silent auto after every extract_pst) | residual / partial **0043** |
 | D-0034-11 | — | Tunable MIN_TEXT_CHARS thresholds per matter | P0 fixed constants (50 total / 20 per page) | residual |
 
 ## From track 0035-CalendarItems (Completed — Codex luna PASS WITH DEFERRED P3)
@@ -260,7 +260,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0036-01 | — | Bundle Tesseract/Poppler in Windows installer | P0: operator installs; path in Settings | residual packaging |
 | D-0036-02 | — | In-process leptess / tesseract-rs linking | P0 CLI sidecar only | residual |
 | D-0036-03 | — | Cloud OCR providers | Never default offline product | never / Series G |
-| D-0036-04 | — | Auto-run OCR after pdf_extract | Manual job; profiles later | **0043** |
+| D-0036-04 | — | Auto-run OCR after pdf_extract | **Closed in 0043:** OCR stage in `with_ocr` built-in + user profiles / `profile_run` | — |
 | D-0036-05 | — | Multi-language pack UI | P0 `lang` string (default eng) | residual |
 | D-0036-06 | — | Handwriting / layout/table OCR | Plain text Tesseract | residual |
 | D-0036-07 | — | Write OCR text layer back into PDF native | Text CAS only | residual |
@@ -281,7 +281,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0037-04 | — | Mobile / cloud package type packs | Thin reserved categories | residual |
 | D-0037-05 | — | User-editable custom taxonomy UI | Closed vocabulary P0 | residual |
 | D-0037-06 | — | AI content-based classification | Offline metadata only | Series G |
-| D-0037-07 | — | Auto-run classify in processing profiles | Manual/job button P0 | **0043** |
+| D-0037-07 | — | Auto-run classify in processing profiles | **Closed in 0043:** classify stage in `standard` / `extract_only` + `profile_run` | — |
 | D-0037-08 | — | Load-file / QC % unrecognized gates | Taxonomy enables fields | **0040** / **0041** |
 | D-0037-09 | — | Deep CFB CLSID sniff to distinguish .msg vs legacy Office without extension | P0: extension disambiguation after OLE magic (§3.4.1) | residual |
 | D-0037-10 | — | Full ZIP central-directory OOXML detection for renamed containers without office extension | P0: peek when possible + extension tie-break; bare zip → archive | residual polish |
@@ -373,6 +373,18 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0042-09 | — | Emit `MESSAGE_ID` on 0040 produce DAT for foreign-style re-import | Self-compare uses ITEM_ID/CONTROL P0 | residual / produce polish |
 | D-0042-10 | — | Raise missing_custodian default to error after alias table ships | P0 locked **warn** | residual |
 | (mid-index) | — | Per-row MID full scan O(n·m) | **Closed in 0042**: `message_id_index` + bulk compare | — |
+
+## From track 0043-ProcessingProfiles (Completed — PASS WITH DEFERRED P3)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0043-01 | P3 | `parent_job_id` column for UI grouping of profile child jobs | P0 correlates via parent checkpoint JSON | residual polish |
+| D-0043-02 | P3 | Neardup skip-already when `reset:false` (still re-sketches) | Off in built-ins; documented residual | residual |
+| D-0043-03 | P3 | Full form profile editor | Save-as + clone from built-in/user is P0 | residual polish |
+| D-0043-04 | P3 | Desk progress stage flicker during `profile_run` (shared progress sink) | Shows stage kind; poller may overwrite | residual polish |
+| D-0043-05 | P3 | Full GUI smoke profile dropdown / Apply / Run profile | Automated engine + unit; operator smoke | operator / polish |
+| D-0036-04 | — | Auto-run OCR after pdf_extract | **Closed in 0043** | — |
+| D-0037-07 | — | Auto-run classify in profiles | **Closed in 0043** | — |
 
 ## Hygiene
 

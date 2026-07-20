@@ -302,6 +302,7 @@ mod tests {
             text_sha256: None,
             role: None,
             imported_at: "2020-01-01T00:00:00Z".into(),
+            cull_status: None,
         }
     }
 

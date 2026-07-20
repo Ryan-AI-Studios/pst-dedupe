@@ -48,6 +48,9 @@ pub mod ocr;
 #[cfg(feature = "classify")]
 pub mod classify;
 
+/// Sequential processing-profile runner (always available; depends only on matter-core).
+pub mod profile_run;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
@@ -95,3 +98,5 @@ pub use ocr::MatterOcrHandler;
 
 #[cfg(feature = "classify")]
 pub use classify::MatterClassifyHandler;
+
+pub use profile_run::MatterProfileRunHandler;

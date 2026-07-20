@@ -930,7 +930,7 @@ fn filter_pdf_needs_ocr_preset() {
 
 #[test]
 fn migration_has_review_list_order_index() {
-    assert_eq!(SCHEMA_VERSION, 22);
+    assert_eq!(SCHEMA_VERSION, 23);
     let (_tmp, _root, matter, _set_id) = setup_review_matter("filter-idx");
     let exists: bool = matter
         .connection()

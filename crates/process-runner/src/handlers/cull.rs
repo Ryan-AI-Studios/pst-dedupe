@@ -58,8 +58,8 @@ fn map_outcome(outcome: CullOutcome) -> JobOutcome {
     match outcome {
         CullOutcome::Succeeded(s) => JobOutcome::Succeeded {
             message: Some(format!(
-                "included={} culled={} completed={}",
-                s.included, s.culled, s.completed_count
+                "included={} culled={} skipped={} completed={}",
+                s.included, s.culled, s.skipped, s.completed_count
             )),
             completed_count: s.completed_count,
         },

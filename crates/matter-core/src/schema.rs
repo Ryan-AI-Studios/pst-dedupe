@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 22;
+pub const SCHEMA_VERSION: u32 = 23;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -36,6 +36,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (20, MIGRATION_V20),
     (21, MIGRATION_V21),
     (22, MIGRATION_V22),
+    (23, MIGRATION_V23),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -730,6 +731,28 @@ CREATE TABLE gap_runs (
     summary_json TEXT
 );
 CREATE INDEX idx_gap_runs_matter_started ON gap_runs(matter_id, started_at);
+"#;
+
+/// Schema v23: named processing profiles (track 0043).
+///
+/// User profiles store a versioned body_json map of stage kind → {enabled, params}.
+/// Built-ins live as code constants (not DB rows). Optional matter default_profile_id.
+const MIGRATION_V23: &str = r#"
+CREATE TABLE processing_profiles (
+    id TEXT PRIMARY KEY NOT NULL,
+    matter_id TEXT NOT NULL REFERENCES matters(id),
+    name TEXT NOT NULL,
+    description TEXT,
+    body_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT
+);
+CREATE UNIQUE INDEX idx_processing_profiles_matter_name
+    ON processing_profiles(matter_id, name);
+CREATE INDEX idx_processing_profiles_matter
+    ON processing_profiles(matter_id);
+ALTER TABLE matters ADD COLUMN default_profile_id TEXT;
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -3072,8 +3095,7 @@ mod tests {
         )
         .expect("matter");
 
-        let v = migrate(&conn).expect("migrate v21 to v22");
-        assert_eq!(v, 22);
+        let v = migrate(&conn).expect("migrate v21 to current");
         assert_eq!(v, SCHEMA_VERSION);
 
         for table in [
@@ -3166,6 +3188,100 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v21'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v22_to_v23_adds_processing_profiles() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        for &(target, sql) in MIGRATIONS {
+            if target > 22 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v22', 'V22 Matter', '2020-01-01T00:00:00Z', 22, '/tmp/v22')",
+            [],
+        )
+        .expect("matter");
+
+        let v = migrate(&conn).expect("migrate v22 to v23");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 23);
+
+        let has_table: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='processing_profiles'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table");
+        assert!(has_table, "expected processing_profiles table");
+
+        for col in [
+            "id",
+            "matter_id",
+            "name",
+            "description",
+            "body_json",
+            "created_at",
+            "updated_at",
+            "created_by",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('processing_profiles') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected processing_profiles.{col}");
+        }
+
+        let has_default: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('matters') WHERE name = 'default_profile_id'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("col");
+        assert!(has_default, "expected matters.default_profile_id");
+
+        for idx in [
+            "idx_processing_profiles_matter_name",
+            "idx_processing_profiles_matter",
+        ] {
+            let has_idx: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='{idx}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("idx");
+            assert!(has_idx, "expected {idx}");
+        }
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v22'",
                 [],
                 |row| row.get(0),
             )
