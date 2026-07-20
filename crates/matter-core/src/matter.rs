@@ -1180,16 +1180,35 @@ impl Matter {
 
     // --- Jobs / checkpoints ---
 
-    /// Create a new job in `pending` state. Returns the job id.
+    /// Create a new root job in `pending` state (`parent_job_id` is `None`).
     pub fn create_job(&self, kind: &str) -> Result<Job> {
+        self.create_job_with_parent(kind, None)
+    }
+
+    /// Create a job, optionally nested under a parent orchestration job.
+    ///
+    /// When `parent_job_id` is `Some`, the parent must exist and belong to this matter.
+    pub fn create_job_with_parent(&self, kind: &str, parent_job_id: Option<&str>) -> Result<Job> {
+        if let Some(parent_id) = parent_job_id {
+            let parent = jobs::get_job(&self.conn, parent_id)?;
+            if parent.matter_id != self.matter_id {
+                return Err(Error::Other(format!(
+                    "parent job {parent_id} belongs to another matter"
+                )));
+            }
+        }
         let id = new_id("job");
         let now = now_rfc3339();
-        let job = jobs::create_job(&self.conn, &id, &self.matter_id, kind, &now)?;
+        let job = jobs::create_job(&self.conn, &id, &self.matter_id, kind, &now, parent_job_id)?;
+        let mut params = serde_json::json!({ "kind": kind });
+        if let Some(pid) = parent_job_id {
+            params["parent_job_id"] = serde_json::Value::String(pid.to_string());
+        }
         let _ = self.append_audit(AuditEventInput {
             actor: "system".into(),
             action: "job.create".into(),
             entity: format!("job:{id}"),
-            params_json: serde_json::json!({ "kind": kind }).to_string(),
+            params_json: params.to_string(),
             tool_version: env!("CARGO_PKG_VERSION").into(),
         })?;
         Ok(job)
@@ -1203,6 +1222,18 @@ impl Matter {
     /// List all jobs for this matter (newest first).
     pub fn list_jobs(&self) -> Result<Vec<Job>> {
         jobs::list_jobs(&self.conn, &self.matter_id)
+    }
+
+    /// List direct child jobs of `parent_job_id` (oldest first).
+    pub fn list_child_jobs(&self, parent_job_id: &str) -> Result<Vec<Job>> {
+        // Ensure parent exists (and belongs to this matter via get + check).
+        let parent = jobs::get_job(&self.conn, parent_job_id)?;
+        if parent.matter_id != self.matter_id {
+            return Err(Error::Other(format!(
+                "parent job {parent_job_id} belongs to another matter"
+            )));
+        }
+        jobs::list_child_jobs(&self.conn, parent_job_id)
     }
 
     /// Transition a job to a new state.

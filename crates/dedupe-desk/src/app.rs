@@ -15,7 +15,8 @@ use process_runner::{
     MatterDedupeHandler, MatterFtsIndexHandler, MatterGapHandler, MatterIcsExtractHandler,
     MatterNearDupHandler, MatterOcrHandler, MatterOfficeExtractHandler, MatterPdfExtractHandler,
     MatterProduceHandler, MatterProductionExportHandler, MatterProfileRunHandler,
-    MatterPromoteHandler, MatterQcHandler, MatterThreadHandler, ProcessRunner, RunnerConfig,
+    MatterPromoteHandler, MatterQcHandler, MatterThreadHandler, MatterWorkflowRunHandler,
+    ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -108,6 +109,12 @@ pub struct DeskApp {
     pub(crate) selected_profile_id: String,
     /// Draft name for Save profile as….
     pub(crate) profile_save_as_name: String,
+    /// Selected workflow id (`builtin:reduce_only_chain` or user `wfl_…`).
+    pub(crate) selected_workflow_id: String,
+    /// Optional run_params for ingest/extract workflow placeholders.
+    pub(crate) workflow_source_path: String,
+    pub(crate) workflow_source_id: String,
+    pub(crate) workflow_pst_item_id: String,
 }
 
 impl DeskApp {
@@ -131,6 +138,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterOcrHandler::new()));
         runner.register(Arc::new(MatterClassifyHandler::new()));
         runner.register(Arc::new(MatterProfileRunHandler::with_default_handlers()));
+        runner.register(Arc::new(MatterWorkflowRunHandler::with_default_handlers()));
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 
@@ -184,6 +192,10 @@ impl DeskApp {
             gap: GapState::new(),
             selected_profile_id: params::PROFILE_DEFAULT_SELECTION.into(),
             profile_save_as_name: String::new(),
+            selected_workflow_id: params::WORKFLOW_DEFAULT_SELECTION.into(),
+            workflow_source_path: String::new(),
+            workflow_source_id: String::new(),
+            workflow_pst_item_id: String::new(),
         }
     }
 
@@ -1089,6 +1101,62 @@ impl DeskApp {
                 self.status_msg = Some(format!(
                     "Started profile_run ({}) job {job_id}",
                     self.selected_profile_id
+                ));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Build optional `run_params` object from desk workflow fields (AST bind placeholders).
+    fn workflow_run_params_value(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        let path = self.workflow_source_path.trim();
+        if !path.is_empty() {
+            map.insert(
+                "source_path".into(),
+                serde_json::Value::String(path.to_string()),
+            );
+        }
+        let source_id = self.workflow_source_id.trim();
+        if !source_id.is_empty() {
+            map.insert(
+                "source_id".into(),
+                serde_json::Value::String(source_id.to_string()),
+            );
+        }
+        let pst_item_id = self.workflow_pst_item_id.trim();
+        if !pst_item_id.is_empty() {
+            map.insert(
+                "pst_item_id".into(),
+                serde_json::Value::String(pst_item_id.to_string()),
+            );
+        }
+        // qc_then_produce uses empty node params + handler defaults; produce scope
+        // toggles remain on the Produce screen (not injected here unless fields set).
+        serde_json::Value::Object(map)
+    }
+
+    /// Run the selected workflow (`workflow_run`).
+    pub(crate) fn start_workflow_run(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let run_params = self.workflow_run_params_value();
+        let params = JobParams::new(params::workflow_run_params(
+            &self.selected_workflow_id,
+            &run_params,
+        ));
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "workflow_run", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!(
+                    "Started workflow_run ({}) job {job_id}",
+                    self.selected_workflow_id
                 ));
                 self.error_msg = None;
             }

@@ -338,6 +338,54 @@ pub fn profile_selection_label(selection: &str, user_profiles: &[(String, String
     selection.to_string()
 }
 
+/// Built-in workflow names (desk dropdown; code constants in matter-core).
+pub const WORKFLOW_BUILTIN_NAMES: &[&str] = &[
+    "ingest_then_standard",
+    "extract_then_standard",
+    "reduce_only_chain",
+    "with_ocr_chain",
+    "qc_then_produce",
+];
+
+/// Default selected workflow id for a new workspace session.
+pub const WORKFLOW_DEFAULT_SELECTION: &str = "builtin:reduce_only_chain";
+
+/// Build `workflow_run` job params from a workflow id/name and optional run_params.
+///
+/// - `builtin:…` or user id (`wfl_…` / uuid-ish) → `{ "workflow_id": … }`
+/// - bare name → `{ "workflow_name": … }`
+/// - When `run_params` is a non-empty object, include it as `"run_params"`.
+pub fn workflow_run_params(workflow_id_or_name: &str, run_params: &serde_json::Value) -> String {
+    let key = workflow_id_or_name.trim();
+    let mut v = if key.starts_with("builtin:") || looks_like_workflow_uuid(key) {
+        serde_json::json!({ "workflow_id": key })
+    } else {
+        serde_json::json!({ "workflow_name": key })
+    };
+    if let Some(obj) = run_params.as_object() {
+        if !obj.is_empty() {
+            v["run_params"] = run_params.clone();
+        }
+    }
+    v.to_string()
+}
+
+/// Heuristic: user workflow ids are `wfl_…` (matter `new_id("wfl")`).
+fn looks_like_workflow_uuid(s: &str) -> bool {
+    s.starts_with("wfl") || (s.len() >= 32 && s.contains('-'))
+}
+
+/// Display label for a workflow selection encoding (`builtin:name` or user id).
+pub fn workflow_selection_label(selection: &str, user_workflows: &[(String, String)]) -> String {
+    if let Some(name) = selection.strip_prefix("builtin:") {
+        return name.to_string();
+    }
+    if let Some((_, name)) = user_workflows.iter().find(|(id, _)| id == selection) {
+        return name.clone();
+    }
+    selection.to_string()
+}
+
 /// Collection gap job params (`kind = "gap"`, collection only).
 pub fn gap_collection_params(
     window_start: &str,
@@ -721,5 +769,52 @@ mod tests {
         assert_eq!(PROFILE_BUILTIN_NAMES.len(), 4);
         assert_eq!(PROFILE_DEFAULT_SELECTION, "builtin:standard");
         assert_eq!(profile_selection_label("builtin:with_ocr", &[]), "with_ocr");
+    }
+
+    #[test]
+    fn workflow_run_params_shapes() {
+        let empty = serde_json::json!({});
+        let by_id = workflow_run_params("builtin:reduce_only_chain", &empty);
+        let v: serde_json::Value = serde_json::from_str(&by_id).unwrap();
+        assert_eq!(v["workflow_id"], "builtin:reduce_only_chain");
+        assert!(v.get("workflow_name").is_none());
+        assert!(v.get("run_params").is_none());
+
+        let by_name = workflow_run_params("qc_then_produce", &empty);
+        let v2: serde_json::Value = serde_json::from_str(&by_name).unwrap();
+        assert_eq!(v2["workflow_name"], "qc_then_produce");
+        assert!(v2.get("workflow_id").is_none());
+
+        let user = workflow_run_params("wfl_abc123", &empty);
+        let v3: serde_json::Value = serde_json::from_str(&user).unwrap();
+        assert_eq!(v3["workflow_id"], "wfl_abc123");
+
+        let run_params = serde_json::json!({
+            "source_path": r"C:\exports\pkg",
+            "source_id": "src1",
+            "pst_item_id": "itm1"
+        });
+        let with_rp = workflow_run_params("builtin:ingest_then_standard", &run_params);
+        let v4: serde_json::Value = serde_json::from_str(&with_rp).unwrap();
+        assert_eq!(v4["workflow_id"], "builtin:ingest_then_standard");
+        assert_eq!(v4["run_params"]["source_path"], r"C:\exports\pkg");
+        assert_eq!(v4["run_params"]["source_id"], "src1");
+        assert_eq!(v4["run_params"]["pst_item_id"], "itm1");
+
+        // Empty object omits run_params key entirely.
+        let empty_obj = workflow_run_params("builtin:with_ocr_chain", &serde_json::json!({}));
+        let v5: serde_json::Value = serde_json::from_str(&empty_obj).unwrap();
+        assert!(v5.get("run_params").is_none());
+
+        assert_eq!(WORKFLOW_BUILTIN_NAMES.len(), 5);
+        assert_eq!(WORKFLOW_DEFAULT_SELECTION, "builtin:reduce_only_chain");
+        assert_eq!(
+            workflow_selection_label("builtin:extract_then_standard", &[]),
+            "extract_then_standard"
+        );
+        assert_eq!(
+            workflow_selection_label("wfl_x", &[("wfl_x".into(), "My flow".into())]),
+            "My flow"
+        );
     }
 }

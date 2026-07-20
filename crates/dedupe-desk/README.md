@@ -29,6 +29,19 @@ Workspace **Processing profile** dropdown (built-ins + user):
 
 Built-ins are **cumulative** (`reset: false`). OCR stays off in `standard`; choose `with_ocr` to opt in. Ingest/extract_pst/produce/qc/gap are **not** profile stages (source-bound or counsel-gated).
 
+### Workflows (0044)
+
+Workspace **Workflow** dropdown (`list_workflows` = built-ins ∪ user):
+
+| Control | Behavior |
+|---|---|
+| Dropdown | `ingest_then_standard`, `extract_then_standard`, `reduce_only_chain`, `with_ocr_chain`, `qc_then_produce` + user |
+| **Run workflow** | Starts `workflow_run` — child jobs per node; progress stage/message via existing panel |
+| Run params | Optional `source_path` / `source_id` / `pst_item_id` (AST bind `${key}`); **Use selected PST** copies inventory ids |
+| Jobs list | Child rows show `parent: …` when `jobs.parent_job_id` is set |
+
+Param binding is AST-only. Hard gates reject `soft_fail`. Nested profile stages parent to the `profile_run` child under the workflow parent.
+
 ### Produce (0040)
 
 Nav **Produce** (or the workspace produce entry) exports the review corpus as a

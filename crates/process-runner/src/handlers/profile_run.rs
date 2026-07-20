@@ -229,7 +229,7 @@ impl JobHandler for MatterProfileRunHandler {
                     // Failed stage with stop_on_failure=false may re-run; new child.
                     let child = ctx
                         .matter
-                        .create_job(&stage.kind)
+                        .create_job_with_parent(&stage.kind, Some(ctx.job_id))
                         .map_err(RunnerError::from)?;
                     ctx.matter
                         .set_job_state(&child.id, JobState::Running, None)
@@ -241,7 +241,7 @@ impl JobHandler for MatterProfileRunHandler {
                 } else {
                     let child = ctx
                         .matter
-                        .create_job(&stage.kind)
+                        .create_job_with_parent(&stage.kind, Some(ctx.job_id))
                         .map_err(RunnerError::from)?;
                     ctx.matter
                         .set_job_state(&child.id, JobState::Running, None)
@@ -251,7 +251,7 @@ impl JobHandler for MatterProfileRunHandler {
             } else {
                 let child = ctx
                     .matter
-                    .create_job(&stage.kind)
+                    .create_job_with_parent(&stage.kind, Some(ctx.job_id))
                     .map_err(RunnerError::from)?;
                 ctx.matter
                     .set_job_state(&child.id, JobState::Running, None)

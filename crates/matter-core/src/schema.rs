@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 23;
+pub const SCHEMA_VERSION: u32 = 24;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -37,6 +37,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (21, MIGRATION_V21),
     (22, MIGRATION_V22),
     (23, MIGRATION_V23),
+    (24, MIGRATION_V24),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -753,6 +754,29 @@ CREATE UNIQUE INDEX idx_processing_profiles_matter_name
 CREATE INDEX idx_processing_profiles_matter
     ON processing_profiles(matter_id);
 ALTER TABLE matters ADD COLUMN default_profile_id TEXT;
+"#;
+
+/// Schema v24: workflows + job parent linkage (track 0044).
+///
+/// User workflows store a versioned body_json of ordered nodes. Built-ins live as
+/// code constants (not DB rows). `jobs.parent_job_id` links orchestrated children
+/// to `workflow_run` / `profile_run` parents.
+const MIGRATION_V24: &str = r#"
+CREATE TABLE workflows (
+    id TEXT PRIMARY KEY NOT NULL,
+    matter_id TEXT NOT NULL REFERENCES matters(id),
+    name TEXT NOT NULL,
+    description TEXT,
+    body_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT
+);
+CREATE UNIQUE INDEX idx_workflows_matter_name ON workflows(matter_id, name);
+CREATE INDEX idx_workflows_matter ON workflows(matter_id);
+ALTER TABLE matters ADD COLUMN default_workflow_id TEXT;
+ALTER TABLE jobs ADD COLUMN parent_job_id TEXT REFERENCES jobs(id);
+CREATE INDEX idx_jobs_parent ON jobs(parent_job_id);
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -3219,9 +3243,8 @@ mod tests {
         )
         .expect("matter");
 
-        let v = migrate(&conn).expect("migrate v22 to v23");
+        let v = migrate(&conn).expect("migrate v22 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 23);
 
         let has_table: bool = conn
             .query_row(
@@ -3282,6 +3305,126 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v22'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v23_to_v24_adds_workflows_and_parent_job_id() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        for &(target, sql) in MIGRATIONS {
+            if target > 23 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v23', 'V23 Matter', '2020-01-01T00:00:00Z', 23, '/tmp/v23')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO jobs (id, matter_id, kind, state, created_at, updated_at) \
+             VALUES ('job_root', 'mat_v23', 'profile_run', 'pending', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("job");
+
+        let v = migrate(&conn).expect("migrate v23 to v24");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 24);
+
+        let has_table: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='workflows'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table");
+        assert!(has_table, "expected workflows table");
+
+        for col in [
+            "id",
+            "matter_id",
+            "name",
+            "description",
+            "body_json",
+            "created_at",
+            "updated_at",
+            "created_by",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('workflows') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected workflows.{col}");
+        }
+
+        let has_default: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('matters') WHERE name = 'default_workflow_id'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("col");
+        assert!(has_default, "expected matters.default_workflow_id");
+
+        let has_parent: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('jobs') WHERE name = 'parent_job_id'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("col");
+        assert!(has_parent, "expected jobs.parent_job_id");
+
+        for idx in [
+            "idx_workflows_matter_name",
+            "idx_workflows_matter",
+            "idx_jobs_parent",
+        ] {
+            let has_idx: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='{idx}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("idx");
+            assert!(has_idx, "expected {idx}");
+        }
+
+        // Existing job rows survive with NULL parent_job_id.
+        let parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_job_id FROM jobs WHERE id = 'job_root'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("parent");
+        assert!(parent.is_none());
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v23'",
                 [],
                 |row| row.get(0),
             )

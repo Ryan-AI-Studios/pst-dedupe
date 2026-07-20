@@ -95,6 +95,7 @@ runner.shutdown(); // or drop
 | `ocr` | `MatterOcrHandler` | `{ "force": false, "batch_size": 20, "lang": "eng", "max_pages": 500, "dpi": 200, "enabled": false, "engine": "tesseract", ... }` — fails closed when `enabled` is false | checkpoint `stage=ocr` cursor |
 | `classify` | `MatterClassifyHandler` | `{ "force": false, "batch_size": 100, "use_magic": true, "in_review_only": false, "respect_extractor_refine": true }` | checkpoint `stage=classify` cursor |
 | `profile_run` | `MatterProfileRunHandler` | `{ "profile_id" \| "profile_name", "stop_on_stage_failure": true }` | checkpoint `stage=profile_run` cursor (`stages: [{stage,job_id,status}]`) |
+| `workflow_run` | `MatterWorkflowRunHandler` | `{ "workflow_id" \| "workflow_name", "run_params"?: object }` | checkpoint `stage=workflow_run` cursor (`nodes: [{node_id,job_id,status,…}]`) |
 
 ### `profile_run` (track 0043)
 
@@ -102,13 +103,25 @@ Sequential multi-stage apply of a named processing profile:
 
 1. Resolve profile (`builtin:standard` or user id/name).
 2. Plan = `CANONICAL_STAGE_ORDER ∩ enabled` (never JSON order).
-3. For each stage: **`create_job(kind)`** → dispatch registered stage handler on the **same worker** → terminal child state.
+3. For each stage: **`create_job_with_parent(kind, parent_job_id)`** → dispatch registered stage handler on the **same worker** → terminal child state.
 4. Parent checkpoint lists `{stage, job_id, status}`; resume skips succeeded stages.
 5. **Never** call `ProcessRunner::start` for children (would return Busy).
 
 Built-in profiles use **cumulative** `reset: false`. Handlers skip already-processed items unless `reset`/`force`. Register with `MatterProfileRunHandler::with_default_handlers()` (includes feature-gated stages).
 
 Profile stage idempotency: **promote** with `reset:false` re-expands membership (may add items); **cull** skips already-flagged rows. Corrupt `profile_run` checkpoints fail closed (no silent empty restart).
+
+### `workflow_run` (track 0044)
+
+Sequential multi-node apply of a named workflow (`list_workflows` = built-ins ∪ user):
+
+1. Resolve workflow (`builtin:…` or user id/name); freeze body in checkpoint.
+2. Bind node params with **AST-only** placeholder substitution from `run_params` (never raw JSON replace).
+3. For each enabled node: create child job with **`parent_job_id` = workflow parent** (nested `profile_run` stages parent to the profile_run child).
+4. Hard gates (`require_qc_pass`, `require_has_sources`) reject `soft_fail` at validation; runtime hard-fails.
+5. **Never** call `ProcessRunner::start` for children (would return Busy).
+
+Register with `MatterWorkflowRunHandler::with_default_handlers()`.
 
 Register additional handlers with `JobHandler` for future tracks. Features `fts`, `office`, `pdf`, `calendar`, `ocr`, and `classify` are **default-on**.
 
