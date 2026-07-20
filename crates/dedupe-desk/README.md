@@ -16,6 +16,19 @@ chip filters `file_category=calendar`. Multi-event ICS → archive parent + sing
 OCR (0036): Settings **Enable local OCR** (off by default) + tool paths; Workspace
 **Run OCR** (`ocr` job) processes needs-OCR PDFs and images via system Tesseract CLI.
 
+### Processing profiles (0043)
+
+Workspace **Processing profile** dropdown (built-ins + user):
+
+| Control | Behavior |
+|---|---|
+| Dropdown | `standard`, `with_ocr`, `extract_only`, `reduce_only` + user profiles |
+| **Apply defaults** | Seeds cull preset, promote policy, Settings OCR enable from profile stages |
+| **Run profile** | Starts `profile_run` — sequential child jobs in **canonical order** only |
+| **Save as…** | Clones selected profile + current cull/promote/OCR into a user profile |
+
+Built-ins are **cumulative** (`reset: false`). OCR stays off in `standard`; choose `with_ocr` to opt in. Ingest/extract_pst/produce/qc/gap are **not** profile stages (source-bound or counsel-gated).
+
 ### Produce (0040)
 
 Nav **Produce** (or the workspace produce entry) exports the review corpus as a

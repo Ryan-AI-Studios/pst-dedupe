@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use camino::Utf8PathBuf;
 use matter_core::{JobState, Matter};
@@ -1721,4 +1721,729 @@ fn qc_resume_restores_checkpoint_params() {
     let run = matter.load_latest_qc_run().expect("load").expect("qc_run");
     assert!(run.passed);
     assert_eq!(run.candidate_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// profile_run (track 0043)
+// ---------------------------------------------------------------------------
+
+/// Corrupt parent checkpoint must fail closed on resume (no silent empty restart).
+#[test]
+fn profile_run_corrupt_checkpoint_fails_closed() {
+    use matter_core::{ProcessingProfileInput, JOB_KIND_PROFILE_RUN};
+    use process_runner::MatterProfileRunHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-profile-corrupt-cp");
+
+    let job_id = {
+        let matter = Matter::open(&root).expect("open");
+        let body = r#"{
+            "version": 1,
+            "stages": {
+                "classify": { "enabled": true, "params": { "force": false } }
+            }
+        }"#;
+        matter
+            .upsert_processing_profile(ProcessingProfileInput {
+                id: None,
+                name: "classify_only_corrupt".into(),
+                description: None,
+                body_json: body.into(),
+                created_by: None,
+            })
+            .expect("upsert");
+        let job = matter.create_job(JOB_KIND_PROFILE_RUN).expect("create job");
+        // Valid JSON so resume can restore params, but invalid ProfileRunCursor
+        // shape (stages must be an array of objects).
+        let corrupt = serde_json::json!({
+            "params": { "profile_name": "classify_only_corrupt" },
+            "stages": "not-an-array"
+        });
+        matter
+            .put_checkpoint(&job.id, "profile_run", &corrupt.to_string(), 0)
+            .expect("put corrupt checkpoint");
+        // Valid transition path for resume: Pending → Running → Paused.
+        matter
+            .set_job_state(&job.id, JobState::Running, None)
+            .expect("running");
+        matter
+            .set_job_state(&job.id, JobState::Paused, Some("test-pause"))
+            .expect("pause");
+        job.id
+    };
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterProfileRunHandler::with_default_handlers()));
+    runner.resume(&root, &job_id).expect("resume accepted");
+    assert!(
+        runner.wait_until_idle(Duration::from_secs(15)),
+        "resume did not finish"
+    );
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Failed,
+        "corrupt checkpoint must fail closed; err={:?}",
+        job.error_summary
+    );
+    let err = job.error_summary.unwrap_or_default();
+    assert!(
+        err.contains("corrupt profile_run checkpoint") || err.contains("corrupt"),
+        "error should mention corrupt checkpoint, got: {err}"
+    );
+    // No classify child should have been created (no silent restart).
+    let classify: Vec<_> = matter
+        .list_jobs()
+        .expect("list")
+        .into_iter()
+        .filter(|j| j.kind == "classify")
+        .collect();
+    assert!(
+        classify.is_empty(),
+        "corrupt checkpoint must not spawn stage children"
+    );
+}
+
+/// Second classify-only profile_run is idempotent when items are already classified.
+#[cfg(feature = "classify")]
+#[test]
+fn profile_run_classify_idempotent_second_run() {
+    use matter_core::{
+        item_role, item_status, ApplyClassificationInput, ItemInput, ProcessingProfileInput,
+        JOB_KIND_PROFILE_RUN,
+    };
+    use process_runner::MatterProfileRunHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-profile-classify-idem");
+
+    let item_id = {
+        let matter = Matter::open(&root).expect("open");
+        let body = r#"{
+            "version": 1,
+            "stages": {
+                "classify": {
+                    "enabled": true,
+                    "params": {
+                        "force": false,
+                        "batch_size": 100,
+                        "use_magic": true,
+                        "in_review_only": false,
+                        "respect_extractor_refine": true
+                    }
+                }
+            }
+        }"#;
+        matter
+            .upsert_processing_profile(ProcessingProfileInput {
+                id: None,
+                name: "classify_only_idem".into(),
+                description: None,
+                body_json: body.into(),
+                created_by: None,
+            })
+            .expect("upsert");
+        let item = matter
+            .insert_item(ItemInput {
+                path: Some("memo.txt".into()),
+                status: item_status::EXTRACTED.into(),
+                file_category: Some("document".into()),
+                role: Some(item_role::STANDALONE.into()),
+                size_bytes: Some(4),
+                ..Default::default()
+            })
+            .expect("item");
+        // Seed decisive taxonomy_v1 so force:false classify skips the row.
+        matter
+            .apply_classification(ApplyClassificationInput {
+                item_id: item.id.clone(),
+                force: true,
+                category: "document".into(),
+                method: "extension".into(),
+                taxonomy: "taxonomy_v1".into(),
+                mime_type: None,
+                status: Some("ok".into()),
+                error: None,
+            })
+            .expect("seed classify");
+        item.id
+    };
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterProfileRunHandler::with_default_handlers()));
+
+    let params = JobParams::new(r#"{"profile_name":"classify_only_idem"}"#);
+    let parent1 = runner
+        .start(&root, JOB_KIND_PROFILE_RUN, params.clone())
+        .expect("start1");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let p1 = matter.get_job(&parent1).expect("p1");
+    assert_eq!(
+        p1.state,
+        JobState::Succeeded,
+        "first run err={:?}",
+        p1.error_summary
+    );
+    let before = matter.get_item(&item_id).expect("item before");
+    let method_before = before.category_method.clone();
+    let cat_before = before.file_category.clone();
+    let categorized_at_before = before.categorized_at.clone();
+    assert!(
+        categorized_at_before.is_some(),
+        "seeded classification should set categorized_at"
+    );
+
+    let parent2 = runner
+        .start(&root, JOB_KIND_PROFILE_RUN, params)
+        .expect("start2");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("reopen");
+    let p2 = matter.get_job(&parent2).expect("p2");
+    assert_eq!(
+        p2.state,
+        JobState::Succeeded,
+        "second run err={:?}",
+        p2.error_summary
+    );
+
+    let after = matter.get_item(&item_id).expect("item after");
+    assert_eq!(after.file_category, cat_before, "category unchanged");
+    assert_eq!(after.category_method, method_before, "method unchanged");
+    assert_eq!(
+        after.categorized_at, categorized_at_before,
+        "categorized_at must not change when force:false skip applies"
+    );
+
+    let classify_jobs: Vec<_> = matter
+        .list_jobs()
+        .expect("list")
+        .into_iter()
+        .filter(|j| j.kind == "classify")
+        .collect();
+    assert_eq!(classify_jobs.len(), 2, "one classify child per profile_run");
+    for j in &classify_jobs {
+        assert_eq!(j.state, JobState::Succeeded, "child {:?}", j.id);
+    }
+    // Second classify child: force:false filters already-done rows at SQL level
+    // → classified_count must be 0 on classify.complete audit (no re-write).
+    let second = classify_jobs
+        .iter()
+        .max_by_key(|j| j.created_at.as_str())
+        .expect("second");
+    let entity = format!("job:{}", second.id);
+    let params_json: String = matter
+        .connection()
+        .query_row(
+            "SELECT params_json FROM audit_events \
+             WHERE action = 'classify.complete' AND entity = ?1 \
+             ORDER BY seq DESC LIMIT 1",
+            [&entity],
+            |row| row.get(0),
+        )
+        .expect("classify.complete audit for second child");
+    let audit: serde_json::Value = serde_json::from_str(&params_json).expect("json");
+    let classified = audit
+        .get("classified_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(u64::MAX);
+    assert_eq!(
+        classified, 0,
+        "second classify must not re-classify seeded item; audit={audit}"
+    );
+}
+
+#[test]
+fn profile_run_creates_child_job_rows() {
+    use matter_core::{ProcessingProfileInput, JOB_KIND_PROFILE_RUN};
+    use process_runner::MatterProfileRunHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-profile");
+
+    // Custom profile: only classify enabled (fast, no external tools).
+    {
+        let matter = Matter::open(&root).expect("open");
+        let body = r#"{
+            "version": 1,
+            "stages": {
+                "classify": { "enabled": true, "params": { "force": false, "batch_size": 100, "use_magic": true, "in_review_only": false, "respect_extractor_refine": true } }
+            }
+        }"#;
+        matter
+            .upsert_processing_profile(ProcessingProfileInput {
+                id: None,
+                name: "classify_only".into(),
+                description: None,
+                body_json: body.into(),
+                created_by: None,
+            })
+            .expect("upsert profile");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterProfileRunHandler::with_default_handlers()));
+
+    let params = JobParams::new(r#"{"profile_name":"classify_only"}"#);
+    let parent_id = runner
+        .start(&root, JOB_KIND_PROFILE_RUN, params)
+        .expect("start profile_run");
+    assert!(
+        runner.wait_until_idle(Duration::from_secs(30)),
+        "profile_run did not finish"
+    );
+
+    let matter = Matter::open(&root).expect("open");
+    let parent = matter.get_job(&parent_id).expect("parent");
+    assert_eq!(
+        parent.state,
+        JobState::Succeeded,
+        "parent err={:?}",
+        parent.error_summary
+    );
+    assert_eq!(parent.kind, JOB_KIND_PROFILE_RUN);
+
+    let jobs = matter.list_jobs().expect("list");
+    assert!(
+        jobs.len() >= 2,
+        "expected parent + at least one child, got {}",
+        jobs.len()
+    );
+    let classify_children: Vec<_> = jobs.iter().filter(|j| j.kind == "classify").collect();
+    assert_eq!(classify_children.len(), 1, "exactly one classify child job");
+    assert_eq!(classify_children[0].state, JobState::Succeeded);
+
+    // Parent checkpoint lists stage outcomes.
+    let cp = matter
+        .get_checkpoint(&parent_id, "profile_run")
+        .expect("cp")
+        .expect("checkpoint present");
+    let cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("json");
+    let stages = cursor["stages"].as_array().expect("stages array");
+    assert!(!stages.is_empty());
+    assert_eq!(stages[0]["stage"], "classify");
+    assert_eq!(stages[0]["status"], "succeeded");
+    assert!(!stages[0]["job_id"].as_str().unwrap_or("").is_empty());
+}
+
+#[test]
+fn profile_run_extract_only_multi_stage_children() {
+    use matter_core::JOB_KIND_PROFILE_RUN;
+    use process_runner::MatterProfileRunHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-profile-extract");
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterProfileRunHandler::with_default_handlers()));
+
+    let params = JobParams::new(r#"{"profile_id":"builtin:extract_only"}"#);
+    let parent_id = runner
+        .start(&root, JOB_KIND_PROFILE_RUN, params)
+        .expect("start");
+    assert!(runner.wait_until_idle(Duration::from_secs(60)));
+
+    let matter = Matter::open(&root).expect("open");
+    let parent = matter.get_job(&parent_id).expect("parent");
+    assert_eq!(
+        parent.state,
+        JobState::Succeeded,
+        "err={:?}",
+        parent.error_summary
+    );
+
+    let jobs = matter.list_jobs().expect("list");
+    let kinds: std::collections::BTreeSet<_> = jobs.iter().map(|j| j.kind.as_str()).collect();
+    assert!(kinds.contains(JOB_KIND_PROFILE_RUN));
+    assert!(kinds.contains("classify"));
+    assert!(kinds.contains("office_extract"));
+    assert!(kinds.contains("pdf_extract"));
+    assert!(kinds.contains("ics_extract"));
+    // Distinct child kinds (not only parent).
+    let child_kinds: std::collections::BTreeSet<_> = jobs
+        .iter()
+        .filter(|j| j.kind != JOB_KIND_PROFILE_RUN)
+        .map(|j| j.kind.as_str())
+        .collect();
+    assert!(
+        child_kinds.len() >= 2,
+        "expected multiple distinct child kinds, got {child_kinds:?}"
+    );
+
+    // Second run: creates new child jobs; classify with force:false skips already-done items
+    // (empty matter → completed quickly with skip semantics intact).
+    let parent2 = runner
+        .start(
+            &root,
+            JOB_KIND_PROFILE_RUN,
+            JobParams::new(r#"{"profile_name":"extract_only"}"#),
+        )
+        .expect("second run");
+    assert!(runner.wait_until_idle(Duration::from_secs(60)));
+    // Re-open for fresh connection after runner closed.
+    let matter = Matter::open(&root).expect("reopen");
+    let parent2_job = matter.get_job(&parent2).expect("p2");
+    assert_eq!(
+        parent2_job.state,
+        JobState::Succeeded,
+        "second run err={:?}",
+        parent2_job.error_summary
+    );
+    let classify_jobs: Vec<_> = matter
+        .list_jobs()
+        .expect("list")
+        .into_iter()
+        .filter(|j| j.kind == "classify")
+        .collect();
+    assert_eq!(
+        classify_jobs.len(),
+        2,
+        "each profile_run creates its own classify child"
+    );
+}
+
+/// Stage handler with allowlisted kind that fails immediately.
+struct FailStageHandler {
+    kind: &'static str,
+}
+
+impl JobHandler for FailStageHandler {
+    fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    fn run(&self, ctx: &JobContext<'_>) -> Result<JobOutcome, RunnerError> {
+        ctx.matter
+            .set_job_state(ctx.job_id, JobState::Failed, Some("injected fail"))
+            .map_err(RunnerError::from)?;
+        Ok(JobOutcome::Failed {
+            message: "injected fail".into(),
+        })
+    }
+}
+
+/// Slow allowlisted stage that honors cancel.
+struct SlowStageHandler {
+    kind: &'static str,
+    ticks: Arc<AtomicUsize>,
+}
+
+impl JobHandler for SlowStageHandler {
+    fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    fn run(&self, ctx: &JobContext<'_>) -> Result<JobOutcome, RunnerError> {
+        for _ in 0..500 {
+            if ctx.cancel.is_cancelled() {
+                ctx.matter
+                    .set_job_state(ctx.job_id, JobState::Paused, Some("cancelled"))
+                    .map_err(RunnerError::from)?;
+                return Ok(JobOutcome::Paused {
+                    message: Some("cancelled".into()),
+                    completed_count: self.ticks.load(Ordering::SeqCst) as u64,
+                });
+            }
+            self.ticks.fetch_add(1, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(20));
+        }
+        ctx.matter
+            .set_job_state(ctx.job_id, JobState::Succeeded, None)
+            .map_err(RunnerError::from)?;
+        Ok(JobOutcome::Succeeded {
+            message: Some("slow finished".into()),
+            completed_count: self.ticks.load(Ordering::SeqCst) as u64,
+        })
+    }
+}
+
+/// Fast succeed for allowlisted kind.
+struct OkStageHandler {
+    kind: &'static str,
+}
+
+impl JobHandler for OkStageHandler {
+    fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    fn run(&self, ctx: &JobContext<'_>) -> Result<JobOutcome, RunnerError> {
+        ctx.matter
+            .set_job_state(ctx.job_id, JobState::Succeeded, None)
+            .map_err(RunnerError::from)?;
+        Ok(JobOutcome::Succeeded {
+            message: Some(format!("{} ok", self.kind)),
+            completed_count: 1,
+        })
+    }
+}
+
+#[test]
+fn profile_run_stop_on_stage_failure_default() {
+    use matter_core::{ProcessingProfileInput, JOB_KIND_PROFILE_RUN};
+    use process_runner::MatterProfileRunHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-profile-fail");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        // classify fails; office_extract would run only if stop_on_stage_failure=false
+        let body = r#"{
+            "version": 1,
+            "stages": {
+                "classify": { "enabled": true, "params": {} },
+                "office_extract": { "enabled": true, "params": {} }
+            }
+        }"#;
+        matter
+            .upsert_processing_profile(ProcessingProfileInput {
+                id: None,
+                name: "fail_first".into(),
+                description: None,
+                body_json: body.into(),
+                created_by: None,
+            })
+            .expect("upsert");
+    }
+
+    let mut handler = MatterProfileRunHandler::new();
+    handler.register_stage(Arc::new(FailStageHandler { kind: "classify" }));
+    handler.register_stage(Arc::new(OkStageHandler {
+        kind: "office_extract",
+    }));
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(handler));
+
+    let parent_id = runner
+        .start(
+            &root,
+            JOB_KIND_PROFILE_RUN,
+            JobParams::new(r#"{"profile_name":"fail_first"}"#),
+        )
+        .expect("start");
+    assert!(runner.wait_until_idle(Duration::from_secs(15)));
+
+    let matter = Matter::open(&root).expect("open");
+    let parent = matter.get_job(&parent_id).expect("parent");
+    assert_eq!(
+        parent.state,
+        JobState::Failed,
+        "default stop_on_stage_failure"
+    );
+    let office: Vec<_> = matter
+        .list_jobs()
+        .expect("list")
+        .into_iter()
+        .filter(|j| j.kind == "office_extract")
+        .collect();
+    assert!(
+        office.is_empty(),
+        "office_extract must not run when stop_on_stage_failure=true"
+    );
+}
+
+#[test]
+fn profile_run_continue_on_stage_failure() {
+    use matter_core::{ProcessingProfileInput, JOB_KIND_PROFILE_RUN};
+    use process_runner::MatterProfileRunHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-profile-cont");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        let body = r#"{
+            "version": 1,
+            "stages": {
+                "classify": { "enabled": true, "params": {} },
+                "office_extract": { "enabled": true, "params": {} }
+            }
+        }"#;
+        matter
+            .upsert_processing_profile(ProcessingProfileInput {
+                id: None,
+                name: "cont_fail".into(),
+                description: None,
+                body_json: body.into(),
+                created_by: None,
+            })
+            .expect("upsert");
+    }
+
+    let mut handler = MatterProfileRunHandler::new();
+    handler.register_stage(Arc::new(FailStageHandler { kind: "classify" }));
+    handler.register_stage(Arc::new(OkStageHandler {
+        kind: "office_extract",
+    }));
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(handler));
+
+    let parent_id = runner
+        .start(
+            &root,
+            JOB_KIND_PROFILE_RUN,
+            JobParams::new(r#"{"profile_name":"cont_fail","stop_on_stage_failure":false}"#),
+        )
+        .expect("start");
+    assert!(runner.wait_until_idle(Duration::from_secs(15)));
+
+    let matter = Matter::open(&root).expect("open");
+    let parent = matter.get_job(&parent_id).expect("parent");
+    assert_eq!(
+        parent.state,
+        JobState::Succeeded,
+        "continues after stage failure when stop_on_stage_failure=false"
+    );
+    let jobs = matter.list_jobs().expect("list");
+    let kinds: std::collections::BTreeSet<_> = jobs.iter().map(|j| j.kind.as_str()).collect();
+    assert!(kinds.contains("classify"));
+    assert!(kinds.contains("office_extract"));
+}
+
+#[test]
+fn profile_run_cancel_mid_stage_pauses_parent() {
+    use matter_core::{ProcessingProfileInput, JOB_KIND_PROFILE_RUN};
+    use process_runner::MatterProfileRunHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-profile-cancel");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        let body = r#"{
+            "version": 1,
+            "stages": {
+                "classify": { "enabled": true, "params": {} },
+                "office_extract": { "enabled": true, "params": {} }
+            }
+        }"#;
+        matter
+            .upsert_processing_profile(ProcessingProfileInput {
+                id: None,
+                name: "cancel_mid".into(),
+                description: None,
+                body_json: body.into(),
+                created_by: None,
+            })
+            .expect("upsert");
+    }
+
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let mut handler = MatterProfileRunHandler::new();
+    handler.register_stage(Arc::new(SlowStageHandler {
+        kind: "classify",
+        ticks: Arc::clone(&ticks),
+    }));
+    handler.register_stage(Arc::new(OkStageHandler {
+        kind: "office_extract",
+    }));
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(handler));
+    let mut rx = runner.watch_progress();
+
+    let parent_id = runner
+        .start(
+            &root,
+            JOB_KIND_PROFILE_RUN,
+            JobParams::new(r#"{"profile_name":"cancel_mid"}"#),
+        )
+        .expect("start");
+
+    // Wait until the slow stage has made progress, then cancel.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if ticks.load(Ordering::SeqCst) > 2 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "slow stage never ticked");
+        thread::sleep(Duration::from_millis(20));
+        let _ = rx.borrow_and_update();
+    }
+    runner.cancel(&parent_id).expect("cancel");
+    assert!(runner.wait_until_idle(Duration::from_secs(15)));
+
+    let matter = Matter::open(&root).expect("open");
+    let parent = matter.get_job(&parent_id).expect("parent");
+    assert_eq!(
+        parent.state,
+        JobState::Paused,
+        "parent should pause on cancel; err={:?}",
+        parent.error_summary
+    );
+    let office: Vec<_> = matter
+        .list_jobs()
+        .expect("list")
+        .into_iter()
+        .filter(|j| j.kind == "office_extract")
+        .collect();
+    assert!(
+        office.is_empty(),
+        "office_extract must not run after cancel during classify"
+    );
+
+    // Capture paused classify child id before resume.
+    let paused_classify_id = {
+        let matter = Matter::open(&root).expect("open");
+        let classify: Vec<_> = matter
+            .list_jobs()
+            .expect("list")
+            .into_iter()
+            .filter(|j| j.kind == "classify")
+            .collect();
+        assert_eq!(classify.len(), 1);
+        assert_eq!(classify[0].state, JobState::Paused);
+        classify[0].id.clone()
+    };
+
+    // Resume: reuses paused classify child (is_resume), then office.
+    let mut handler2 = MatterProfileRunHandler::new();
+    handler2.register_stage(Arc::new(OkStageHandler { kind: "classify" }));
+    handler2.register_stage(Arc::new(OkStageHandler {
+        kind: "office_extract",
+    }));
+    let mut runner2 = ProcessRunner::new(RunnerConfig::default());
+    runner2.register(Arc::new(handler2));
+    runner2
+        .resume(&root, &parent_id)
+        .expect("resume profile_run");
+    assert!(runner2.wait_until_idle(Duration::from_secs(15)));
+
+    let matter = Matter::open(&root).expect("reopen");
+    let parent = matter.get_job(&parent_id).expect("parent");
+    assert_eq!(
+        parent.state,
+        JobState::Succeeded,
+        "resume should complete; err={:?}",
+        parent.error_summary
+    );
+    let classify: Vec<_> = matter
+        .list_jobs()
+        .expect("list")
+        .into_iter()
+        .filter(|j| j.kind == "classify")
+        .collect();
+    assert_eq!(
+        classify.len(),
+        1,
+        "resume must reuse paused classify child, not create a second"
+    );
+    assert_eq!(classify[0].id, paused_classify_id);
+    assert_eq!(classify[0].state, JobState::Succeeded);
+    let office: Vec<_> = matter
+        .list_jobs()
+        .expect("list")
+        .into_iter()
+        .filter(|j| j.kind == "office_extract")
+        .collect();
+    assert_eq!(office.len(), 1, "office_extract runs after resume");
+    assert_eq!(office[0].state, JobState::Succeeded);
 }

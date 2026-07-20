@@ -28,6 +28,9 @@ pub struct CullSummary {
     pub completed_count: u64,
     pub included: u64,
     pub culled: u64,
+    /// Items skipped on cumulative run (`reset:false` + prior non-null `cull_status`).
+    #[serde(default)]
+    pub skipped: u64,
     /// Counts keyed by reason code (JSON object in audit).
     #[serde(default)]
     pub by_reason: HashMap<String, u64>,
@@ -53,6 +56,8 @@ struct CheckpointCursor {
     completed_count: u64,
     included: u64,
     culled: u64,
+    #[serde(default)]
+    skipped: u64,
     #[serde(default)]
     by_reason: HashMap<String, u64>,
     params: serde_json::Value,
@@ -124,6 +129,7 @@ pub fn run_cull(
                 params_json: json!({
                     "included": s.included,
                     "culled": s.culled,
+                    "skipped": s.skipped,
                     "completed_count": s.completed_count,
                     "by_reason": s.by_reason,
                     "duration_ms": started.elapsed().as_millis() as u64,
@@ -301,6 +307,7 @@ fn run_cull_inner(
         completed_count: 0,
         included: 0,
         culled: 0,
+        skipped: 0,
         by_reason: HashMap::new(),
         params: params_json.clone(),
         rules: rules_json.clone(),
@@ -343,23 +350,39 @@ fn run_cull_inner(
                 return Ok(CullOutcome::Paused(summary));
             }
 
-            let decision = evaluate_item(cand, rules, denist.as_ref());
-            batch.push((cand.id.clone(), decision));
+            // Cumulative: skip already-flagged rows when reset:false (no rewrite).
+            if !params.reset && cand.cull_status.is_some() {
+                cursor.skipped += 1;
+                cursor.completed_count += 1;
+                cursor.cursor_index = (i + 1) as u64;
+            } else {
+                let decision = evaluate_item(cand, rules, denist.as_ref());
+                batch.push((cand.id.clone(), decision));
+            }
 
-            if batch.len() as u64 >= batch_size || i + 1 == candidates.len() {
-                let updates =
-                    build_updates(&batch, job_id, preset_id, preset_name, &now, &mut cursor);
-                let cursor_json = serde_json::to_string(&cursor)
-                    .map_err(|e| CullError::Other(format!("checkpoint serialize: {e}")))?;
-                matter.apply_cull_batch_with_checkpoint(
-                    job_id,
-                    CULL_STAGE,
-                    &updates,
-                    &cursor_json,
-                    cursor.completed_count as i64,
-                )?;
-                progress(cursor.completed_count);
-                batch.clear();
+            let at_end = i + 1 == candidates.len();
+            let batch_full = batch.len() as u64 >= batch_size;
+            if batch_full || at_end {
+                let updates = if batch.is_empty() {
+                    Vec::new()
+                } else {
+                    build_updates(&batch, job_id, preset_id, preset_name, &now, &mut cursor)
+                };
+                // build_updates advances cursor for evaluated rows; for skip-only
+                // batches cursor_index/completed_count were already advanced above.
+                if !batch.is_empty() || at_end {
+                    let cursor_json = serde_json::to_string(&cursor)
+                        .map_err(|e| CullError::Other(format!("checkpoint serialize: {e}")))?;
+                    matter.apply_cull_batch_with_checkpoint(
+                        job_id,
+                        CULL_STAGE,
+                        &updates,
+                        &cursor_json,
+                        cursor.completed_count as i64,
+                    )?;
+                    progress(cursor.completed_count);
+                    batch.clear();
+                }
             }
         }
 
@@ -384,6 +407,8 @@ fn run_cull_inner(
         // cursor.cursor_index (cancel-aware every batch).
         let candidates = matter.list_cull_candidates(process_attachments)?;
         let mut decisions: HashMap<String, ItemCullDecision> = HashMap::new();
+        // Prior DB snapshot for cumulative skip (avoid rewriting unchanged rows).
+        let mut prior_snapshot: HashMap<String, (String, String)> = HashMap::new();
         for c in &candidates {
             let item = matter.get_item(&c.id)?;
             let reasons: Vec<String> = item
@@ -393,7 +418,14 @@ fn run_cull_inner(
                 .unwrap_or_default();
             let status = item
                 .cull_status
+                .clone()
                 .unwrap_or_else(|| item_cull_status::INCLUDED.into());
+            if let Some(ref prior_status) = item.cull_status {
+                prior_snapshot.insert(
+                    c.id.clone(),
+                    (prior_status.clone(), reasons_to_json(&reasons)),
+                );
+            }
             decisions.insert(c.id.clone(), ItemCullDecision { status, reasons });
         }
 
@@ -419,10 +451,19 @@ fn run_cull_inner(
             } else {
                 included += 1;
             }
+            let reasons_json = reasons_to_json(&d.reasons);
+            // Cumulative: do not rewrite rows whose status+reasons already match.
+            if !params.reset {
+                if let Some((prior_status, prior_reasons)) = prior_snapshot.get(&c.id) {
+                    if prior_status == &d.status && prior_reasons == &reasons_json {
+                        continue;
+                    }
+                }
+            }
             updates.push(CullFieldUpdate {
                 item_id: c.id.clone(),
                 cull_status: Some(d.status),
-                cull_reasons_json: Some(reasons_to_json(&d.reasons)),
+                cull_reasons_json: Some(reasons_json),
                 cull_preset_id: preset_id.map(|s| s.to_string()),
                 cull_preset_name: preset_name.map(|s| s.to_string()),
                 culled_at: Some(now.clone()),
@@ -441,6 +482,20 @@ fn run_cull_inner(
                 "family checkpoint cursor_index {offset} exceeds update count {}",
                 updates.len()
             )));
+        }
+
+        if updates.is_empty() {
+            cursor.phase = "done".into();
+            cursor.cursor_index = 0;
+            let cursor_json = serde_json::to_string(&cursor)
+                .map_err(|e| CullError::Other(format!("checkpoint serialize: {e}")))?;
+            matter.apply_cull_batch_with_checkpoint(
+                job_id,
+                CULL_STAGE,
+                &[],
+                &cursor_json,
+                cursor.completed_count as i64,
+            )?;
         }
 
         while offset < updates.len() {
@@ -529,6 +584,7 @@ fn summary_from_cursor(cursor: &CheckpointCursor) -> CullSummary {
         completed_count: cursor.completed_count,
         included: cursor.included,
         culled: cursor.culled,
+        skipped: cursor.skipped,
         by_reason: cursor.by_reason.clone(),
     }
 }

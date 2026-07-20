@@ -296,6 +296,48 @@ pub fn classify_default_params() -> String {
     .to_string()
 }
 
+/// Built-in processing profile names (desk dropdown; code constants in matter-core).
+pub const PROFILE_BUILTIN_NAMES: &[&str] = &["standard", "with_ocr", "extract_only", "reduce_only"];
+
+/// Default selected profile id for a new workspace session.
+pub const PROFILE_DEFAULT_SELECTION: &str = "builtin:standard";
+
+/// Build `profile_run` job params from a profile id or bare name.
+///
+/// Accepts `builtin:standard`, bare built-in name, or user profile uuid.
+pub fn profile_run_params(profile_id_or_name: &str) -> String {
+    let key = profile_id_or_name.trim();
+    if key.starts_with("builtin:") || looks_like_profile_uuid(key) {
+        serde_json::json!({
+            "profile_id": key,
+            "stop_on_stage_failure": true
+        })
+        .to_string()
+    } else {
+        serde_json::json!({
+            "profile_name": key,
+            "stop_on_stage_failure": true
+        })
+        .to_string()
+    }
+}
+
+/// Heuristic: user profile ids are `pfl_…` (matter `new_id("pfl")`).
+fn looks_like_profile_uuid(s: &str) -> bool {
+    s.starts_with("pfl") || (s.len() >= 32 && s.contains('-'))
+}
+
+/// Display label for a profile selection encoding (`builtin:name` or user id).
+pub fn profile_selection_label(selection: &str, user_profiles: &[(String, String)]) -> String {
+    if let Some(name) = selection.strip_prefix("builtin:") {
+        return name.to_string();
+    }
+    if let Some((_, name)) = user_profiles.iter().find(|(id, _)| id == selection) {
+        return name.clone();
+    }
+    selection.to_string()
+}
+
 /// Collection gap job params (`kind = "gap"`, collection only).
 pub fn gap_collection_params(
     window_start: &str,
@@ -659,5 +701,25 @@ mod tests {
         let msg = format_runner_error(&err);
         assert!(msg.to_lowercase().contains("resume"));
         assert!(msg.contains("job_x"));
+    }
+
+    #[test]
+    fn profile_run_params_shapes() {
+        let by_id = profile_run_params("builtin:standard");
+        let v: serde_json::Value = serde_json::from_str(&by_id).unwrap();
+        assert_eq!(v["profile_id"], "builtin:standard");
+        assert_eq!(v["stop_on_stage_failure"], true);
+
+        let by_name = profile_run_params("extract_only");
+        let v2: serde_json::Value = serde_json::from_str(&by_name).unwrap();
+        assert_eq!(v2["profile_name"], "extract_only");
+
+        let user = profile_run_params("pfl_abc123");
+        let v3: serde_json::Value = serde_json::from_str(&user).unwrap();
+        assert_eq!(v3["profile_id"], "pfl_abc123");
+
+        assert_eq!(PROFILE_BUILTIN_NAMES.len(), 4);
+        assert_eq!(PROFILE_DEFAULT_SELECTION, "builtin:standard");
+        assert_eq!(profile_selection_label("builtin:with_ocr", &[]), "with_ocr");
     }
 }

@@ -468,6 +468,97 @@ fn family_absolute_include_duplicate_child() {
     );
 }
 
+/// 8b. reset:false skips already-flagged rows (cumulative / profile standard).
+#[test]
+fn reset_false_skips_already_flagged() {
+    let (_tmp, matter) = temp_matter("reset-false-skip");
+    let job1 = matter.create_job(JOB_KIND_CULL).expect("job1");
+    let job2 = matter.create_job(JOB_KIND_CULL).expect("job2");
+
+    let u = insert(
+        &matter,
+        "u.eml",
+        item_status::EXTRACTED,
+        ItemInput {
+            dedup_role: Some(item_dedup_role::UNIQUE.into()),
+            size_bytes: Some(10),
+            ..Default::default()
+        },
+    );
+    let d = insert(
+        &matter,
+        "d.eml",
+        item_status::EXTRACTED,
+        ItemInput {
+            dedup_role: Some(item_dedup_role::DUPLICATE.into()),
+            size_bytes: Some(10),
+            ..Default::default()
+        },
+    );
+
+    let first = CullParams {
+        preset_name: Some(PRESET_UNIQUE_ONLY.into()),
+        reset: true,
+        ..Default::default()
+    };
+    let o1 = run_with(&matter, &job1.id, &first);
+    assert!(matches!(o1, CullOutcome::Succeeded(_)), "{o1:?}");
+    let before_u = matter.get_item(&u).unwrap();
+    let before_d = matter.get_item(&d).unwrap();
+    assert_eq!(
+        before_u.cull_status.as_deref(),
+        Some(item_cull_status::INCLUDED)
+    );
+    assert_eq!(
+        before_d.cull_status.as_deref(),
+        Some(item_cull_status::CULLED)
+    );
+    let job_id_u = before_u.cull_job_id.clone();
+    let job_id_d = before_d.cull_job_id.clone();
+
+    // New item without cull_status must still be processed.
+    let fresh = insert(
+        &matter,
+        "fresh.eml",
+        item_status::EXTRACTED,
+        ItemInput {
+            dedup_role: Some(item_dedup_role::UNIQUE.into()),
+            size_bytes: Some(3),
+            ..Default::default()
+        },
+    );
+
+    let second = CullParams {
+        preset_name: Some(PRESET_UNIQUE_ONLY.into()),
+        reset: false,
+        ..Default::default()
+    };
+    let o2 = run_with(&matter, &job2.id, &second);
+    match o2 {
+        CullOutcome::Succeeded(s) => {
+            assert!(s.skipped >= 2, "expected skips for prior rows, got {s:?}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+
+    let after_u = matter.get_item(&u).unwrap();
+    let after_d = matter.get_item(&d).unwrap();
+    assert_eq!(after_u.cull_status, before_u.cull_status);
+    assert_eq!(after_d.cull_status, before_d.cull_status);
+    assert_eq!(
+        after_u.cull_job_id, job_id_u,
+        "must not rewrite skipped row"
+    );
+    assert_eq!(
+        after_d.cull_job_id, job_id_d,
+        "must not rewrite skipped row"
+    );
+    assert_eq!(
+        matter.get_item(&fresh).unwrap().cull_status.as_deref(),
+        Some(item_cull_status::INCLUDED)
+    );
+}
+
 /// 9. reset:true deterministic recompute.
 #[test]
 fn reset_true_deterministic_recompute() {

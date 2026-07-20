@@ -82,6 +82,75 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
 
         ui.separator();
 
+        // Processing profile (track 0043): select, apply defaults, save-as, run.
+        {
+            let user_profiles: Vec<(String, String)> = app
+                .snapshot
+                .processing_profiles
+                .iter()
+                .filter(|p| !p.is_builtin)
+                .map(|p| (p.id.clone(), p.name.clone()))
+                .collect();
+            let selected_label =
+                params::profile_selection_label(&app.selected_profile_id, &user_profiles);
+            egui::ComboBox::from_id_salt("processing_profile")
+                .selected_text(selected_label)
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    ui.label(egui::RichText::new("Built-in").strong().small());
+                    for name in params::PROFILE_BUILTIN_NAMES {
+                        let id = format!("builtin:{name}");
+                        ui.selectable_value(&mut app.selected_profile_id, id, *name);
+                    }
+                    if !user_profiles.is_empty() {
+                        ui.separator();
+                        ui.label(egui::RichText::new("User").strong().small());
+                        for (id, name) in &user_profiles {
+                            ui.selectable_value(
+                                &mut app.selected_profile_id,
+                                id.clone(),
+                                name.as_str(),
+                            );
+                        }
+                    }
+                });
+            if ui
+                .add_enabled(!busy, egui::Button::new("Apply defaults"))
+                .on_hover_text(
+                    "Seed workspace cull/promote/OCR toggles from the selected profile \
+                     (does not start a job)",
+                )
+                .clicked()
+            {
+                app.apply_profile_defaults();
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("Run profile"))
+                .on_hover_text(
+                    "Sequential profile_run: child jobs per enabled stage in canonical order \
+                     (classify→extract→ocr→fts→dedupe→thread→neardup→cull→promote). \
+                     Built-ins use cumulative reset:false.",
+                )
+                .clicked()
+            {
+                app.start_profile_run();
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut app.profile_save_as_name)
+                    .desired_width(100.0)
+                    .hint_text("Save as name"),
+            );
+            if ui
+                .add_enabled(!busy, egui::Button::new("Save as…"))
+                .on_hover_text("Clone selected profile + current cull/promote/OCR into a user profile")
+                .clicked()
+            {
+                app.save_profile_as();
+            }
+        }
+
+        ui.separator();
+
         if ui
             .add_enabled(!busy, egui::Button::new("Run dedupe"))
             .on_hover_text("Tiered matter dedupe: Message-ID → logical_hash → family attachments")

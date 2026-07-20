@@ -35,6 +35,7 @@ const PROGRESS_STAGES: &[&str] = &[
     "ics",
     "ocr",
     "classify",
+    "profile_run",
 ];
 
 /// Clone an error for channel delivery (Matter errors become `Other` text).
@@ -715,6 +716,7 @@ fn load_resume_params(matter: &Matter, job: &Job) -> String {
         "cull" => Some("cull"),
         "promote" => Some("promote"),
         "fts_index" | "fts" => Some("fts"),
+        "profile_run" => Some("profile_run"),
         other => Some(other),
     };
     let mut stages: Vec<&str> = Vec::new();

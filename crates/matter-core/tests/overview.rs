@@ -23,7 +23,7 @@ fn schema_v19_on_create() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-v19");
     let matter = Matter::create(&root, "V19").expect("create");
-    assert_eq!(SCHEMA_VERSION, 22);
+    assert_eq!(SCHEMA_VERSION, 23);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     assert_eq!(matter.info().expect("info").schema_version, SCHEMA_VERSION);
 

@@ -50,6 +50,8 @@ pub struct MatterSnapshot {
     pub dedup_duplicate: u64,
     /// Matter-saved user cull presets (`cull_presets` table).
     pub cull_presets: Vec<CullPresetRow>,
+    /// User processing profiles (built-ins are code constants; not listed here).
+    pub processing_profiles: Vec<ProcessingProfileRow>,
 }
 
 /// Compact cull preset row for the desk dropdown (id + display name).
@@ -57,6 +59,14 @@ pub struct MatterSnapshot {
 pub struct CullPresetRow {
     pub id: String,
     pub name: String,
+}
+
+/// Compact processing profile row for the desk dropdown.
+#[derive(Debug, Clone)]
+pub struct ProcessingProfileRow {
+    pub id: String,
+    pub name: String,
+    pub is_builtin: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +157,17 @@ pub fn refresh_snapshot(matter_root: &Utf8Path) -> Result<MatterSnapshot, String
         })
         .collect();
 
+    let processing_profiles = matter
+        .list_processing_profiles()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|p| ProcessingProfileRow {
+            id: p.id,
+            name: p.name,
+            is_builtin: p.is_builtin,
+        })
+        .collect();
+
     Ok(MatterSnapshot {
         matter_name: info.name,
         matter_id: info.id,
@@ -158,6 +179,7 @@ pub fn refresh_snapshot(matter_root: &Utf8Path) -> Result<MatterSnapshot, String
         dedup_unique: dedup_counts.unique,
         dedup_duplicate: dedup_counts.duplicate,
         cull_presets,
+        processing_profiles,
     })
 }
 
@@ -358,6 +380,13 @@ mod tests {
         assert!(
             snap.cull_presets.is_empty(),
             "fresh matter has no user cull presets"
+        );
+        // Built-ins appear via list_processing_profiles even on a fresh matter.
+        assert!(
+            snap.processing_profiles
+                .iter()
+                .any(|p| p.is_builtin && p.name == "standard"),
+            "snapshot should include built-in processing profiles"
         );
     }
 

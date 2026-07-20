@@ -498,6 +498,8 @@ pub struct CullCandidate {
     pub text_sha256: Option<String>,
     pub role: Option<String>,
     pub imported_at: String,
+    /// Prior cull result when set — used for cumulative (`reset:false`) skip.
+    pub cull_status: Option<String>,
 }
 
 /// One item's cull field assignment for transactional batch write.
@@ -2480,7 +2482,7 @@ impl Matter {
             "SELECT id, parent_item_id, family_id, dedup_role, near_dup_role, \
                     sent_at, received_at, created_at, modified_at, path, custodian, \
                     file_category, mime_type, size_bytes, status, native_sha256, \
-                    text_sha256, role, imported_at \
+                    text_sha256, role, imported_at, cull_status \
              FROM items \
              WHERE matter_id = ?1 \
                {attach_clause} \
@@ -4984,6 +4986,7 @@ fn map_cull_candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CullCandi
         text_sha256: row.get(16)?,
         role: row.get(17)?,
         imported_at: row.get(18)?,
+        cull_status: row.get(19)?,
     })
 }
 

@@ -14,8 +14,8 @@ use process_runner::{
     ExtractPstHandler, IngestHandler, JobParams, MatterClassifyHandler, MatterCullHandler,
     MatterDedupeHandler, MatterFtsIndexHandler, MatterGapHandler, MatterIcsExtractHandler,
     MatterNearDupHandler, MatterOcrHandler, MatterOfficeExtractHandler, MatterPdfExtractHandler,
-    MatterProduceHandler, MatterProductionExportHandler, MatterPromoteHandler, MatterQcHandler,
-    MatterThreadHandler, ProcessRunner, RunnerConfig,
+    MatterProduceHandler, MatterProductionExportHandler, MatterProfileRunHandler,
+    MatterPromoteHandler, MatterQcHandler, MatterThreadHandler, ProcessRunner, RunnerConfig,
 };
 use tokio::sync::watch;
 
@@ -104,6 +104,10 @@ pub struct DeskApp {
     pub(crate) review: ReviewState,
     /// Gap analysis panel state (track 0042).
     pub(crate) gap: GapState,
+    /// Selected processing profile id (`builtin:standard` or user `pfl_…`).
+    pub(crate) selected_profile_id: String,
+    /// Draft name for Save profile as….
+    pub(crate) profile_save_as_name: String,
 }
 
 impl DeskApp {
@@ -126,6 +130,7 @@ impl DeskApp {
         runner.register(Arc::new(MatterIcsExtractHandler::new()));
         runner.register(Arc::new(MatterOcrHandler::new()));
         runner.register(Arc::new(MatterClassifyHandler::new()));
+        runner.register(Arc::new(MatterProfileRunHandler::with_default_handlers()));
         let progress_rx = runner.watch_progress();
         let settings = DeskSettings::load();
 
@@ -177,6 +182,8 @@ impl DeskApp {
             qc_findings_show: false,
             review: ReviewState::default(),
             gap: GapState::new(),
+            selected_profile_id: params::PROFILE_DEFAULT_SELECTION.into(),
+            profile_save_as_name: String::new(),
         }
     }
 
@@ -1063,6 +1070,180 @@ impl DeskApp {
                 self.error_msg = None;
             }
             Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Run the selected processing profile (`profile_run`).
+    pub(crate) fn start_profile_run(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params = JobParams::new(params::profile_run_params(&self.selected_profile_id));
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "profile_run", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!(
+                    "Started profile_run ({}) job {job_id}",
+                    self.selected_profile_id
+                ));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Apply selected profile stage defaults to workspace toggles (cull/promote/OCR).
+    pub(crate) fn apply_profile_defaults(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let matter = match matter_core::Matter::open_for_read(Utf8Path::new(root.as_str())) {
+            Ok(m) => m,
+            Err(e) => {
+                self.error_msg = Some(format!("Open matter failed: {e}"));
+                return;
+            }
+        };
+        let profile = match matter.get_processing_profile(&self.selected_profile_id) {
+            Ok(p) => p,
+            Err(e) => {
+                self.error_msg = Some(format!("Load profile failed: {e}"));
+                return;
+            }
+        };
+
+        if let Some(cull) = profile.body.stages.get("cull") {
+            if cull.enabled {
+                if let Some(name) = cull.params.get("preset_name").and_then(|v| v.as_str()) {
+                    self.cull_preset = name.to_string();
+                } else if let Some(id) = cull.params.get("preset_id").and_then(|v| v.as_str()) {
+                    self.cull_preset = format!("{}{}", params::CULL_USER_PRESET_PREFIX, id);
+                }
+            }
+        }
+        if let Some(promote) = profile.body.stages.get("promote") {
+            if promote.enabled {
+                if let Some(policy) = promote.params.get("policy").and_then(|v| v.as_str()) {
+                    self.promote_policy = policy.to_string();
+                }
+            }
+        }
+        if let Some(ocr) = profile.body.stages.get("ocr") {
+            // Outer enabled drives Settings OCR toggle for desk one-off Run OCR.
+            let nested = ocr
+                .params
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(ocr.enabled);
+            self.settings.ocr_enabled = ocr.enabled && nested;
+            self.settings.save();
+        }
+
+        self.status_msg = Some(format!("Applied defaults from profile '{}'", profile.name));
+        self.error_msg = None;
+    }
+
+    /// Save current workspace toggles as a new user processing profile.
+    pub(crate) fn save_profile_as(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let name = self.profile_save_as_name.trim().to_string();
+        if name.is_empty() {
+            self.error_msg = Some("Enter a name for Save profile as…".into());
+            return;
+        }
+        if params::PROFILE_BUILTIN_NAMES.iter().any(|n| *n == name) {
+            self.error_msg = Some(format!("'{name}' is reserved for a built-in profile."));
+            return;
+        }
+
+        // Clone selected profile body and stamp desk cull/promote/OCR onto it.
+        let matter = match matter_core::Matter::open(Utf8Path::new(root.as_str())) {
+            Ok(m) => m,
+            Err(e) => {
+                self.error_msg = Some(format!("Open matter failed: {e}"));
+                return;
+            }
+        };
+        let base = match matter.get_processing_profile(&self.selected_profile_id) {
+            Ok(p) => p,
+            Err(e) => {
+                self.error_msg = Some(format!("Load profile failed: {e}"));
+                return;
+            }
+        };
+        let mut body = base.body;
+        if let Some(cull) = body.stages.get_mut("cull") {
+            if let Some(id) = self
+                .cull_preset
+                .strip_prefix(params::CULL_USER_PRESET_PREFIX)
+            {
+                cull.params = serde_json::json!({
+                    "preset_id": id,
+                    "reset": false,
+                    "batch_size": 500
+                });
+            } else {
+                cull.params = serde_json::json!({
+                    "preset_name": self.cull_preset,
+                    "reset": false,
+                    "batch_size": 500
+                });
+            }
+            cull.enabled = true;
+        }
+        if let Some(promote) = body.stages.get_mut("promote") {
+            promote.params = serde_json::json!({
+                "policy": self.promote_policy,
+                "review_set_name": "Review Corpus",
+                "expand_families": true,
+                "reset": false,
+                "batch_size": 500,
+                "require_dedupe": false
+            });
+            promote.enabled = true;
+        }
+        if let Some(ocr) = body.stages.get_mut("ocr") {
+            ocr.enabled = self.settings.ocr_enabled;
+            if let Some(obj) = ocr.params.as_object_mut() {
+                obj.insert(
+                    "enabled".into(),
+                    serde_json::Value::Bool(self.settings.ocr_enabled),
+                );
+            }
+        }
+
+        let body_json = match matter_core::profile_body_to_json(&body) {
+            Ok(j) => j,
+            Err(e) => {
+                self.error_msg = Some(format!("Serialize profile: {e}"));
+                return;
+            }
+        };
+        match matter.upsert_processing_profile(matter_core::ProcessingProfileInput {
+            id: None,
+            name: name.clone(),
+            description: Some(format!("Saved from desk ({})", self.selected_profile_id)),
+            body_json,
+            created_by: Some("desk".into()),
+        }) {
+            Ok(saved) => {
+                self.selected_profile_id = saved.id.clone();
+                self.profile_save_as_name.clear();
+                self.status_msg = Some(format!("Saved profile '{}' ({})", saved.name, saved.id));
+                self.error_msg = None;
+                self.refresh_matter_lists();
+            }
+            Err(e) => {
+                self.error_msg = Some(format!("Save profile failed: {e}"));
+            }
         }
     }
 

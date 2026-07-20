@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v22**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v23**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -31,6 +31,7 @@
 //! - **Production export** bookkeeping (`production_sets` / `production_items`, schema v20) (0040)
 //! - **Production QC** run history (`qc_runs` + selection fingerprint gate, schema v21) (0041)
 //! - **Gap analysis** roster + opposing expected docs + gap_runs (schema v22) (0042)
+//! - **Processing profiles** (`processing_profiles` + built-in stage presets, schema v23) (0043)
 //!
 //! ## Layout
 //!
@@ -71,6 +72,7 @@ pub mod office;
 pub mod overview;
 pub mod pdf;
 pub mod privilege;
+pub mod profile;
 pub mod qc;
 pub mod redaction;
 pub mod report;
@@ -137,6 +139,14 @@ pub use privilege::{
     privilege_log_format, privilege_status, FamilyPrivilegeConsistency, ItemPrivilege,
     PrivilegeLogExportParams, PrivilegeLogExportResult, PrivilegeProtocol,
     UpsertItemPrivilegeInput, UpsertPrivilegeProtocolInput, PRIVILEGE_LOG_COLUMNS,
+};
+pub use profile::{
+    builtin_id, builtin_profile, builtin_profiles, expand_profile_stage, is_allowlisted_stage,
+    parse_profile_body, profile_body_to_json, profile_stage_plan, strip_builtin_prefix,
+    ProcessingProfile, ProcessingProfileInput, ProfileBody, StagePlan, StageSpec,
+    BUILTIN_EXTRACT_ONLY, BUILTIN_REDUCE_ONLY, BUILTIN_STANDARD, BUILTIN_WITH_OCR,
+    CANONICAL_STAGE_ORDER, JOB_KIND_PROFILE_RUN, PROFILE_BODY_MAX_BYTES, PROFILE_BODY_VERSION,
+    RESERVED_BUILTIN_NAMES,
 };
 pub use qc::{qc_run_is_fresh, selection_fingerprint, InsertQcRunInput, QcRunRecord};
 pub use redaction::{
