@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v21**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v22**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -30,6 +30,7 @@
 //! - **Matter report** CSV pack export from `CaseOverview` + jobs (0039; PDF deferred D-0039-01)
 //! - **Production export** bookkeeping (`production_sets` / `production_items`, schema v20) (0040)
 //! - **Production QC** run history (`qc_runs` + selection fingerprint gate, schema v21) (0041)
+//! - **Gap analysis** roster + opposing expected docs + gap_runs (schema v22) (0042)
 //!
 //! ## Layout
 //!
@@ -60,6 +61,7 @@ pub mod cas;
 pub mod category;
 pub mod error;
 pub mod filter;
+pub mod gap;
 pub mod item_errors;
 pub mod jobs;
 pub mod logical_hash;
@@ -91,6 +93,11 @@ pub use filter::{
     register_filter_functions, stored_instant_to_epoch_ms, CompiledFilter, FilterCondition,
     FilterSpec, DESK_UTC_EPOCH_MS_FN, FILTER_SPEC_VERSION, SCOPE_ENTIRE_MATTER,
     SCOPE_REVIEW_CORPUS,
+};
+pub use gap::{
+    normalize_custodian_name, normalize_source_label, CustodianInventoryRow, ExpectedCustodian,
+    ExpectedSource, GapExpectedDoc, GapExpectedDocInput, GapImportRecord, GapRunRecord,
+    ImportExpectedCustodiansResult, InsertGapImportInput, InsertGapRunInput,
 };
 pub use item_errors::{ItemError, ItemErrorInput};
 pub use jobs::{Job, JobCheckpoint, JobState};

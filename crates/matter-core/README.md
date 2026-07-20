@@ -7,7 +7,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (fields introduced across schema v2–v14; current [`SCHEMA_VERSION`] is **21**) + family graph
+6. **Normalized Item** model (fields introduced across schema v2–v14; current [`SCHEMA_VERSION`] is **22**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
@@ -21,7 +21,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 17. **Redaction** regions + true redacted text CAS artifact (0032)
 18. **Office extract** bookkeeping (`office_*`) for OOXML text fill (0033)
 
-Schema version: **21** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, text redaction, office extract bookkeeping, PDF extract bookkeeping (`pdf_needs_ocr`), calendar/ICS fields (`cal_*`, `ics_*`), OCR bookkeeping (`ocr_*`), file-category bookkeeping (`category_*` / taxonomy_v1), supporting indexes for case overview rollups (`(matter_id, file_category)`, `(matter_id, custodian)`, `(matter_id, role)`), **production sets/items** for review-set produce (0040), and **`qc_runs`** for production QC history + selection-fingerprint soft-gate (0041). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+Schema version: **22** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, text redaction, office extract bookkeeping, PDF extract bookkeeping (`pdf_needs_ocr`), calendar/ICS fields (`cal_*`, `ics_*`), OCR bookkeeping (`ocr_*`), file-category bookkeeping (`category_*` / taxonomy_v1), supporting indexes for case overview rollups (`(matter_id, file_category)`, `(matter_id, custodian)`, `(matter_id, role)`), **production sets/items** for review-set produce (0040), **`qc_runs`** for production QC history + selection-fingerprint soft-gate (0041), and **gap analysis** tables (`expected_custodians`, `expected_sources`, `gap_imports`, `gap_expected_docs`, `gap_runs`) (0042). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
 
 ## Layout
 

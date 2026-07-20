@@ -17,6 +17,7 @@ members = [
     "crates/matter-promote",
     "crates/matter-produce",
     "crates/matter-qc",
+    "crates/matter-gap",
     "crates/matter-search",
     "crates/extract-office",
     "crates/extract-pdf",

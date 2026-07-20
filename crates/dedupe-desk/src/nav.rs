@@ -13,6 +13,8 @@ pub enum Screen {
     Review,
     /// Production export (track 0040) — produce dialog + job.
     Produce,
+    /// Gap analysis: expected custodians + opposing DAT (track 0042).
+    Gap,
 }
 
 impl Screen {
@@ -23,11 +25,12 @@ impl Screen {
             Self::StubReduce => "Reduce",
             Self::Review => "Review",
             Self::Produce => "Produce",
+            Self::Gap => "Gap",
         }
     }
 
     pub fn is_stub(self) -> bool {
-        // Produce screen is live (0040); Reduce remains a placeholder.
+        // Produce + Gap are live; Reduce remains a placeholder.
         matches!(self, Self::StubReduce)
     }
 
@@ -105,6 +108,17 @@ mod tests {
         assert_eq!(
             resolve_nav(Screen::Workspace, Screen::Produce, true),
             Screen::Produce
+        );
+    }
+
+    #[test]
+    fn gap_is_live_not_stub() {
+        assert!(!Screen::Gap.is_stub());
+        assert_eq!(Screen::Gap.label(), "Gap");
+        assert_eq!(resolve_nav(Screen::Home, Screen::Gap, false), Screen::Home);
+        assert_eq!(
+            resolve_nav(Screen::Workspace, Screen::Gap, true),
+            Screen::Gap
         );
     }
 }

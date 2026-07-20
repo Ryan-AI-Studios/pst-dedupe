@@ -27,6 +27,9 @@ pub mod produce;
 #[cfg(feature = "qc")]
 pub mod qc;
 
+#[cfg(feature = "gap")]
+pub mod gap;
+
 #[cfg(feature = "fts")]
 pub mod fts;
 
@@ -71,6 +74,9 @@ pub use produce::{MatterProduceHandler, MatterProductionExportHandler};
 
 #[cfg(feature = "qc")]
 pub use qc::MatterQcHandler;
+
+#[cfg(feature = "gap")]
+pub use gap::MatterGapHandler;
 
 #[cfg(feature = "fts")]
 pub use fts::MatterFtsIndexHandler;

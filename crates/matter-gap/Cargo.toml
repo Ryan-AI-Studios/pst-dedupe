@@ -1,0 +1,21 @@
+[package]
+name = "matter-gap"
+version = "0.1.0"
+edition = "2021"
+description = "Gap analysis: expected custodians, date coverage, opposing DAT set-diff"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+matter-core = { path = "../matter-core" }
+matter-produce = { path = "../matter-produce" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+camino = { workspace = true }
+csv = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -8,6 +8,7 @@
 
 mod app;
 mod dialogs;
+mod gap_ui;
 mod html_strip;
 mod matter_ops;
 mod matter_ui;
