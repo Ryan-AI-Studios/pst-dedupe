@@ -1635,6 +1635,101 @@ fn entity_scan_handler_via_process_runner() {
     }
 }
 
+/// people_graph via ProcessRunner + register_default_handlers: job succeeds, people/edges, audit.
+#[cfg(feature = "people")]
+#[test]
+fn people_graph_handler_via_process_runner() {
+    use matter_core::{item_status, ItemInput};
+    use process_runner::register_default_handlers;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-people");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        matter
+            .insert_item(ItemInput {
+                path: Some("msg.eml".into()),
+                status: item_status::EXTRACTED.into(),
+                from_addr: Some("alice@example.com".into()),
+                to_addrs_json: Some(r#"["bob@example.com"]"#.into()),
+                cc_addrs_json: Some(r#"["carol@example.com"]"#.into()),
+                sent_at: Some("2024-06-01T12:00:00Z".into()),
+                ..Default::default()
+            })
+            .expect("item");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    register_default_handlers(&mut runner);
+
+    let params = JobParams::new(
+        serde_json::json!({
+            "scope": "all",
+            "include_entity_emails": false,
+            "grain": "day",
+            "reset": true,
+            "batch_size": 200,
+            "max_recipients_per_item": 200
+        })
+        .to_string(),
+    );
+    let job_id = runner
+        .start(&root, "people_graph", params)
+        .expect("start people_graph");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "err={:?}",
+        job.error_summary
+    );
+    assert_eq!(job.kind, "people_graph");
+
+    let people = matter.list_people(50).expect("people");
+    assert!(
+        people.len() >= 3,
+        "expected alice/bob/carol people, got {}",
+        people.len()
+    );
+    let edges = matter.list_people_edges(50).expect("edges");
+    assert!(
+        !edges.is_empty(),
+        "expected at least one visible edge (alice→bob and/or alice→carol)"
+    );
+    assert!(edges.iter().all(|e| e.visible_count > 0));
+
+    let status = matter.people_graph_status().expect("status");
+    assert!(status.is_complete, "graph should be complete");
+    assert!(status.people_count >= 3);
+    assert!(status.edge_count >= 1);
+
+    let mut stmt = matter
+        .connection()
+        .prepare(
+            "SELECT action FROM audit_events \
+             WHERE action IN ('people_graph.start', 'people_graph.complete') \
+             ORDER BY seq ASC",
+        )
+        .expect("prep audit");
+    let actions: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .expect("q")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert!(
+        actions.iter().any(|a| a == "people_graph.start"),
+        "missing people_graph.start audit"
+    );
+    assert!(
+        actions.iter().any(|a| a == "people_graph.complete"),
+        "missing people_graph.complete audit"
+    );
+}
+
 /// Thin production QC handler smoke (`kind = "qc"`).
 #[cfg(feature = "qc")]
 #[test]

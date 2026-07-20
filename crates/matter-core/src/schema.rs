@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 25;
+pub const SCHEMA_VERSION: u32 = 26;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -39,6 +39,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (23, MIGRATION_V23),
     (24, MIGRATION_V24),
     (25, MIGRATION_V25),
+    (26, MIGRATION_V26),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -811,6 +812,82 @@ CREATE INDEX idx_entity_hits_matter_type ON item_entity_hits(matter_id, entity_t
 CREATE INDEX idx_entity_hits_hash ON item_entity_hits(matter_id, match_hash);
 
 CREATE INDEX idx_items_entity_flags ON items(entity_flags) WHERE entity_flags != 0;
+"#;
+
+/// People–comms graph: participants, directed edges, timeline (track 0047).
+///
+/// Two-pass build: Pass 1 → `item_participants`; Pass 2 rebuilds aggregates.
+/// BCC counters are separate; `visible_count = to_count + cc_count` (stored).
+/// No self-loop edges (`CHECK from_person_id != to_person_id`).
+const MIGRATION_V26: &str = r#"
+ALTER TABLE matters ADD COLUMN people_graph_built_at TEXT;
+ALTER TABLE matters ADD COLUMN people_graph_fingerprint TEXT;
+ALTER TABLE matters ADD COLUMN people_graph_job_id TEXT;
+ALTER TABLE matters ADD COLUMN people_graph_pass TEXT;
+
+CREATE TABLE people (
+  id TEXT PRIMARY KEY NOT NULL,
+  matter_id TEXT NOT NULL REFERENCES matters(id),
+  identity_kind TEXT NOT NULL,
+  normalized_key TEXT NOT NULL,
+  email_domain TEXT,
+  display_label TEXT,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  as_from_count INTEGER NOT NULL DEFAULT 0,
+  as_to_count INTEGER NOT NULL DEFAULT 0,
+  as_cc_count INTEGER NOT NULL DEFAULT 0,
+  as_bcc_count INTEGER NOT NULL DEFAULT 0,
+  self_mail_count INTEGER NOT NULL DEFAULT 0,
+  first_seen_at TEXT,
+  last_seen_at TEXT,
+  UNIQUE (matter_id, identity_kind, normalized_key)
+);
+CREATE INDEX idx_people_domain ON people(matter_id, email_domain);
+CREATE INDEX idx_people_msg_count ON people(matter_id, message_count DESC);
+
+CREATE TABLE item_participants (
+  id TEXT PRIMARY KEY NOT NULL,
+  matter_id TEXT NOT NULL,
+  item_id TEXT NOT NULL REFERENCES items(id),
+  person_id TEXT NOT NULL REFERENCES people(id),
+  role TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'header',
+  raw_value TEXT,
+  item_at TEXT,
+  UNIQUE (item_id, person_id, role, source)
+);
+CREATE INDEX idx_item_part_person ON item_participants(person_id);
+CREATE INDEX idx_item_part_item ON item_participants(item_id);
+CREATE INDEX idx_item_part_matter_role ON item_participants(matter_id, role);
+
+CREATE TABLE people_edges (
+  id TEXT PRIMARY KEY NOT NULL,
+  matter_id TEXT NOT NULL,
+  from_person_id TEXT NOT NULL REFERENCES people(id),
+  to_person_id TEXT NOT NULL REFERENCES people(id),
+  to_count INTEGER NOT NULL DEFAULT 0,
+  cc_count INTEGER NOT NULL DEFAULT 0,
+  bcc_count INTEGER NOT NULL DEFAULT 0,
+  visible_count INTEGER NOT NULL DEFAULT 0,
+  first_at TEXT,
+  last_at TEXT,
+  UNIQUE (matter_id, from_person_id, to_person_id),
+  CHECK (from_person_id != to_person_id)
+);
+CREATE INDEX idx_edges_visible ON people_edges(matter_id, visible_count DESC);
+CREATE INDEX idx_edges_from ON people_edges(from_person_id);
+CREATE INDEX idx_edges_to ON people_edges(to_person_id);
+
+CREATE TABLE people_timeline (
+  id TEXT PRIMARY KEY NOT NULL,
+  matter_id TEXT NOT NULL,
+  bucket_start TEXT NOT NULL,
+  grain TEXT NOT NULL,
+  person_id TEXT,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (matter_id, grain, bucket_start, person_id)
+);
+CREATE INDEX idx_timeline_matter ON people_timeline(matter_id, grain, bucket_start);
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -3378,7 +3455,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v23 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 25);
+        assert_eq!(v, 26);
 
         let has_table: bool = conn
             .query_row(
@@ -3499,7 +3576,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v24 to v25");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 25);
+        assert_eq!(v, 26);
 
         for col in [
             "entity_flags",
@@ -3595,6 +3672,163 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v24'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v25_to_v26_adds_people_graph_tables() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        for &(target, sql) in MIGRATIONS {
+            if target > 25 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v25', 'V25 Matter', '2020-01-01T00:00:00Z', 25, '/tmp/v25')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, status, imported_at) \
+             VALUES ('it_v25', 'mat_v25', 'extracted', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v25 to v26");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 26);
+
+        for col in [
+            "people_graph_built_at",
+            "people_graph_fingerprint",
+            "people_graph_job_id",
+            "people_graph_pass",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('matters') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected matters.{col}");
+        }
+
+        for table in [
+            "people",
+            "item_participants",
+            "people_edges",
+            "people_timeline",
+        ] {
+            let has_table: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='{table}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("table");
+            assert!(has_table, "expected {table} table");
+        }
+
+        for col in [
+            "identity_kind",
+            "normalized_key",
+            "as_to_count",
+            "as_cc_count",
+            "as_bcc_count",
+            "self_mail_count",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('people') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected people.{col}");
+        }
+
+        let has_visible: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('people_edges') WHERE name = 'visible_count'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("visible");
+        assert!(has_visible, "expected people_edges.visible_count");
+
+        for idx in [
+            "idx_people_domain",
+            "idx_people_msg_count",
+            "idx_item_part_person",
+            "idx_item_part_item",
+            "idx_item_part_matter_role",
+            "idx_edges_visible",
+            "idx_edges_from",
+            "idx_edges_to",
+            "idx_timeline_matter",
+        ] {
+            let has_idx: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='{idx}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("idx");
+            assert!(has_idx, "expected {idx}");
+        }
+
+        // Unique (matter, kind, key) and no self-loop CHECK.
+        conn.execute(
+            "INSERT INTO people (id, matter_id, identity_kind, normalized_key, display_label) \
+             VALUES ('p1', 'mat_v25', 'smtp', 'a@example.com', 'A')",
+            [],
+        )
+        .expect("person");
+        let dup = conn.execute(
+            "INSERT INTO people (id, matter_id, identity_kind, normalized_key, display_label) \
+             VALUES ('p2', 'mat_v25', 'smtp', 'a@example.com', 'A2')",
+            [],
+        );
+        assert!(
+            dup.is_err(),
+            "unique (matter, kind, key) must reject duplicate"
+        );
+
+        let self_loop = conn.execute(
+            "INSERT INTO people_edges (id, matter_id, from_person_id, to_person_id, \
+             to_count, cc_count, bcc_count, visible_count) \
+             VALUES ('e1', 'mat_v25', 'p1', 'p1', 1, 0, 0, 1)",
+            [],
+        );
+        assert!(self_loop.is_err(), "CHECK must reject self-loop edges");
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v25'",
                 [],
                 |row| row.get(0),
             )

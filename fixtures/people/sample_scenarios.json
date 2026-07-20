@@ -1,0 +1,50 @@
+{
+  "description": "Synthetic people-graph scenarios (example.com only)",
+  "messages": [
+    {
+      "id": "m1",
+      "from": "alice@example.com",
+      "to": ["bob@example.com", "carol@example.com"],
+      "cc": [],
+      "bcc": [],
+      "sent_at": "2024-01-15T10:00:00Z",
+      "expect": "two edges alice→bob, alice→carol; visible_count=1 each"
+    },
+    {
+      "id": "m2",
+      "from": "alice@example.com",
+      "to": ["bob@example.com"],
+      "cc": [],
+      "bcc": ["hidden@example.com"],
+      "sent_at": "2024-01-16T11:00:00Z",
+      "expect": "bcc edge visible_count=0; bob edge visible only"
+    },
+    {
+      "id": "m3",
+      "from": "solo@example.com",
+      "to": ["solo@example.com"],
+      "cc": [],
+      "bcc": [],
+      "sent_at": "2024-01-17T12:00:00Z",
+      "expect": "no edge; self_mail_count >= 1"
+    },
+    {
+      "id": "m4",
+      "from": "John Doe",
+      "to": ["alice@example.com"],
+      "cc": [],
+      "bcc": [],
+      "sent_at": "2024-01-18T13:00:00Z",
+      "expect": "display identity for John Doe; not dropped"
+    },
+    {
+      "id": "m5",
+      "from": "/o=Exch/ou=AG/cn=Recipients/cn=jdoe",
+      "to": ["alice@example.com"],
+      "cc": [],
+      "bcc": [],
+      "sent_at": "2024-01-19T14:00:00Z",
+      "expect": "x500 identity retained"
+    }
+  ]
+}

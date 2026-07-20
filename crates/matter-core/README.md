@@ -7,7 +7,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (fields introduced across schema v2–v14; current [`SCHEMA_VERSION`] is **25**) + family graph
+6. **Normalized Item** model (fields introduced across schema v2–v14; current [`SCHEMA_VERSION`] is **26**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
@@ -21,7 +21,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 17. **Redaction** regions + true redacted text CAS artifact (0032)
 18. **Office extract** bookkeeping (`office_*`) for OOXML text fill (0033)
 
-Schema version: **25** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, text redaction, office extract bookkeeping, PDF extract bookkeeping (`pdf_needs_ocr`), calendar/ICS fields (`cal_*`, `ics_*`), OCR bookkeeping (`ocr_*`), file-category bookkeeping (`category_*` / taxonomy_v1), supporting indexes for case overview rollups (`(matter_id, file_category)`, `(matter_id, custodian)`, `(matter_id, role)`), **production sets/items** for review-set produce (0040), **`qc_runs`** for production QC history + selection-fingerprint soft-gate (0041), **gap analysis** tables (`expected_custodians`, `expected_sources`, `gap_imports`, `gap_expected_docs`, `gap_runs`) (0042), **processing profiles** (`processing_profiles` + optional `matters.default_profile_id`) with code built-ins (`standard`, `with_ocr`, `extract_only`, `reduce_only`) (0043), **workflows** (`workflows` + `jobs.parent_job_id`) with code built-ins (`ingest_then_standard`, `extract_then_standard`, `reduce_only_chain`, `with_ocr_chain`, `qc_then_produce`) (0044), and **entity / PII hits** (`item_entity_hits` + `entity_*` item rollup columns) (0046). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+Schema version: **26** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding, saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, text redaction, office extract bookkeeping, PDF extract bookkeeping (`pdf_needs_ocr`), calendar/ICS fields (`cal_*`, `ics_*`), OCR bookkeeping (`ocr_*`), file-category bookkeeping (`category_*` / taxonomy_v1), supporting indexes for case overview rollups (`(matter_id, file_category)`, `(matter_id, custodian)`, `(matter_id, role)`), **production sets/items** for review-set produce (0040), **`qc_runs`** for production QC history + selection-fingerprint soft-gate (0041), **gap analysis** tables (`expected_custodians`, `expected_sources`, `gap_imports`, `gap_expected_docs`, `gap_runs`) (0042), **processing profiles** (`processing_profiles` + optional `matters.default_profile_id`) with code built-ins (`standard`, `with_ocr`, `extract_only`, `reduce_only`) (0043), **workflows** (`workflows` + `jobs.parent_job_id`) with code built-ins (`ingest_then_standard`, `extract_then_standard`, `reduce_only_chain`, `with_ocr_chain`, `qc_then_produce`) (0044), **entity / PII hits** (`item_entity_hits` + `entity_*` item rollup columns) (0046), and **people–comms graph** (`people`, `item_participants`, `people_edges`, `people_timeline` + matter build columns) (0047). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
 
 ### Processing profiles (0043)
 
@@ -641,7 +641,7 @@ P0 keeps `to_addrs_json` / `cc_addrs_json` / `bcc_addrs_json` on `items` as JSON
 |---|---|
 | Ingest / extract write path | JSON arrays match extractor output |
 | Free-text / fielded participant search | **Tantivy (0029)** is plan-of-record — not SQLite JSON1 |
-| Comms graphs (0038, 0047) | May add relational `item_participants` later; **not** assumed here |
+| Comms graphs (0038, 0047) | Schema **v26** has relational `item_participants` + `people` / `people_edges` / `people_timeline` (built by `people_graph` / matter-people). JSON address columns (`from_addr`, `to_addrs_json`, `cc_addrs_json`, `bcc_addrs_json`) remain the extract source of truth for Pass 1 |
 
 ### Migration notes (v1 → v2)
 

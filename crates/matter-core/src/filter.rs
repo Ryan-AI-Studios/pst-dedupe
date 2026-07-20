@@ -779,6 +779,106 @@ fn push_condition(
                 params.push(Value::Text(k));
             }
         }
+        // People–comms graph (track 0047). `participant_email` aliases `participant_key`.
+        ("participant_key" | "participant_email", "eq") => {
+            let key = require_string_value(cond, "participant_key")?;
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_participants ip \
+                 INNER JOIN people p ON p.id = ip.person_id \
+                 WHERE ip.item_id = {alias}.id AND ip.matter_id = ? \
+                   AND p.normalized_key = ?)"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            params.push(Value::Text(key));
+        }
+        ("participant_key" | "participant_email", "contains") => {
+            let key = require_string_value(cond, "participant_key")?;
+            let pattern = format!("%{}%", escape_like_pattern(&key.to_lowercase()));
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_participants ip \
+                 INNER JOIN people p ON p.id = ip.person_id \
+                 WHERE ip.item_id = {alias}.id AND ip.matter_id = ? \
+                   AND LOWER(p.normalized_key) LIKE ? ESCAPE '\\')"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            params.push(Value::Text(pattern));
+        }
+        ("participant_domain", "eq") => {
+            let domain = require_string_value(cond, "participant_domain")?;
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_participants ip \
+                 INNER JOIN people p ON p.id = ip.person_id \
+                 WHERE ip.item_id = {alias}.id AND ip.matter_id = ? \
+                   AND p.identity_kind = 'smtp' AND p.email_domain = ?)"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            params.push(Value::Text(domain));
+        }
+        ("participant_domain", "contains") => {
+            let domain = require_string_value(cond, "participant_domain")?;
+            let pattern = format!("%{}%", escape_like_pattern(&domain.to_lowercase()));
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_participants ip \
+                 INNER JOIN people p ON p.id = ip.person_id \
+                 WHERE ip.item_id = {alias}.id AND ip.matter_id = ? \
+                   AND p.identity_kind = 'smtp' \
+                   AND LOWER(p.email_domain) LIKE ? ESCAPE '\\')"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            params.push(Value::Text(pattern));
+        }
+        ("participant_role", "any_of") => {
+            let roles = require_values(cond, "participant_role any_of")?;
+            let placeholders = sql_placeholders(roles.len());
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_participants ip \
+                 WHERE ip.item_id = {alias}.id AND ip.matter_id = ? \
+                   AND ip.role IN ({placeholders}))"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            for r in roles {
+                params.push(Value::Text(r));
+            }
+        }
+        ("person_id", "eq") => {
+            let pid = require_string_value(cond, "person_id")?;
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_participants ip \
+                 WHERE ip.item_id = {alias}.id AND ip.matter_id = ? \
+                   AND ip.person_id = ?)"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            params.push(Value::Text(pid));
+        }
+        ("person_id", "any_of") => {
+            let ids = require_values(cond, "person_id any_of")?;
+            let placeholders = sql_placeholders(ids.len());
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_participants ip \
+                 WHERE ip.item_id = {alias}.id AND ip.matter_id = ? \
+                   AND ip.person_id IN ({placeholders}))"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            for id in ids {
+                params.push(Value::Text(id));
+            }
+        }
+        ("has_participants", "eq") => {
+            let want = bool_value(cond, "has_participants")?;
+            if want {
+                where_parts.push(format!(
+                    "EXISTS (SELECT 1 FROM item_participants ip \
+                     WHERE ip.item_id = {alias}.id AND ip.matter_id = ?)"
+                ));
+                params.push(Value::Text(matter_id.to_string()));
+            } else {
+                where_parts.push(format!(
+                    "NOT EXISTS (SELECT 1 FROM item_participants ip \
+                     WHERE ip.item_id = {alias}.id AND ip.matter_id = ?)"
+                ));
+                params.push(Value::Text(matter_id.to_string()));
+            }
+        }
         ("pdf_needs_ocr", "eq") => {
             let want = bool_value(cond, "pdf_needs_ocr")?;
             if want {
@@ -1425,5 +1525,79 @@ mod tests {
         assert!(compiled.list_sql.contains("entity_hit_count > 0"));
         assert!(compiled.list_sql.contains("item_entity_hits"));
         assert!(compiled.list_sql.contains("entity_type IN"));
+    }
+
+    #[test]
+    fn participant_filters_compile() {
+        let spec = FilterSpec {
+            conditions: vec![
+                FilterCondition {
+                    field: "participant_key".into(),
+                    op: "eq".into(),
+                    value: Some(serde_json::Value::String("bob@example.com".into())),
+                    values: None,
+                    start: None,
+                    end: None,
+                },
+                FilterCondition {
+                    field: "participant_domain".into(),
+                    op: "contains".into(),
+                    value: Some(serde_json::Value::String("example".into())),
+                    values: None,
+                    start: None,
+                    end: None,
+                },
+                FilterCondition {
+                    field: "person_id".into(),
+                    op: "eq".into(),
+                    value: Some(serde_json::Value::String("abc".into())),
+                    values: None,
+                    start: None,
+                    end: None,
+                },
+                FilterCondition {
+                    field: "has_participants".into(),
+                    op: "eq".into(),
+                    value: Some(serde_json::Value::Bool(true)),
+                    values: None,
+                    start: None,
+                    end: None,
+                },
+                FilterCondition {
+                    field: "participant_role".into(),
+                    op: "any_of".into(),
+                    value: None,
+                    values: Some(vec!["from".into(), "to".into()]),
+                    start: None,
+                    end: None,
+                },
+            ],
+            ..FilterSpec::default()
+        };
+        let compiled = compile_filter(&spec, "mat1", None).expect("compile");
+        assert!(
+            compiled.list_sql.contains("item_participants"),
+            "sql={}",
+            compiled.list_sql
+        );
+        assert!(compiled.list_sql.contains("normalized_key"));
+        assert!(compiled.list_sql.contains("email_domain"));
+        assert!(compiled.list_sql.contains("person_id"));
+        assert!(compiled.list_sql.contains("ip.role IN"));
+
+        // Alias participant_email
+        let alias = FilterSpec {
+            conditions: vec![FilterCondition {
+                field: "participant_email".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::String("a@b.com".into())),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..FilterSpec::default()
+        };
+        let c2 = compile_filter(&alias, "mat1", None).expect("compile alias");
+        assert!(c2.list_sql.contains("normalized_key"));
     }
 }

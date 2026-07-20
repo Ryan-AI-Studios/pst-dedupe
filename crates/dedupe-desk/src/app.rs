@@ -18,6 +18,7 @@ use crate::matter_ops::{MatterOpResult, MatterOpState};
 use crate::matter_ui::{self, MatterSnapshot, OverviewLoadResult, OverviewLoadState};
 use crate::nav::{self, Screen};
 use crate::params::{self, format_runner_error, is_transient_sqlite_lock};
+use crate::people_ui::{self, PeopleState};
 use crate::produce_qc::{
     evaluate_produce_qc_readiness, hydrate_last_qc_summary, load_findings_csv, ProduceQcReadiness,
     QcFindingRow, FINDINGS_DISPLAY_CAP,
@@ -97,6 +98,8 @@ pub struct DeskApp {
     pub(crate) review: ReviewState,
     /// Gap analysis panel state (track 0042).
     pub(crate) gap: GapState,
+    /// People–comms graph panel (track 0047).
+    pub(crate) people: PeopleState,
     /// Selected processing profile id (`builtin:standard` or user `pfl_…`).
     pub(crate) selected_profile_id: String,
     /// Draft name for Save profile as….
@@ -164,6 +167,7 @@ impl DeskApp {
             qc_findings_show: false,
             review: ReviewState::default(),
             gap: GapState::new(),
+            people: PeopleState::new(),
             selected_profile_id: params::PROFILE_DEFAULT_SELECTION.into(),
             profile_save_as_name: String::new(),
             selected_workflow_id: params::WORKFLOW_DEFAULT_SELECTION.into(),
@@ -1079,6 +1083,26 @@ impl DeskApp {
         }
     }
 
+    /// Offline people–comms graph build (`people_graph`).
+    pub(crate) fn start_people_graph(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params = JobParams::new(params::people_graph_default_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "people_graph", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started people_graph job {job_id}"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
     /// Run the selected processing profile (`profile_run`).
     pub(crate) fn start_profile_run(&mut self) {
         let Some(root) = self.matter_root.clone() else {
@@ -1761,6 +1785,7 @@ impl DeskApp {
                 Screen::Review,
                 Screen::Produce,
                 Screen::Gap,
+                Screen::People,
             ] {
                 let selected = self.screen == target;
                 let enabled = target == Screen::Home || has_matter;
@@ -1780,6 +1805,11 @@ impl DeskApp {
                     if next == Screen::Gap {
                         if let Some(ref root) = self.matter_root {
                             self.gap.request_reload(root);
+                        }
+                    }
+                    if next == Screen::People {
+                        if let Some(ref root) = self.matter_root {
+                            self.people.request_reload(root);
                         }
                     }
                     self.screen = next;
@@ -1887,6 +1917,34 @@ impl eframe::App for DeskApp {
                 }
                 if gap_ui::take_start_opposing(&mut self.gap) {
                     self.start_opposing_gap();
+                }
+            }
+            Screen::People => {
+                let root = self.matter_root.clone();
+                let busy = self.runner_busy();
+                people_ui::show(ui, &mut self.people, root.as_deref(), busy);
+                if self.people.take_start() {
+                    self.start_people_graph();
+                }
+                if let Some(pid) = self.people.take_filter_person() {
+                    use matter_core::{FilterCondition, FilterSpec, SCOPE_ENTIRE_MATTER};
+                    let mut spec = FilterSpec {
+                        conditions: vec![FilterCondition {
+                            field: "person_id".into(),
+                            op: "eq".into(),
+                            value: Some(serde_json::Value::String(pid)),
+                            values: None,
+                            start: None,
+                            end: None,
+                        }],
+                        ..FilterSpec::default()
+                    };
+                    spec.scope = SCOPE_ENTIRE_MATTER.into();
+                    if let Some(ref root) = self.matter_root {
+                        self.review.apply_preset(root, spec);
+                    }
+                    self.screen = Screen::Review;
+                    self.status_msg = Some("Filter applied: person_id".into());
                 }
             }
             Screen::Produce => {

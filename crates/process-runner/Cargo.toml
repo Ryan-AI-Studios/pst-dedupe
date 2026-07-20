@@ -6,7 +6,7 @@ description = "In-process matter job runner: single worker thread, cancel, watch
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["ingest", "extract_pst", "dedupe", "thread", "neardup", "cull", "promote", "produce", "qc", "gap", "fts", "office", "pdf", "calendar", "ocr", "classify", "entity"]
+default = ["ingest", "extract_pst", "dedupe", "thread", "neardup", "cull", "promote", "produce", "qc", "gap", "fts", "office", "pdf", "calendar", "ocr", "classify", "entity", "people"]
 ingest = ["dep:ingest-purview"]
 extract_pst = ["dep:extract-pst"]
 dedupe = ["dep:matter-dedupe"]
@@ -24,6 +24,7 @@ calendar = ["dep:extract-calendar"]
 ocr = ["dep:ocr-plugin"]
 classify = ["dep:file-category"]
 entity = ["dep:matter-entity"]
+people = ["dep:matter-people"]
 # Alias for feature name in docs / CI.
 ics = ["calendar"]
 
@@ -51,6 +52,7 @@ extract-calendar = { path = "../extract-calendar", optional = true }
 ocr-plugin = { path = "../ocr-plugin", optional = true }
 file-category = { path = "../file-category", optional = true }
 matter-entity = { path = "../matter-entity", optional = true }
+matter-people = { path = "../matter-people", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

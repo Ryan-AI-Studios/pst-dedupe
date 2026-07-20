@@ -15,6 +15,8 @@ pub enum Screen {
     Produce,
     /// Gap analysis: expected custodians + opposing DAT (track 0042).
     Gap,
+    /// People–comms graph tables (track 0047).
+    People,
 }
 
 impl Screen {
@@ -26,6 +28,7 @@ impl Screen {
             Self::Review => "Review",
             Self::Produce => "Produce",
             Self::Gap => "Gap",
+            Self::People => "People",
         }
     }
 
@@ -119,6 +122,20 @@ mod tests {
         assert_eq!(
             resolve_nav(Screen::Workspace, Screen::Gap, true),
             Screen::Gap
+        );
+    }
+
+    #[test]
+    fn people_is_live_not_stub() {
+        assert!(!Screen::People.is_stub());
+        assert_eq!(Screen::People.label(), "People");
+        assert_eq!(
+            resolve_nav(Screen::Home, Screen::People, false),
+            Screen::Home
+        );
+        assert_eq!(
+            resolve_nav(Screen::Workspace, Screen::People, true),
+            Screen::People
         );
     }
 }
