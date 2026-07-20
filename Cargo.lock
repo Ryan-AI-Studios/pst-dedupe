@@ -2724,6 +2724,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "matter-cluster"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "matter-core",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "matter-core"
 version = "0.1.0"
 dependencies = [
@@ -3879,6 +3892,7 @@ dependencies = [
  "extract-pst",
  "file-category",
  "ingest-purview",
+ "matter-cluster",
  "matter-core",
  "matter-cull",
  "matter-dedupe",

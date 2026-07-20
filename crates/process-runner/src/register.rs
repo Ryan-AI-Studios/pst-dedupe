@@ -54,6 +54,8 @@ pub fn register_default_handlers(runner: &mut ProcessRunner) {
     runner.register(Arc::new(MatterEntityScanHandler::new()));
     #[cfg(feature = "people")]
     runner.register(Arc::new(MatterPeopleGraphHandler::new()));
+    #[cfg(feature = "cluster")]
+    runner.register(Arc::new(MatterConceptClusterHandler::new()));
 
     // Always available (matter-core only).
     runner.register(Arc::new(MatterProfileRunHandler::with_default_handlers()));
@@ -84,6 +86,7 @@ pub fn default_handler_kinds() -> &'static [&'static str] {
         "classify",
         "entity_scan",
         "people_graph",
+        "concept_cluster",
         "profile_run",
         "workflow_run",
     ]
@@ -105,5 +108,6 @@ mod tests {
         assert!(default_handler_kinds().contains(&"profile_run"));
         assert!(default_handler_kinds().contains(&"ingest"));
         assert!(default_handler_kinds().contains(&"people_graph"));
+        assert!(default_handler_kinds().contains(&"concept_cluster"));
     }
 }

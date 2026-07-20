@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v26**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v27**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -35,6 +35,7 @@
 //! - **Workflows** (`workflows` + `jobs.parent_job_id` + built-in multi-step recipes, schema v24) (0044)
 //! - **Entity / PII hits** (`item_entity_hits` + `entity_*` rollup columns, schema v25) (0046)
 //! - **People–comms graph** (`people`, `item_participants`, `people_edges`, `people_timeline`, schema v26) (0047)
+//! - **Concept clustering** (`concept_cluster_sets` / `concept_clusters` / `item_concept_membership`, schema v27) (0048)
 //!
 //! ## Layout
 //!
@@ -63,6 +64,7 @@ pub mod audit;
 pub mod calendar;
 pub mod cas;
 pub mod category;
+pub mod cluster;
 pub mod entity;
 pub mod error;
 pub mod filter;
@@ -94,6 +96,11 @@ pub use cas::{sha256_hex, Cas, PUT_READER_BUF_SIZE};
 pub use category::{
     category_status, classify_candidate_needs_work, ApplyClassificationInput, CategoryApplyResult,
     ClassifyCandidate,
+};
+pub use cluster::{
+    ConceptCluster, ConceptClusterCandidate, ConceptClusterSet, ConceptClusterStatus,
+    ConceptClusterWrite, ConceptMembershipWrite, ReplaceConceptClusterSetInput,
+    DEFAULT_CONCEPT_SET_NAME,
 };
 pub use entity::{
     entity_flags, flag_bit_for_entity_type, CreateEntityHitInput, EntityScanCandidate,

@@ -12,6 +12,7 @@ use matter_core::CaseOverview;
 use process_runner::{register_default_handlers, JobParams, ProcessRunner, RunnerConfig};
 use tokio::sync::watch;
 
+use crate::cluster_ui::{self, ClusterState};
 use crate::dialogs::{DialogKind, DialogState};
 use crate::gap_ui::{self, GapState};
 use crate::matter_ops::{MatterOpResult, MatterOpState};
@@ -100,6 +101,8 @@ pub struct DeskApp {
     pub(crate) gap: GapState,
     /// People–comms graph panel (track 0047).
     pub(crate) people: PeopleState,
+    /// Concept / theme clusters panel (track 0048).
+    pub(crate) clusters: ClusterState,
     /// Selected processing profile id (`builtin:standard` or user `pfl_…`).
     pub(crate) selected_profile_id: String,
     /// Draft name for Save profile as….
@@ -168,6 +171,7 @@ impl DeskApp {
             review: ReviewState::default(),
             gap: GapState::new(),
             people: PeopleState::new(),
+            clusters: ClusterState::new(),
             selected_profile_id: params::PROFILE_DEFAULT_SELECTION.into(),
             profile_save_as_name: String::new(),
             selected_workflow_id: params::WORKFLOW_DEFAULT_SELECTION.into(),
@@ -1103,6 +1107,27 @@ impl DeskApp {
         }
     }
 
+    /// Offline concept clustering (`concept_cluster`).
+    pub(crate) fn start_concept_cluster(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let k = self.clusters.requested_k();
+        let params = JobParams::new(params::concept_cluster_default_params(k));
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "concept_cluster", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started concept_cluster job {job_id} (k={k})"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
     /// Run the selected processing profile (`profile_run`).
     pub(crate) fn start_profile_run(&mut self) {
         let Some(root) = self.matter_root.clone() else {
@@ -1786,6 +1811,7 @@ impl DeskApp {
                 Screen::Produce,
                 Screen::Gap,
                 Screen::People,
+                Screen::Clusters,
             ] {
                 let selected = self.screen == target;
                 let enabled = target == Screen::Home || has_matter;
@@ -1810,6 +1836,11 @@ impl DeskApp {
                     if next == Screen::People {
                         if let Some(ref root) = self.matter_root {
                             self.people.request_reload(root);
+                        }
+                    }
+                    if next == Screen::Clusters {
+                        if let Some(ref root) = self.matter_root {
+                            self.clusters.request_reload(root);
                         }
                     }
                     self.screen = next;
@@ -1945,6 +1976,34 @@ impl eframe::App for DeskApp {
                     }
                     self.screen = Screen::Review;
                     self.status_msg = Some("Filter applied: person_id".into());
+                }
+            }
+            Screen::Clusters => {
+                let root = self.matter_root.clone();
+                let busy = self.runner_busy();
+                cluster_ui::show(ui, &mut self.clusters, root.as_deref(), busy);
+                if self.clusters.take_start() {
+                    self.start_concept_cluster();
+                }
+                if let Some(cid) = self.clusters.take_filter_cluster() {
+                    use matter_core::{FilterCondition, FilterSpec, SCOPE_ENTIRE_MATTER};
+                    let mut spec = FilterSpec {
+                        conditions: vec![FilterCondition {
+                            field: "concept_cluster_id".into(),
+                            op: "eq".into(),
+                            value: Some(serde_json::Value::String(cid)),
+                            values: None,
+                            start: None,
+                            end: None,
+                        }],
+                        ..FilterSpec::default()
+                    };
+                    spec.scope = SCOPE_ENTIRE_MATTER.into();
+                    if let Some(ref root) = self.matter_root {
+                        self.review.apply_preset(root, spec);
+                    }
+                    self.screen = Screen::Review;
+                    self.status_msg = Some("Filter applied: concept_cluster_id".into());
                 }
             }
             Screen::Produce => {

@@ -443,6 +443,21 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0047-10 | P3 | Auto-reload People panel when job completes | Manual Refresh P0 | residual polish |
 | D-0017-03 | — | Relational `item_participants` | **Closed in 0047** | — |
 
+
+## From track 0048-ClusteringConceptMining (Completed - see conductor review)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0048-01 | — | Embedding / BERTopic-style pipeline | P0 classical TF–IDF only | **0050** |
+| D-0048-02 | — | Hierarchical / HDBSCAN soft clusters | Residual | residual |
+| D-0048-03 | — | Multi-set UI + compare sets | Schema multi-set; Desk default set only | residual |
+| D-0048-04 | — | Cluster bubble / treemap viz | Tables-first P0 | residual polish |
+| D-0048-05 | — | Multilingual stopwords / CJK tokenizers | English P0 | **0054** |
+| D-0048-06 | — | Mid-iteration empty-centroid reseed | Final empty drop always applied | residual |
+| D-0048-07 | — | Deeper reply-quote strip for clustering | Shares D-0023-01 residual | residual |
+| D-0048-08 | — | Exclude near-dup members by default | Residual param; off by default | residual |
+| D-0048-09 | — | Incremental re-cluster dirty docs | P0 full rebuild | scale residual |
+| D-0048-10 | — | LLM cluster titles | Opt-in only | **0051/0052** |
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

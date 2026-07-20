@@ -326,6 +326,28 @@ pub fn people_graph_default_params() -> String {
     .to_string()
 }
 
+/// Default params for concept clustering (`kind = "concept_cluster"`).
+///
+/// Opt-in job — not part of built-in profiles. `k` is requested target;
+/// actual non-empty cluster_count may be lower.
+pub fn concept_cluster_default_params(k: u32) -> String {
+    serde_json::json!({
+        "set_name": "default",
+        "k": k.max(1),
+        "seed": 42,
+        "max_docs": 50000,
+        "max_text_bytes": 200000,
+        "min_df": 2,
+        "max_df_ratio": 0.9,
+        "max_vocab": 20000,
+        "label_terms": 8,
+        "scope": "all",
+        "reset": true,
+        "batch_size": 100
+    })
+    .to_string()
+}
+
 /// Built-in processing profile names (desk dropdown; code constants in matter-core).
 pub const PROFILE_BUILTIN_NAMES: &[&str] = &["standard", "with_ocr", "extract_only", "reduce_only"];
 

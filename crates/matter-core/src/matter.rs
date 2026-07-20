@@ -293,6 +293,13 @@ pub struct Item {
     pub entity_hit_count: i64,
     /// Digest of body text last used for entity_scan (idempotency).
     pub entity_scanned_text_sha256: Option<String>,
+    // --- schema v27 (concept clustering / default set denorm) ---
+    /// Default-set concept cluster id (NULL when unclustered / non-default set only).
+    pub concept_cluster_id: Option<String>,
+    /// Default-set concept cluster set id.
+    pub concept_cluster_set_id: Option<String>,
+    /// When default-set membership was last written.
+    pub concept_clustered_at: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -4832,7 +4839,8 @@ const ITEM_COLUMNS: &str =
     ocr_status, ocr_engine, ocr_lang, ocr_text_sha256, ocr_source_native_sha256, \
     ocr_page_count, ocr_at, ocr_error, ocr_confidence, \
     category_method, category_taxonomy, category_status, category_error, categorized_at, \
-    entity_flags, entity_scan_at, entity_scan_job_id, entity_hit_count, entity_scanned_text_sha256";
+    entity_flags, entity_scan_at, entity_scan_job_id, entity_hit_count, entity_scanned_text_sha256, \
+    concept_cluster_id, concept_cluster_set_id, concept_clustered_at";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -4958,6 +4966,9 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         entity_scan_job_id: row.get(115)?,
         entity_hit_count: row.get::<_, Option<i64>>(116)?.unwrap_or(0),
         entity_scanned_text_sha256: row.get(117)?,
+        concept_cluster_id: row.get(118)?,
+        concept_cluster_set_id: row.get(119)?,
+        concept_clustered_at: row.get(120)?,
     })
 }
 

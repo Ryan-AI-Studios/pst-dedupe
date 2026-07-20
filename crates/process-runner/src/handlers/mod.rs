@@ -54,6 +54,9 @@ pub mod entity_scan;
 #[cfg(feature = "people")]
 pub mod people_graph;
 
+#[cfg(feature = "cluster")]
+pub mod concept_cluster;
+
 /// Sequential processing-profile runner (always available; depends only on matter-core).
 pub mod profile_run;
 
@@ -113,6 +116,9 @@ pub use entity_scan::MatterEntityScanHandler;
 
 #[cfg(feature = "people")]
 pub use people_graph::MatterPeopleGraphHandler;
+
+#[cfg(feature = "cluster")]
+pub use concept_cluster::MatterConceptClusterHandler;
 
 pub use profile_run::MatterProfileRunHandler;
 pub use workflow_run::MatterWorkflowRunHandler;

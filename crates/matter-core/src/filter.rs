@@ -879,6 +879,62 @@ fn push_condition(
                 params.push(Value::Text(matter_id.to_string()));
             }
         }
+        // Concept clustering (track 0048) — membership table (not near_dup_*).
+        ("concept_cluster_id", "eq") => {
+            let cid = require_string_value(cond, "concept_cluster_id")?;
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_concept_membership icm \
+                 WHERE icm.item_id = {alias}.id AND icm.matter_id = ? \
+                   AND icm.cluster_id = ?)"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            params.push(Value::Text(cid));
+        }
+        ("concept_cluster_id", "any_of") => {
+            let ids = require_values(cond, "concept_cluster_id any_of")?;
+            let placeholders = sql_placeholders(ids.len());
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_concept_membership icm \
+                 WHERE icm.item_id = {alias}.id AND icm.matter_id = ? \
+                   AND icm.cluster_id IN ({placeholders}))"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            for id in ids {
+                params.push(Value::Text(id));
+            }
+        }
+        ("concept_cluster_set_id", "eq") => {
+            let sid = require_string_value(cond, "concept_cluster_set_id")?;
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_concept_membership icm \
+                 WHERE icm.item_id = {alias}.id AND icm.matter_id = ? \
+                   AND icm.set_id = ?)"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            params.push(Value::Text(sid));
+        }
+        ("has_concept_cluster", "eq") => {
+            // Default / active set only (P0 set name `default`). Custom sets
+            // require concept_cluster_set_id / concept_cluster_id predicates.
+            let want = bool_value(cond, "has_concept_cluster")?;
+            if want {
+                where_parts.push(format!(
+                    "EXISTS (SELECT 1 FROM item_concept_membership icm \
+                     INNER JOIN concept_cluster_sets ccs ON ccs.id = icm.set_id \
+                     WHERE icm.item_id = {alias}.id AND icm.matter_id = ? \
+                       AND ccs.name = 'default')"
+                ));
+                params.push(Value::Text(matter_id.to_string()));
+            } else {
+                where_parts.push(format!(
+                    "NOT EXISTS (SELECT 1 FROM item_concept_membership icm \
+                     INNER JOIN concept_cluster_sets ccs ON ccs.id = icm.set_id \
+                     WHERE icm.item_id = {alias}.id AND icm.matter_id = ? \
+                       AND ccs.name = 'default')"
+                ));
+                params.push(Value::Text(matter_id.to_string()));
+            }
+        }
         ("pdf_needs_ocr", "eq") => {
             let want = bool_value(cond, "pdf_needs_ocr")?;
             if want {
@@ -1599,5 +1655,60 @@ mod tests {
         };
         let c2 = compile_filter(&alias, "mat1", None).expect("compile alias");
         assert!(c2.list_sql.contains("normalized_key"));
+    }
+
+    #[test]
+    fn concept_cluster_filters_compile() {
+        let spec = FilterSpec {
+            conditions: vec![
+                FilterCondition {
+                    field: "concept_cluster_id".into(),
+                    op: "eq".into(),
+                    value: Some(serde_json::Value::String("ccl_1".into())),
+                    values: None,
+                    start: None,
+                    end: None,
+                },
+                FilterCondition {
+                    field: "concept_cluster_id".into(),
+                    op: "any_of".into(),
+                    value: None,
+                    values: Some(vec!["ccl_a".into(), "ccl_b".into()]),
+                    start: None,
+                    end: None,
+                },
+                FilterCondition {
+                    field: "concept_cluster_set_id".into(),
+                    op: "eq".into(),
+                    value: Some(serde_json::Value::String("ccs_1".into())),
+                    values: None,
+                    start: None,
+                    end: None,
+                },
+                FilterCondition {
+                    field: "has_concept_cluster".into(),
+                    op: "eq".into(),
+                    value: Some(serde_json::Value::Bool(true)),
+                    values: None,
+                    start: None,
+                    end: None,
+                },
+            ],
+            ..FilterSpec::default()
+        };
+        let compiled = compile_filter(&spec, "mat1", None).expect("compile");
+        assert!(
+            compiled.list_sql.contains("item_concept_membership"),
+            "sql={}",
+            compiled.list_sql
+        );
+        assert!(compiled.list_sql.contains("cluster_id"));
+        assert!(compiled.list_sql.contains("set_id"));
+        assert!(
+            compiled.list_sql.contains("concept_cluster_sets")
+                && compiled.list_sql.contains("'default'"),
+            "has_concept_cluster must join default set: sql={}",
+            compiled.list_sql
+        );
     }
 }
