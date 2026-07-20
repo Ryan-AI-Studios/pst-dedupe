@@ -134,6 +134,12 @@ pub struct FilterDraft {
     pub has_email: bool,
     /// Has credit-card entity hits chip (track 0046).
     pub has_card: bool,
+    /// Sentiment polarity chip (track 0049): "negative" | "positive" | "neutral" | None.
+    pub sentiment_polarity: Option<String>,
+    /// Has sentiment score (`has_sentiment eq true`) chip (track 0049).
+    pub has_sentiment: bool,
+    /// Unscored (`has_sentiment eq false`) chip — distinct from neutral (track 0049).
+    pub unscored_sentiment: bool,
     /// `redacted_text_stale eq true` chip (track 0032).
     pub redacted_text_stale: bool,
     /// `pdf_needs_ocr eq true` chip (track 0034).
@@ -251,6 +257,35 @@ impl FilterDraft {
                 value: Some(serde_json::Value::Number(serde_json::Number::from(
                     matter_core::entity_flags::CARD,
                 ))),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        if self.unscored_sentiment {
+            conditions.push(FilterCondition {
+                field: "has_sentiment".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(false)),
+                values: None,
+                start: None,
+                end: None,
+            });
+        } else if self.has_sentiment {
+            conditions.push(FilterCondition {
+                field: "has_sentiment".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        if let Some(pol) = self.sentiment_polarity.as_deref() {
+            conditions.push(FilterCondition {
+                field: "sentiment_polarity".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::String(pol.into())),
                 values: None,
                 start: None,
                 end: None,
@@ -375,6 +410,21 @@ impl FilterDraft {
                 }
                 ("has_redactions", "eq") => {
                     d.has_redactions = c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
+                }
+                ("sentiment_polarity", "eq") => {
+                    if let Some(v) = c.value.as_ref().and_then(|v| v.as_str()) {
+                        d.sentiment_polarity = Some(v.to_string());
+                    }
+                }
+                ("has_sentiment", "eq") => {
+                    let want = c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
+                    if want {
+                        d.has_sentiment = true;
+                        d.unscored_sentiment = false;
+                    } else {
+                        d.unscored_sentiment = true;
+                        d.has_sentiment = false;
+                    }
                 }
                 ("entity_flags", "any_bits") => {
                     let bits = c.value.as_ref().and_then(|v| v.as_i64()).unwrap_or(0);
@@ -515,6 +565,12 @@ pub struct ReviewState {
     item_redactions: Vec<ItemRedaction>,
     /// Entity / PII hits for the current selection (masked only; track 0046).
     item_entity_hits: Vec<ItemEntityHit>,
+    /// Sentiment polarity for current selection (NULL = unscored; track 0049).
+    item_sentiment_polarity: Option<String>,
+    item_sentiment_compound: Option<f64>,
+    item_sentiment_compound_min: Option<f64>,
+    item_sentiment_compound_max: Option<f64>,
+    item_sentiment_method: Option<String>,
     /// Bookkeeping from `items` for regenerate / stale banner.
     item_redaction_count: i64,
     item_redacted_text_sha256: Option<String>,
@@ -663,6 +719,11 @@ impl ReviewState {
         self.item_highlights.clear();
         self.item_redactions.clear();
         self.item_entity_hits.clear();
+        self.item_sentiment_polarity = None;
+        self.item_sentiment_compound = None;
+        self.item_sentiment_compound_min = None;
+        self.item_sentiment_compound_max = None;
+        self.item_sentiment_method = None;
         self.item_redaction_count = 0;
         self.item_redacted_text_sha256 = None;
         self.item_redacted_source_digest = None;
@@ -1233,6 +1294,11 @@ impl ReviewState {
         self.item_highlights.clear();
         self.item_redactions.clear();
         self.item_entity_hits.clear();
+        self.item_sentiment_polarity = None;
+        self.item_sentiment_compound = None;
+        self.item_sentiment_compound_min = None;
+        self.item_sentiment_compound_max = None;
+        self.item_sentiment_method = None;
         self.item_redaction_count = 0;
         self.item_redacted_text_sha256 = None;
         self.item_redacted_source_digest = None;
@@ -1293,6 +1359,11 @@ impl ReviewState {
                 self.item_highlights.clear();
                 self.item_redactions.clear();
                 self.item_entity_hits.clear();
+                self.item_sentiment_polarity = None;
+                self.item_sentiment_compound = None;
+                self.item_sentiment_compound_min = None;
+                self.item_sentiment_compound_max = None;
+                self.item_sentiment_method = None;
                 self.item_redaction_count = 0;
                 self.item_redacted_text_sha256 = None;
                 self.item_redacted_source_digest = None;
@@ -1307,6 +1378,11 @@ impl ReviewState {
         self.item_highlights = bundle.highlights;
         self.item_redactions = bundle.redactions;
         self.item_entity_hits = bundle.entity_hits;
+        self.item_sentiment_polarity = bundle.sentiment_polarity;
+        self.item_sentiment_compound = bundle.sentiment_compound;
+        self.item_sentiment_compound_min = bundle.sentiment_compound_min;
+        self.item_sentiment_compound_max = bundle.sentiment_compound_max;
+        self.item_sentiment_method = bundle.sentiment_method;
         self.item_redaction_count = bundle.redaction_count;
         self.item_redacted_text_sha256 = bundle.redacted_text_sha256;
         self.item_redacted_source_digest = bundle.redacted_source_digest;
@@ -2484,6 +2560,11 @@ struct AnnotationBundle {
     highlights: Vec<ItemHighlight>,
     redactions: Vec<ItemRedaction>,
     entity_hits: Vec<ItemEntityHit>,
+    sentiment_polarity: Option<String>,
+    sentiment_compound: Option<f64>,
+    sentiment_compound_min: Option<f64>,
+    sentiment_compound_max: Option<f64>,
+    sentiment_method: Option<String>,
     redaction_count: i64,
     redacted_text_sha256: Option<String>,
     redacted_source_digest: Option<String>,
@@ -2507,6 +2588,11 @@ fn load_notes_highlights_redactions(
         highlights,
         redactions,
         entity_hits,
+        sentiment_polarity: item.sentiment_polarity,
+        sentiment_compound: item.sentiment_compound,
+        sentiment_compound_min: item.sentiment_compound_min,
+        sentiment_compound_max: item.sentiment_compound_max,
+        sentiment_method: item.sentiment_method,
         redaction_count: item.redaction_count,
         redacted_text_sha256: item.redacted_text_sha256,
         redacted_source_digest: item.redacted_source_digest,
@@ -3125,6 +3211,59 @@ fn show_filter_bar(
             if ui.small_button("Has card").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_has_card());
             }
+            if ui
+                .small_button("Negative")
+                .on_hover_text("Scored negative tone (NULL/unscored excluded)")
+                .clicked()
+            {
+                state.apply_preset(matter_root, FilterSpec::preset_negative_tone());
+            }
+            if ui
+                .small_button("Positive")
+                .on_hover_text("Scored positive tone (NULL/unscored excluded)")
+                .clicked()
+            {
+                state.apply_preset(matter_root, FilterSpec::preset_positive_tone());
+            }
+            if ui
+                .small_button("Neutral")
+                .on_hover_text("Scored neutral (~0 compound) — not the same as Unscored")
+                .clicked()
+            {
+                let mut spec = FilterSpec::default();
+                spec.conditions.push(FilterCondition {
+                    field: "sentiment_polarity".into(),
+                    op: "eq".into(),
+                    value: Some(serde_json::Value::String("neutral".into())),
+                    values: None,
+                    start: None,
+                    end: None,
+                });
+                state.apply_preset(matter_root, spec);
+            }
+            if ui
+                .small_button("Unscored")
+                .on_hover_text("Never scored / skipped / NULL polarity — distinct from Neutral")
+                .clicked()
+            {
+                state.apply_preset(matter_root, FilterSpec::preset_unscored());
+            }
+            if ui
+                .small_button("Has score")
+                .on_hover_text("Items with sentiment_polarity IS NOT NULL")
+                .clicked()
+            {
+                let mut spec = FilterSpec::default();
+                spec.conditions.push(FilterCondition {
+                    field: "has_sentiment".into(),
+                    op: "eq".into(),
+                    value: Some(serde_json::Value::Bool(true)),
+                    values: None,
+                    start: None,
+                    end: None,
+                });
+                state.apply_preset(matter_root, spec);
+            }
             if ui.small_button("Redacted text stale").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_redacted_text_stale());
             }
@@ -3483,6 +3622,44 @@ fn show_viewer(
             if let Some(cull) = row.cull_status.as_deref() {
                 ui.separator();
                 ui.label(RichText::new(format!("cull={cull}")).small());
+            }
+        });
+        // Sentiment / tone (track 0049) — Unscored ≠ Neutral.
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Tone:").strong().small());
+            match state.item_sentiment_polarity.as_deref() {
+                Some(pol) => {
+                    let compound = state
+                        .item_sentiment_compound
+                        .map(|c| format!("{c:.3}"))
+                        .unwrap_or_else(|| "?".into());
+                    let range = match (
+                        state.item_sentiment_compound_min,
+                        state.item_sentiment_compound_max,
+                    ) {
+                        (Some(lo), Some(hi)) => format!(" [{lo:.3}…{hi:.3}]"),
+                        _ => String::new(),
+                    };
+                    let method = state
+                        .item_sentiment_method
+                        .as_deref()
+                        .unwrap_or("?");
+                    ui.label(
+                        RichText::new(format!("{pol} compound={compound}{range} ({method})"))
+                            .small(),
+                    )
+                    .on_hover_text(
+                        "Lexicon heuristic (vader_lexicon_v1): unit-extreme aggregation + footer strip. \
+Not emotion ground truth; sarcasm often fails; not for privilege or auto-coding. Unscored ≠ Neutral.",
+                    );
+                }
+                None => {
+                    ui.label(RichText::new("Unscored").italics().small().color(Color32::GRAY))
+                        .on_hover_text(
+                            "No sentiment score (job not run, skipped, or cleared). \
+Unscored is not Neutral — Neutral is a scored ~0 compound.",
+                        );
+                }
             }
         });
 

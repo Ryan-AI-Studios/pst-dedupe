@@ -324,6 +324,55 @@ impl FilterSpec {
         }
     }
 
+    /// Quick chip: scored negative tone (track 0049). NULL/unscored excluded.
+    pub fn preset_negative_tone() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "sentiment_polarity".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::String(
+                    crate::sentiment_polarity::NEGATIVE.into(),
+                )),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
+    /// Quick chip: scored positive tone (track 0049). NULL/unscored excluded.
+    pub fn preset_positive_tone() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "sentiment_polarity".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::String(
+                    crate::sentiment_polarity::POSITIVE.into(),
+                )),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
+    /// Quick chip: unscored items (`sentiment_polarity IS NULL`) — not neutral (track 0049).
+    pub fn preset_unscored() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "has_sentiment".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(false)),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
     /// True when no conditions and default family flag (still may have scope).
     pub fn is_empty_conditions(&self) -> bool {
         self.conditions.is_empty() && !self.include_family
@@ -935,6 +984,42 @@ fn push_condition(
                 params.push(Value::Text(matter_id.to_string()));
             }
         }
+        // Sentiment / tone (track 0049). NULL polarity = unscored (SQL `=` excludes NULL).
+        ("sentiment_polarity", "eq") => {
+            let pol = require_string_value(cond, "sentiment_polarity")?;
+            where_parts.push(format!("{alias}.sentiment_polarity = ?"));
+            params.push(Value::Text(pol));
+        }
+        ("sentiment_polarity", "any_of") => {
+            let keys = require_values(cond, "sentiment_polarity any_of")?;
+            let placeholders = sql_placeholders(keys.len());
+            where_parts.push(format!("{alias}.sentiment_polarity IN ({placeholders})"));
+            for k in keys {
+                params.push(Value::Text(k));
+            }
+        }
+        ("sentiment_compound", "gte") | ("sentiment_compound", "lte") => {
+            let n = require_f64_value(cond, "sentiment_compound")?;
+            let cmp = if op == "gte" { ">=" } else { "<=" };
+            where_parts.push(format!("{alias}.sentiment_compound {cmp} ?"));
+            params.push(Value::Real(n));
+        }
+        ("sentiment_compound", "between") => {
+            let (lo, hi) = require_f64_between(cond, "sentiment_compound")?;
+            where_parts.push(format!(
+                "{alias}.sentiment_compound >= ? AND {alias}.sentiment_compound <= ?"
+            ));
+            params.push(Value::Real(lo));
+            params.push(Value::Real(hi));
+        }
+        ("has_sentiment", "eq") => {
+            let want = bool_value(cond, "has_sentiment")?;
+            if want {
+                where_parts.push(format!("{alias}.sentiment_polarity IS NOT NULL"));
+            } else {
+                where_parts.push(format!("{alias}.sentiment_polarity IS NULL"));
+            }
+        }
         ("pdf_needs_ocr", "eq") => {
             let want = bool_value(cond, "pdf_needs_ocr")?;
             if want {
@@ -1302,6 +1387,40 @@ fn require_i64_between(cond: &FilterCondition, field: &str) -> Result<(i64, i64)
         (Some(a), Some(b)) => Ok((a, b)),
         _ => Err(Error::Other(format!(
             "filter field '{field}' between requires integer start and end"
+        ))),
+    }
+}
+
+fn require_f64_value(cond: &FilterCondition, field: &str) -> Result<f64> {
+    if let Some(v) = cond.value.as_ref() {
+        if let Some(n) = v.as_f64() {
+            return Ok(n);
+        }
+        if let Some(s) = v.as_str() {
+            if let Ok(n) = s.trim().parse::<f64>() {
+                return Ok(n);
+            }
+        }
+    }
+    Err(Error::Other(format!(
+        "filter field '{field}' requires a numeric 'value'"
+    )))
+}
+
+fn require_f64_between(cond: &FilterCondition, field: &str) -> Result<(f64, f64)> {
+    let lo = cond
+        .start
+        .as_deref()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .or_else(|| cond.value.as_ref().and_then(|v| v.as_f64()));
+    let hi = cond
+        .end
+        .as_deref()
+        .and_then(|s| s.trim().parse::<f64>().ok());
+    match (lo, hi) {
+        (Some(a), Some(b)) => Ok((a, b)),
+        _ => Err(Error::Other(format!(
+            "filter field '{field}' between requires numeric start and end"
         ))),
     }
 }
@@ -1709,6 +1828,89 @@ mod tests {
                 && compiled.list_sql.contains("'default'"),
             "has_concept_cluster must join default set: sql={}",
             compiled.list_sql
+        );
+    }
+
+    #[test]
+    fn sentiment_filters_compile() {
+        let neg = FilterSpec::preset_negative_tone();
+        let c_neg = compile_filter(&neg, "mat1", None).expect("neg");
+        assert!(
+            c_neg.list_sql.contains("sentiment_polarity = ?"),
+            "sql={}",
+            c_neg.list_sql
+        );
+
+        let pos = FilterSpec::preset_positive_tone();
+        let c_pos = compile_filter(&pos, "mat1", None).expect("pos");
+        assert!(c_pos.list_sql.contains("sentiment_polarity = ?"));
+
+        let unscored = FilterSpec::preset_unscored();
+        let c_u = compile_filter(&unscored, "mat1", None).expect("unscored");
+        assert!(
+            c_u.list_sql.contains("sentiment_polarity IS NULL"),
+            "sql={}",
+            c_u.list_sql
+        );
+
+        let has = FilterSpec {
+            conditions: vec![FilterCondition {
+                field: "has_sentiment".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..FilterSpec::default()
+        };
+        let c_has = compile_filter(&has, "mat1", None).expect("has");
+        assert!(c_has.list_sql.contains("sentiment_polarity IS NOT NULL"));
+
+        let compound = FilterSpec {
+            conditions: vec![
+                FilterCondition {
+                    field: "sentiment_compound".into(),
+                    op: "gte".into(),
+                    value: Some(serde_json::json!(0.05)),
+                    values: None,
+                    start: None,
+                    end: None,
+                },
+                FilterCondition {
+                    field: "sentiment_compound".into(),
+                    op: "lte".into(),
+                    value: Some(serde_json::json!(-0.05)),
+                    values: None,
+                    start: None,
+                    end: None,
+                },
+                FilterCondition {
+                    field: "sentiment_compound".into(),
+                    op: "between".into(),
+                    value: None,
+                    values: None,
+                    start: Some("-0.5".into()),
+                    end: Some("0.5".into()),
+                },
+                FilterCondition {
+                    field: "sentiment_polarity".into(),
+                    op: "any_of".into(),
+                    value: None,
+                    values: Some(vec!["positive".into(), "neutral".into()]),
+                    start: None,
+                    end: None,
+                },
+            ],
+            ..FilterSpec::default()
+        };
+        let c_c = compile_filter(&compound, "mat1", None).expect("compound");
+        assert!(
+            c_c.list_sql.contains("sentiment_compound >=")
+                && c_c.list_sql.contains("sentiment_compound <=")
+                && c_c.list_sql.contains("sentiment_polarity IN"),
+            "sql={}",
+            c_c.list_sql
         );
     }
 }

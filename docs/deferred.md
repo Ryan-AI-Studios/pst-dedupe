@@ -458,6 +458,23 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0048-08 | — | Exclude near-dup members by default | Residual param; off by default | residual |
 | D-0048-09 | — | Incremental re-cluster dirty docs | P0 full rebuild | scale residual |
 | D-0048-10 | — | LLM cluster titles | Opt-in only | **0051/0052** |
+
+## From track 0049-SentimentNlpPlugin (Completed — see conductor review)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0049-01 | — | Transformer / ONNX sentiment | P0 lexicon/rules only | **0050/0051** |
+| D-0049-02 | — | Multilingual lexicons | English P0 | **0054** |
+| D-0049-03 | — | Per-unit score table + highlight UI | Aggregation is unit-based; no per-unit persist | residual |
+| D-0049-04 | — | Aspect-based (entity targets) | Residual | residual |
+| D-0049-05 | — | Emotion taxonomy beyond pos/neu/neg | Residual | residual |
+| D-0049-06 | — | Dashboard tone heatmaps | Residual polish | residual |
+| D-0049-07 | — | Auto-suggest codes from polarity | **Never default** | never default |
+| D-0049-08 | — | Job scope `in_review` | P0 `all` only | residual |
+| D-0049-09 | — | Subject prepend as first unit | Optional residual | residual |
+| D-0049-10 | P3 | Wire remaining fixtures via `include_str!` | pos/neg used; hostile still partly inline | residual polish |
+| D-0049-11 | P3 | Formal `cargo deny` in CI for sentiment tree | Manual tree audit in review.md | residual |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

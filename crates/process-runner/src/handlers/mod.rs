@@ -57,6 +57,9 @@ pub mod people_graph;
 #[cfg(feature = "cluster")]
 pub mod concept_cluster;
 
+#[cfg(feature = "sentiment")]
+pub mod sentiment;
+
 /// Sequential processing-profile runner (always available; depends only on matter-core).
 pub mod profile_run;
 
@@ -119,6 +122,9 @@ pub use people_graph::MatterPeopleGraphHandler;
 
 #[cfg(feature = "cluster")]
 pub use concept_cluster::MatterConceptClusterHandler;
+
+#[cfg(feature = "sentiment")]
+pub use sentiment::MatterSentimentHandler;
 
 pub use profile_run::MatterProfileRunHandler;
 pub use workflow_run::MatterWorkflowRunHandler;

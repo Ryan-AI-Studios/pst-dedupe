@@ -279,6 +279,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
             app.start_entity_scan();
         }
         if ui
+            .add_enabled(!busy, egui::Button::new("Run sentiment"))
+            .on_hover_text(
+                "Offline VADER lexicon tone (kind=sentiment): unit-extreme + footer strip. \
+Heuristic only — not privilege/coding; Unscored ≠ Neutral; sarcasm/dilution imperfect.",
+            )
+            .clicked()
+        {
+            app.start_sentiment();
+        }
+        if ui
             .add_enabled(!busy, egui::Button::new("Build people graph"))
             .on_hover_text(
                 "Two-pass people–comms graph from headers (kind=people_graph); BCC separate; no self-loop edges",

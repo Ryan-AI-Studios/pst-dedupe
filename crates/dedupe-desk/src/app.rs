@@ -1087,6 +1087,26 @@ impl DeskApp {
         }
     }
 
+    /// Offline sentiment / tone (`sentiment`) — VADER lexicon heuristic.
+    pub(crate) fn start_sentiment(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params = JobParams::new(params::sentiment_default_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "sentiment", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started sentiment job {job_id}"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
     /// Offline people–comms graph build (`people_graph`).
     pub(crate) fn start_people_graph(&mut self) {
         let Some(root) = self.matter_root.clone() else {

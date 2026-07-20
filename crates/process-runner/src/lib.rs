@@ -87,5 +87,8 @@ pub use handlers::MatterClassifyHandler;
 #[cfg(feature = "entity")]
 pub use handlers::MatterEntityScanHandler;
 
+#[cfg(feature = "sentiment")]
+pub use handlers::MatterSentimentHandler;
+
 pub use handlers::MatterProfileRunHandler;
 pub use handlers::MatterWorkflowRunHandler;
