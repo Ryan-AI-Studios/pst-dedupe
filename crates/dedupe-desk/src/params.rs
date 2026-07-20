@@ -310,6 +310,22 @@ pub fn entity_scan_default_params() -> String {
     .to_string()
 }
 
+/// Default params for people–comms graph (`kind = "people_graph"`).
+///
+/// Opt-in job — headers primary. `include_entity_emails` must stay `false`
+/// (true is rejected by matter-people until body join is implemented).
+pub fn people_graph_default_params() -> String {
+    serde_json::json!({
+        "scope": "all",
+        "include_entity_emails": false,
+        "grain": "day",
+        "reset": true,
+        "batch_size": 200,
+        "max_recipients_per_item": 200
+    })
+    .to_string()
+}
+
 /// Built-in processing profile names (desk dropdown; code constants in matter-core).
 pub const PROFILE_BUILTIN_NAMES: &[&str] = &["standard", "with_ocr", "extract_only", "reduce_only"];
 

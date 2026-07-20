@@ -2812,6 +2812,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "matter-people"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "chrono",
+ "matter-core",
+ "matter-entity",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "matter-produce"
 version = "0.1.0"
 dependencies = [
@@ -3870,6 +3885,7 @@ dependencies = [
  "matter-entity",
  "matter-gap",
  "matter-neardup",
+ "matter-people",
  "matter-produce",
  "matter-promote",
  "matter-qc",

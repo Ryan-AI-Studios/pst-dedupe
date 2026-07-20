@@ -23,7 +23,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 |---|---|---|---|---|
 | D-0017-01 | P3 | Unique index on `items(source_id, path)` | Optional in DoD; resume remains app-level | future polish |
 | D-0017-02 | P3 | Formal SQLite FK on `parent_item_id` | App-enforced; ALTER cannot add FK cleanly | later migration if needed |
-| D-0017-03 | — | Relational `item_participants` | JSON P0 by design; Tantivy/graph later | **0029 / 0038 / 0047** |
+| D-0017-03 | — | Relational `item_participants` | **Done in 0047** (`item_participants` + people/edges/timeline schema v26) | — |
 | D-0017-04 | — | Body-to-CAS promote helper (`text_sha256`) | **Done in 0018** (body → CAS + column) | — |
 | D-0017-05 | — | Bulk rehash / fill from PST | Extract fill in 0018; runner in 0019 | bulk job polish later |
 
@@ -298,7 +298,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0038-05 | — | Multi-matter portfolio dashboard | Single matter P0 | residual / **0058** |
 | D-0038-06 | — | Continuous auto-refresh / live per-second charts | Manual + post-job refresh P0 | residual |
 | D-0038-07 | — | Gap analysis (missing mailbox/date vs opposing) | Not overview | **0042** |
-| D-0038-08 | — | People/comms timeline heatmaps | Analytics | **0047** / Series G |
+| D-0038-08 | — | People/comms timeline heatmaps | **Partial close in 0047**: day/week timeline **tables** + Top Pairs/people; force-graph/heatmap charts residual | residual / D-0047-05 |
 | D-0038-09 | P3 | Full GUI smoke Overview panel | Automated API + unit; operator smoke local | operator / polish |
 | D-0038-10 | — | Physical source package size (path stat / sources.size column) | P0 top-level item size only | residual |
 | D-0038-11 | — | “Reviewed” beyond codes (opened, notes-only, privilege-only) | P0: ≥1 item_code | residual |
@@ -425,7 +425,23 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0046-03 | — | Auto-add `entity_scan` to processing profiles / workflows | Manual job / CLI only P0 | residual |
 | D-0046-04 | — | Auto-redact / create redaction from entity hit | Operator uses **0032** manually | residual |
 | D-0046-05 | — | HTML body (`html_sha256`) scan | Prefer plain `text_sha256` P0 | residual |
-| D-0046-06 | — | Cross-item same `match_hash` report UI | Hash index enables later; thin API residual | residual / **0047** |
+| D-0046-06 | — | Cross-item same `match_hash` report UI | Hash index enables later; graph does not surface match_hash report; thin API residual | residual |
+
+## From track 0047-PeopleCommsGraph (Completed — see conductor review)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0047-01 | — | Force-directed / canvas people graph viz | P0 tables-first only | residual polish |
+| D-0047-02 | — | Manual alias merge UI (display↔smtp) | No auto-merge P0 | residual / **0051** |
+| D-0047-03 | — | Entity-body emails in graph (`include_entity_emails`) | P0 rejects `true` fail-closed; headers only | residual (policy) |
+| D-0047-04 | — | Multi-hop path UI (recursive CTE) | Residual | residual |
+| D-0047-05 | — | Heatmap charts for timeline / pairs | Tables in 0047; charts residual | residual / D-0038-08 |
+| D-0047-06 | — | Incremental dirty Pass 1 | P0 full rebuild; Pass 2 always from participants | scale residual |
+| D-0047-07 | — | BCC-in-pairs export/UI toggle | Default Top Pairs = visible only (to+cc); no BCC column | residual advanced |
+| D-0047-08 | P3 | Fingerprint inventory digest for soft-stale | Fingerprint = engine+params; desk defaults `reset:true` | residual polish |
+| D-0047-09 | P3 | SQLite UNIQUE + NULL person_id on timeline | Pass2 delete+rebuild; sentinel residual | residual polish |
+| D-0047-10 | P3 | Auto-reload People panel when job completes | Manual Refresh P0 | residual polish |
+| D-0017-03 | — | Relational `item_participants` | **Closed in 0047** | — |
 
 ## Hygiene
 

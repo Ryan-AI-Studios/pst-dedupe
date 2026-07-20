@@ -279,6 +279,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
             app.start_entity_scan();
         }
         if ui
+            .add_enabled(!busy, egui::Button::new("Build people graph"))
+            .on_hover_text(
+                "Two-pass people–comms graph from headers (kind=people_graph); BCC separate; no self-loop edges",
+            )
+            .clicked()
+        {
+            app.start_people_graph();
+        }
+        if ui
             .add_enabled(!busy, egui::Button::new("Build / Update search index"))
             .on_hover_text("Incremental Tantivy FTS index (kind=fts_index, reset:false)")
             .clicked()

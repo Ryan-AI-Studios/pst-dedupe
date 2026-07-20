@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v25**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v26**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -34,6 +34,7 @@
 //! - **Processing profiles** (`processing_profiles` + built-in stage presets, schema v23) (0043)
 //! - **Workflows** (`workflows` + `jobs.parent_job_id` + built-in multi-step recipes, schema v24) (0044)
 //! - **Entity / PII hits** (`item_entity_hits` + `entity_*` rollup columns, schema v25) (0046)
+//! - **People–comms graph** (`people`, `item_participants`, `people_edges`, `people_timeline`, schema v26) (0047)
 //!
 //! ## Layout
 //!
@@ -74,6 +75,7 @@ pub mod ocr;
 pub mod office;
 pub mod overview;
 pub mod pdf;
+pub mod people;
 pub mod privilege;
 pub mod profile;
 pub mod qc;
@@ -142,6 +144,12 @@ pub use overview::{
     PrivilegeOverview, ReviewOverview,
 };
 pub use pdf::{pdf_extract_status, ApplyPdfTextInput, PdfCandidate, PdfExtractApplyResult};
+pub use people::{
+    identity_kind, participant_role, people_edge_id, people_graph_pass, people_timeline_id,
+    person_id_for, DomainRollupRow, ItemParticipant, PeopleEdge, PeopleGraphStatus,
+    PeoplePass1Candidate, PeopleTimelineBucket, Person, UpsertItemParticipantInput,
+    UpsertPersonStubInput,
+};
 pub use privilege::{
     basis_label, csv_escape_field, join_addrs_json, path_basename, privilege_basis,
     privilege_log_format, privilege_status, FamilyPrivilegeConsistency, ItemPrivilege,

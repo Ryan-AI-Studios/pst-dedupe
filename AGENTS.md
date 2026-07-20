@@ -59,7 +59,7 @@ verify{
 rust{
   forbid[2]:".unwrap()","expect() in production"
   errors:"use miette + Result"
-  boundaries[8]:
+  boundaries[9]:
     "pst-reader owns PST parsing: header, NDB, LTP, messaging extraction"
     "dedup-engine owns dedup hashing, index, CSV report, EML serialization"
     "pst-dedup-cli owns the CLI surface: inspect, scan, dups, JSON/CSV output"
@@ -68,6 +68,7 @@ rust{
     "matter-core owns matter layout, SQLite metadata, CAS, audit chain, jobs/checkpoints"
     "ingest-purview owns package detect, safe ZIP expand, leaf checkpoints; call from blocking worker only"
     "matter-entity owns offline entity/PII packs, entity_scan job logic, mask/hash hits"
+    "matter-people owns people-comms graph: normalize_participant, people_graph two-pass job, edges/timeline"
   invariants[2]:
     "features work offline with local model"
     "preserve Windows paths; prefer camino for UTF-8 paths"

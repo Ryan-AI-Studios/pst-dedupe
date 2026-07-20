@@ -51,6 +51,9 @@ pub mod classify;
 #[cfg(feature = "entity")]
 pub mod entity_scan;
 
+#[cfg(feature = "people")]
+pub mod people_graph;
+
 /// Sequential processing-profile runner (always available; depends only on matter-core).
 pub mod profile_run;
 
@@ -107,6 +110,9 @@ pub use classify::MatterClassifyHandler;
 
 #[cfg(feature = "entity")]
 pub use entity_scan::MatterEntityScanHandler;
+
+#[cfg(feature = "people")]
+pub use people_graph::MatterPeopleGraphHandler;
 
 pub use profile_run::MatterProfileRunHandler;
 pub use workflow_run::MatterWorkflowRunHandler;
