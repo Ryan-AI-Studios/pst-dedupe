@@ -49,9 +49,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense};
 use matter_core::{
     parse_bound_instant, redaction_reason, ApplyCodesInput, ApplyCodesResult, CodeDef,
-    CodeDefInput, FilterCondition, FilterSpec, ItemCodeInfo, ItemHighlight, ItemNote,
-    ItemPrivilege, ItemRedaction, Matter, ResolvedHighlight, ResolvedRedaction, ReviewListRow,
-    SavedSearch, SavedSearchInput, UpsertNoteInput, UpsertPrivilegeProtocolInput,
+    CodeDefInput, FilterCondition, FilterSpec, ItemCodeInfo, ItemEntityHit, ItemHighlight,
+    ItemNote, ItemPrivilege, ItemRedaction, Matter, ResolvedHighlight, ResolvedRedaction,
+    ReviewListRow, SavedSearch, SavedSearchInput, UpsertNoteInput, UpsertPrivilegeProtocolInput,
 };
 
 use crate::review_body::{BodyLoader, BodyPane};
@@ -128,6 +128,12 @@ pub struct FilterDraft {
     pub has_highlights: bool,
     /// `has_redactions eq true` chip (track 0032).
     pub has_redactions: bool,
+    /// Has PII entity hits (phone|SSN|card) chip (track 0046).
+    pub has_pii: bool,
+    /// Has email entity hits chip (track 0046).
+    pub has_email: bool,
+    /// Has credit-card entity hits chip (track 0046).
+    pub has_card: bool,
     /// `redacted_text_stale eq true` chip (track 0032).
     pub redacted_text_stale: bool,
     /// `pdf_needs_ocr eq true` chip (track 0034).
@@ -209,6 +215,42 @@ impl FilterDraft {
                 field: "has_redactions".into(),
                 op: "eq".into(),
                 value: Some(serde_json::Value::Bool(true)),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        if self.has_pii {
+            conditions.push(FilterCondition {
+                field: "entity_flags".into(),
+                op: "any_bits".into(),
+                value: Some(serde_json::Value::Number(serde_json::Number::from(
+                    matter_core::entity_flags::PII_MASK,
+                ))),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        if self.has_email {
+            conditions.push(FilterCondition {
+                field: "entity_flags".into(),
+                op: "any_bits".into(),
+                value: Some(serde_json::Value::Number(serde_json::Number::from(
+                    matter_core::entity_flags::EMAIL,
+                ))),
+                values: None,
+                start: None,
+                end: None,
+            });
+        }
+        if self.has_card {
+            conditions.push(FilterCondition {
+                field: "entity_flags".into(),
+                op: "any_bits".into(),
+                value: Some(serde_json::Value::Number(serde_json::Number::from(
+                    matter_core::entity_flags::CARD,
+                ))),
                 values: None,
                 start: None,
                 end: None,
@@ -334,6 +376,25 @@ impl FilterDraft {
                 ("has_redactions", "eq") => {
                     d.has_redactions = c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
                 }
+                ("entity_flags", "any_bits") => {
+                    let bits = c.value.as_ref().and_then(|v| v.as_i64()).unwrap_or(0);
+                    if bits & matter_core::entity_flags::PII_MASK != 0
+                        && bits & matter_core::entity_flags::EMAIL == 0
+                        && bits != matter_core::entity_flags::CARD
+                    {
+                        d.has_pii = true;
+                    }
+                    if bits & matter_core::entity_flags::EMAIL != 0 {
+                        d.has_email = true;
+                    }
+                    if bits == matter_core::entity_flags::CARD {
+                        d.has_card = true;
+                    }
+                    // Full PII_MASK preset.
+                    if bits == matter_core::entity_flags::PII_MASK {
+                        d.has_pii = true;
+                    }
+                }
                 ("redacted_text_stale", "eq") => {
                     d.redacted_text_stale =
                         c.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(true);
@@ -452,6 +513,8 @@ pub struct ReviewState {
     item_highlights: Vec<ItemHighlight>,
     /// Redaction regions for the current selection (stored SQLite rows).
     item_redactions: Vec<ItemRedaction>,
+    /// Entity / PII hits for the current selection (masked only; track 0046).
+    item_entity_hits: Vec<ItemEntityHit>,
     /// Bookkeeping from `items` for regenerate / stale banner.
     item_redaction_count: i64,
     item_redacted_text_sha256: Option<String>,
@@ -599,6 +662,7 @@ impl ReviewState {
         self.item_notes.clear();
         self.item_highlights.clear();
         self.item_redactions.clear();
+        self.item_entity_hits.clear();
         self.item_redaction_count = 0;
         self.item_redacted_text_sha256 = None;
         self.item_redacted_source_digest = None;
@@ -1168,6 +1232,7 @@ impl ReviewState {
         self.item_notes.clear();
         self.item_highlights.clear();
         self.item_redactions.clear();
+        self.item_entity_hits.clear();
         self.item_redaction_count = 0;
         self.item_redacted_text_sha256 = None;
         self.item_redacted_source_digest = None;
@@ -1227,6 +1292,7 @@ impl ReviewState {
                 self.item_notes.clear();
                 self.item_highlights.clear();
                 self.item_redactions.clear();
+                self.item_entity_hits.clear();
                 self.item_redaction_count = 0;
                 self.item_redacted_text_sha256 = None;
                 self.item_redacted_source_digest = None;
@@ -1240,6 +1306,7 @@ impl ReviewState {
         self.item_notes = bundle.notes;
         self.item_highlights = bundle.highlights;
         self.item_redactions = bundle.redactions;
+        self.item_entity_hits = bundle.entity_hits;
         self.item_redaction_count = bundle.redaction_count;
         self.item_redacted_text_sha256 = bundle.redacted_text_sha256;
         self.item_redacted_source_digest = bundle.redacted_source_digest;
@@ -2416,6 +2483,7 @@ struct AnnotationBundle {
     notes: Vec<ItemNote>,
     highlights: Vec<ItemHighlight>,
     redactions: Vec<ItemRedaction>,
+    entity_hits: Vec<ItemEntityHit>,
     redaction_count: i64,
     redacted_text_sha256: Option<String>,
     redacted_source_digest: Option<String>,
@@ -2430,16 +2498,33 @@ fn load_notes_highlights_redactions(
     let notes = matter.list_notes(item_id).map_err(|e| e.to_string())?;
     let highlights = matter.list_highlights(item_id).map_err(|e| e.to_string())?;
     let redactions = matter.list_redactions(item_id).map_err(|e| e.to_string())?;
+    let entity_hits = matter
+        .list_entity_hits(item_id)
+        .map_err(|e| e.to_string())?;
     let item = matter.get_item(item_id).map_err(|e| e.to_string())?;
     Ok(AnnotationBundle {
         notes,
         highlights,
         redactions,
+        entity_hits,
         redaction_count: item.redaction_count,
         redacted_text_sha256: item.redacted_text_sha256,
         redacted_source_digest: item.redacted_source_digest,
         pdf_needs_ocr: item.pdf_needs_ocr,
     })
+}
+
+/// Safe highlight slice helper — offsets are UI hints; OOB returns None (no panic).
+pub fn safe_entity_offset_slice(text: &str, start: i64, end: i64) -> Option<&str> {
+    if start < 0 || end < 0 || end < start {
+        return None;
+    }
+    let start = start as usize;
+    let end = end as usize;
+    if end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return None;
+    }
+    Some(&text[start..end])
 }
 
 /// Load `pdf_needs_ocr` from the item row (independent of annotation queries).
@@ -3031,6 +3116,15 @@ fn show_filter_bar(
             if ui.small_button("Has redactions").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_has_redactions());
             }
+            if ui.small_button("Has PII").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_has_pii());
+            }
+            if ui.small_button("Has email").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_has_email());
+            }
+            if ui.small_button("Has card").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_has_card());
+            }
             if ui.small_button("Redacted text stale").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_redacted_text_stale());
             }
@@ -3063,6 +3157,27 @@ fn show_filter_bar(
             if state.filter_draft.has_redactions {
                 ui.label(
                     RichText::new("active: Has redactions")
+                        .small()
+                        .color(Color32::from_rgb(40, 120, 60)),
+                );
+            }
+            if state.filter_draft.has_pii {
+                ui.label(
+                    RichText::new("active: Has PII")
+                        .small()
+                        .color(Color32::from_rgb(40, 120, 60)),
+                );
+            }
+            if state.filter_draft.has_email {
+                ui.label(
+                    RichText::new("active: Has email")
+                        .small()
+                        .color(Color32::from_rgb(40, 120, 60)),
+                );
+            }
+            if state.filter_draft.has_card {
+                ui.label(
+                    RichText::new("active: Has card")
                         .small()
                         .color(Color32::from_rgb(40, 120, 60)),
                 );
@@ -3674,6 +3789,11 @@ fn show_viewer(
 
         ui.separator();
 
+        // Entity / PII hits (masked only)
+        show_entity_hits_panel(ui, state);
+
+        ui.separator();
+
         // Family / attachment strip
         show_family_strip(ui, state, &row, matter_root, ctx);
     });
@@ -3947,6 +4067,45 @@ fn show_notes_panel(
                 }
             });
         }
+    }
+}
+
+fn show_entity_hits_panel(ui: &mut egui::Ui, state: &ReviewState) {
+    let n = state.item_entity_hits.len();
+    ui.label(RichText::new(format!("Entity hits ({n})")).strong().small());
+    ui.label(
+        RichText::new(
+            "Masked values only (never full PAN/SSN). Offsets are UI hints — list stays valid if highlights fail.",
+        )
+        .weak()
+        .small(),
+    );
+    if state.item_entity_hits.is_empty() {
+        ui.label(
+            RichText::new("No entity hits for this item.")
+                .weak()
+                .small(),
+        );
+        return;
+    }
+    // Body for optional offset check (hint degrade — never panic).
+    let body = state
+        .current_item_id()
+        .and_then(|id| state.ready_body_for_item(id).map(|s| s.to_string()));
+    for hit in &state.item_entity_hits {
+        let offset_ok = body
+            .as_deref()
+            .and_then(|b| safe_entity_offset_slice(b, hit.start_offset, hit.end_offset))
+            .is_some();
+        let hint = if offset_ok { "offset ok" } else { "offset n/a" };
+        ui.label(
+            RichText::new(format!(
+                "[{}] {}  ({})  {}",
+                hit.entity_type, hit.masked_value, hit.field, hint
+            ))
+            .small()
+            .monospace(),
+        );
     }
 }
 

@@ -48,6 +48,9 @@ pub mod ocr;
 #[cfg(feature = "classify")]
 pub mod classify;
 
+#[cfg(feature = "entity")]
+pub mod entity_scan;
+
 /// Sequential processing-profile runner (always available; depends only on matter-core).
 pub mod profile_run;
 
@@ -101,6 +104,9 @@ pub use ocr::MatterOcrHandler;
 
 #[cfg(feature = "classify")]
 pub use classify::MatterClassifyHandler;
+
+#[cfg(feature = "entity")]
+pub use entity_scan::MatterEntityScanHandler;
 
 pub use profile_run::MatterProfileRunHandler;
 pub use workflow_run::MatterWorkflowRunHandler;

@@ -50,6 +50,8 @@ pub fn register_default_handlers(runner: &mut ProcessRunner) {
     runner.register(Arc::new(MatterOcrHandler::new()));
     #[cfg(feature = "classify")]
     runner.register(Arc::new(MatterClassifyHandler::new()));
+    #[cfg(feature = "entity")]
+    runner.register(Arc::new(MatterEntityScanHandler::new()));
 
     // Always available (matter-core only).
     runner.register(Arc::new(MatterProfileRunHandler::with_default_handlers()));
@@ -78,6 +80,7 @@ pub fn default_handler_kinds() -> &'static [&'static str] {
         "ics_extract",
         "ocr",
         "classify",
+        "entity_scan",
         "profile_run",
         "workflow_run",
     ]

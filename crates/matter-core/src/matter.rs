@@ -283,6 +283,16 @@ pub struct Item {
     pub category_error: Option<String>,
     /// RFC3339 timestamp of last classify apply.
     pub categorized_at: Option<String>,
+    // --- schema v25 (entity / PII packs) ---
+    /// Bitmask of entity hit types (see [`crate::entity_flags`]).
+    pub entity_flags: i64,
+    /// RFC3339 timestamp of last entity scan for this item.
+    pub entity_scan_at: Option<String>,
+    pub entity_scan_job_id: Option<String>,
+    /// Denormalized count of `item_entity_hits` for this item.
+    pub entity_hit_count: i64,
+    /// Digest of body text last used for entity_scan (idempotency).
+    pub entity_scanned_text_sha256: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -4821,7 +4831,8 @@ const ITEM_COLUMNS: &str =
     ics_extracted_at, ics_extract_error, \
     ocr_status, ocr_engine, ocr_lang, ocr_text_sha256, ocr_source_native_sha256, \
     ocr_page_count, ocr_at, ocr_error, ocr_confidence, \
-    category_method, category_taxonomy, category_status, category_error, categorized_at";
+    category_method, category_taxonomy, category_status, category_error, categorized_at, \
+    entity_flags, entity_scan_at, entity_scan_job_id, entity_hit_count, entity_scanned_text_sha256";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -4942,6 +4953,11 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         category_status: row.get(110)?,
         category_error: row.get(111)?,
         categorized_at: row.get(112)?,
+        entity_flags: row.get::<_, Option<i64>>(113)?.unwrap_or(0),
+        entity_scan_at: row.get(114)?,
+        entity_scan_job_id: row.get(115)?,
+        entity_hit_count: row.get::<_, Option<i64>>(116)?.unwrap_or(0),
+        entity_scanned_text_sha256: row.get(117)?,
     })
 }
 

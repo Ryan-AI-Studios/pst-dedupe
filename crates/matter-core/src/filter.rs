@@ -226,6 +226,59 @@ impl FilterSpec {
         }
     }
 
+    /// Quick chip: items with phone/SSN/card entity hits (track 0046).
+    ///
+    /// Uses [`crate::entity_flags::PII_MASK`] (`PHONE|SSN|CARD`).
+    pub fn preset_has_pii() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "entity_flags".into(),
+                op: "any_bits".into(),
+                value: Some(serde_json::Value::Number(serde_json::Number::from(
+                    crate::entity_flags::PII_MASK,
+                ))),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
+    /// Quick chip: items with email entity hits (track 0046).
+    pub fn preset_has_email() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "entity_flags".into(),
+                op: "any_bits".into(),
+                value: Some(serde_json::Value::Number(serde_json::Number::from(
+                    crate::entity_flags::EMAIL,
+                ))),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
+    /// Quick chip: items with credit-card entity hits (track 0046).
+    pub fn preset_has_card() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "entity_flags".into(),
+                op: "any_bits".into(),
+                value: Some(serde_json::Value::Number(serde_json::Number::from(
+                    crate::entity_flags::CARD,
+                ))),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
     /// Quick chip: PDF empty/low-text needing OCR (track 0034 / handoff 0036).
     pub fn preset_pdf_needs_ocr() -> Self {
         Self {
@@ -693,6 +746,39 @@ fn push_condition(
                 ));
             }
         }
+        ("entity_flags", "any_bits") => {
+            let bits = i64_value(cond, "entity_flags any_bits")?;
+            where_parts.push(format!("({alias}.entity_flags & ?) != 0"));
+            params.push(Value::Integer(bits));
+        }
+        ("entity_flags", "eq") => {
+            let bits = i64_value(cond, "entity_flags eq")?;
+            where_parts.push(format!("{alias}.entity_flags = ?"));
+            params.push(Value::Integer(bits));
+        }
+        ("has_entity", "eq") => {
+            let want = bool_value(cond, "has_entity")?;
+            if want {
+                where_parts.push(format!("{alias}.entity_hit_count > 0"));
+            } else {
+                where_parts.push(format!(
+                    "({alias}.entity_hit_count = 0 OR {alias}.entity_hit_count IS NULL)"
+                ));
+            }
+        }
+        ("entity_type", "any_of") => {
+            let keys = require_values(cond, "entity_type any_of")?;
+            let placeholders = sql_placeholders(keys.len());
+            where_parts.push(format!(
+                "EXISTS (SELECT 1 FROM item_entity_hits eh \
+                 WHERE eh.item_id = {alias}.id AND eh.matter_id = ? \
+                 AND eh.entity_type IN ({placeholders}))"
+            ));
+            params.push(Value::Text(matter_id.to_string()));
+            for k in keys {
+                params.push(Value::Text(k));
+            }
+        }
         ("pdf_needs_ocr", "eq") => {
             let want = bool_value(cond, "pdf_needs_ocr")?;
             if want {
@@ -1093,6 +1179,27 @@ fn bool_or_int_value(cond: &FilterCondition, field: &str) -> Result<i64> {
     Ok(if bool_value(cond, field)? { 1 } else { 0 })
 }
 
+fn i64_value(cond: &FilterCondition, field: &str) -> Result<i64> {
+    if let Some(v) = cond.value.as_ref() {
+        if let Some(n) = v.as_i64() {
+            return Ok(n);
+        }
+        if let Some(n) = v.as_u64() {
+            if n <= i64::MAX as u64 {
+                return Ok(n as i64);
+            }
+        }
+        if let Some(s) = v.as_str() {
+            if let Ok(n) = s.trim().parse::<i64>() {
+                return Ok(n);
+            }
+        }
+    }
+    Err(Error::Other(format!(
+        "filter field '{field}' requires integer 'value'"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1251,5 +1358,72 @@ mod tests {
             !outer.to_ascii_lowercase().contains("like ?"),
             "outer must not re-apply LIKE conditions"
         );
+    }
+
+    #[test]
+    fn preset_has_pii_compiles_any_bits() {
+        let spec = FilterSpec::preset_has_pii();
+        let compiled = compile_filter(&spec, "mat1", None).expect("compile");
+        assert!(
+            compiled.list_sql.contains("entity_flags & ?"),
+            "sql={}",
+            compiled.list_sql
+        );
+        assert!(
+            compiled
+                .params
+                .iter()
+                .any(|p| matches!(p, Value::Integer(n) if *n == crate::entity_flags::PII_MASK)),
+            "params={:?}",
+            compiled.params
+        );
+    }
+
+    #[test]
+    fn preset_has_card_compiles_any_bits() {
+        let spec = FilterSpec::preset_has_card();
+        let compiled = compile_filter(&spec, "mat1", None).expect("compile");
+        assert!(
+            compiled.list_sql.contains("entity_flags & ?"),
+            "sql={}",
+            compiled.list_sql
+        );
+        assert!(
+            compiled
+                .params
+                .iter()
+                .any(|p| matches!(p, Value::Integer(n) if *n == crate::entity_flags::CARD)),
+            "params={:?}",
+            compiled.params
+        );
+    }
+
+    #[test]
+    fn has_entity_and_entity_type_compile() {
+        let spec = FilterSpec {
+            conditions: vec![
+                FilterCondition {
+                    field: "has_entity".into(),
+                    op: "eq".into(),
+                    value: Some(serde_json::Value::Bool(true)),
+                    values: None,
+                    start: None,
+                    end: None,
+                },
+                FilterCondition {
+                    field: "entity_type".into(),
+                    op: "any_of".into(),
+                    value: None,
+                    values: Some(vec!["email".into(), "ssn_us".into()]),
+                    start: None,
+                    end: None,
+                },
+            ],
+            ..FilterSpec::default()
+        };
+        let compiled = compile_filter(&spec, "mat1", None).expect("compile");
+        assert!(compiled.list_sql.contains("entity_hit_count > 0"));
+        assert!(compiled.list_sql.contains("item_entity_hits"));
+        assert!(compiled.list_sql.contains("entity_type IN"));
     }
 }

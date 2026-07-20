@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 24;
+pub const SCHEMA_VERSION: u32 = 25;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -38,6 +38,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (22, MIGRATION_V22),
     (23, MIGRATION_V23),
     (24, MIGRATION_V24),
+    (25, MIGRATION_V25),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -777,6 +778,39 @@ CREATE INDEX idx_workflows_matter ON workflows(matter_id);
 ALTER TABLE matters ADD COLUMN default_workflow_id TEXT;
 ALTER TABLE jobs ADD COLUMN parent_job_id TEXT REFERENCES jobs(id);
 CREATE INDEX idx_jobs_parent ON jobs(parent_job_id);
+"#;
+
+/// Entity / PII hit storage + item rollup flags (track 0046).
+///
+/// Stores **mask + match_hash only** — never cleartext PAN/SSN.
+/// `entity_scanned_text_sha256` enables digest-aware skip/rescan.
+const MIGRATION_V25: &str = r#"
+ALTER TABLE items ADD COLUMN entity_flags INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE items ADD COLUMN entity_scan_at TEXT;
+ALTER TABLE items ADD COLUMN entity_scan_job_id TEXT;
+ALTER TABLE items ADD COLUMN entity_hit_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE items ADD COLUMN entity_scanned_text_sha256 TEXT;
+
+CREATE TABLE item_entity_hits (
+  id TEXT PRIMARY KEY NOT NULL,
+  matter_id TEXT NOT NULL REFERENCES matters(id),
+  item_id TEXT NOT NULL REFERENCES items(id),
+  pack_id TEXT NOT NULL,
+  pack_version INTEGER NOT NULL,
+  entity_type TEXT NOT NULL,
+  start_offset INTEGER NOT NULL,
+  end_offset INTEGER NOT NULL,
+  match_hash TEXT NOT NULL,
+  masked_value TEXT NOT NULL,
+  field TEXT NOT NULL,
+  job_id TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_entity_hits_item ON item_entity_hits(item_id);
+CREATE INDEX idx_entity_hits_matter_type ON item_entity_hits(matter_id, entity_type);
+CREATE INDEX idx_entity_hits_hash ON item_entity_hits(matter_id, match_hash);
+
+CREATE INDEX idx_items_entity_flags ON items(entity_flags) WHERE entity_flags != 0;
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -3342,9 +3376,9 @@ mod tests {
         )
         .expect("job");
 
-        let v = migrate(&conn).expect("migrate v23 to v24");
+        let v = migrate(&conn).expect("migrate v23 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 24);
+        assert_eq!(v, 25);
 
         let has_table: bool = conn
             .query_row(
@@ -3425,6 +3459,142 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v23'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v24_to_v25_adds_entity_hits_and_item_flags() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        for &(target, sql) in MIGRATIONS {
+            if target > 24 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v24', 'V24 Matter', '2020-01-01T00:00:00Z', 24, '/tmp/v24')",
+            [],
+        )
+        .expect("matter");
+        // Minimal item so entity hit FK can be exercised after migrate.
+        conn.execute(
+            "INSERT INTO items (id, matter_id, status, imported_at) \
+             VALUES ('it_v24', 'mat_v24', 'extracted', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v24 to v25");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 25);
+
+        for col in [
+            "entity_flags",
+            "entity_scan_at",
+            "entity_scan_job_id",
+            "entity_hit_count",
+            "entity_scanned_text_sha256",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected items.{col}");
+        }
+
+        let has_table: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_entity_hits'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table");
+        assert!(has_table, "expected item_entity_hits table");
+
+        for col in [
+            "id",
+            "matter_id",
+            "item_id",
+            "pack_id",
+            "pack_version",
+            "entity_type",
+            "start_offset",
+            "end_offset",
+            "match_hash",
+            "masked_value",
+            "field",
+            "job_id",
+            "created_at",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('item_entity_hits') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected item_entity_hits.{col}");
+        }
+
+        for idx in [
+            "idx_entity_hits_item",
+            "idx_entity_hits_matter_type",
+            "idx_entity_hits_hash",
+            "idx_items_entity_flags",
+        ] {
+            let has_idx: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='{idx}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("idx");
+            assert!(has_idx, "expected {idx}");
+        }
+
+        // Defaults on existing rows.
+        let flags: i64 = conn
+            .query_row(
+                "SELECT entity_flags FROM items WHERE id = 'it_v24'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("flags");
+        assert_eq!(flags, 0);
+        let hit_count: i64 = conn
+            .query_row(
+                "SELECT entity_hit_count FROM items WHERE id = 'it_v24'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("hit_count");
+        assert_eq!(hit_count, 0);
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v24'",
                 [],
                 |row| row.get(0),
             )

@@ -106,11 +106,11 @@ impl JobHandler for SlowNodeHandler {
 
 #[test]
 fn schema_version_is_24() {
-    assert_eq!(SCHEMA_VERSION, 24);
+    assert_eq!(SCHEMA_VERSION, 25);
     let (_tmp, base) = utf8_tempdir();
     let root = make_matter(&base, "m-schema");
     let matter = Matter::open(&root).expect("open");
-    assert_eq!(matter.schema_version().expect("ver"), 24);
+    assert_eq!(matter.schema_version().expect("ver"), 25);
 }
 
 #[test]

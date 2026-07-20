@@ -1,0 +1,27 @@
+# Synthetic entity/PII fixture — FAKE data for automated tests only.
+# Do not use real SSNs, PANs, or client mail.
+
+Contact: bob@competitor.com, please reply.
+Also reach alice@example.org.
+
+Phone (NANP): (415) 555-2671 or +1-212-555-0199.
+
+# SSN-like (synthetic; passes light rules: area 219, group 09, serial 9999)
+SSN on form: 219-09-9999
+
+# Invalid SSN samples (must NOT hit after validation)
+bad area: 000-12-3456
+bad 666: 666-12-3456
+bad 9xx: 900-12-3456
+
+# Test Visa (known Luhn-valid test PAN — not a real card)
+Card: 4111-1111-1111-1111
+Also contiguous: 4111111111111111
+
+# Invalid Luhn (must NOT hit)
+Bad card: 4111-1111-1111-1112
+
+# Currency
+Invoice total $1,234.56 USD 99.00
+
+End of fixture.

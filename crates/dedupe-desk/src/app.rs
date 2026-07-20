@@ -1059,6 +1059,26 @@ impl DeskApp {
         }
     }
 
+    /// Offline entity / PII pack scan (`entity_scan`).
+    pub(crate) fn start_entity_scan(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params = JobParams::new(params::entity_scan_default_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "entity_scan", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started entity_scan job {job_id}"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
     /// Run the selected processing profile (`profile_run`).
     pub(crate) fn start_profile_run(&mut self) {
         let Some(root) = self.matter_root.clone() else {
