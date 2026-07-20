@@ -51,6 +51,9 @@ pub mod classify;
 /// Sequential processing-profile runner (always available; depends only on matter-core).
 pub mod profile_run;
 
+/// Sequential workflow runner (always available; depends only on matter-core + profile_run).
+pub mod workflow_run;
+
 #[cfg(feature = "ingest")]
 pub use ingest::IngestHandler;
 
@@ -100,3 +103,4 @@ pub use ocr::MatterOcrHandler;
 pub use classify::MatterClassifyHandler;
 
 pub use profile_run::MatterProfileRunHandler;
+pub use workflow_run::MatterWorkflowRunHandler;

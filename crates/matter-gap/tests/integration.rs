@@ -55,7 +55,7 @@ fn fixture_path(name: &str) -> PathBuf {
 #[test]
 fn schema_v22_gap_tables() {
     let (_tmp, matter) = temp_matter("schema-v22");
-    assert_eq!(SCHEMA_VERSION, 23);
+    assert_eq!(SCHEMA_VERSION, 24);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     for table in [
         "expected_custodians",

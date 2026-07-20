@@ -40,7 +40,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0019-01 | — | Multi-job parallel stages per matter | P0 single-flight only | future / **0044** |
+| D-0019-01 | — | Multi-job parallel stages per matter | **Partial close in 0044**: sequential multi-job orchestration (`workflow_run` / `profile_run` child rows). **True parallel** stages remain residual (SQLite single-writer) | residual / **D-0044-02** |
 | D-0019-02 | — | Full CLI `job run|resume|cancel` | `examples/run_job.rs` smoke only | future |
 | D-0019-03 | P3 | Extract cancel→resume via runner | Ingest path proven; extract fixture success proven | future polish |
 | D-0019-04 | — | Rayon pure-CPU stages without Matter | Forbidden for Matter path P0 | later |
@@ -378,13 +378,27 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0043-01 | P3 | `parent_job_id` column for UI grouping of profile child jobs | P0 correlates via parent checkpoint JSON | residual polish |
+| D-0043-01 | — | `parent_job_id` column for UI grouping of profile child jobs | **Closed in 0044**: `jobs.parent_job_id` + index; profile_run + workflow_run children set parent; desk Parent column | — |
 | D-0043-02 | P3 | Neardup skip-already when `reset:false` (still re-sketches) | Off in built-ins; documented residual | residual |
 | D-0043-03 | P3 | Full form profile editor | Save-as + clone from built-in/user is P0 | residual polish |
-| D-0043-04 | P3 | Desk progress stage flicker during `profile_run` (shared progress sink) | Shows stage kind; poller may overwrite | residual polish |
+| D-0043-04 | P3 | Desk progress stage flicker during `profile_run` (shared progress sink) | **Improved in 0044**: poller preserves handler stage/message for `profile_run`/`workflow_run` (count-only); residual polish | residual polish |
 | D-0043-05 | P3 | Full GUI smoke profile dropdown / Apply / Run profile | Automated engine + unit; operator smoke | operator / polish |
 | D-0036-04 | — | Auto-run OCR after pdf_extract | **Closed in 0043** | — |
 | D-0037-07 | — | Auto-run classify in profiles | **Closed in 0043** | — |
+
+## From track 0044-WorkflowEngine (Completed — Codex luna PASS)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0044-01 | — | Extract-all-PSTs fan-out under a source | P0 single `pst_item_id` binding | residual |
+| D-0044-02 | — | True parallel multi-handler stages per matter | Sequential multi-job only; SQLite single-writer | residual |
+| D-0044-03 | — | Firm-wide **user** workflow template pack | Built-ins app-global; user matter-local; multi-user pack later | residual / **0058** |
+| D-0044-04 | — | Visual workflow editor / DAG designer | Built-ins + API upsert; no graph UI | residual |
+| D-0044-05 | — | Branch / alt-path nodes on prior failure | Ordinary soft_fail without full graph | residual |
+| D-0044-06 | P3 | Full GUI smoke workflow dropdown / Run / parent jobs | Automated engine + unit; operator smoke | operator / polish |
+| D-0044-07 | P3 | Desk CRUD for user workflows (JSON editor) | Select/run P0; upsert via API | residual polish |
+| D-0019-01 | — | Multi-job parallel stages | **Partial closed in 0044** (sequential); true parallel → D-0044-02 | residual |
+| D-0043-01 | — | parent_job_id | **Closed in 0044** | — |
 
 ## Hygiene
 

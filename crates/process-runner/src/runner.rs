@@ -36,6 +36,7 @@ const PROGRESS_STAGES: &[&str] = &[
     "ocr",
     "classify",
     "profile_run",
+    "workflow_run",
 ];
 
 /// Clone an error for channel delivery (Matter errors become `Other` text).
@@ -678,8 +679,12 @@ fn start_checkpoint_poller(
                                 // Only update if this is still the same job.
                                 if s.job_id == job_id && s.state == "running" {
                                     s.completed_count = count;
-                                    s.stage = Some((*stage).to_string());
-                                    s.message = Some(format!("checkpoint:{stage}"));
+                                    // Orchestration parents own stage/message labels
+                                    // (current node / stage). Only mirror count.
+                                    if *stage != "workflow_run" && *stage != "profile_run" {
+                                        s.stage = Some((*stage).to_string());
+                                        s.message = Some(format!("checkpoint:{stage}"));
+                                    }
                                     s.kind = kind.clone();
                                     s.matter_id = matter_id.clone();
                                 }
@@ -717,6 +722,7 @@ fn load_resume_params(matter: &Matter, job: &Job) -> String {
         "promote" => Some("promote"),
         "fts_index" | "fts" => Some("fts"),
         "profile_run" => Some("profile_run"),
+        "workflow_run" => Some("workflow_run"),
         other => Some(other),
     };
     let mut stages: Vec<&str> = Vec::new();

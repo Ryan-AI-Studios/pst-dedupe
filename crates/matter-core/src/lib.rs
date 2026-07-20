@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v23**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v24**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -32,6 +32,7 @@
 //! - **Production QC** run history (`qc_runs` + selection fingerprint gate, schema v21) (0041)
 //! - **Gap analysis** roster + opposing expected docs + gap_runs (schema v22) (0042)
 //! - **Processing profiles** (`processing_profiles` + built-in stage presets, schema v23) (0043)
+//! - **Workflows** (`workflows` + `jobs.parent_job_id` + built-in multi-step recipes, schema v24) (0044)
 //!
 //! ## Layout
 //!
@@ -78,6 +79,7 @@ pub mod redaction;
 pub mod report;
 pub mod schema;
 pub mod thread_headers;
+pub mod workflow;
 
 pub use audit::{
     canonical_audit_preimage, compute_entry_hash, verify_audit_chain, AuditEvent, AuditEventInput,
@@ -162,4 +164,15 @@ pub use schema::SCHEMA_VERSION;
 pub use thread_headers::{
     normalize_conversation_index_to_hex, parse_in_reply_to, parse_references_header,
     parse_references_json, references_to_json, unfold_header_value, ConversationIndexInput,
+};
+pub use workflow::{
+    bind_workflow, builtin_workflow, builtin_workflows, collect_placeholders, evaluate_gate_kind,
+    is_allowed_workflow_job_kind, is_hard_gate_kind, parse_workflow_body,
+    strip_workflow_builtin_prefix, validate_workflow, validate_workflow_detailed,
+    workflow_body_to_json, workflow_builtin_id, workflow_definition_hash, BoundNode, Workflow,
+    WorkflowBody, WorkflowInput, WorkflowNode, WorkflowNodeType, WorkflowPlan, WorkflowValidation,
+    ALLOWED_WORKFLOW_JOB_KINDS, BUILTIN_EXTRACT_THEN_STANDARD, BUILTIN_INGEST_THEN_STANDARD,
+    BUILTIN_QC_THEN_PRODUCE, BUILTIN_REDUCE_ONLY_CHAIN, BUILTIN_WITH_OCR_CHAIN, HARD_GATE_KINDS,
+    JOB_KIND_WORKFLOW_RUN, RESERVED_WORKFLOW_BUILTIN_NAMES, WORKFLOW_BODY_MAX_BYTES,
+    WORKFLOW_BODY_VERSION,
 };

@@ -83,6 +83,8 @@ pub struct Job {
     pub error_summary: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Parent orchestration job (`workflow_run` / `profile_run`), if any.
+    pub parent_job_id: Option<String>,
 }
 
 /// Opaque checkpoint cursor owned by the calling stage.
@@ -95,83 +97,96 @@ pub struct JobCheckpoint {
     pub updated_at: String,
 }
 
+const JOB_SELECT_COLS: &str = "id, matter_id, kind, state, started_at, finished_at, \
+     error_summary, created_at, updated_at, parent_job_id";
+
+fn map_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Job, String)> {
+    let state_str: String = row.get(3)?;
+    Ok((
+        Job {
+            id: row.get(0)?,
+            matter_id: row.get(1)?,
+            kind: row.get(2)?,
+            // placeholder; set by caller after parse
+            state: JobState::Pending,
+            started_at: row.get(4)?,
+            finished_at: row.get(5)?,
+            error_summary: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
+            parent_job_id: row.get(9)?,
+        },
+        state_str,
+    ))
+}
+
+fn finalize_job(mut job: Job, state_str: String) -> Result<Job> {
+    job.state = JobState::parse(&state_str)?;
+    Ok(job)
+}
+
 pub(crate) fn create_job(
     conn: &Connection,
     id: &str,
     matter_id: &str,
     kind: &str,
     now: &str,
+    parent_job_id: Option<&str>,
 ) -> Result<Job> {
     conn.execute(
-        "INSERT INTO jobs (id, matter_id, kind, state, started_at, finished_at, error_summary, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5, ?5)",
-        params![id, matter_id, kind, JobState::Pending.as_str(), now],
+        "INSERT INTO jobs (id, matter_id, kind, state, started_at, finished_at, error_summary, \
+         created_at, updated_at, parent_job_id) \
+         VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5, ?5, ?6)",
+        params![
+            id,
+            matter_id,
+            kind,
+            JobState::Pending.as_str(),
+            now,
+            parent_job_id
+        ],
     )?;
     get_job(conn, id)
 }
 
 pub(crate) fn get_job(conn: &Connection, job_id: &str) -> Result<Job> {
     conn.query_row(
-        "SELECT id, matter_id, kind, state, started_at, finished_at, error_summary, created_at, updated_at \
-         FROM jobs WHERE id = ?1",
+        &format!("SELECT {JOB_SELECT_COLS} FROM jobs WHERE id = ?1"),
         params![job_id],
-        |row| {
-            let state_str: String = row.get(3)?;
-            Ok((
-                Job {
-                    id: row.get(0)?,
-                    matter_id: row.get(1)?,
-                    kind: row.get(2)?,
-                    // placeholder; set below
-                    state: JobState::Pending,
-                    started_at: row.get(4)?,
-                    finished_at: row.get(5)?,
-                    error_summary: row.get(6)?,
-                    created_at: row.get(7)?,
-                    updated_at: row.get(8)?,
-                },
-                state_str,
-            ))
-        },
+        map_job_row,
     )
     .map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => Error::JobNotFound(job_id.to_string()),
         other => Error::Sqlite(other),
     })
-    .and_then(|(mut job, state_str)| {
-        job.state = JobState::parse(&state_str)?;
-        Ok(job)
-    })
+    .and_then(|(job, state_str)| finalize_job(job, state_str))
 }
 
 /// List all jobs for a matter, newest first by `created_at`.
 pub(crate) fn list_jobs(conn: &Connection, matter_id: &str) -> Result<Vec<Job>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, matter_id, kind, state, started_at, finished_at, error_summary, created_at, updated_at \
-         FROM jobs WHERE matter_id = ?1 ORDER BY created_at DESC",
-    )?;
-    let rows = stmt.query_map(params![matter_id], |row| {
-        let state_str: String = row.get(3)?;
-        Ok((
-            Job {
-                id: row.get(0)?,
-                matter_id: row.get(1)?,
-                kind: row.get(2)?,
-                state: JobState::Pending,
-                started_at: row.get(4)?,
-                finished_at: row.get(5)?,
-                error_summary: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            },
-            state_str,
-        ))
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {JOB_SELECT_COLS} FROM jobs WHERE matter_id = ?1 ORDER BY created_at DESC"
+    ))?;
+    let rows = stmt.query_map(params![matter_id], map_job_row)?;
     let mut out = Vec::new();
     for row in rows {
-        let (mut job, state_str) = row?;
-        job.state = JobState::parse(&state_str)?;
-        out.push(job);
+        let (job, state_str) = row?;
+        out.push(finalize_job(job, state_str)?);
+    }
+    Ok(out)
+}
+
+/// List direct children of a parent job (oldest first for stable orchestration order).
+pub(crate) fn list_child_jobs(conn: &Connection, parent_job_id: &str) -> Result<Vec<Job>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {JOB_SELECT_COLS} FROM jobs WHERE parent_job_id = ?1 \
+         ORDER BY created_at ASC, id ASC"
+    ))?;
+    let rows = stmt.query_map(params![parent_job_id], map_job_row)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (job, state_str) = row?;
+        out.push(finalize_job(job, state_str)?);
     }
     Ok(out)
 }

@@ -151,6 +151,53 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
 
         ui.separator();
 
+        // Workflow (track 0044): select, optional run_params, run.
+        {
+            let user_workflows: Vec<(String, String)> = app
+                .snapshot
+                .workflows
+                .iter()
+                .filter(|w| !w.is_builtin)
+                .map(|w| (w.id.clone(), w.name.clone()))
+                .collect();
+            let selected_label =
+                params::workflow_selection_label(&app.selected_workflow_id, &user_workflows);
+            egui::ComboBox::from_id_salt("workflow_select")
+                .selected_text(selected_label)
+                .width(180.0)
+                .show_ui(ui, |ui| {
+                    ui.label(egui::RichText::new("Built-in").strong().small());
+                    for name in params::WORKFLOW_BUILTIN_NAMES {
+                        let id = format!("builtin:{name}");
+                        ui.selectable_value(&mut app.selected_workflow_id, id, *name);
+                    }
+                    if !user_workflows.is_empty() {
+                        ui.separator();
+                        ui.label(egui::RichText::new("User").strong().small());
+                        for (id, name) in &user_workflows {
+                            ui.selectable_value(
+                                &mut app.selected_workflow_id,
+                                id.clone(),
+                                name.as_str(),
+                            );
+                        }
+                    }
+                });
+            if ui
+                .add_enabled(!busy, egui::Button::new("Run workflow"))
+                .on_hover_text(
+                    "Sequential workflow_run: child jobs per node (job / profile_run / gate). \
+                     AST-only param binding (${key}); hard gates ignore soft_fail. \
+                     Fill path / source_id / pst_item_id for ingest/extract built-ins.",
+                )
+                .clicked()
+            {
+                app.start_workflow_run();
+            }
+        }
+
+        ui.separator();
+
         if ui
             .add_enabled(!busy, egui::Button::new("Run dedupe"))
             .on_hover_text("Tiered matter dedupe: Message-ID → logical_hash → family attachments")
@@ -347,6 +394,56 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
             .clicked()
         {
             app.request_overview_refresh();
+        }
+    });
+
+    // Workflow details + optional AST bind fields (track 0044).
+    ui.horizontal(|ui| {
+        let desc = app
+            .snapshot
+            .workflows
+            .iter()
+            .find(|w| w.id == app.selected_workflow_id)
+            .and_then(|w| w.description.as_deref())
+            .unwrap_or("");
+        if !desc.is_empty() {
+            ui.label(egui::RichText::new(desc).small().weak());
+        } else {
+            ui.label(
+                egui::RichText::new(format!("Workflow: {}", app.selected_workflow_id))
+                    .small()
+                    .weak(),
+            );
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Workflow params").small().strong());
+        ui.add(
+            egui::TextEdit::singleline(&mut app.workflow_source_path)
+                .desired_width(180.0)
+                .hint_text("source_path"),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut app.workflow_source_id)
+                .desired_width(120.0)
+                .hint_text("source_id"),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut app.workflow_pst_item_id)
+                .desired_width(120.0)
+                .hint_text("pst_item_id"),
+        );
+        if ui
+            .small_button("Use selected PST")
+            .on_hover_text("Copy source_id + pst_item_id from the inventory selection")
+            .clicked()
+        {
+            if let Some(sel) = app.selected_pst.as_ref() {
+                if let Some(pst) = app.snapshot.psts.iter().find(|p| p.item_id == *sel) {
+                    app.workflow_pst_item_id = pst.item_id.clone();
+                    app.workflow_source_id = pst.source_id.clone();
+                }
+            }
         }
     });
 
@@ -708,20 +805,32 @@ fn show_jobs(ui: &mut egui::Ui, snap: &MatterSnapshot) {
             .max_height(160.0)
             .show(ui, |ui| {
                 egui::Grid::new("jobs_grid")
-                    .num_columns(6)
+                    .num_columns(7)
                     .striped(true)
                     .show(ui, |ui| {
                         ui.strong("Kind");
                         ui.strong("State");
                         ui.strong("Id");
+                        ui.strong("Parent");
                         ui.strong("Started");
                         ui.strong("Finished");
                         ui.strong("Error");
                         ui.end_row();
                         for j in snap.jobs.iter().rev() {
-                            ui.label(&j.kind);
+                            // Indent child jobs under orchestrators (workflow_run / profile_run).
+                            let kind_label = if j.parent_job_id.is_some() {
+                                format!("  └ {}", j.kind)
+                            } else {
+                                j.kind.clone()
+                            };
+                            ui.label(kind_label);
                             ui.label(&j.state);
                             ui.monospace(short(&j.id));
+                            if let Some(ref pid) = j.parent_job_id {
+                                ui.monospace(format!("parent: {}", short(pid)));
+                            } else {
+                                ui.label("—");
+                            }
                             ui.label(j.started_at.as_deref().unwrap_or("—"));
                             ui.label(j.finished_at.as_deref().unwrap_or("—"));
                             ui.label(j.error_summary.as_deref().unwrap_or("—"));

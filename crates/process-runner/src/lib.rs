@@ -83,3 +83,4 @@ pub use handlers::MatterOcrHandler;
 pub use handlers::MatterClassifyHandler;
 
 pub use handlers::MatterProfileRunHandler;
+pub use handlers::MatterWorkflowRunHandler;

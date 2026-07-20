@@ -52,6 +52,8 @@ pub struct MatterSnapshot {
     pub cull_presets: Vec<CullPresetRow>,
     /// User processing profiles (built-ins are code constants; not listed here).
     pub processing_profiles: Vec<ProcessingProfileRow>,
+    /// Workflows from `list_workflows` (built-ins ∪ user) for desk dropdown + descriptions.
+    pub workflows: Vec<WorkflowRow>,
 }
 
 /// Compact cull preset row for the desk dropdown (id + display name).
@@ -66,6 +68,15 @@ pub struct CullPresetRow {
 pub struct ProcessingProfileRow {
     pub id: String,
     pub name: String,
+    pub is_builtin: bool,
+}
+
+/// Compact workflow row for the desk dropdown (built-in or user).
+#[derive(Debug, Clone)]
+pub struct WorkflowRow {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
     pub is_builtin: bool,
 }
 
@@ -94,6 +105,8 @@ pub struct JobRow {
     pub error_summary: Option<String>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    /// Parent orchestration job (`workflow_run` / `profile_run`), if any.
+    pub parent_job_id: Option<String>,
 }
 
 /// Load lists via [`Matter::open_for_read`] (WAL-safe; no workspace/temp wipe).
@@ -142,6 +155,7 @@ pub fn refresh_snapshot(matter_root: &Utf8Path) -> Result<MatterSnapshot, String
             error_summary: j.error_summary,
             started_at: j.started_at,
             finished_at: j.finished_at,
+            parent_job_id: j.parent_job_id,
         })
         .collect();
 
@@ -168,6 +182,18 @@ pub fn refresh_snapshot(matter_root: &Utf8Path) -> Result<MatterSnapshot, String
         })
         .collect();
 
+    let workflows = matter
+        .list_workflows()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|w| WorkflowRow {
+            id: w.id,
+            name: w.name,
+            description: w.description,
+            is_builtin: w.is_builtin,
+        })
+        .collect();
+
     Ok(MatterSnapshot {
         matter_name: info.name,
         matter_id: info.id,
@@ -180,6 +206,7 @@ pub fn refresh_snapshot(matter_root: &Utf8Path) -> Result<MatterSnapshot, String
         dedup_duplicate: dedup_counts.duplicate,
         cull_presets,
         processing_profiles,
+        workflows,
     })
 }
 
@@ -387,6 +414,13 @@ mod tests {
                 .iter()
                 .any(|p| p.is_builtin && p.name == "standard"),
             "snapshot should include built-in processing profiles"
+        );
+        // Built-ins appear via list_workflows (built-ins ∪ user) on a fresh matter.
+        assert!(
+            snap.workflows
+                .iter()
+                .any(|w| w.is_builtin && w.name == "reduce_only_chain"),
+            "snapshot should include built-in workflows"
         );
     }
 
