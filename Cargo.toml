@@ -27,6 +27,7 @@ members = [
     "crates/extract-calendar",
     "crates/matter-entity",
     "crates/matter-people",
+    "crates/matter-cluster",
 ]
 
 [workspace.dependencies]

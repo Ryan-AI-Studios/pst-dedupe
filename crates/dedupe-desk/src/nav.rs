@@ -17,6 +17,8 @@ pub enum Screen {
     Gap,
     /// People–comms graph tables (track 0047).
     People,
+    /// Concept / theme clusters (track 0048).
+    Clusters,
 }
 
 impl Screen {
@@ -29,6 +31,7 @@ impl Screen {
             Self::Produce => "Produce",
             Self::Gap => "Gap",
             Self::People => "People",
+            Self::Clusters => "Clusters",
         }
     }
 
@@ -136,6 +139,20 @@ mod tests {
         assert_eq!(
             resolve_nav(Screen::Workspace, Screen::People, true),
             Screen::People
+        );
+    }
+
+    #[test]
+    fn clusters_is_live_when_matter_open() {
+        assert!(!Screen::Clusters.is_stub());
+        assert_eq!(Screen::Clusters.label(), "Clusters");
+        assert_eq!(
+            resolve_nav(Screen::Home, Screen::Clusters, false),
+            Screen::Home
+        );
+        assert_eq!(
+            resolve_nav(Screen::Workspace, Screen::Clusters, true),
+            Screen::Clusters
         );
     }
 }

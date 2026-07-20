@@ -1730,6 +1730,112 @@ fn people_graph_handler_via_process_runner() {
     );
 }
 
+/// concept_cluster via ProcessRunner: multi-topic texts → clusters + audit.
+#[cfg(feature = "cluster")]
+#[test]
+fn concept_cluster_handler_via_process_runner() {
+    use matter_core::{item_status, ItemInput};
+    use process_runner::register_default_handlers;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-cluster");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        for i in 0..4 {
+            let body =
+                format!("Invoice payment vendor remittance accounts payable overdue wire {i}");
+            let dig = matter.put_bytes(body.as_bytes()).expect("cas");
+            matter
+                .insert_item(ItemInput {
+                    path: Some(format!("inv{i}.txt")),
+                    status: item_status::EXTRACTED.into(),
+                    text_sha256: Some(dig),
+                    ..Default::default()
+                })
+                .expect("item");
+        }
+        for i in 0..4 {
+            let body =
+                format!("Patient clinical dosage pharmaceutical trial laboratory biomarkers {i}");
+            let dig = matter.put_bytes(body.as_bytes()).expect("cas");
+            matter
+                .insert_item(ItemInput {
+                    path: Some(format!("clin{i}.txt")),
+                    status: item_status::EXTRACTED.into(),
+                    text_sha256: Some(dig),
+                    ..Default::default()
+                })
+                .expect("item");
+        }
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    register_default_handlers(&mut runner);
+
+    let params = JobParams::new(
+        serde_json::json!({
+            "set_name": "default",
+            "k": 2,
+            "seed": 42,
+            "min_df": 1,
+            "max_df_ratio": 1.0,
+            "max_vocab": 5000,
+            "label_terms": 5,
+            "scope": "all",
+            "reset": true,
+            "batch_size": 100
+        })
+        .to_string(),
+    );
+    let job_id = runner
+        .start(&root, "concept_cluster", params)
+        .expect("start concept_cluster");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "err={:?}",
+        job.error_summary
+    );
+    assert_eq!(job.kind, "concept_cluster");
+
+    let status = matter.concept_cluster_status("default").expect("status");
+    assert!(status.is_complete, "cluster set should be complete");
+    assert!(status.cluster_count >= 1);
+    assert!(status.item_count >= 1);
+
+    let set_id = status.set_id.expect("set_id");
+    let clusters = matter.list_concept_clusters(&set_id).expect("list");
+    assert_eq!(clusters.len() as i64, status.cluster_count);
+    assert!(clusters.iter().all(|c| c.item_count > 0));
+
+    let mut stmt = matter
+        .connection()
+        .prepare(
+            "SELECT action FROM audit_events \
+             WHERE action IN ('concept_cluster.start', 'concept_cluster.complete') \
+             ORDER BY seq ASC",
+        )
+        .expect("prep audit");
+    let actions: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .expect("q")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert!(
+        actions.iter().any(|a| a == "concept_cluster.start"),
+        "missing concept_cluster.start audit"
+    );
+    assert!(
+        actions.iter().any(|a| a == "concept_cluster.complete"),
+        "missing concept_cluster.complete audit"
+    );
+}
+
 /// Thin production QC handler smoke (`kind = "qc"`).
 #[cfg(feature = "qc")]
 #[test]

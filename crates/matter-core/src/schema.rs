@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 26;
+pub const SCHEMA_VERSION: u32 = 27;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -40,6 +40,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (24, MIGRATION_V24),
     (25, MIGRATION_V25),
     (26, MIGRATION_V26),
+    (27, MIGRATION_V27),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -888,6 +889,59 @@ CREATE TABLE people_timeline (
   UNIQUE (matter_id, grain, bucket_start, person_id)
 );
 CREATE INDEX idx_timeline_matter ON people_timeline(matter_id, grain, bucket_start);
+"#;
+
+/// Concept clustering / theme groups (track 0048).
+///
+/// Orthogonal to near-dup (`near_dup_*`). `k` = requested target; `cluster_count` =
+/// actual non-empty clusters written (dense ordinals 0..cluster_count-1).
+/// Optional item denorm columns hold the **default** set membership only.
+const MIGRATION_V27: &str = r#"
+CREATE TABLE concept_cluster_sets (
+  id TEXT PRIMARY KEY NOT NULL,
+  matter_id TEXT NOT NULL REFERENCES matters(id),
+  name TEXT NOT NULL,
+  method TEXT NOT NULL,
+  k INTEGER NOT NULL,
+  cluster_count INTEGER NOT NULL DEFAULT 0,
+  params_json TEXT NOT NULL,
+  fingerprint TEXT,
+  item_count INTEGER NOT NULL DEFAULT 0,
+  built_at TEXT,
+  job_id TEXT,
+  UNIQUE (matter_id, name)
+);
+CREATE INDEX idx_concept_sets_matter ON concept_cluster_sets(matter_id);
+
+CREATE TABLE concept_clusters (
+  id TEXT PRIMARY KEY NOT NULL,
+  set_id TEXT NOT NULL REFERENCES concept_cluster_sets(id),
+  matter_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  label TEXT NOT NULL,
+  label_terms_json TEXT NOT NULL,
+  item_count INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (set_id, ordinal)
+);
+CREATE INDEX idx_concept_clusters_set ON concept_clusters(set_id);
+
+CREATE TABLE item_concept_membership (
+  id TEXT PRIMARY KEY NOT NULL,
+  matter_id TEXT NOT NULL,
+  set_id TEXT NOT NULL REFERENCES concept_cluster_sets(id),
+  item_id TEXT NOT NULL REFERENCES items(id),
+  cluster_id TEXT NOT NULL REFERENCES concept_clusters(id),
+  distance REAL,
+  UNIQUE (set_id, item_id)
+);
+CREATE INDEX idx_item_concept_item ON item_concept_membership(item_id);
+CREATE INDEX idx_item_concept_cluster ON item_concept_membership(cluster_id);
+
+ALTER TABLE items ADD COLUMN concept_cluster_id TEXT;
+ALTER TABLE items ADD COLUMN concept_cluster_set_id TEXT;
+ALTER TABLE items ADD COLUMN concept_clustered_at TEXT;
+CREATE INDEX idx_items_concept_cluster ON items(concept_cluster_id)
+  WHERE concept_cluster_id IS NOT NULL;
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -3455,7 +3509,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v23 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 26);
+        assert_eq!(v, 27);
 
         let has_table: bool = conn
             .query_row(
@@ -3576,7 +3630,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v24 to v25");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 26);
+        assert_eq!(v, 27);
 
         for col in [
             "entity_flags",
@@ -3709,9 +3763,9 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v25 to v26");
+        let v = migrate(&conn).expect("migrate v25 onward");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 26);
+        assert_eq!(v, 27);
 
         for col in [
             "people_graph_built_at",
@@ -3829,6 +3883,142 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v25'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v26_to_v27_adds_concept_cluster_tables() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        for &(target, sql) in MIGRATIONS {
+            if target > 26 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v26', 'V26 Matter', '2020-01-01T00:00:00Z', 26, '/tmp/v26')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, status, imported_at) \
+             VALUES ('it_v26', 'mat_v26', 'extracted', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v26 to v27");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 27);
+
+        for table in [
+            "concept_cluster_sets",
+            "concept_clusters",
+            "item_concept_membership",
+        ] {
+            let has_table: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='{table}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("table");
+            assert!(has_table, "expected {table} table");
+        }
+
+        for col in [
+            "k",
+            "cluster_count",
+            "method",
+            "params_json",
+            "fingerprint",
+            "built_at",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('concept_cluster_sets') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected concept_cluster_sets.{col}");
+        }
+
+        for col in [
+            "concept_cluster_id",
+            "concept_cluster_set_id",
+            "concept_clustered_at",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected items.{col}");
+        }
+
+        for idx in [
+            "idx_concept_sets_matter",
+            "idx_concept_clusters_set",
+            "idx_item_concept_item",
+            "idx_item_concept_cluster",
+            "idx_items_concept_cluster",
+        ] {
+            let has_idx: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='{idx}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("idx");
+            assert!(has_idx, "expected {idx}");
+        }
+
+        // Unique (matter, name) on sets.
+        conn.execute(
+            "INSERT INTO concept_cluster_sets \
+             (id, matter_id, name, method, k, cluster_count, params_json) \
+             VALUES ('ccs1', 'mat_v26', 'default', 'tfidf_kmeans_v1', 5, 0, '{}')",
+            [],
+        )
+        .expect("set");
+        let dup = conn.execute(
+            "INSERT INTO concept_cluster_sets \
+             (id, matter_id, name, method, k, cluster_count, params_json) \
+             VALUES ('ccs2', 'mat_v26', 'default', 'tfidf_kmeans_v1', 3, 0, '{}')",
+            [],
+        );
+        assert!(
+            dup.is_err(),
+            "unique (matter_id, name) must reject duplicate"
+        );
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v26'",
                 [],
                 |row| row.get(0),
             )

@@ -288,6 +288,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
             app.start_people_graph();
         }
         if ui
+            .add_enabled(!busy, egui::Button::new("Run concept clustering"))
+            .on_hover_text(
+                "TF–IDF + L2 + k-means themes (kind=concept_cluster); not near-dup; k is a target",
+            )
+            .clicked()
+        {
+            app.start_concept_cluster();
+        }
+        if ui
             .add_enabled(!busy, egui::Button::new("Build / Update search index"))
             .on_hover_text("Incremental Tantivy FTS index (kind=fts_index, reset:false)")
             .clicked()

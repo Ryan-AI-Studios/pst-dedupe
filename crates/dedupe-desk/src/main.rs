@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod cluster_ui;
 mod dialogs;
 mod gap_ui;
 mod html_strip;

@@ -1,0 +1,9 @@
+From: alice@corp.example
+To: bob@corp.example
+Cc: legal@corp.example
+Subject: RE: Q3 billing
+Sent: Monday, January 6, 2025 10:00 AM
+
+Invoice payment vendor remittance accounts payable overdue wire transfer.
+
+This message is privileged and confidential. If you are not the intended recipient, please delete this email. Unauthorized disclosure is prohibited. Confidentiality notice applies.
