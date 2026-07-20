@@ -1581,6 +1581,60 @@ fn classify_handler_via_process_runner() {
     assert_eq!(item.role.as_deref(), Some(item_role::ATTACHMENT));
 }
 
+/// Thin entity_scan handler smoke: email + Luhn card → masked hits.
+#[cfg(feature = "entity")]
+#[test]
+fn entity_scan_handler_via_process_runner() {
+    use matter_core::{item_status, ItemInput};
+    use process_runner::MatterEntityScanHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-entity");
+
+    let item_id = {
+        let matter = Matter::open(&root).expect("open");
+        let text = matter
+            .put_bytes(b"Contact bob@competitor.com card 4111111111111111")
+            .expect("put");
+        matter
+            .insert_item(ItemInput {
+                path: Some("msg.txt".into()),
+                status: item_status::EXTRACTED.into(),
+                text_sha256: Some(text),
+                subject: Some("Invoice".into()),
+                ..Default::default()
+            })
+            .expect("item")
+            .id
+    };
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterEntityScanHandler::new()));
+
+    let job_id = runner
+        .start(&root, "entity_scan", JobParams::empty())
+        .expect("start entity_scan");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "err={:?}",
+        job.error_summary
+    );
+    assert_eq!(job.kind, "entity_scan");
+
+    let hits = matter.list_entity_hits(&item_id).expect("hits");
+    assert!(!hits.is_empty());
+    assert!(hits.iter().any(|h| h.entity_type == "email"));
+    assert!(hits.iter().any(|h| h.entity_type == "credit_card"));
+    for h in &hits {
+        assert!(!h.masked_value.contains("4111111111111111"));
+    }
+}
+
 /// Thin production QC handler smoke (`kind = "qc"`).
 #[cfg(feature = "qc")]
 #[test]

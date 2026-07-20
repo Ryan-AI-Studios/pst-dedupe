@@ -25,6 +25,7 @@ members = [
     "crates/file-category",
     "crates/dedupe-desk",
     "crates/extract-calendar",
+    "crates/matter-entity",
 ]
 
 [workspace.dependencies]
@@ -54,6 +55,9 @@ camino = "1"
 
 # FTS (track 0029) — pin 0.26.x (locks to 0.26.1)
 tantivy = "0.26"
+
+# Entity / PII packs (track 0046) — FA regex only (linear time; no ReDoS)
+regex = "1"
 
 # Shared
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -296,6 +296,20 @@ pub fn classify_default_params() -> String {
     .to_string()
 }
 
+/// Default params for entity / PII pack scan (`kind = "entity_scan"`).
+///
+/// Opt-in job — not part of built-in profiles (D-0046-03).
+pub fn entity_scan_default_params() -> String {
+    serde_json::json!({
+        "packs": ["email", "phone_us", "ssn_us", "credit_card", "currency_usd"],
+        "max_text_bytes": 2_000_000,
+        "reset": false,
+        "batch_size": 100,
+        "scope": "all"
+    })
+    .to_string()
+}
+
 /// Built-in processing profile names (desk dropdown; code constants in matter-core).
 pub const PROFILE_BUILTIN_NAMES: &[&str] = &["standard", "with_ocr", "extract_only", "reduce_only"];
 

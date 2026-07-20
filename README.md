@@ -80,6 +80,9 @@ $m = "C:\Matters\cli-smoke"
 
 # Generic job (always waits for terminal)
 .\target\release\pst-dedup.exe job run --path $m --kind classify --json
+# Entity / PII packs (opt-in; offline regex + Luhn; mask+hash only — not forensic-grade)
+# See crates/matter-entity/README.md for honesty, FA-regex/ReDoS note, digest idempotency.
+.\target\release\pst-dedup.exe job run --path $m --kind entity_scan --json
 .\target\release\pst-dedup.exe job list --path $m --json
 .\target\release\pst-dedup.exe job status --path $m --job-id <id> --json
 .\target\release\pst-dedup.exe job cancel --path $m --job-id <id> --json
@@ -190,15 +193,16 @@ Small Aspose/sample fixtures live under `fixtures/` (see `fixtures/README.md`). 
 | `pst-dedup-cli` | CLI surface: inspect / scan / dups (JSON + CSV) |
 | `pst-dedup-gui` | egui app and background scan worker |
 | `pst-writer` | Experimental/fixture PST writing and EML import helpers |
-| `matter-core` | Matter layout + SQLite (schema v9: Normalized Item + dedupe/thread/neardup/cull/promote + `review_sets` + coding + `saved_searches` + review-list index + metadata filters) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + logical_hash v1 + `workspace/temp/` |
+| `matter-core` | Matter layout + SQLite (schema v25: Normalized Item + dedupe/thread/neardup/cull/promote + `review_sets` + coding + `saved_searches` + review-list index + metadata filters + entity hits / `entity_flags`) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + logical_hash v1 + `workspace/temp/` |
 | `ingest-purview` | Purview/package/ZIP detect + safe expand + resumable inventory (blocking worker API; `*_on_job` for runner) |
 | `extract-pst` | PST → Normalized Items + families + logical_hash; `pst-native-message-v1` native (not EML); mid-folder resume (blocking; `*_on_job` for runner) |
 | `process-runner` | In-process job runner: single matter worker, cancel, watch progress, Option C job-id authority |
 | `matter-cull` | Flag-only data reduction: built-in + user presets, family fixpoint, `cull_*` result columns (never deletes items/CAS) |
 | `matter-promote` | Flag-only promote-to-review: policies + bidirectional family expand + single-pass `review_order` (never deletes items/CAS) |
+| `matter-entity` | Offline entity/PII packs (`entity_scan`): regex + Luhn, mask+hash hits only (schema v25) |
 
 **Matter layout** (Desk foundation): `matter.db`, `blobs/sha256/<aa>/<hex>`, reserved `index/` / `exports/` / `logs/`, `workspace/temp/`.
-See [`crates/matter-core/README.md`](crates/matter-core/README.md), [`crates/ingest-purview/README.md`](crates/ingest-purview/README.md), [`crates/extract-pst/README.md`](crates/extract-pst/README.md), [`crates/process-runner/README.md`](crates/process-runner/README.md), and [`ARCHITECTURE.md`](ARCHITECTURE.md).
+See [`crates/matter-core/README.md`](crates/matter-core/README.md), [`crates/ingest-purview/README.md`](crates/ingest-purview/README.md), [`crates/extract-pst/README.md`](crates/extract-pst/README.md), [`crates/process-runner/README.md`](crates/process-runner/README.md), [`crates/matter-entity/README.md`](crates/matter-entity/README.md), and [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Current Status
 

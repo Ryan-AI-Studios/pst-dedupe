@@ -84,5 +84,8 @@ pub use handlers::MatterOcrHandler;
 #[cfg(feature = "classify")]
 pub use handlers::MatterClassifyHandler;
 
+#[cfg(feature = "entity")]
+pub use handlers::MatterEntityScanHandler;
+
 pub use handlers::MatterProfileRunHandler;
 pub use handlers::MatterWorkflowRunHandler;

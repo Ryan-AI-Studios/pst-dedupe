@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v24**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v25**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -33,6 +33,7 @@
 //! - **Gap analysis** roster + opposing expected docs + gap_runs (schema v22) (0042)
 //! - **Processing profiles** (`processing_profiles` + built-in stage presets, schema v23) (0043)
 //! - **Workflows** (`workflows` + `jobs.parent_job_id` + built-in multi-step recipes, schema v24) (0044)
+//! - **Entity / PII hits** (`item_entity_hits` + `entity_*` rollup columns, schema v25) (0046)
 //!
 //! ## Layout
 //!
@@ -61,6 +62,7 @@ pub mod audit;
 pub mod calendar;
 pub mod cas;
 pub mod category;
+pub mod entity;
 pub mod error;
 pub mod filter;
 pub mod gap;
@@ -90,6 +92,10 @@ pub use cas::{sha256_hex, Cas, PUT_READER_BUF_SIZE};
 pub use category::{
     category_status, classify_candidate_needs_work, ApplyClassificationInput, CategoryApplyResult,
     ClassifyCandidate,
+};
+pub use entity::{
+    entity_flags, flag_bit_for_entity_type, CreateEntityHitInput, EntityScanCandidate,
+    ItemEntityHit, ReplaceEntityHitsInput,
 };
 pub use error::{Error, Result};
 pub use filter::{

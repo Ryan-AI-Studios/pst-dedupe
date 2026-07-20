@@ -416,6 +416,17 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0041-07 | — | CLI qc | **Closed in 0045** | — |
 | D-0042-07 | — | CLI gap | **Closed in 0045** | — |
 
+## From track 0046-EntityPiiPacks (Completed — see conductor review)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0046-01 | — | NER / ML entity extractors | P0 offline regex packs only | **0051+** |
+| D-0046-02 | — | User-authored regex packs (JSON) | Built-ins only P0; if later, still `regex` crate only | residual |
+| D-0046-03 | — | Auto-add `entity_scan` to processing profiles / workflows | Manual job / CLI only P0 | residual |
+| D-0046-04 | — | Auto-redact / create redaction from entity hit | Operator uses **0032** manually | residual |
+| D-0046-05 | — | HTML body (`html_sha256`) scan | Prefer plain `text_sha256` P0 | residual |
+| D-0046-06 | — | Cross-item same `match_hash` report UI | Hash index enables later; thin API residual | residual / **0047** |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

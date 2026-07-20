@@ -270,6 +270,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
             app.start_classify();
         }
         if ui
+            .add_enabled(!busy, egui::Button::new("Run entity scan"))
+            .on_hover_text(
+                "Offline PII/entity packs (email, phone, SSN, card, $) — mask+hash only (kind=entity_scan)",
+            )
+            .clicked()
+        {
+            app.start_entity_scan();
+        }
+        if ui
             .add_enabled(!busy, egui::Button::new("Build / Update search index"))
             .on_hover_text("Incremental Tantivy FTS index (kind=fts_index, reset:false)")
             .clicked()
