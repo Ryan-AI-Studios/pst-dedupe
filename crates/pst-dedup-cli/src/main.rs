@@ -1,11 +1,19 @@
-//! `pst-dedup` — CLI surface for PST inspection and deduplication.
+//! `pst-dedup` — CLI for PST tools and headless matter automation (track 0045).
 //!
-//! Designed for both humans and agents: stable subcommands, `--json` output,
-//! and non-zero exit on hard failures.
+//! Designed for humans and agents: stable subcommands, `--json` stdout isolation,
+//! documented exit codes, and SIGINT → graceful cancel.
 
+mod convenience;
 mod error;
 mod inspect;
+mod job_cmd;
+mod json_io;
+mod matter_cmd;
+mod paths;
+mod profile_cmd;
+mod runner_util;
 mod scan;
+mod workflow_cmd;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,23 +21,28 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use dedup_engine::format_bytes;
 
-use crate::error::Result;
+use crate::error::{CliError, CliExit, Result};
+use crate::json_io::emit_error;
 use crate::scan::{collect_dups, resolve_pst_paths, run_scan, write_report, ScanOptions};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "pst-dedup",
     version,
-    about = "PST email deduplication CLI (scan / inspect / dups)",
-    long_about = "Read-only PST inspection and tiered dedup.\n\n\
-Examples:\n  \
+    about = "PST dedup + headless matter automation CLI",
+    long_about = "Read-only PST tools and headless matter job/profile/workflow runs.\n\n\
+PST examples:\n  \
   pst-dedup scan archive.pst --json\n  \
-  pst-dedup scan a.pst b.pst --csv report.csv\n  \
-  pst-dedup inspect archive.pst --top 20\n  \
-  pst-dedup dups archive.pst --limit 25 --json"
+  pst-dedup inspect archive.pst --top 20\n\n\
+Matter automation:\n  \
+  pst-dedup matter create --path C:\\Matters\\M1 --name case\n  \
+  pst-dedup job run --path C:\\Matters\\M1 --kind classify --json\n  \
+  pst-dedup workflow run --path C:\\Matters\\M1 --workflow builtin:reduce_only_chain --json\n\n\
+Exit codes: 0 ok · 2 usage · 3 busy · 4 job failed/cancelled · 5 matter IO · 1 other.\n\
+With --json, only the final envelope is written to stdout; logs/progress go to stderr."
 )]
 struct Cli {
-    /// Increase log verbosity (-v, -vv).
+    /// Increase log verbosity (-v, -vv). Logs always go to stderr.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
 
@@ -41,66 +54,293 @@ struct Cli {
 enum Commands {
     /// Scan PST file(s), run tiered dedup, print summary.
     Scan {
-        /// One or more .pst paths.
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-
-        /// Disable Tier 2 content-hash fallback.
         #[arg(long)]
         no_tier2: bool,
-
-        /// Skip attachment metadata in Tier 2 hashing.
         #[arg(long)]
         no_attachments: bool,
-
-        /// Write full CSV report (+ summary footer) to this path.
         #[arg(long)]
         csv: Option<PathBuf>,
-
-        /// Emit machine-readable JSON summary (and dups if --dups).
         #[arg(long)]
         json: bool,
-
-        /// Also list duplicate rows (text or inside JSON).
         #[arg(long)]
         dups: bool,
-
-        /// Cap listed duplicates (default 50 when --dups; 0 = all).
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
 
     /// Inspect PST structure: encryption, folder tree, message counts.
     Inspect {
-        /// Path to a .pst file.
         path: PathBuf,
-
-        /// Max folders to list (sorted by message count). 0 = all.
         #[arg(long, default_value_t = 30)]
         top: usize,
-
-        /// Emit JSON.
         #[arg(long)]
         json: bool,
     },
 
     /// Scan and list only duplicate messages.
     Dups {
-        /// One or more .pst paths.
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-
-        /// Disable Tier 2 content-hash fallback.
         #[arg(long)]
         no_tier2: bool,
-
-        /// Max duplicates to print (0 = all).
         #[arg(long, default_value_t = 50)]
         limit: usize,
-
-        /// Emit JSON array of duplicates + summary.
         #[arg(long)]
         json: bool,
+    },
+
+    /// Matter lifecycle.
+    Matter {
+        #[command(subcommand)]
+        cmd: MatterCmd,
+    },
+
+    /// Generic job control.
+    Job {
+        #[command(subcommand)]
+        cmd: JobCmd,
+    },
+
+    /// Processing profiles (0043).
+    Profile {
+        #[command(subcommand)]
+        cmd: ProfileCmd,
+    },
+
+    /// Workflows (0044).
+    Workflow {
+        #[command(subcommand)]
+        cmd: WorkflowCmd,
+    },
+
+    /// Ingest a source package into a matter.
+    Ingest {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        json: bool,
+        /// Accepted for compatibility; P0 always waits.
+        #[arg(long, default_value_t = true, hide = true)]
+        wait: bool,
+    },
+
+    /// Export matter report CSV pack (0039).
+    Report {
+        #[command(subcommand)]
+        cmd: ReportCmd,
+    },
+
+    /// Run production QC (0041).
+    Qc {
+        #[command(subcommand)]
+        cmd: QcCmd,
+    },
+
+    /// Run production export (0040).
+    Produce {
+        #[command(subcommand)]
+        cmd: ProduceCmd,
+    },
+
+    /// Run gap analysis (0042).
+    Gap {
+        #[command(subcommand)]
+        cmd: GapCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MatterCmd {
+    /// Create a new matter at --path.
+    Create {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show matter metadata (open-for-read).
+    Info {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum JobCmd {
+    /// Start a job and wait for terminal state.
+    Run {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        kind: String,
+        /// Inline JSON object or @file path.
+        #[arg(long)]
+        params_json: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = true, hide = true)]
+        wait: bool,
+    },
+    /// Resume a paused/failed job and wait.
+    Resume {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        job_id: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = true, hide = true)]
+        wait: bool,
+    },
+    /// Mark a non-terminal job cancelled in the matter DB.
+    Cancel {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        job_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one job's status.
+    Status {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        job_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List jobs (optionally children of --parent).
+    List {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProfileCmd {
+    List {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Import {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Run {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = true, hide = true)]
+        wait: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkflowCmd {
+    List {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Import {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Run {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        params_json: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = true, hide = true)]
+        wait: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReportCmd {
+    /// Export matter report CSV pack to --out (must not already exist).
+    Export {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum QcCmd {
+    Run {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        params_json: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = true, hide = true)]
+        wait: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProduceCmd {
+    Run {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        params_json: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = true, hide = true)]
+        wait: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GapCmd {
+    Run {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        params_json: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = true, hide = true)]
+        wait: bool,
     },
 }
 
@@ -119,15 +359,60 @@ fn init_tracing(verbose: u8) {
         .try_init();
 }
 
+fn command_wants_json(cmd: &Commands) -> bool {
+    match cmd {
+        Commands::Scan { json, .. }
+        | Commands::Inspect { json, .. }
+        | Commands::Dups { json, .. }
+        | Commands::Ingest { json, .. } => *json,
+        Commands::Matter { cmd } => match cmd {
+            MatterCmd::Create { json, .. } | MatterCmd::Info { json, .. } => *json,
+        },
+        Commands::Job { cmd } => match cmd {
+            JobCmd::Run { json, .. }
+            | JobCmd::Resume { json, .. }
+            | JobCmd::Cancel { json, .. }
+            | JobCmd::Status { json, .. }
+            | JobCmd::List { json, .. } => *json,
+        },
+        Commands::Profile { cmd } => match cmd {
+            ProfileCmd::List { json, .. }
+            | ProfileCmd::Import { json, .. }
+            | ProfileCmd::Run { json, .. } => *json,
+        },
+        Commands::Workflow { cmd } => match cmd {
+            WorkflowCmd::List { json, .. }
+            | WorkflowCmd::Import { json, .. }
+            | WorkflowCmd::Run { json, .. } => *json,
+        },
+        Commands::Report { cmd } => match cmd {
+            ReportCmd::Export { json, .. } => *json,
+        },
+        Commands::Qc { cmd } => match cmd {
+            QcCmd::Run { json, .. } => *json,
+        },
+        Commands::Produce { cmd } => match cmd {
+            ProduceCmd::Run { json, .. } => *json,
+        },
+        Commands::Gap { cmd } => match cmd {
+            GapCmd::Run { json, .. } => *json,
+        },
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
+    let json = command_wants_json(&cli.command);
 
     match run(cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => CliExit::Success.into(),
         Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
+            // JobFailed / AlreadyEmitted already wrote the operator payload.
+            if !e.already_emitted() {
+                emit_error(json, &e);
+            }
+            e.exit_code().into()
         }
     }
 }
@@ -150,6 +435,91 @@ fn run(cli: Cli) -> Result<()> {
             limit,
             json,
         } => cmd_dups(paths, no_tier2, limit, json),
+        Commands::Matter { cmd } => match cmd {
+            MatterCmd::Create { path, name, json } => matter_cmd::matter_create(&path, &name, json),
+            MatterCmd::Info { path, json } => matter_cmd::matter_info(&path, json),
+        },
+        Commands::Job { cmd } => match cmd {
+            JobCmd::Run {
+                path,
+                kind,
+                params_json,
+                json,
+                wait: _,
+            } => job_cmd::job_run(&path, &kind, params_json.as_deref(), json),
+            JobCmd::Resume {
+                path,
+                job_id,
+                json,
+                wait: _,
+            } => job_cmd::job_resume(&path, &job_id, json),
+            JobCmd::Cancel { path, job_id, json } => job_cmd::job_cancel(&path, &job_id, json),
+            JobCmd::Status { path, job_id, json } => job_cmd::job_status(&path, &job_id, json),
+            JobCmd::List {
+                path,
+                parent,
+                limit,
+                json,
+            } => job_cmd::job_list(&path, parent.as_deref(), limit, json),
+        },
+        Commands::Profile { cmd } => match cmd {
+            ProfileCmd::List { path, json } => profile_cmd::profile_list(&path, json),
+            ProfileCmd::Import { path, file, json } => {
+                profile_cmd::profile_import(&path, &file, json)
+            }
+            ProfileCmd::Run {
+                path,
+                profile,
+                json,
+                wait: _,
+            } => profile_cmd::profile_run(&path, &profile, json),
+        },
+        Commands::Workflow { cmd } => match cmd {
+            WorkflowCmd::List { path, json } => workflow_cmd::workflow_list(&path, json),
+            WorkflowCmd::Import { path, file, json } => {
+                workflow_cmd::workflow_import(&path, &file, json)
+            }
+            WorkflowCmd::Run {
+                path,
+                workflow,
+                params_json,
+                json,
+                wait: _,
+            } => workflow_cmd::workflow_run(&path, &workflow, params_json.as_deref(), json),
+        },
+        Commands::Ingest {
+            path,
+            source,
+            json,
+            wait: _,
+        } => convenience::ingest_run(&path, &source, json),
+        Commands::Report { cmd } => match cmd {
+            ReportCmd::Export { path, out, json } => convenience::report_export(&path, &out, json),
+        },
+        Commands::Qc { cmd } => match cmd {
+            QcCmd::Run {
+                path,
+                params_json,
+                json,
+                wait: _,
+            } => convenience::qc_run(&path, params_json.as_deref(), json),
+        },
+        Commands::Produce { cmd } => match cmd {
+            ProduceCmd::Run {
+                path,
+                params_json,
+                json,
+                wait: _,
+            } => convenience::produce_run(&path, params_json.as_deref(), json),
+        },
+        Commands::Gap { cmd } => match cmd {
+            GapCmd::Run {
+                path,
+                params_json,
+                json,
+                wait: _,
+            } => convenience::gap_run(&path, params_json.as_deref(), json),
+        },
     }
 }
 
@@ -185,6 +555,26 @@ fn cmd_scan(
         Vec::new()
     };
 
+    if outcome.summary.failed_files > 0 {
+        let msg = format!("{} file(s) failed to scan", outcome.summary.failed_files);
+        if json {
+            let payload = serde_json::json!({
+                "ok": false,
+                "error": { "code": "scan_failed", "message": msg },
+                "summary": outcome.summary,
+                "csv": csv.as_ref().map(|p| p.display().to_string()),
+                "duplicates": if list_dups { serde_json::to_value(&dups)? } else { serde_json::Value::Null },
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+            return Err(CliError::AlreadyEmitted {
+                message: msg,
+                exit: crate::error::CliExit::Generic,
+            });
+        }
+        print_summary_text(&outcome.summary);
+        return Err(CliError::Msg(msg));
+    }
+
     if json {
         let payload = serde_json::json!({
             "summary": outcome.summary,
@@ -202,13 +592,6 @@ fn cmd_scan(
     if list_dups {
         println!();
         print_dups_text(&dups);
-    }
-
-    if outcome.summary.failed_files > 0 {
-        return Err(error::CliError::Msg(format!(
-            "{} file(s) failed to scan",
-            outcome.summary.failed_files
-        )));
     }
     Ok(())
 }
@@ -259,6 +642,27 @@ fn cmd_dups(paths: Vec<PathBuf>, no_tier2: bool, limit: usize, json: bool) -> Re
     let dup_limit = if limit == 0 { None } else { Some(limit) };
     let dups = collect_dups(&outcome, dup_limit);
 
+    if outcome.summary.failed_files > 0 {
+        let msg = format!("{} file(s) failed to scan", outcome.summary.failed_files);
+        if json {
+            let payload = serde_json::json!({
+                "ok": false,
+                "error": { "code": "scan_failed", "message": msg },
+                "summary": outcome.summary,
+                "duplicates": dups,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+            return Err(CliError::AlreadyEmitted {
+                message: msg,
+                exit: crate::error::CliExit::Generic,
+            });
+        }
+        print_summary_text(&outcome.summary);
+        println!();
+        print_dups_text(&dups);
+        return Err(CliError::Msg(msg));
+    }
+
     if json {
         let payload = serde_json::json!({
             "summary": outcome.summary,
@@ -269,13 +673,6 @@ fn cmd_dups(paths: Vec<PathBuf>, no_tier2: bool, limit: usize, json: bool) -> Re
         print_summary_text(&outcome.summary);
         println!();
         print_dups_text(&dups);
-    }
-
-    if outcome.summary.failed_files > 0 {
-        return Err(error::CliError::Msg(format!(
-            "{} file(s) failed to scan",
-            outcome.summary.failed_files
-        )));
     }
     Ok(())
 }

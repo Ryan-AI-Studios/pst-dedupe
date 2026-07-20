@@ -13,7 +13,7 @@ A pure Rust Windows tool for deduplicating emails across Outlook PST files.
 - Optionally **exports unique messages as `.eml` files** (GUI path).
 - Surfaces:
   - **`dedupe-desk`** — primary product shell: create/open matter, add sources, ingest/extract with live progress (track 0020)
-  - **`pst-dedup` CLI** — agent- and script-friendly (`inspect`, `scan`, `dups`, `--json`, `--csv`)
+  - **`pst-dedup` CLI** — agent- and script-friendly PST tools plus **headless matter automation** (`matter`, `job`, `profile`, `workflow`, `ingest`, `report`, `qc`, `produce`, `gap`)
   - **`pst-dedup-gui`** — legacy egui scan/dedup wizard (still builds for regression)
 
 ## Build
@@ -47,6 +47,8 @@ cargo build --release -p pst-dedup-gui
 
 ## CLI Usage
 
+### PST tools
+
 ```powershell
 # Structure + folder counts
 .\target\release\pst-dedup.exe inspect archive.pst --top 20
@@ -64,8 +66,74 @@ cargo build --release -p pst-dedup-gui
 .\target\release\pst-dedup.exe scan a.pst b.pst --json --dups --limit 50
 ```
 
-Useful flags: `--no-tier2`, `--no-attachments`, `-v` / `-vv` (logs on stderr).  
+Useful flags: `--no-tier2`, `--no-attachments`, `-v` / `-vv` (logs on stderr).
 For quiet agent runs: `$env:RUST_LOG = 'error'`.
+
+### Headless matter automation (track 0045)
+
+Same engine as Dedupe Desk: create a matter, import profiles/workflows, run jobs, export reports — no GUI.
+
+```powershell
+$m = "C:\Matters\cli-smoke"
+.\target\release\pst-dedup.exe matter create --path $m --name "cli-smoke" --json
+.\target\release\pst-dedup.exe matter info --path $m --json
+
+# Generic job (always waits for terminal)
+.\target\release\pst-dedup.exe job run --path $m --kind classify --json
+.\target\release\pst-dedup.exe job list --path $m --json
+.\target\release\pst-dedup.exe job status --path $m --job-id <id> --json
+.\target\release\pst-dedup.exe job cancel --path $m --job-id <id> --json
+.\target\release\pst-dedup.exe job resume --path $m --job-id <id> --json
+
+# Profiles / workflows (import custom JSON without Desk)
+.\target\release\pst-dedup.exe profile list --path $m --json
+.\target\release\pst-dedup.exe profile import --path $m --file .\my-profile.json --json
+.\target\release\pst-dedup.exe profile run --path $m --profile builtin:standard --json
+
+.\target\release\pst-dedup.exe workflow list --path $m --json
+.\target\release\pst-dedup.exe workflow import --path $m --file .\my-workflow.json --json
+.\target\release\pst-dedup.exe workflow run --path $m --workflow builtin:reduce_only_chain --json
+
+# Convenience wrappers
+.\target\release\pst-dedup.exe ingest --path $m --source C:\Data\package.zip --json
+.\target\release\pst-dedup.exe report export --path $m --out C:\Matters\cli-smoke\exports\report1 --json
+.\target\release\pst-dedup.exe qc run --path $m --json
+.\target\release\pst-dedup.exe produce run --path $m --params-json '@C:\params\produce.json' --json
+.\target\release\pst-dedup.exe gap run --path $m --params-json '{}' --json
+```
+
+**Path rules**
+
+| Kind | Rule |
+|---|---|
+| CLI args (`--path`, `--file`, `--source`, `--out`, `@file`) | Relative to process **CWD**, then normalized absolute |
+| Paths **inside** `--params-json` (`path`, `source_path`, `output_dir`, …) | Must be **absolute** (exit **2** if relative) |
+
+**Stdout isolation (`--json`)**
+
+- **stdout:** only the final JSON envelope (parseable with no preprocess)
+- **stderr:** tracing, progress lines, cancel notices
+- Progress never uses stdout
+
+**Exit codes**
+
+| Code | Meaning |
+|---|---|
+| **0** | Success |
+| **1** | Generic / unexpected error |
+| **2** | Usage / validation (bad args, bad JSON, unknown kind, relative path in params) |
+| **3** | Matter busy (another job active) |
+| **4** | Job finished **failed** or **cancelled** |
+| **5** | Matter open/create/IO error |
+
+**SIGINT / Ctrl+C**
+
+1. First Ctrl+C → request cooperative cancel (no `process::exit` in the handler); wait for terminal + runner join + clean SQLite drop. Interrupted jobs often end **paused** or **cancelled** → exit **4** (`ok: false`).
+2. Second Ctrl+C → force-abort request (documented last resort).
+
+**`job cancel` vs SIGINT:** `job cancel` marks a non-terminal job **cancelled** in the matter DB (cleanup / leftover rows). In-flight work in the *current* process is stopped with **Ctrl+C** (cooperative cancel on the ProcessRunner).
+
+**Import JSON shape** (profile/workflow): top-level `name` + either nested `body` or bare `version` + `stages`/`nodes`.
 
 ## Test
 
@@ -129,7 +197,7 @@ Small Aspose/sample fixtures live under `fixtures/` (see `fixtures/README.md`). 
 | `matter-cull` | Flag-only data reduction: built-in + user presets, family fixpoint, `cull_*` result columns (never deletes items/CAS) |
 | `matter-promote` | Flag-only promote-to-review: policies + bidirectional family expand + single-pass `review_order` (never deletes items/CAS) |
 
-**Matter layout** (Desk foundation): `matter.db`, `blobs/sha256/<aa>/<hex>`, reserved `index/` / `exports/` / `logs/`, `workspace/temp/`.  
+**Matter layout** (Desk foundation): `matter.db`, `blobs/sha256/<aa>/<hex>`, reserved `index/` / `exports/` / `logs/`, `workspace/temp/`.
 See [`crates/matter-core/README.md`](crates/matter-core/README.md), [`crates/ingest-purview/README.md`](crates/ingest-purview/README.md), [`crates/extract-pst/README.md`](crates/extract-pst/README.md), [`crates/process-runner/README.md`](crates/process-runner/README.md), and [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Current Status

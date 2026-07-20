@@ -2,7 +2,7 @@
 name = "pst-dedup-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Command-line surface for PST deduplication (agent- and human-friendly)"
+description = "Command-line surface for PST deduplication and headless matter automation"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
@@ -12,9 +12,21 @@ path = "src/main.rs"
 [dependencies]
 pst-reader = { path = "../pst-reader" }
 dedup-engine = { path = "../dedup-engine" }
+matter-core = { path = "../matter-core" }
+process-runner = { path = "../process-runner" }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+camino = { workspace = true }
+ctrlc = "3.5"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+assert_cmd = "2"
+predicates = "3"
+matter-core = { path = "../matter-core" }
+camino = { workspace = true }

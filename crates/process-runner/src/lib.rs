@@ -25,6 +25,7 @@ pub mod error;
 pub mod handler;
 pub mod handlers;
 pub mod progress;
+pub mod register;
 pub mod runner;
 
 pub use cancel::CancelToken;
@@ -32,6 +33,7 @@ pub use config::RunnerConfig;
 pub use error::{Result, RunnerError};
 pub use handler::{JobContext, JobHandler, JobOutcome, JobParams};
 pub use progress::{JobProgressSnapshot, ProgressEvent, ProgressSink};
+pub use register::{default_handler_kinds, register_default_handlers};
 pub use runner::{JobSnapshot, ProcessRunner};
 
 #[cfg(feature = "ingest")]
