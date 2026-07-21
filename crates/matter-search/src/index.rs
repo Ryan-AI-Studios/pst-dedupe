@@ -6,10 +6,13 @@ use std::path::Path;
 use camino::{Utf8Path, Utf8PathBuf};
 use matter_core::INDEX_DIR;
 use tantivy::schema::{TantivyDocument, Term, Value as _};
+use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{doc, Index, IndexWriter, Opstamp, ReloadPolicy};
 
 use crate::error::{Result, SearchError};
+use crate::pack::LangPack;
 use crate::schema::FtsSchema;
+use crate::tokenizer::HybridCjkTokenizer;
 
 /// Directory name under the matter root (`index/`).
 pub const INDEX_DIR_NAME: &str = INDEX_DIR;
@@ -33,16 +36,25 @@ impl MatterIndex {
         matter_root.join(INDEX_DIR_NAME)
     }
 
-    /// Open an existing index or create one with the P0 schema.
+    /// Open an existing index or create one with the latin_default schema.
     pub fn open_or_create(matter_root: &Utf8Path) -> Result<Self> {
+        Self::open_or_create_with_pack(matter_root, LangPack::LatinDefault)
+    }
+
+    /// Open an existing index or create one for the given language pack.
+    ///
+    /// Registers the hybrid CJK tokenizer when the pack requires it (before
+    /// create/open so schema tokenizer names resolve).
+    pub fn open_or_create_with_pack(matter_root: &Utf8Path, pack: LangPack) -> Result<Self> {
         let index_dir = Self::index_dir(matter_root);
-        let fts_schema = FtsSchema::build();
+        let fts_schema = FtsSchema::build_for_pack(pack);
         let path = index_dir.as_std_path();
         if path.exists() {
             // Existing directory: try open; if empty/corrupt, recreate.
             if is_empty_dir(path)? {
                 fs::create_dir_all(path)?;
                 let index = Index::create_in_dir(path, fts_schema.schema.clone())?;
+                register_pack_tokenizers(&index, pack)?;
                 return Ok(Self {
                     index,
                     fts_schema,
@@ -54,6 +66,7 @@ impl MatterIndex {
                     "failed to open FTS index at {index_dir}: {e} — try Rebuild index"
                 ))
             })?;
+            register_pack_tokenizers(&index, pack)?;
             Ok(Self {
                 index,
                 fts_schema,
@@ -62,6 +75,7 @@ impl MatterIndex {
         } else {
             fs::create_dir_all(path)?;
             let index = Index::create_in_dir(path, fts_schema.schema.clone())?;
+            register_pack_tokenizers(&index, pack)?;
             Ok(Self {
                 index,
                 fts_schema,
@@ -105,6 +119,17 @@ impl MatterIndex {
             .reload_policy(ReloadPolicy::Manual)
             .try_into()?)
     }
+}
+
+/// Register pack-specific tokenizers on an open index.
+pub fn register_pack_tokenizers(index: &Index, pack: LangPack) -> Result<()> {
+    if pack.is_cjk() {
+        let analyzer = TextAnalyzer::builder(HybridCjkTokenizer::default()).build();
+        index
+            .tokenizers()
+            .register(crate::pack::CJK_HYBRID_TOKENIZER_ID, analyzer);
+    }
+    Ok(())
 }
 
 /// Delete-by-`item_id` then add a document (required crash-recovery path).

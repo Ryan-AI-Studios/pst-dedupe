@@ -62,6 +62,9 @@ camino = "1"
 # FTS (track 0029) — pin 0.26.x (locks to 0.26.1)
 tantivy = "0.26"
 
+# Language detection (track 0054) — pure-Rust offline
+whatlang = "0.18"
+
 # Entity / PII packs (track 0046) — FA regex only (linear time; no ReDoS)
 regex = "1"
 

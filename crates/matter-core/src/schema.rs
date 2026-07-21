@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 32;
+pub const SCHEMA_VERSION: u32 = 33;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -46,6 +46,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (30, MIGRATION_V30),
     (31, MIGRATION_V31),
     (32, MIGRATION_V32),
+    (33, MIGRATION_V33),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -1103,6 +1104,17 @@ ALTER TABLE items ADD COLUMN transcript_job_id TEXT;
 ALTER TABLE items ADD COLUMN transcript_error TEXT;
 CREATE INDEX idx_items_transcript_status
   ON items(transcript_status) WHERE transcript_status IS NOT NULL;
+"#;
+
+/// Schema v33: multilingual language packs + FTS fingerprint (track 0054).
+const MIGRATION_V33: &str = r#"
+ALTER TABLE matters ADD COLUMN lang_pack_id TEXT NOT NULL DEFAULT 'latin_default';
+ALTER TABLE matters ADD COLUMN lang_pack_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE matters ADD COLUMN fts_lang_fingerprint TEXT;
+ALTER TABLE matters ADD COLUMN fts_lang_built_at TEXT;
+
+ALTER TABLE items ADD COLUMN language_tag TEXT;
+CREATE INDEX idx_items_language ON items(language_tag) WHERE language_tag IS NOT NULL;
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -4616,7 +4628,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v30 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 32);
+        assert_eq!(v, 33);
 
         let has_table: bool = conn
             .query_row(
@@ -4702,9 +4714,9 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v31 to v32");
+        let v = migrate(&conn).expect("migrate v31 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 32);
+        assert_eq!(v, 33);
 
         for col in [
             "transcript_status",
@@ -4740,6 +4752,125 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v31'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    /// v32 → v33 adds language pack + FTS fingerprint + item language_tag (track 0054).
+    #[test]
+    fn migrate_v32_to_v33_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        for &(target, sql) in MIGRATIONS {
+            if target > 32 {
+                break;
+            }
+            conn.execute_batch(sql).expect("sql");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        assert_eq!(read_schema_version(&conn).expect("read"), 32);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v32', 'V32 Matter', '2020-01-01T00:00:00Z', 32, '/tmp/v32')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, status, imported_at) \
+             VALUES ('it_v32', 'mat_v32', 'extracted', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v32 to v33");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 33);
+
+        for col in [
+            "lang_pack_id",
+            "lang_pack_version",
+            "fts_lang_fingerprint",
+            "fts_lang_built_at",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('matters') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected matters column {col}");
+        }
+
+        let has_lang_tag: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = 'language_tag'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("language_tag");
+        assert!(has_lang_tag);
+
+        let pack: String = conn
+            .query_row(
+                "SELECT lang_pack_id FROM matters WHERE id = 'mat_v32'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pack");
+        assert_eq!(pack, "latin_default");
+
+        let pack_ver: i64 = conn
+            .query_row(
+                "SELECT lang_pack_version FROM matters WHERE id = 'mat_v32'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pack ver");
+        assert_eq!(pack_ver, 1);
+
+        let fp: Option<String> = conn
+            .query_row(
+                "SELECT fts_lang_fingerprint FROM matters WHERE id = 'mat_v32'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fp");
+        assert!(fp.is_none());
+
+        let tag: Option<String> = conn
+            .query_row(
+                "SELECT language_tag FROM items WHERE id = 'it_v32'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("tag");
+        assert!(tag.is_none());
+
+        // Pre-existing rows still readable.
+        let status: String = conn
+            .query_row("SELECT status FROM items WHERE id = 'it_v32'", [], |row| {
+                row.get(0)
+            })
+            .expect("status");
+        assert_eq!(status, "extracted");
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v32'",
                 [],
                 |row| row.get(0),
             )

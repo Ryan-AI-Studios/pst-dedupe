@@ -1,20 +1,19 @@
 //! Compose keyword FTS hits with metadata [`FilterSpec`] (track 0029 + 0028).
 
-use camino::Utf8Path;
 use matter_core::{FilterSpec, Matter, ReviewListRow};
 
 use crate::error::Result;
-use crate::query::{search_keyword, KeywordHits, KeywordQuery, DEFAULT_FTS_FETCH_LIMIT};
+use crate::query::{search_keyword_for_matter, KeywordHits, KeywordQuery, DEFAULT_FTS_FETCH_LIMIT};
 
 /// Compose keyword search with a metadata filter for the Review list.
 ///
 /// - `keyword` empty / `None` → metadata-only [`Matter::list_items_filtered_thin`]
-/// - otherwise: FTS → unique ids → intersect with filter (family expand after intersect)
+/// - otherwise: FTS (matter-aware, pack stale gate) → unique ids → intersect filter
 ///
 /// Returns `(count, rows)`.
 pub fn compose_keyword_filter(
     matter: &Matter,
-    matter_root: &Utf8Path,
+    _matter_root: &camino::Utf8Path,
     keyword: Option<&str>,
     filter: &FilterSpec,
     limit: u64,
@@ -27,8 +26,8 @@ pub fn compose_keyword_filter(
         return Ok((count, rows));
     };
 
-    let hits = search_keyword(
-        matter_root,
+    let hits = search_keyword_for_matter(
+        matter,
         &KeywordQuery {
             query: qstr.to_string(),
             limit: DEFAULT_FTS_FETCH_LIMIT,

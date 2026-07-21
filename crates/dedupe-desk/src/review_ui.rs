@@ -2660,16 +2660,19 @@ pub fn load_review_composed(
 
     let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
 
-    // Single FTS open: hit count for status + id set for filter intersection.
-    let hits = matter_search::search_keyword(
-        matter_root,
+    // Single FTS open: matter-aware (pack fingerprint stale gate + pack tokenizer).
+    let hits = matter_search::search_keyword_for_matter(
+        &matter,
         &matter_search::KeywordQuery {
             query: kw.to_string(),
             limit: matter_search::DEFAULT_FTS_FETCH_LIMIT,
             offset: 0,
         },
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        // Surface pack-stale as an honest rebuild-required error (not empty success).
+        e.to_string()
+    })?;
     let fts_hits = hits.item_ids.len() as u64;
     if hits.item_ids.is_empty() {
         return Ok((0, Vec::new(), false, Some(0)));
@@ -3488,7 +3491,24 @@ fn show_keyword_bar(
             });
         }
         if let Some(err) = state.keyword_error.clone() {
+            let is_stale = err.contains("fts_lang_pack_stale")
+                || err.contains("Rebuild required")
+                || err.contains("language pack");
             ui.colored_label(Color32::from_rgb(200, 60, 60), format!("Keyword: {err}"));
+            if is_stale {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        Color32::from_rgb(180, 100, 20),
+                        "Language pack changed — Rebuild FTS required before keyword search.",
+                    );
+                    if ui
+                        .add_enabled(!index_job_busy, egui::Button::new("Rebuild FTS").small())
+                        .clicked()
+                    {
+                        *fts_request = Some(FtsUiRequest::RebuildIndex);
+                    }
+                });
+            }
         }
     });
 }

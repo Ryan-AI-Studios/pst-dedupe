@@ -299,9 +299,64 @@ impl DeskApp {
         self.qc_findings_show = false;
         self.hydrate_qc_from_matter();
         self.hydrate_ai_settings_from_matter();
+        self.hydrate_lang_pack_from_matter();
         self.refresh_produce_qc_readiness();
         self.refresh_matter_lists();
         self.status_msg = Some(format!("Opened matter at {root}"));
+    }
+
+    /// Copy matter language pack into Desk settings (FTS pack select).
+    fn hydrate_lang_pack_from_matter(&mut self) {
+        let Some(root) = self.matter_root.as_ref() else {
+            return;
+        };
+        match matter_core::Matter::open_for_read(root.as_path()) {
+            Ok(matter) => match matter.get_lang_config() {
+                Ok(cfg) => {
+                    self.settings.lang_pack_id = cfg.lang_pack_id;
+                    self.settings.save();
+                }
+                Err(e) => {
+                    self.error_msg = Some(format!("Could not load matter language pack: {e}"));
+                }
+            },
+            Err(e) => {
+                self.error_msg = Some(format!(
+                    "Could not open matter for language pack hydrate: {e}"
+                ));
+            }
+        }
+    }
+
+    /// Dual-write language pack to open matter; clears FTS fingerprint (rebuild required).
+    fn dual_write_lang_pack(&mut self) {
+        let Some(root) = self.matter_root.as_ref() else {
+            self.settings.save();
+            return;
+        };
+        let pack = self.settings.lang_pack_id.clone();
+        match matter_core::Matter::open(root.as_path()) {
+            Ok(matter) => match matter.update_lang_pack(&pack) {
+                Ok(cfg) => {
+                    self.settings.lang_pack_id = cfg.lang_pack_id;
+                    self.settings.save();
+                    self.status_msg = Some(
+                        "Language pack updated — Rebuild FTS required before keyword search."
+                            .into(),
+                    );
+                    self.review.keyword_error = Some(
+                        "Index is stale due to language pack change. Rebuild required. (fts_lang_pack_stale)"
+                            .into(),
+                    );
+                }
+                Err(e) => {
+                    self.error_msg = Some(format!("Could not update language pack: {e}"));
+                }
+            },
+            Err(e) => {
+                self.error_msg = Some(format!("Could not open matter to save language pack: {e}"));
+            }
+        }
     }
 
     /// Copy matter AI config into Desk settings so the UI matches the DB on open.
@@ -1975,6 +2030,59 @@ impl DeskApp {
                 .weak()
                 .small(),
         );
+
+        ui.add_space(8.0);
+        ui.heading("Language pack (keyword FTS)");
+        ui.label(
+            egui::RichText::new(
+                "Offline packs only — not machine translation. \
+                 CJK pack uses character bigrams + phrase adjacency for consecutive CJK. \
+                 Changing pack hard-blocks keyword search until Rebuild FTS.",
+            )
+            .weak()
+            .small(),
+        );
+        let pack_locked = self.job_may_be_writing();
+        ui.horizontal(|ui| {
+            ui.label("Pack:");
+            let mut pack = self.settings.lang_pack_id.clone();
+            ui.add_enabled_ui(!pack_locked, |ui| {
+                for (label, val) in [
+                    ("latin_default", "latin_default"),
+                    ("cjk_ngram_v1", "cjk_ngram_v1"),
+                ] {
+                    if ui
+                        .selectable_label(pack == val, label)
+                        .on_hover_text(if val == "cjk_ngram_v1" {
+                            "Hybrid CJK n-gram + Latin/email-safe path"
+                        } else {
+                            "English-friendly Tantivy default tokenizer"
+                        })
+                        .clicked()
+                    {
+                        pack = val.into();
+                    }
+                }
+            });
+            if pack_locked {
+                ui.label(
+                    egui::RichText::new("(locked while a job runs)")
+                        .weak()
+                        .small(),
+                );
+            }
+            if !pack_locked && self.settings.lang_pack_id != pack {
+                self.settings.lang_pack_id = pack;
+                self.dual_write_lang_pack();
+            }
+        });
+        if ui
+            .add_enabled(!pack_locked, egui::Button::new("Rebuild FTS"))
+            .on_hover_text("Full FTS rebuild with the active language pack (reset:true)")
+            .clicked()
+        {
+            self.start_fts_rebuild();
+        }
 
         ui.add_space(8.0);
         ui.heading("Local semantic search (optional)");

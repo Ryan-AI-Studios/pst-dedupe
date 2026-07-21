@@ -10,6 +10,7 @@ use tantivy::schema::Term;
 
 use crate::error::{Result, SearchError};
 use crate::index::{delete_then_add, remove_index_dir, MatterIndex, DEFAULT_WRITER_HEAP_BYTES};
+use crate::pack::LangPack;
 use crate::params::FtsIndexParams;
 use crate::schema::FtsSchema;
 
@@ -51,6 +52,12 @@ struct CheckpointCursor {
     skipped_count: u64,
     error_count: u64,
     params: serde_json::Value,
+    /// Active pack at checkpoint write time (empty = pre-0054 / missing).
+    #[serde(default)]
+    lang_pack_id: String,
+    /// Pack version at checkpoint write time (0 = pre-0054 / missing).
+    #[serde(default)]
+    lang_pack_version: i64,
 }
 
 fn default_phase() -> String {
@@ -79,11 +86,24 @@ pub fn run_fts_index(
     effective.validate().map_err(SearchError::InvalidParams)?;
     let params_json = serde_json::to_value(&effective).unwrap_or_else(|_| json!({}));
 
+    let lang_start = matter.get_lang_config().ok();
+    let pack_id_start = lang_start
+        .as_ref()
+        .map(|c| c.lang_pack_id.clone())
+        .unwrap_or_else(|| "latin_default".into());
+    let expected_fp_start = LangPack::parse(&pack_id_start)
+        .map(|p| p.fingerprint())
+        .unwrap_or_default();
     matter.append_audit(AuditEventInput {
         actor: "system".into(),
         action: "fts_index.start".into(),
         entity: format!("job:{job_id}"),
-        params_json: json!({ "params": params_json }).to_string(),
+        params_json: json!({
+            "params": params_json,
+            "lang_pack_id": pack_id_start,
+            "fts_lang_fingerprint_expected": expected_fp_start,
+        })
+        .to_string(),
         tool_version: env!("CARGO_PKG_VERSION").into(),
     })?;
 
@@ -97,8 +117,40 @@ pub fn run_fts_index(
         prior,
     );
 
-    match &result {
-        Ok(FtsOutcome::Succeeded(s)) => {
+    // Post-process Succeeded: re-verify pack did not change mid-run, audit, then
+    // write the fingerprint for the pack that **actually tokenized** the index.
+    // Never re-read pack id for certification alone (race with Desk pack switch).
+    match result {
+        Ok((FtsOutcome::Succeeded(s), Some(cert))) => {
+            // Fail closed if matter pack changed during the job.
+            match matter.get_lang_config() {
+                Ok(lang) => {
+                    let still_same = lang.lang_pack_id == cert.pack_id
+                        && lang.lang_pack_version == cert.pack_version;
+                    if !still_same {
+                        let _ = matter.clear_fts_lang_fingerprint();
+                        return Ok(FtsOutcome::Failed {
+                            message: format!(
+                                "language pack changed during fts_index \
+                                 (indexed {} v{}, now {} v{}); rebuild required",
+                                cert.pack_id,
+                                cert.pack_version,
+                                lang.lang_pack_id,
+                                lang.lang_pack_version
+                            ),
+                            summary: s,
+                        });
+                    }
+                }
+                Err(e) => {
+                    let _ = matter.clear_fts_lang_fingerprint();
+                    return Ok(FtsOutcome::Failed {
+                        message: format!("could not re-read lang config after index: {e}"),
+                        summary: s,
+                    });
+                }
+            }
+
             if let Err(e) = matter.append_audit(AuditEventInput {
                 actor: "system".into(),
                 action: "fts_index.complete".into(),
@@ -109,18 +161,40 @@ pub fn run_fts_index(
                     "error_count": s.error_count,
                     "completed_count": s.completed_count,
                     "duration_ms": started.elapsed().as_millis() as u64,
+                    "fts_lang_fingerprint": cert.fingerprint,
+                    "lang_pack_id": cert.pack_id,
+                    "lang_pack_version": cert.pack_version,
                 })
                 .to_string(),
                 tool_version: env!("CARGO_PKG_VERSION").into(),
             }) {
+                // Do not write fingerprint when audit fails.
                 return Ok(FtsOutcome::Failed {
                     message: format!("audit complete failed: {e}"),
-                    summary: s.clone(),
+                    summary: s,
                 });
             }
+
+            let built_at = Utc::now().to_rfc3339();
+            if let Err(e) = matter.set_fts_lang_fingerprint(&cert.fingerprint, &built_at) {
+                // Clear any partial/stale claim so search stays hard-fail until rebuild.
+                let _ = matter.clear_fts_lang_fingerprint();
+                return Ok(FtsOutcome::Failed {
+                    message: format!("failed to write fts_lang_fingerprint: {e}"),
+                    summary: s,
+                });
+            }
+            Ok(FtsOutcome::Succeeded(s))
         }
-        Ok(FtsOutcome::Paused(_)) => {}
-        Ok(FtsOutcome::Failed { message, summary }) => {
+        Ok((FtsOutcome::Succeeded(s), None)) => {
+            // Defensive: Succeeded without cert must not claim a fingerprint.
+            Ok(FtsOutcome::Failed {
+                message: "internal error: fts_index succeeded without pack certification".into(),
+                summary: s,
+            })
+        }
+        Ok((FtsOutcome::Paused(s), _)) => Ok(FtsOutcome::Paused(s)),
+        Ok((FtsOutcome::Failed { message, summary }, _)) => {
             if let Err(e) = matter.append_audit(AuditEventInput {
                 actor: "system".into(),
                 action: "fts_index.fail".into(),
@@ -137,6 +211,7 @@ pub fn run_fts_index(
                     "audit fail write failed after run failure ({message}): {e}"
                 )));
             }
+            Ok(FtsOutcome::Failed { message, summary })
         }
         Err(e) => {
             if let Err(ae) = matter.append_audit(AuditEventInput {
@@ -150,10 +225,17 @@ pub fn run_fts_index(
                     "{e}; audit fail write also failed: {ae}"
                 )));
             }
+            Err(e)
         }
     }
+}
 
-    result
+/// Pack identity used for a successful index run (frozen at start of that run).
+#[derive(Debug, Clone)]
+struct IndexedPackCert {
+    pack_id: String,
+    pack_version: i64,
+    fingerprint: String,
 }
 
 fn load_prior_checkpoint(matter: &Matter, job_id: &str) -> Result<Option<CheckpointCursor>> {
@@ -196,7 +278,7 @@ fn run_fts_inner(
     progress: &impl Fn(u64),
     params_json: &serde_json::Value,
     prior: Option<CheckpointCursor>,
-) -> Result<FtsOutcome> {
+) -> Result<(FtsOutcome, Option<IndexedPackCert>)> {
     let mut summary = FtsSummary::default();
     let mut cursor_index: u64 = 0;
 
@@ -208,17 +290,44 @@ fn run_fts_inner(
         cursor_index = p.cursor_index;
     }
 
-    // reset: only when starting fresh (cursor_index == 0 and no prior progress)
-    let do_reset = params.reset && prior.is_none();
+    // Active language pack drives tokenizer/schema registration.
+    let lang = matter.get_lang_config()?;
+    let pack = LangPack::parse(&lang.lang_pack_id)?;
+    let expected_fp = pack.fingerprint();
+    let pack_id = pack.id().to_string();
+    let pack_version = pack.version();
+
+    // Full rebuild when:
+    // - explicit reset and no resume checkpoint, or
+    // - stored fingerprint / pack version does not match active pack, or
+    // - resume checkpoint was written under a different pack/version (or is
+    //   missing pack fields — treat as unknown → force rebuild).
+    // Mid-job resume with matching pack keeps the in-progress index even if
+    // fingerprint is still None — fingerprint is written only on Succeeded
+    // (after audit complete in the outer runner).
+    let fingerprint_mismatch = lang.fts_lang_fingerprint.as_deref() != Some(expected_fp.as_str());
+    let version_mismatch = lang.lang_pack_version != pack_version;
+    let pack_changed_on_resume = prior.as_ref().is_some_and(|p| {
+        p.lang_pack_id.is_empty()
+            || p.lang_pack_id != pack_id
+            || p.lang_pack_version != pack_version
+    });
+    let force_pack_rebuild =
+        pack_changed_on_resume || (prior.is_none() && (fingerprint_mismatch || version_mismatch));
+    let do_reset = (params.reset && prior.is_none()) || force_pack_rebuild;
+
     if do_reset {
         // No live MatterIndex handle held yet — safe to remove_dir_all.
+        // Ignore prior progress when pack changed mid-job.
         remove_index_dir(matter.root())?;
         matter.clear_fts_fields()?;
+        // Clear stale fingerprint so partial failure does not claim a good build.
+        matter.clear_fts_lang_fingerprint()?;
         cursor_index = 0;
         summary = FtsSummary::default();
     }
 
-    let index = MatterIndex::open_or_create(matter.root())?;
+    let index = MatterIndex::open_or_create_with_pack(matter.root(), pack)?;
     let fts_schema = index.fts_schema().clone();
     let heap = if params.writer_heap_bytes == 0 {
         DEFAULT_WRITER_HEAP_BYTES
@@ -241,10 +350,12 @@ fn run_fts_inner(
         cancel,
         progress,
         &mut summary,
+        &pack_id,
+        pack_version,
     )? {
         drop(writer);
         index.shutdown();
-        return Ok(FtsOutcome::Paused(summary));
+        return Ok((FtsOutcome::Paused(summary), None));
     }
 
     // Page through candidates; skip already-current when incremental.
@@ -253,7 +364,7 @@ fn run_fts_inner(
         if cancel.map(|c| c()).unwrap_or(false) {
             drop(writer);
             index.shutdown();
-            return Ok(FtsOutcome::Paused(summary));
+            return Ok((FtsOutcome::Paused(summary), None));
         }
 
         let page = matter.list_fts_candidates(cursor_index, batch_size as u64)?;
@@ -350,10 +461,13 @@ fn run_fts_inner(
         if let Err(e) = writer.commit() {
             drop(writer);
             index.shutdown();
-            return Ok(FtsOutcome::Failed {
-                message: format!("tantivy commit failed: {e}"),
-                summary,
-            });
+            return Ok((
+                FtsOutcome::Failed {
+                    message: format!("tantivy commit failed: {e}"),
+                    summary,
+                },
+                None,
+            ));
         }
 
         let cursor = CheckpointCursor {
@@ -364,6 +478,8 @@ fn run_fts_inner(
             skipped_count: summary.skipped_count,
             error_count: summary.error_count,
             params: params_json.clone(),
+            lang_pack_id: pack_id.clone(),
+            lang_pack_version: pack_version,
         };
         let cursor_json = serde_json::to_string(&cursor).unwrap_or_else(|_| "{}".into());
         if let Err(e) = matter.apply_fts_batch_with_checkpoint(
@@ -375,10 +491,13 @@ fn run_fts_inner(
         ) {
             drop(writer);
             index.shutdown();
-            return Ok(FtsOutcome::Failed {
-                message: format!("sqlite fts batch failed: {e}"),
-                summary,
-            });
+            return Ok((
+                FtsOutcome::Failed {
+                    message: format!("sqlite fts batch failed: {e}"),
+                    summary,
+                },
+                None,
+            ));
         }
 
         progress(summary.completed_count);
@@ -390,7 +509,15 @@ fn run_fts_inner(
 
     drop(writer);
     index.shutdown();
-    Ok(FtsOutcome::Succeeded(summary))
+
+    // Fingerprint is written by the outer runner only after audit complete succeeds,
+    // using this frozen pack cert (never re-derived from a mid-run pack switch).
+    let cert = IndexedPackCert {
+        pack_id,
+        pack_version,
+        fingerprint: expected_fp,
+    };
+    Ok((FtsOutcome::Succeeded(summary), Some(cert)))
 }
 
 /// SHA-256 hex of body digest + searchable metadata fields.
@@ -428,6 +555,8 @@ fn purge_orphans(
     cancel: Option<&dyn Fn() -> bool>,
     progress: &impl Fn(u64),
     summary: &mut FtsSummary,
+    lang_pack_id: &str,
+    lang_pack_version: i64,
 ) -> Result<bool> {
     let mut orphan_offset = 0u64;
     const BATCH: u64 = 200;
@@ -464,6 +593,8 @@ fn purge_orphans(
             skipped_count: summary.skipped_count,
             error_count: summary.error_count,
             params: params_json.clone(),
+            lang_pack_id: lang_pack_id.to_string(),
+            lang_pack_version,
         };
         let cursor_json = serde_json::to_string(&cursor).unwrap_or_else(|_| "{}".into());
         matter.apply_fts_batch_with_checkpoint(
