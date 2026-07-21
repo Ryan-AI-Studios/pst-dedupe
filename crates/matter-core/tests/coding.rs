@@ -82,6 +82,7 @@ fn coding_single_group_mutual_exclusion() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("add responsive");
     matter
@@ -91,6 +92,7 @@ fn coding_single_group_mutual_exclusion() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("add not_responsive");
 
@@ -135,6 +137,7 @@ fn coding_rejects_conflicting_single_group_batch_add() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect_err("must reject conflicting single-group adds");
 
@@ -191,6 +194,7 @@ fn coding_multi_group_allows_both_issues() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("add issues");
 
@@ -228,6 +232,7 @@ fn coding_batch_add_and_audit_full_ids() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("batch add");
     assert_eq!(result.target_count, 3);
@@ -301,6 +306,7 @@ fn coding_batch_remove() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("add");
     matter
@@ -310,6 +316,7 @@ fn coding_batch_remove() {
             remove_code_ids: vec![hot],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("remove");
 
@@ -343,6 +350,7 @@ fn coding_batch_transaction_no_partial_on_error() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect_err("must fail");
     assert!(matches!(err, Error::ItemNotFound(_)));
@@ -359,6 +367,7 @@ fn coding_batch_transaction_no_partial_on_error() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect_err("bad code");
     assert!(err2.to_string().contains("not found"));
@@ -414,6 +423,7 @@ fn coding_propagate_family_parent_and_siblings() {
             remove_code_ids: vec![],
             propagate_family: true,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("prop parent");
     assert_eq!(r.target_count, 3);
@@ -431,6 +441,7 @@ fn coding_propagate_family_parent_and_siblings() {
             remove_code_ids: vec![priv_id.clone()],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("clear");
 
@@ -442,6 +453,7 @@ fn coding_propagate_family_parent_and_siblings() {
             remove_code_ids: vec![],
             propagate_family: true,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("prop attachment");
     assert_eq!(r2.target_count, 3);
@@ -460,6 +472,7 @@ fn coding_propagate_family_parent_and_siblings() {
             remove_code_ids: vec![priv_id.clone()],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("clear2");
     matter
@@ -469,6 +482,7 @@ fn coding_propagate_family_parent_and_siblings() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("no prop");
     assert_eq!(
@@ -521,6 +535,7 @@ fn coding_near_dup_peer_not_auto_coded() {
             // Family expand still must not pull near-dup peers.
             propagate_family: true,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("code a");
 
@@ -557,6 +572,7 @@ fn coding_inactive_definition_still_displays_and_removable() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("add");
 
@@ -588,6 +604,7 @@ fn coding_inactive_definition_still_displays_and_removable() {
             remove_code_ids: vec![hot.id],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("remove");
     assert!(matter
@@ -622,6 +639,7 @@ fn coding_audit_large_batch_full_item_ids() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("large batch");
 

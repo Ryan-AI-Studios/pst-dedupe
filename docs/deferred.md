@@ -127,7 +127,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0027-01 | — | Privilege log export / 502(d) workflow | **Done in 0031** (`item_privilege` + withhold + privilege log CSV + protocol stub) | — |
 | D-0027-02 | — | Filter list / saved search by code | **Done in 0028** (code any_of/none_of/missing + desk chips) | — |
 | D-0027-03 | — | Auto-propagate to near-dup / full thread | Never default; family = parent+all children only | residual / **0056** |
-| D-0027-04 | — | QC sampling reports / multi-reviewer lock | Single-desk P0 | later / **0058** |
+| D-0027-04 | — | QC sampling reports / multi-reviewer lock | **Partial close in 0058**: sampling QC + item locks + force-unlock via matter service; Desk multi-reviewer UX residual | **D-0058-01** / residual |
 | D-0027-05 | P3 | Full GUI smoke for coding panel / batch / digits path | Automated matter-core + desk unit/integration tests; operator smoke local | operator / polish |
 | D-0027-06 | — | Production export of coded subsets | Membership only in 0027; **closed in 0040** (`scope=item_ids` / review corpus) | — |
 
@@ -162,7 +162,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0030-02 | — | Notes in production load file | **Closed in 0040** (default exclude; residual opt-in) | residual opt-in |
 | D-0030-03 | — | Privilege log narrative from notes | **Partial complete in 0031**: optional “draft from note” confirm only; never auto-export notes | — |
 | D-0030-04 | — | Case-wide persistent keyword highlight sets | User highlights only; FTS paint optional | residual |
-| D-0030-05 | — | Multi-user concurrent note edit | Single-desk actor | **0058** |
+| D-0030-05 | — | Multi-user concurrent note edit | **Partial close in 0058**: service notes + OCC/locks/strict actor; Desk Connect residual | **D-0058-01** |
 | D-0030-06 | — | Rich text / markdown notes | P0 plain text | residual |
 | D-0030-07 | P3 | Full GUI smoke for notes panel / selection highlight | Automated unit + API; operator smoke local | operator / polish |
 | D-0030-08 | P3 | Dual body widgets (Label paint + TextEdit selection) | Usable; document residual under egui 0.34; unify later if API allows | residual polish |
@@ -179,7 +179,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0031-04 | — | Name normalization legend for log parties | Metadata as stored | residual |
 | D-0031-05 | — | AI privilege prediction / draft log descriptions | Off by default | Series G |
 | D-0031-06 | — | Clawback post-produce workflow UI | Protocol notes only in 0031 | residual / **0040** |
-| D-0031-07 | — | Multi-reviewer privilege lock / sampling QC | Single-desk | **0058** / **0041** |
+| D-0031-07 | — | Multi-reviewer privilege lock / sampling QC | **Partial close in 0058**: privilege mutates + locks + sampling QC on service; Desk multi-reviewer residual | **D-0058-01** / **0041** residual |
 | D-0031-08 | P3 | Full GUI smoke for privilege panel / log export | Automated API + unit; operator smoke local | operator / polish |
 | D-0031-09 | — | Court e-file / load-file Bates on privilege log | ControlNumber = item_id until production | **0040** |
 | D-0031-10 | — | Optional ParentFrom/ParentTo extra CSV columns | P0: in-place inherit into From/To/… is enough | residual |
@@ -347,7 +347,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0041-03 | — | Auto-fix (auto expand family, auto regenerate redacted, auto slip-sheet) | Report-only P0 | residual |
 | D-0041-04 | — | Custom user-defined QC SQL rules | Builtin pack P0 | residual |
 | D-0041-05 | — | Multi-jurisdiction QC packs | | **0060** |
-| D-0041-06 | — | Sampling / multi-reviewer QC UI | | **0058** residual |
+| D-0041-06 | — | Sampling / multi-reviewer QC UI | **Partial close in 0058**: API sampling QC + JSON report; Desk QC UI residual | residual / **D-0058-01** |
 | D-0041-07 | — | CLI `qc run` | **Closed in 0045** (`qc run`) | — |
 | D-0041-08 | — | Full findings table in SQLite | CSV + qc_runs + fingerprint enough P0 | residual |
 | D-0041-09 | P3 | Full GUI smoke Run QC / produce block / stale | Automated engine + unit; operator smoke | operator / polish |
@@ -392,7 +392,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 |---|---|---|---|---|
 | D-0044-01 | — | Extract-all-PSTs fan-out under a source | P0 single `pst_item_id` binding | residual |
 | D-0044-02 | — | True parallel multi-handler stages per matter | Sequential multi-job only; SQLite single-writer | residual |
-| D-0044-03 | — | Firm-wide **user** workflow template pack | Built-ins app-global; user matter-local; multi-user pack later | residual / **0058** |
+| D-0044-03 | — | Firm-wide **user** workflow template pack | Built-ins app-global; user matter-local; multi-user pack later | residual (not closed by 0058) |
 | D-0044-04 | — | Visual workflow editor / DAG designer | Built-ins + API upsert; no graph UI | residual |
 | D-0044-05 | — | Branch / alt-path nodes on prior failure | Ordinary soft_fail without full graph | residual |
 | D-0044-06 | P3 | Full GUI smoke workflow dropdown / Run / parent jobs | Automated engine + unit; operator smoke | operator / polish |
@@ -513,7 +513,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0052-01 | — | Multi-turn chat / cross-doc RAG | P0 is single-item grounded citations only | residual |
-| D-0052-02 | — | Batch accept-all with sampling QC | P0 single-item promote | residual / **0058** |
+| D-0052-02 | — | Batch accept-all with sampling QC | P0 single-item promote; 0058 sampling QC is human review QC not AI batch accept | residual |
 | D-0052-03 | — | Persistent multi-citation highlight sets | P0 is click-to-highlight active citation | residual polish |
 | D-0052-04 | — | Export AI provenance report pack | Still no cleartext quotes unless redacted export policy | residual |
 | D-0052-05 | — | Privilege / redaction AI with citations | Human-confirm residual | residual |
@@ -585,6 +585,22 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0025-02 | — | Expand full email threads into review set | Still residual (0056 did not ship email thread mode) | residual |
 | D-0022-01 | — | Full JWZ dual objects as review items | Still residual | residual |
 | D-0027-03 | — | Auto-propagate codes to full thread | Never default; day-bucket bulk is explicit opt-in only | residual |
+
+## From track 0058-MultiUserMatterService (Completed — Codex luna PASS WITH DEFERRED P3)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0058-01 | — | Desk “Connect to service” UX (URL + login + session actor) | API-only P0; solo Desk unchanged | residual polish |
+| D-0058-02 | — | TLS / mutual TLS for LAN bind | Loopback default; `--allow-lan` without TLS P0 | residual |
+| D-0058-03 | — | Lock heartbeat / renewal | TTL-only P0 (default 4h) | residual |
+| D-0058-04 | P3 | True dual-process exclusive-lock CI stress | Real `fs4` exclusive lock; same-process test may soft-pass | residual polish |
+| D-0058-05 | P3 | Concurrent read path under service (`open_for_read` pool) | WriteGate serializes all handlers P0 | residual scale |
+| D-0058-06 | — | `PST_DEDUPE_SERVICE_TOKEN` long-lived automation token | Password login + bearer sessions P0 | residual |
+| D-0058-07 | P3 | Redaction privilege hook OCC under multi-user | Service P0 mutates codes/notes/privilege; redaction path residual | residual polish |
+| D-0058-08 | — | Multi-matter host process | One matter per process P0 | residual |
+| D-0058-09 | — | Fine-grained field-level RBAC | Three roles P0 | residual |
+| D-0038-05 | — | Multi-matter portfolio dashboard | Still residual | residual |
+| D-0039-07 | — | Multi-matter portfolio report | Still residual | residual |
 
 ## From track 0057-SecurityHardener (Completed — see conductor review)
 

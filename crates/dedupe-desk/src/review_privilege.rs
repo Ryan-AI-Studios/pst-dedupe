@@ -70,6 +70,7 @@ impl PrivilegePanelDraft {
             withhold: self.withhold,
             include_on_log: self.include_on_log,
             actor: actor.to_string(),
+            expected_version: None,
         }
     }
 }
@@ -222,6 +223,7 @@ pub fn assert_privilege_blocking(
                 remove_code_ids: vec![],
                 propagate_family: false,
                 actor: actor.to_string(),
+                expected_version: None,
             })
             .map_err(|e| e.to_string())?;
     } else {

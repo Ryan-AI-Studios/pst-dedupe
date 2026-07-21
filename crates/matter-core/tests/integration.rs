@@ -23,28 +23,32 @@ fn create_matter_opens_db_and_layout_exists() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-a");
 
-    let matter = Matter::create(&root, "Test Matter").expect("create");
-    assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
-    assert_eq!(matter.info().expect("info").name, "Test Matter");
-    assert_eq!(
-        matter.info().expect("info").schema_version,
-        SCHEMA_VERSION,
-        "denormalized matters.schema_version matches SCHEMA_VERSION on create"
-    );
+    let matter_id = {
+        let matter = Matter::create(&root, "Test Matter").expect("create");
+        assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
+        assert_eq!(matter.info().expect("info").name, "Test Matter");
+        assert_eq!(
+            matter.info().expect("info").schema_version,
+            SCHEMA_VERSION,
+            "denormalized matters.schema_version matches SCHEMA_VERSION on create"
+        );
 
-    assert!(root.join(DB_FILE).as_std_path().is_file());
-    assert!(root.join("blobs").join("sha256").as_std_path().is_dir());
-    assert!(root.join(INDEX_DIR).as_std_path().is_dir());
-    assert!(root.join(EXPORTS_DIR).as_std_path().is_dir());
-    assert!(root.join(LOGS_DIR).as_std_path().is_dir());
-    assert!(root
-        .join(WORKSPACE_DIR)
-        .join(WORKSPACE_TEMP_DIR)
-        .as_std_path()
-        .is_dir());
+        assert!(root.join(DB_FILE).as_std_path().is_file());
+        assert!(root.join("blobs").join("sha256").as_std_path().is_dir());
+        assert!(root.join(INDEX_DIR).as_std_path().is_dir());
+        assert!(root.join(EXPORTS_DIR).as_std_path().is_dir());
+        assert!(root.join(LOGS_DIR).as_std_path().is_dir());
+        assert!(root
+            .join(WORKSPACE_DIR)
+            .join(WORKSPACE_TEMP_DIR)
+            .as_std_path()
+            .is_dir());
+        // Drop write lock before second write-open (exclusive OS lock).
+        matter.id().to_string()
+    };
 
     let reopened = Matter::open(&root).expect("open");
-    assert_eq!(reopened.id(), matter.id());
+    assert_eq!(reopened.id(), matter_id);
     assert_eq!(reopened.schema_version().expect("ver"), SCHEMA_VERSION);
     reopened
         .verify_audit_chain()
@@ -381,7 +385,7 @@ fn schema_v12_on_create() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-v12");
     let matter = Matter::create(&root, "V12").expect("create");
-    assert_eq!(SCHEMA_VERSION, 35);
+    assert_eq!(SCHEMA_VERSION, 36);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     assert_eq!(matter.info().expect("info").schema_version, SCHEMA_VERSION);
     // Default coding catalog seeded on create.

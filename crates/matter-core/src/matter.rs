@@ -2,11 +2,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::fs::File;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::Utc;
+use fs4::fs_std::FileExt;
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +27,9 @@ use crate::schema::{self, SCHEMA_VERSION};
 
 /// Database filename under the matter root.
 pub const DB_FILE: &str = "matter.db";
+
+/// Exclusive OS lock file under the matter root (write-open only).
+pub const MATTER_LOCK_FILE: &str = ".matter.lock";
 
 /// Reserved directory for Tantivy full-text index (track 0029).
 pub const INDEX_DIR: &str = "index";
@@ -735,6 +740,8 @@ pub struct ApplyCodesInput {
     pub propagate_family: bool,
     /// Actor written to membership + audit.
     pub actor: String,
+    /// Optional OCC expected `review_version` (required under multi-user service path).
+    pub expected_version: Option<i64>,
 }
 
 /// Result of a successful [`Matter::apply_codes`] call.
@@ -744,6 +751,8 @@ pub struct ApplyCodesResult {
     pub target_item_ids: Vec<String>,
     pub selected_count: usize,
     pub target_count: usize,
+    /// New `review_version` per target item (same order as `target_item_ids`).
+    pub review_versions: Vec<i64>,
 }
 
 /// Max UTF-8 byte length for a note body (P0).
@@ -787,6 +796,8 @@ pub struct UpsertNoteInput {
     /// Optional passage link on create only (ignored on update).
     pub highlight_id: Option<String>,
     pub actor: String,
+    /// Optional OCC expected `review_version`.
+    pub expected_version: Option<i64>,
 }
 
 /// Stand-off text highlight on Review display text (schema v11 / track 0030).
@@ -1047,6 +1058,11 @@ pub struct Matter {
     /// Seals plain session DB after `conn` closes (field never read).
     #[allow(dead_code)]
     enc_session: Option<EncryptedDbSession>,
+    /// Exclusive OS lock on [`MATTER_LOCK_FILE`] for write opens (None for `open_for_read`).
+    #[allow(dead_code)]
+    write_lock: Option<File>,
+    /// When true, mutating APIs require a validated `matter_users.id` as actor.
+    strict_actor: AtomicBool,
 }
 
 impl Matter {
@@ -1073,6 +1089,7 @@ impl Matter {
         }
         fs::create_dir_all(root.as_std_path())?;
         create_layout_dirs(&root)?;
+        let write_lock = Some(acquire_write_lock(&root)?);
 
         let db_path = root.join(DB_FILE);
         let conn = Connection::open(db_path.as_std_path())?;
@@ -1100,6 +1117,8 @@ impl Matter {
             chunk_bytes: DEFAULT_CHUNK_BYTES,
             conn,
             enc_session: None,
+            write_lock,
+            strict_actor: AtomicBool::new(false),
         };
         matter.cleanup_workspace_temp()?;
         // Seed default coding catalog (idempotent).
@@ -1136,6 +1155,7 @@ impl Matter {
         }
         fs::create_dir_all(root.as_std_path())?;
         create_layout_dirs(&root)?;
+        let write_lock = Some(acquire_write_lock(&root)?);
 
         // Confidentiality fail-closed: drop crash-orphan plain session if any
         // (no live process session for this new root).
@@ -1186,6 +1206,8 @@ impl Matter {
             chunk_bytes,
             conn,
             enc_session: Some(enc_session),
+            write_lock,
+            strict_actor: AtomicBool::new(false),
         };
         // Seed only — do not wipe .enc-db session.
         matter.seed_default_codes()?;
@@ -1255,6 +1277,13 @@ impl Matter {
             return Err(Error::DatabaseMissing(root.to_string()));
         }
 
+        // Write opens take exclusive OS lock first; open_for_read does not.
+        let write_lock = if cleanup_temp {
+            Some(acquire_write_lock(&root)?)
+        } else {
+            None
+        };
+
         // Writer open: purge crash residue. open_for_read must not delete active
         // CAS staging under .cas-stage while concurrent workers are using it.
         if cleanup_temp {
@@ -1322,6 +1351,8 @@ impl Matter {
             chunk_bytes,
             conn,
             enc_session: Some(enc_session),
+            write_lock,
+            strict_actor: AtomicBool::new(false),
         };
         if cleanup_temp {
             matter.seed_default_codes()?;
@@ -1381,6 +1412,13 @@ impl Matter {
             }
         }
 
+        // Exclusive lock before SQLite open on write path.
+        let write_lock = if cleanup_temp {
+            Some(acquire_write_lock(&root)?)
+        } else {
+            None
+        };
+
         let conn = Connection::open(db_path.as_std_path())?;
         schema::configure_connection(&conn)?;
         schema::migrate(&conn)?;
@@ -1405,6 +1443,8 @@ impl Matter {
             chunk_bytes: DEFAULT_CHUNK_BYTES,
             conn,
             enc_session: None,
+            write_lock,
+            strict_actor: AtomicBool::new(false),
         };
         if cleanup_temp {
             matter.cleanup_workspace_temp()?;
@@ -1412,6 +1452,19 @@ impl Matter {
             matter.seed_default_codes()?;
         }
         Ok(matter)
+    }
+
+    /// Enable or disable strict actor mode (service path sets `true`).
+    ///
+    /// When enabled, mutating APIs require `actor` to be a non-disabled
+    /// `matter_users.id`; free-form strings are rejected.
+    pub fn set_strict_actor_mode(&self, enabled: bool) {
+        self.strict_actor.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Whether strict actor mode is enabled.
+    pub fn strict_actor(&self) -> bool {
+        self.strict_actor.load(Ordering::Relaxed)
     }
 
     /// Re-wrap the DEK under a new passphrase (encrypted matters only).
@@ -4441,14 +4494,10 @@ impl Matter {
                 "apply_codes requires at least one add or remove code id".into(),
             ));
         }
-        let actor = {
-            let t = input.actor.trim();
-            if t.is_empty() {
-                "desk".to_string()
-            } else {
-                t.to_string()
-            }
-        };
+        let actor = self.resolve_actor_for_mutate(&input.actor)?;
+        let guards = self.multi_user_guards_active(input.expected_version)?;
+        let enforce_locks = self.is_multi_user_enabled()?;
+        let require_expected = self.strict_actor() || self.is_multi_user_enabled()?;
 
         // Resolve definitions once (validate existence).
         let mut add_defs: Vec<CodeDef> = Vec::with_capacity(input.add_code_ids.len());
@@ -4556,9 +4605,34 @@ impl Matter {
         let add_privilege = add_defs.iter().any(|d| d.key == "privilege");
         let remove_privilege = remove_defs.iter().any(|d| d.key == "privilege");
 
-        self.with_transaction(|conn| {
+        let review_versions = self.with_transaction(|conn| {
             let mut privilege_ensure_ids: Vec<String> = Vec::new();
             let mut privilege_clear_ids: Vec<String> = Vec::new();
+
+            let versions = if guards {
+                Self::prepare_review_mutates_conn(
+                    conn,
+                    &targets,
+                    &actor,
+                    input.expected_version,
+                    enforce_locks,
+                    require_expected,
+                    &now,
+                )?
+            } else {
+                // Solo path: still bump version for OCC bookkeeping when column present.
+                let mut vs = Vec::with_capacity(targets.len());
+                for item_id in &targets {
+                    let v = crate::multi_user::bump_review_version_conn(
+                        conn,
+                        item_id,
+                        input.expected_version,
+                        false,
+                    )?;
+                    vs.push(v);
+                }
+                vs
+            };
 
             for item_id in &targets {
                 // Adds first (with single-group clear), then removes — per spec §3.3.2.
@@ -4631,13 +4705,14 @@ impl Matter {
             // Distinct privilege audit events with full sorted item_ids.
             Matter::audit_privilege_batch_upsert(conn, &actor, &privilege_ensure_ids, &now)?;
             Matter::audit_privilege_batch_clear(conn, &actor, &privilege_clear_ids, &now)?;
-            Ok(())
+            Ok(versions)
         })?;
 
         Ok(ApplyCodesResult {
             target_item_ids: targets,
             selected_count,
             target_count,
+            review_versions,
         })
     }
 
@@ -4662,7 +4737,7 @@ impl Matter {
     ///
     /// Single SQLite transaction + `note.upsert` audit (full body in payload).
     pub fn upsert_note(&self, input: UpsertNoteInput) -> Result<ItemNote> {
-        let actor = normalize_actor(&input.actor);
+        let actor = self.resolve_actor_for_mutate(&input.actor)?;
         let body = input.body.trim();
         if body.is_empty() {
             return Err(Error::Other(
@@ -4676,6 +4751,9 @@ impl Matter {
             )));
         }
         let now = now_rfc3339();
+        let guards = self.multi_user_guards_active(input.expected_version)?;
+        let enforce_locks = self.is_multi_user_enabled()?;
+        let require_expected = self.strict_actor() || self.is_multi_user_enabled()?;
 
         if let Some(ref id) = input.id {
             // Update path.
@@ -4699,6 +4777,24 @@ impl Matter {
             })
             .to_string();
             self.with_transaction(|conn| {
+                if guards {
+                    Self::prepare_review_mutates_conn(
+                        conn,
+                        std::slice::from_ref(&item_id),
+                        &actor,
+                        input.expected_version,
+                        enforce_locks,
+                        require_expected,
+                        &now,
+                    )?;
+                } else {
+                    let _ = crate::multi_user::bump_review_version_conn(
+                        conn,
+                        &item_id,
+                        input.expected_version,
+                        false,
+                    )?;
+                }
                 conn.execute(
                     "UPDATE item_notes SET body = ?1, updated_at = ?2, updated_by = ?3 \
                      WHERE id = ?4",
@@ -4742,6 +4838,24 @@ impl Matter {
         })
         .to_string();
         self.with_transaction(|conn| {
+            if guards {
+                Self::prepare_review_mutates_conn(
+                    conn,
+                    std::slice::from_ref(&item_id),
+                    &actor,
+                    input.expected_version,
+                    enforce_locks,
+                    require_expected,
+                    &now,
+                )?;
+            } else {
+                let _ = crate::multi_user::bump_review_version_conn(
+                    conn,
+                    &item_id,
+                    input.expected_version,
+                    false,
+                )?;
+            }
             conn.execute(
                 "INSERT INTO item_notes \
                  (id, item_id, matter_id, body, highlight_id, created_at, updated_at, \
@@ -4782,7 +4896,17 @@ impl Matter {
 
     /// Hard-delete a note. Audit retains body snapshot + `highlight_id` when set.
     pub fn delete_note(&self, note_id: &str, actor: &str) -> Result<()> {
-        let actor = normalize_actor(actor);
+        self.delete_note_with_version(note_id, actor, None)
+    }
+
+    /// Hard-delete a note with optional OCC `expected_version` (service path).
+    pub fn delete_note_with_version(
+        &self,
+        note_id: &str,
+        actor: &str,
+        expected_version: Option<i64>,
+    ) -> Result<()> {
+        let actor = self.resolve_actor_for_mutate(actor)?;
         let existing = self.get_note(note_id)?;
         if existing.matter_id != self.matter_id {
             return Err(Error::Other(format!(
@@ -4790,6 +4914,9 @@ impl Matter {
             )));
         }
         let now = now_rfc3339();
+        let guards = self.multi_user_guards_active(expected_version)?;
+        let enforce_locks = self.is_multi_user_enabled()?;
+        let require_expected = self.strict_actor() || self.is_multi_user_enabled()?;
         let params_json = serde_json::json!({
             "note_id": note_id,
             "item_id": existing.item_id,
@@ -4798,6 +4925,24 @@ impl Matter {
         })
         .to_string();
         self.with_transaction(|conn| {
+            if guards {
+                Self::prepare_review_mutates_conn(
+                    conn,
+                    std::slice::from_ref(&existing.item_id),
+                    &actor,
+                    expected_version,
+                    enforce_locks,
+                    require_expected,
+                    &now,
+                )?;
+            } else {
+                let _ = crate::multi_user::bump_review_version_conn(
+                    conn,
+                    &existing.item_id,
+                    expected_version,
+                    false,
+                )?;
+            }
             conn.execute("DELETE FROM item_notes WHERE id = ?1", params![note_id])?;
             conn.execute(
                 "UPDATE items SET note_count = MAX(0, note_count - 1) \
@@ -5760,6 +5905,39 @@ pub(crate) fn normalize_actor(actor: &str) -> String {
         "desk".to_string()
     } else {
         t.to_string()
+    }
+}
+
+/// Acquire an exclusive OS lock on `<root>/.matter.lock`.
+///
+/// Held for the lifetime of the open write [`Matter`]; released on drop of the
+/// returned [`File`]. Second process write-open fails with
+/// [`Error::MatterAlreadyOpen`].
+///
+/// Note: same-process re-lock behavior is platform-dependent; sequential
+/// open → drop → open is the portable dual-open test pattern.
+pub(crate) fn acquire_write_lock(root: &Utf8Path) -> Result<File> {
+    let lock_path = root.join(MATTER_LOCK_FILE);
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path.as_std_path())
+        .map_err(|e| {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot open matter lock file {}: {e}", lock_path),
+            ))
+        })?;
+    match file.try_lock_exclusive() {
+        Ok(true) => Ok(file),
+        Ok(false) => Err(Error::MatterAlreadyOpen(format!(
+            "matter already open by another process: {root}"
+        ))),
+        Err(e) => Err(Error::MatterAlreadyOpen(format!(
+            "matter already open by another process: {root} (lock {lock_path}: {e})"
+        ))),
     }
 }
 

@@ -445,8 +445,9 @@ fn resume_nested_zip_mid_archive() {
     limits.checkpoint_every_n_entries = 1;
 
     // Cancel once inventory contains a leaf under the nested zip marker.
+    // Use open_for_read: exclusive write lock is held by the ingest handle.
     let matter_root_c = matter_root.clone();
-    let cancel = move || match Matter::open(&matter_root_c) {
+    let cancel = move || match Matter::open_for_read(&matter_root_c) {
         Ok(m) => m
             .connection()
             .query_row(

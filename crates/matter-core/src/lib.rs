@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v35**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v36**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -46,6 +46,9 @@
 //! - **Conversation review queries** (list by day bucket, full stream, centered handoff, reply snippets) (0056)
 //! - **Optional encryption at rest** (schema v35 / track 0057): Argon2id KEK-wrap-DEK,
 //!   chunked AES-256-GCM for SQLite container + CAS; FTS via encrypted Directory (no mmap)
+//! - **Multi-user concurrent review** (schema v36 / track 0058): local users/sessions,
+//!   item locks + batch checkout, OCC `review_version`, sampling QC; exclusive OS
+//!   `.matter.lock` on write-open; strict actor mode for the matter service
 //!
 //! ## Layout
 //!
@@ -95,6 +98,7 @@ pub mod jobs;
 pub mod lang;
 pub mod logical_hash;
 pub mod matter;
+pub mod multi_user;
 pub mod ocr;
 pub mod office;
 pub mod overview;
@@ -193,8 +197,15 @@ pub use matter::{
     ReviewListRow, ReviewSet, SavedSearch, SavedSearchInput, Source, ThreadCandidate,
     ThreadFieldUpdate, UpsertNoteInput, DB_FILE, DEFAULT_REVIEW_SET_NAME, EXPORTS_DIR,
     FAMILY_KIND_EMAIL_ATTACHMENTS, HIGHLIGHT_CONTEXT_CHARS, HIGHLIGHT_DEFAULT_COLOR,
-    HIGHLIGHT_QUOTE_MAX_BYTES, INDEX_DIR, LOGS_DIR, NOTE_BODY_MAX_BYTES, WORKSPACE_DIR,
-    WORKSPACE_TEMP_DIR,
+    HIGHLIGHT_QUOTE_MAX_BYTES, INDEX_DIR, LOGS_DIR, MATTER_LOCK_FILE, NOTE_BODY_MAX_BYTES,
+    WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
+};
+pub use multi_user::{
+    hash_secret, hash_token, require_role, verify_secret, BatchCheckout, BatchItemRow,
+    ItemBodyPayload, ItemLock, ItemThinRow, MatterUser, QcSample, QcSampleItem, ReviewBatch,
+    SessionIssue, BATCH_STATUS_CLOSED, BATCH_STATUS_OPEN, DEFAULT_LOCK_TTL_HOURS,
+    DEFAULT_SESSION_TTL_HOURS, QC_OUTCOME_AGREE, QC_OUTCOME_CORRECTED, QC_OUTCOME_DISAGREE,
+    QC_SAMPLE_STATUS_OPEN, ROLE_ADMIN, ROLE_READ_ONLY, ROLE_REVIEWER,
 };
 pub use ocr::{ocr_status, ApplyOcrTextInput, OcrApplyResult, OcrCandidate};
 pub use office::{

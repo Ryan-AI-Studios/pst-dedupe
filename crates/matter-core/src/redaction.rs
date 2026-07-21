@@ -797,6 +797,7 @@ impl Matter {
                     withhold: true,
                     include_on_log: true,
                     actor: actor.to_string(),
+                    expected_version: None,
                 })?;
             }
             None => {
@@ -808,6 +809,7 @@ impl Matter {
                     withhold: true,
                     include_on_log: true,
                     actor: actor.to_string(),
+                    expected_version: None,
                 })?;
             }
         }

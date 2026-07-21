@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 35;
+pub const SCHEMA_VERSION: u32 = 36;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -49,6 +49,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (33, MIGRATION_V33),
     (34, MIGRATION_V34),
     (35, MIGRATION_V35),
+    (36, MIGRATION_V36),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -1142,6 +1143,96 @@ const MIGRATION_V35: &str = r#"
 ALTER TABLE matters ADD COLUMN encryption_enabled INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE matters ADD COLUMN encryption_cipher TEXT;
 ALTER TABLE matters ADD COLUMN encryption_header_version INTEGER;
+"#;
+
+/// Schema v36: multi-user matter service (track 0058).
+///
+/// Local identity, item locks, review batches, sampling QC, OCC `review_version`.
+/// Solo Desk path remains default (`multi_user_enabled = 0`).
+const MIGRATION_V36: &str = r#"
+ALTER TABLE matters ADD COLUMN multi_user_enabled INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE items ADD COLUMN review_version INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE matter_users (
+  id TEXT PRIMARY KEY NOT NULL,
+  display_name TEXT NOT NULL,
+  role TEXT NOT NULL,
+  secret_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  disabled_at TEXT
+);
+CREATE UNIQUE INDEX idx_matter_users_display_name_lower
+  ON matter_users(lower(display_name));
+
+CREATE TABLE matter_sessions (
+  token_hash TEXT PRIMARY KEY NOT NULL,
+  user_id TEXT NOT NULL REFERENCES matter_users(id),
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_matter_sessions_user ON matter_sessions(user_id);
+CREATE INDEX idx_matter_sessions_expires ON matter_sessions(expires_at);
+
+CREATE TABLE item_locks (
+  item_id TEXT PRIMARY KEY NOT NULL REFERENCES items(id),
+  user_id TEXT NOT NULL REFERENCES matter_users(id),
+  locked_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  reason TEXT
+);
+CREATE INDEX idx_item_locks_user ON item_locks(user_id);
+CREATE INDEX idx_item_locks_expires ON item_locks(expires_at);
+
+CREATE TABLE review_batches (
+  id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  filter_json TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_review_batches_status ON review_batches(status);
+
+CREATE TABLE review_batch_items (
+  batch_id TEXT NOT NULL REFERENCES review_batches(id),
+  item_id TEXT NOT NULL REFERENCES items(id),
+  PRIMARY KEY (batch_id, item_id)
+);
+CREATE INDEX idx_review_batch_items_item ON review_batch_items(item_id);
+
+CREATE TABLE batch_checkouts (
+  batch_id TEXT NOT NULL REFERENCES review_batches(id),
+  user_id TEXT NOT NULL REFERENCES matter_users(id),
+  checked_out_at TEXT NOT NULL,
+  checked_in_at TEXT,
+  PRIMARY KEY (batch_id, user_id)
+);
+CREATE INDEX idx_batch_checkouts_active
+  ON batch_checkouts(batch_id) WHERE checked_in_at IS NULL;
+
+CREATE TABLE qc_samples (
+  id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  sample_pct REAL,
+  sample_n INTEGER,
+  seed INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open'
+);
+
+CREATE TABLE qc_sample_items (
+  sample_id TEXT NOT NULL REFERENCES qc_samples(id),
+  item_id TEXT NOT NULL REFERENCES items(id),
+  primary_coder TEXT,
+  outcome TEXT,
+  notes TEXT,
+  recorded_by TEXT,
+  recorded_at TEXT,
+  PRIMARY KEY (sample_id, item_id)
+);
+CREATE INDEX idx_qc_sample_items_item ON qc_sample_items(item_id);
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -4670,7 +4761,7 @@ mod tests {
         let v = migrate(&conn).expect("migrate v30 to current");
         assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 35);
+        assert_eq!(v, 36);
 
         let has_table: bool = conn
             .query_row(
@@ -4759,7 +4850,7 @@ mod tests {
         let v = migrate(&conn).expect("migrate v31 to current");
         assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 35);
+        assert_eq!(v, 36);
 
         for col in [
             "transcript_status",
@@ -4839,7 +4930,7 @@ mod tests {
         let v = migrate(&conn).expect("migrate v33 to v34");
         assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 35);
+        assert_eq!(v, 36);
 
         for col in [
             "conversation_id",
@@ -4928,7 +5019,7 @@ mod tests {
         let v = migrate(&conn).expect("migrate v32 to current");
         assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 35);
+        assert_eq!(v, 36);
 
         for col in [
             "lang_pack_id",

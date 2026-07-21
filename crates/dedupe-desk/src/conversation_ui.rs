@@ -668,6 +668,7 @@ impl ConversationState {
                         remove_code_ids: vec![],
                         propagate_family: false,
                         actor,
+                        expected_version: None,
                     })
                     .map_err(|e| e.to_string())?;
                 Ok(ConvOpResult::Coded {
@@ -708,6 +709,7 @@ impl ConversationState {
                         remove_code_ids: vec![],
                         propagate_family: false,
                         actor,
+                        expected_version: None,
                     })
                     .map_err(|e| e.to_string())?;
                 Ok(ConvOpResult::Coded {

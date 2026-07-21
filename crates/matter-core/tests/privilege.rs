@@ -46,7 +46,7 @@ fn schema_v12_on_create() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-v12");
     let matter = Matter::create(&root, "V12").expect("create");
-    assert_eq!(SCHEMA_VERSION, 35);
+    assert_eq!(SCHEMA_VERSION, 36);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
 
     let has: bool = matter
@@ -75,6 +75,7 @@ fn apply_privilege_code_ensures_row_withhold() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("apply");
 
@@ -118,6 +119,7 @@ fn upsert_description_basis_audits() {
             withhold: true,
             include_on_log: true,
             actor: "alice".into(),
+            expected_version: None,
         })
         .expect("upsert");
     assert_eq!(updated.basis, "work_product");
@@ -153,6 +155,7 @@ fn remove_privilege_soft_clears_retains_description() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("apply");
     matter
@@ -164,6 +167,7 @@ fn remove_privilege_soft_clears_retains_description() {
             withhold: true,
             include_on_log: true,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("desc");
 
@@ -174,6 +178,7 @@ fn remove_privilege_soft_clears_retains_description() {
             remove_code_ids: vec![by_key["privilege"].id.clone()],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("remove");
 
@@ -216,6 +221,7 @@ fn export_csv_two_items_headers() {
                 withhold: true,
                 include_on_log: true,
                 actor: "exp".into(),
+                expected_version: None,
             })
             .expect("upsert");
     }
@@ -332,6 +338,7 @@ fn attachment_inheritance_on_export() {
             withhold: true,
             include_on_log: true,
             actor: "att".into(),
+            expected_version: None,
         })
         .expect("upsert");
 
@@ -425,6 +432,7 @@ fn attachment_empty_subject_prefers_item_title_over_parent() {
             withhold: true,
             include_on_log: true,
             actor: "att".into(),
+            expected_version: None,
         })
         .expect("upsert");
 
@@ -496,6 +504,7 @@ fn attachment_empty_subject_and_title_inherits_parent_subject() {
             withhold: true,
             include_on_log: true,
             actor: "att".into(),
+            expected_version: None,
         })
         .expect("upsert");
 
@@ -558,6 +567,7 @@ fn include_on_log_zero_and_cleared_omitted() {
             withhold: true,
             include_on_log: false,
             actor: "o".into(),
+            expected_version: None,
         })
         .expect("nolog");
     matter
@@ -610,6 +620,7 @@ fn review_corpus_scope_excludes_non_review() {
                 withhold: true,
                 include_on_log: true,
                 actor: "s".into(),
+                expected_version: None,
             })
             .expect("u");
     }
@@ -724,6 +735,7 @@ fn item_is_withheld_matrix() {
             withhold: false,
             include_on_log: true,
             actor: "m".into(),
+            expected_version: None,
         })
         .expect("override");
 
@@ -751,6 +763,7 @@ fn withhold_zero_asserted_still_on_log() {
             withhold: false,
             include_on_log: true,
             actor: "w".into(),
+            expected_version: None,
         })
         .expect("u");
 
@@ -795,6 +808,7 @@ fn notes_body_not_in_csv_by_default() {
             body: "SECRET_NOTE_BODY_SHOULD_NOT_APPEAR".into(),
             highlight_id: None,
             actor: "n".into(),
+            expected_version: None,
         })
         .expect("note");
 
@@ -831,6 +845,7 @@ fn filter_presets_withheld_and_incomplete() {
             withhold: true,
             include_on_log: true,
             actor: "f".into(),
+            expected_version: None,
         })
         .expect("ready");
     // incomplete: blank description

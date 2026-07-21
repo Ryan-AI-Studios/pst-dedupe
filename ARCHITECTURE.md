@@ -16,11 +16,21 @@ Target scale: 1M+ emails across multi-gigabyte PSTs.
 
 ---
 
+## Dual product mode (track 0058)
+
+| Mode | How | Network | Concurrency |
+|---|---|---|---|
+| **Desk (default)** | Single-exe local `Matter::open` | None | One operator; free-string actor OK |
+| **Matter service (opt-in)** | `pst-dedup service serve --matter …` | Loopback HTTP (LAN only with `--allow-lan`) | Many clients; one writer process |
+
+Architecture locks: exclusive OS `.matter.lock` on write-open; OCC `review_version` on mutates; item locks + batch checkout; strict actor mode in core when service hosts; matter path must be **local disk** of the host. Schema **v36** is additive — solo Desk keeps working with multi-user flag off. See `crates/matter-service/README.md`.
+
 ## Crate Architecture
 
 ```
 pst-dedup/                      (Cargo workspace)
 ├── crates/
+│   ├── matter-service/         Multi-user HTTP host (0058; axum + WriteGate)
 │   ├── pst-reader/             Pure Rust PST parser (the hard part)
 │   │   src/
 │   │   ├── lib.rs              Public API: PstFile, Message, Folder iterators

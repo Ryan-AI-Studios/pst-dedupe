@@ -415,6 +415,7 @@ fn filter_code_any_of_responsive() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("code");
 
@@ -458,6 +459,7 @@ fn filter_code_none_of_and_uncoded() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("code");
 
@@ -848,6 +850,7 @@ fn filter_has_notes_and_note_text() {
             body: "special counsel phrase".into(),
             highlight_id: None,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("note");
 
@@ -930,7 +933,7 @@ fn filter_pdf_needs_ocr_preset() {
 
 #[test]
 fn migration_has_review_list_order_index() {
-    assert_eq!(SCHEMA_VERSION, 35);
+    assert_eq!(SCHEMA_VERSION, 36);
     let (_tmp, _root, matter, _set_id) = setup_review_matter("filter-idx");
     let exists: bool = matter
         .connection()

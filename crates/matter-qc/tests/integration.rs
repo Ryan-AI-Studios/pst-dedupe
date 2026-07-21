@@ -134,7 +134,7 @@ fn insert_child(
 #[test]
 fn schema_v21_qc_runs_table() {
     let (_tmp, matter) = temp_matter("schema-v21");
-    assert_eq!(SCHEMA_VERSION, 35);
+    assert_eq!(SCHEMA_VERSION, 36);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     let has: bool = matter
         .connection()
@@ -231,6 +231,7 @@ fn withheld_child_not_incomplete_but_family_member() {
             withhold: true,
             include_on_log: true,
             actor: "t".into(),
+            expected_version: None,
         })
         .unwrap();
 
@@ -263,6 +264,7 @@ fn withheld_in_selection_error() {
             withhold: true,
             include_on_log: true,
             actor: "t".into(),
+            expected_version: None,
         })
         .unwrap();
     let r = run_qc(&matter, &job.id, &QcParams::default());
@@ -510,6 +512,7 @@ fn only_withheld_set_level_error() {
             withhold: true,
             include_on_log: true,
             actor: "t".into(),
+            expected_version: None,
         })
         .unwrap();
     let r = run_qc(&matter, &job.id, &QcParams::default());

@@ -7,7 +7,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (fields introduced across schema v2–v35; current [`SCHEMA_VERSION`] is **35**) + family graph
+6. **Normalized Item** model (fields introduced across schema v2–v36; current [`SCHEMA_VERSION`] is **36**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
@@ -21,7 +21,19 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 17. **Redaction** regions + true redacted text CAS artifact (0032)
 18. **Office extract** bookkeeping (`office_*`) for OOXML text fill (0033)
 
-Schema version: **35** (`SCHEMA_VERSION`) — prior features through Teams/chat metadata (v34 / 0055) plus **optional encryption flags** (`encryption_enabled`, `encryption_cipher`, `encryption_header_version`) for track **0057**. SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+Schema version: **36** (`SCHEMA_VERSION`) — prior features through optional encryption (v35 / 0057) plus **multi-user concurrent review** tables (`matter_users`, locks, batches, QC samples, `items.review_version`, `matters.multi_user_enabled`) for track **0058**. SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+
+### Multi-user / matter service (0058)
+
+Opt-in second product mode. **Desk solo remains default** (`multi_user_enabled = 0`).
+
+| Topic | Rule |
+|---|---|
+| Exclusive open | Write open acquires OS lock on `.matter.lock`; second write-open fails closed |
+| OCC | `items.review_version`; service mutates require `expected_version` → conflict on stale |
+| Identity | Matter-local users + Argon2id secrets + hashed sessions; no OIDC |
+| Strict actor | Service sets `Matter::set_strict_actor_mode(true)`; free-form actor rejected |
+| Hosting | `matter-service` crate / `pst-dedup service serve` — loopback default; local disk only |
 
 ### Optional encryption at rest (0057)
 
