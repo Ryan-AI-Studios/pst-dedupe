@@ -158,7 +158,13 @@ impl From<matter_core::Error> for CliError {
             | Error::PassphraseRequired(_)
             | Error::WrongPassphrase
             | Error::Crypto(_)
-            | Error::CryptoHeaderMissing(_) => CliError::MatterIo(e.to_string()),
+            | Error::CryptoHeaderMissing(_)
+            | Error::MatterAlreadyOpen(_) => CliError::MatterIo(e.to_string()),
+            Error::VersionConflict { .. }
+            | Error::Conflict { .. }
+            | Error::Locked { .. }
+            | Error::Unauthorized(_)
+            | Error::Forbidden(_) => CliError::Usage(e.to_string()),
         }
     }
 }

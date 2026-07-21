@@ -1,6 +1,6 @@
 //! Conversation-centric review API tests (track 0056).
 //!
-//! Schema stays **v35** (conversation columns from v34) — uses `conversation_id` + `idx_items_conversation`.
+//! Conversation columns from v34; current schema is **v36** — uses `conversation_id` + `idx_items_conversation`.
 
 use std::collections::HashSet;
 
@@ -71,11 +71,11 @@ fn insert_chat(matter: &Matter, seed: ChatSeed<'_>) -> ConversationMessageRow {
 }
 
 #[test]
-fn schema_stays_v35() {
+fn schema_is_current() {
     let (_tmp, base) = utf8_tempdir();
     let matter = Matter::create(base.join("m"), "Conv Schema").expect("create");
-    assert_eq!(SCHEMA_VERSION, 35);
-    assert_eq!(matter.schema_version().expect("ver"), 35);
+    assert_eq!(SCHEMA_VERSION, 36);
+    assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
 }
 
 #[test]
@@ -321,6 +321,7 @@ fn bulk_code_entire_day_bucket_applies_to_all_ids() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("apply");
     assert_eq!(result.target_count, 5);

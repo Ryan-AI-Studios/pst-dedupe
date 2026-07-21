@@ -393,7 +393,10 @@ fn worker_loop(
                             &sink,
                             &reply,
                         );
-                        // Matter drops here — exclusive ownership ends.
+                        // Release exclusive OS lock **before** clearing active so
+                        // wait_until_idle callers can write-open immediately.
+                        drop(matter);
+                        *active.lock().expect("active") = None;
                     }
                     Err(e) => {
                         let _ = reply.send(Err(e));
@@ -424,6 +427,8 @@ fn worker_loop(
                             &sink,
                             &reply,
                         );
+                        drop(matter);
+                        *active.lock().expect("active") = None;
                     }
                     Err(e) => {
                         let _ = reply.send(Err(e));
@@ -525,8 +530,7 @@ fn run_start(
     let outcome = handler.run(&ctx);
     stop_checkpoint_poller(poller);
     finalize_job(matter, &job.id, kind, matter.id(), sink, outcome);
-
-    *active.lock().expect("active") = None;
+    // Active cleared by worker loop after Matter drops (exclusive lock release).
     Ok(())
 }
 
@@ -646,8 +650,7 @@ fn run_resume(
     let outcome = handler.run(&ctx);
     stop_checkpoint_poller(poller);
     finalize_job(matter, &job.id, &job.kind, matter.id(), sink, outcome);
-
-    *active.lock().expect("active") = None;
+    // Active cleared by worker loop after Matter drops (exclusive lock release).
     Ok(())
 }
 

@@ -13,6 +13,7 @@ mod paths;
 mod profile_cmd;
 mod runner_util;
 mod scan;
+mod service_cmd;
 mod workflow_cmd;
 
 use std::path::PathBuf;
@@ -150,6 +151,12 @@ enum Commands {
     Gap {
         #[command(subcommand)]
         cmd: GapCmd,
+    },
+
+    /// Multi-user matter service (0058): serve / bootstrap / users.
+    Service {
+        #[command(subcommand)]
+        cmd: service_cmd::ServiceCmd,
     },
 }
 
@@ -411,6 +418,15 @@ fn command_wants_json(cmd: &Commands) -> bool {
         Commands::Gap { cmd } => match cmd {
             GapCmd::Run { json, .. } => *json,
         },
+        Commands::Service { cmd } => match cmd {
+            service_cmd::ServiceCmd::Serve { json, .. }
+            | service_cmd::ServiceCmd::BootstrapAdmin { json, .. } => *json,
+            service_cmd::ServiceCmd::User { cmd } => match cmd {
+                service_cmd::ServiceUserCmd::Add { json, .. }
+                | service_cmd::ServiceUserCmd::List { json, .. }
+                | service_cmd::ServiceUserCmd::Disable { json, .. } => *json,
+            },
+        },
     }
 }
 
@@ -542,6 +558,7 @@ fn run(cli: Cli) -> Result<()> {
                 wait: _,
             } => convenience::gap_run(&path, params_json.as_deref(), json),
         },
+        Commands::Service { cmd } => service_cmd::run_service(cmd).map(|_| ()),
     }
 }
 

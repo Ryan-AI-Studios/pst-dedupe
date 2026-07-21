@@ -2241,22 +2241,26 @@ fn profile_run_classify_idempotent_second_run() {
         .expect("start1");
     assert!(runner.wait_until_idle(Duration::from_secs(30)));
 
-    let matter = Matter::open(&root).expect("open");
-    let p1 = matter.get_job(&parent1).expect("p1");
-    assert_eq!(
-        p1.state,
-        JobState::Succeeded,
-        "first run err={:?}",
-        p1.error_summary
-    );
-    let before = matter.get_item(&item_id).expect("item before");
-    let method_before = before.category_method.clone();
-    let cat_before = before.file_category.clone();
-    let categorized_at_before = before.categorized_at.clone();
-    assert!(
-        categorized_at_before.is_some(),
-        "seeded classification should set categorized_at"
-    );
+    let (method_before, cat_before, categorized_at_before) = {
+        let matter = Matter::open(&root).expect("open");
+        let p1 = matter.get_job(&parent1).expect("p1");
+        assert_eq!(
+            p1.state,
+            JobState::Succeeded,
+            "first run err={:?}",
+            p1.error_summary
+        );
+        let before = matter.get_item(&item_id).expect("item before");
+        let method_before = before.category_method.clone();
+        let cat_before = before.file_category.clone();
+        let categorized_at_before = before.categorized_at.clone();
+        assert!(
+            categorized_at_before.is_some(),
+            "seeded classification should set categorized_at"
+        );
+        // Drop exclusive write lock before second runner start.
+        (method_before, cat_before, categorized_at_before)
+    };
 
     let parent2 = runner
         .start(&root, JOB_KIND_PROFILE_RUN, params)
@@ -2408,32 +2412,35 @@ fn profile_run_extract_only_multi_stage_children() {
         .expect("start");
     assert!(runner.wait_until_idle(Duration::from_secs(60)));
 
-    let matter = Matter::open(&root).expect("open");
-    let parent = matter.get_job(&parent_id).expect("parent");
-    assert_eq!(
-        parent.state,
-        JobState::Succeeded,
-        "err={:?}",
-        parent.error_summary
-    );
+    {
+        let matter = Matter::open(&root).expect("open");
+        let parent = matter.get_job(&parent_id).expect("parent");
+        assert_eq!(
+            parent.state,
+            JobState::Succeeded,
+            "err={:?}",
+            parent.error_summary
+        );
 
-    let jobs = matter.list_jobs().expect("list");
-    let kinds: std::collections::BTreeSet<_> = jobs.iter().map(|j| j.kind.as_str()).collect();
-    assert!(kinds.contains(JOB_KIND_PROFILE_RUN));
-    assert!(kinds.contains("classify"));
-    assert!(kinds.contains("office_extract"));
-    assert!(kinds.contains("pdf_extract"));
-    assert!(kinds.contains("ics_extract"));
-    // Distinct child kinds (not only parent).
-    let child_kinds: std::collections::BTreeSet<_> = jobs
-        .iter()
-        .filter(|j| j.kind != JOB_KIND_PROFILE_RUN)
-        .map(|j| j.kind.as_str())
-        .collect();
-    assert!(
-        child_kinds.len() >= 2,
-        "expected multiple distinct child kinds, got {child_kinds:?}"
-    );
+        let jobs = matter.list_jobs().expect("list");
+        let kinds: std::collections::BTreeSet<_> = jobs.iter().map(|j| j.kind.as_str()).collect();
+        assert!(kinds.contains(JOB_KIND_PROFILE_RUN));
+        assert!(kinds.contains("classify"));
+        assert!(kinds.contains("office_extract"));
+        assert!(kinds.contains("pdf_extract"));
+        assert!(kinds.contains("ics_extract"));
+        // Distinct child kinds (not only parent).
+        let child_kinds: std::collections::BTreeSet<_> = jobs
+            .iter()
+            .filter(|j| j.kind != JOB_KIND_PROFILE_RUN)
+            .map(|j| j.kind.as_str())
+            .collect();
+        assert!(
+            child_kinds.len() >= 2,
+            "expected multiple distinct child kinds, got {child_kinds:?}"
+        );
+        // Drop exclusive write lock before second runner start.
+    }
 
     // Second run: creates new child jobs; classify with force:false skips already-done items
     // (empty matter → completed quickly with skip semantics intact).
@@ -2731,28 +2738,27 @@ fn profile_run_cancel_mid_stage_pauses_parent() {
     runner.cancel(&parent_id).expect("cancel");
     assert!(runner.wait_until_idle(Duration::from_secs(15)));
 
-    let matter = Matter::open(&root).expect("open");
-    let parent = matter.get_job(&parent_id).expect("parent");
-    assert_eq!(
-        parent.state,
-        JobState::Paused,
-        "parent should pause on cancel; err={:?}",
-        parent.error_summary
-    );
-    let office: Vec<_> = matter
-        .list_jobs()
-        .expect("list")
-        .into_iter()
-        .filter(|j| j.kind == "office_extract")
-        .collect();
-    assert!(
-        office.is_empty(),
-        "office_extract must not run after cancel during classify"
-    );
-
-    // Capture paused classify child id before resume.
     let paused_classify_id = {
         let matter = Matter::open(&root).expect("open");
+        let parent = matter.get_job(&parent_id).expect("parent");
+        assert_eq!(
+            parent.state,
+            JobState::Paused,
+            "parent should pause on cancel; err={:?}",
+            parent.error_summary
+        );
+        let office: Vec<_> = matter
+            .list_jobs()
+            .expect("list")
+            .into_iter()
+            .filter(|j| j.kind == "office_extract")
+            .collect();
+        assert!(
+            office.is_empty(),
+            "office_extract must not run after cancel during classify"
+        );
+
+        // Capture paused classify child id before resume.
         let classify: Vec<_> = matter
             .list_jobs()
             .expect("list")
@@ -2762,6 +2768,7 @@ fn profile_run_cancel_mid_stage_pauses_parent() {
         assert_eq!(classify.len(), 1);
         assert_eq!(classify[0].state, JobState::Paused);
         classify[0].id.clone()
+        // Drop exclusive write lock before resume/start.
     };
 
     // Resume: reuses paused classify child (is_resume), then office.

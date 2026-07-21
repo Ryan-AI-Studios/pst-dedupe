@@ -23,7 +23,7 @@ fn schema_v19_on_create() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-v19");
     let matter = Matter::create(&root, "V19").expect("create");
-    assert_eq!(SCHEMA_VERSION, 35);
+    assert_eq!(SCHEMA_VERSION, 36);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     assert_eq!(matter.info().expect("info").schema_version, SCHEMA_VERSION);
 
@@ -246,6 +246,7 @@ fn mixed_seed_matrix_rollups() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("code");
 
@@ -266,6 +267,7 @@ fn mixed_seed_matrix_rollups() {
             withhold: true,
             include_on_log: true,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("priv");
 
@@ -474,6 +476,7 @@ fn review_progress_coded_vs_uncoded() {
             remove_code_ids: vec![],
             propagate_family: false,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("codes");
 

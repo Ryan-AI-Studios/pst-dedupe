@@ -98,7 +98,7 @@ fn sha256_file(path: &std::path::Path) -> String {
 #[test]
 fn schema_v20_production_tables() {
     let (_tmp, matter) = temp_matter("schema-v20");
-    assert_eq!(SCHEMA_VERSION, 35);
+    assert_eq!(SCHEMA_VERSION, 36);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     for table in ["production_sets", "production_items"] {
         let has: bool = matter
@@ -275,6 +275,7 @@ fn withhold_skipped_not_in_volume() {
             withhold: true,
             include_on_log: true,
             actor: "tester".into(),
+            expected_version: None,
         })
         .expect("withhold");
 
@@ -342,6 +343,7 @@ fn fail_if_withheld_aborts() {
             withhold: true,
             include_on_log: true,
             actor: "t".into(),
+            expected_version: None,
         })
         .expect("priv");
 
@@ -525,6 +527,7 @@ fn privilege_description_not_in_dat() {
             withhold: false,
             include_on_log: true,
             actor: "t".into(),
+            expected_version: None,
         })
         .expect("priv");
 
@@ -567,6 +570,7 @@ fn notes_not_in_dat() {
             body: "UNIQUE_NOTE_BODY_TOKEN_ABC work product".into(),
             highlight_id: None,
             actor: "t".into(),
+            expected_version: None,
         })
         .expect("note");
 
@@ -1194,6 +1198,7 @@ fn late_withhold_on_resume_excludes_from_volume() {
             withhold: true,
             include_on_log: true,
             actor: "t".into(),
+            expected_version: None,
         })
         .expect("withhold");
     assert!(matter.item_is_withheld(&first_id).unwrap());
@@ -1623,6 +1628,7 @@ fn late_withhold_after_db_ok_without_jsonl_purges_bytes() {
             withhold: true,
             include_on_log: true,
             actor: "t".into(),
+            expected_version: None,
         })
         .expect("withhold");
 

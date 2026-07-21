@@ -378,6 +378,7 @@ pub fn note_upsert_from_draft(
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string()),
         actor: actor.to_string(),
+        expected_version: None,
     })
 }
 

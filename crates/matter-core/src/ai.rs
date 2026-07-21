@@ -721,6 +721,7 @@ impl Matter {
                 remove_code_ids: vec![],
                 propagate_family: false,
                 actor: actor_for_apply.clone(),
+                expected_version: None,
             })?;
             let now = now_rfc3339();
             self.connection().execute(

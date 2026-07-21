@@ -13,6 +13,7 @@ path = "src/main.rs"
 pst-reader = { path = "../pst-reader" }
 dedup-engine = { path = "../dedup-engine" }
 matter-core = { path = "../matter-core" }
+matter-service = { path = "../matter-service" }
 process-runner = { path = "../process-runner" }
 clap = { workspace = true }
 serde = { workspace = true }
@@ -22,7 +23,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 camino = { workspace = true }
 ctrlc = "3.5"
-tokio = { version = "1", default-features = false, features = ["sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

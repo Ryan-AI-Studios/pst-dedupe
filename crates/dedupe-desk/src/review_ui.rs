@@ -1963,6 +1963,7 @@ impl ReviewState {
                 // highlight_id ignored on update (matter-core); body-only edit.
                 highlight_id: None,
                 actor,
+                expected_version: None,
             })?;
             Ok("Note updated.".into())
         });
@@ -2263,28 +2264,33 @@ impl ReviewState {
         // Sync path for small single writes (notes/highlights/redactions are cheap).
         let root = matter_root.to_owned();
         let write_ok = match Matter::open(&root) {
-            Ok(matter) => match f(&matter) {
-                Ok(message) => {
-                    match load_notes_highlights_redactions(&root, &item_id) {
-                        Ok(bundle) => {
-                            self.apply_annotation_bundle(bundle);
-                            self.notes_status = Some(message);
-                            self.notes_error = None;
+            Ok(matter) => {
+                // Release exclusive write lock before any reload open.
+                let result = f(&matter);
+                drop(matter);
+                match result {
+                    Ok(message) => {
+                        match load_notes_highlights_redactions(&root, &item_id) {
+                            Ok(bundle) => {
+                                self.apply_annotation_bundle(bundle);
+                                self.notes_status = Some(message);
+                                self.notes_error = None;
+                            }
+                            Err(e) => {
+                                // Write already committed; keep success so drafts clear.
+                                self.notes_status = Some(message);
+                                self.notes_error = Some(e);
+                            }
                         }
-                        Err(e) => {
-                            // Write already committed; keep success so drafts clear.
-                            self.notes_status = Some(message);
-                            self.notes_error = Some(e);
-                        }
+                        true
                     }
-                    true
+                    Err(e) => {
+                        self.notes_error = Some(e.to_string());
+                        self.notes_status = None;
+                        false
+                    }
                 }
-                Err(e) => {
-                    self.notes_error = Some(e.to_string());
-                    self.notes_status = None;
-                    false
-                }
-            },
+            }
             Err(e) => {
                 self.notes_error = Some(e.to_string());
                 false
@@ -2316,6 +2322,7 @@ impl ReviewState {
                 remove_code_ids: vec![code_id.to_string()],
                 propagate_family: false,
                 actor: actor.to_string(),
+                expected_version: None,
             }
         } else {
             ApplyCodesInput {
@@ -2324,6 +2331,7 @@ impl ReviewState {
                 remove_code_ids: vec![],
                 propagate_family: false,
                 actor: actor.to_string(),
+                expected_version: None,
             }
         };
         self.apply_codes_now(matter_root, ctx, input);
@@ -2348,6 +2356,7 @@ impl ReviewState {
                 remove_code_ids: vec![code_id.to_string()],
                 propagate_family: false,
                 actor: actor.to_string(),
+                expected_version: None,
             },
         );
     }
@@ -2831,7 +2840,8 @@ fn load_notes_highlights_redactions(
     matter_root: &Utf8Path,
     item_id: &str,
 ) -> Result<AnnotationBundle, String> {
-    let matter = Matter::open(matter_root).map_err(|e| e.to_string())?;
+    // Read path: must not take exclusive write lock (writer may still hold it).
+    let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
     let notes = matter.list_notes(item_id).map_err(|e| e.to_string())?;
     let highlights = matter.list_highlights(item_id).map_err(|e| e.to_string())?;
     let redactions = matter.list_redactions(item_id).map_err(|e| e.to_string())?;
@@ -5744,6 +5754,7 @@ fn show_batch_confirm(
                         remove_code_ids: remove_ids,
                         propagate_family: confirm.propagate_family,
                         actor: actor.to_string(),
+            expected_version: None,
                     };
                     state.batch_confirm = None;
                     state.apply_codes_now(matter_root, ctx, input);
@@ -6068,6 +6079,7 @@ mod tests {
                 remove_code_ids: vec![],
                 propagate_family: false,
                 actor: "desk-test".into(),
+                expected_version: None,
             },
         )
         .expect("code");
@@ -6492,6 +6504,7 @@ mod tests {
                 remove_code_ids: vec![],
                 propagate_family: false,
                 actor: "desk-test".into(),
+                expected_version: None,
             },
         )
         .expect("apply");

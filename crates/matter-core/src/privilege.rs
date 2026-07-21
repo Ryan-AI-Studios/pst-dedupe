@@ -135,6 +135,8 @@ pub struct UpsertItemPrivilegeInput {
     pub withhold: bool,
     pub include_on_log: bool,
     pub actor: String,
+    /// Optional OCC expected `review_version`.
+    pub expected_version: Option<i64>,
 }
 
 /// Matter-level privilege protocol stub (502(d)/502(e) notes are informational).
@@ -530,7 +532,7 @@ impl Matter {
         let status = input.status.trim();
         validate_basis(basis)?;
         validate_status(status)?;
-        let actor = normalize_actor(&input.actor);
+        let actor = self.resolve_actor_for_mutate(&input.actor)?;
         let now = now_rfc3339();
         let description = input.description; // allow blank
         let withhold = if input.withhold { 1i64 } else { 0i64 };
@@ -543,8 +545,29 @@ impl Matter {
             (withhold, include_on_log)
         };
         let item_id = input.item_id.clone();
+        let guards = self.multi_user_guards_active(input.expected_version)?;
+        let enforce_locks = self.is_multi_user_enabled()?;
+        let require_expected = self.strict_actor() || self.is_multi_user_enabled()?;
 
         self.with_transaction(|conn| {
+            if guards {
+                Matter::prepare_review_mutates_conn(
+                    conn,
+                    std::slice::from_ref(&item_id),
+                    &actor,
+                    input.expected_version,
+                    enforce_locks,
+                    require_expected,
+                    &now,
+                )?;
+            } else {
+                let _ = crate::multi_user::bump_review_version_conn(
+                    conn,
+                    &item_id,
+                    input.expected_version,
+                    false,
+                )?;
+            }
             let existing = load_privilege(conn, self.id(), &item_id)?;
             let (asserted_at, asserted_by) = match &existing {
                 Some(e) if e.asserted_at.is_some() => {

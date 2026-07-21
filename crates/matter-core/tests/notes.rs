@@ -34,7 +34,7 @@ fn schema_v11_on_create() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-v11");
     let matter = Matter::create(&root, "V11").expect("create");
-    assert_eq!(SCHEMA_VERSION, 35);
+    assert_eq!(SCHEMA_VERSION, 36);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
 
     let (item, _) = insert_text_item(&matter, "hello");
@@ -63,6 +63,7 @@ fn document_note_create_list_reopen() {
             body: "Counsel strategy note".into(),
             highlight_id: None,
             actor: "alice".into(),
+            expected_version: None,
         })
         .expect("create");
     assert_eq!(note.body, "Counsel strategy note");
@@ -103,6 +104,7 @@ fn update_note_body_audit_upsert() {
             body: "v1".into(),
             highlight_id: None,
             actor: "bob".into(),
+            expected_version: None,
         })
         .expect("create");
     let created_at = note.created_at.clone();
@@ -116,6 +118,7 @@ fn update_note_body_audit_upsert() {
             body: "v2 revised".into(),
             highlight_id: None,
             actor: "bob".into(),
+            expected_version: None,
         })
         .expect("update");
     assert_eq!(updated.body, "v2 revised");
@@ -170,6 +173,7 @@ fn delete_note_audit_includes_highlight_id_when_linked() {
             body: "Passage note on fox".into(),
             highlight_id: Some(hl.id.clone()),
             actor: "carol".into(),
+            expected_version: None,
         })
         .expect("note");
 
@@ -475,6 +479,7 @@ fn delete_highlight_unlinks_notes() {
             body: "About two".into(),
             highlight_id: Some(hl.id.clone()),
             actor: "f".into(),
+            expected_version: None,
         })
         .expect("note");
     assert_eq!(note.highlight_id.as_deref(), Some(hl.id.as_str()));
@@ -516,6 +521,7 @@ fn filter_has_notes_true() {
             body: "has note".into(),
             highlight_id: None,
             actor: "g".into(),
+            expected_version: None,
         })
         .expect("note");
 
@@ -541,6 +547,7 @@ fn empty_body_rejected() {
             body: "   \n\t  ".into(),
             highlight_id: None,
             actor: "h".into(),
+            expected_version: None,
         })
         .expect_err("empty");
     assert!(err.to_string().contains("empty"), "{err}");
@@ -560,6 +567,7 @@ fn oversize_note_rejected() {
             body: big,
             highlight_id: None,
             actor: "i".into(),
+            expected_version: None,
         })
         .expect_err("oversize");
     assert!(err.to_string().contains("max size"), "{err}");
@@ -580,6 +588,7 @@ fn audit_chain_verifies_after_mutations() {
             body: "doc note".into(),
             highlight_id: None,
             actor: "j".into(),
+            expected_version: None,
         })
         .expect("note");
     let hl = matter
@@ -601,6 +610,7 @@ fn audit_chain_verifies_after_mutations() {
             body: "passage".into(),
             highlight_id: Some(hl.id.clone()),
             actor: "j".into(),
+            expected_version: None,
         })
         .expect("passage");
     matter.delete_note(&passage.id, "j").expect("del passage");

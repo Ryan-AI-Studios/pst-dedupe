@@ -86,6 +86,30 @@ pub enum Error {
     #[error("crypto header missing under matter root: {0}")]
     CryptoHeaderMissing(String),
 
+    /// Optimistic concurrency conflict on a review-mutable field.
+    #[error("version conflict: expected {expected}, actual {actual}")]
+    VersionConflict { expected: i64, actual: i64 },
+
+    /// Generic conflict (e.g. duplicate name, concurrent checkout).
+    #[error("conflict: {message}")]
+    Conflict { message: String },
+
+    /// Item is locked by another user (fail closed).
+    #[error("item {item_id} is locked by user {by_user}")]
+    Locked { item_id: String, by_user: String },
+
+    /// Authentication failed or session invalid/expired.
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
+    /// Authenticated but role or policy forbids the action.
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
+    /// Exclusive OS matter lock held by another process.
+    #[error("matter already open by another process: {0}")]
+    MatterAlreadyOpen(String),
+
     #[error("{0}")]
     Other(String),
 }
