@@ -120,21 +120,54 @@ pub struct DeskApp {
     ai_api_key_draft: String,
 }
 
-/// Resolve `conversation_id` for a Review item and optional hit set for badges.
-fn handoff_conversation_for_item(
+/// Resolve `conversation_id` for a Review item.
+fn handoff_conversation_id_for_item(
     matter_root: &Utf8Path,
     item_id: &str,
-) -> Result<(String, Option<std::collections::HashSet<String>>), String> {
+) -> Result<String, String> {
     use matter_core::Matter;
     let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
     let item = matter.get_item(item_id).map_err(|e| e.to_string())?;
-    let cid = item.conversation_id.ok_or_else(|| {
+    item.conversation_id.ok_or_else(|| {
         "Selected item has no conversation_id (not a day-bucket chat item).".to_string()
-    })?;
-    // Badge the handoff item itself as a hit; full FTS set may be larger residual.
+    })
+}
+
+/// Build hit ids for Conversations handoff from Review in-memory state.
+///
+/// Always includes `handoff_item_id`. When Review has an active filter / keyword /
+/// semantic list, also includes all currently loaded thin-row ids (and multi-select).
+///
+/// Residual: the full FTS hit set (up to ~50k) is not retained in Review UI state after
+/// list load — only loaded pages + total count. Unpaged loads (≤50k threshold) pass the
+/// full filtered id set via `rows`.
+fn review_hit_ids_for_handoff(
+    review: &review_ui::ReviewState,
+    handoff_item_id: &str,
+) -> Option<std::collections::HashSet<String>> {
     let mut hits = std::collections::HashSet::new();
-    hits.insert(item_id.to_string());
-    Ok((cid, Some(hits)))
+    hits.insert(handoff_item_id.to_string());
+
+    let filter_or_search = review.filter_active
+        || review
+            .applied_keyword
+            .as_ref()
+            .is_some_and(|k| !k.trim().is_empty())
+        || review
+            .applied_semantic
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty());
+
+    if filter_or_search {
+        for row in &review.rows {
+            hits.insert(row.id.clone());
+        }
+        for id in &review.multi_selected {
+            hits.insert(id.clone());
+        }
+    }
+
+    Some(hits)
 }
 
 impl DeskApp {
@@ -2620,8 +2653,9 @@ impl eframe::App for DeskApp {
                     }
                     // Search handoff → Conversations (centered day-bucket window).
                     if let Some(item_id) = self.review.pending_conversation_handoff.take() {
-                        match handoff_conversation_for_item(&root, &item_id) {
-                            Ok((cid, hits)) => {
+                        match handoff_conversation_id_for_item(&root, &item_id) {
+                            Ok(cid) => {
+                                let hits = review_hit_ids_for_handoff(&self.review, &item_id);
                                 self.conversations.set_active_hits(hits);
                                 self.conversations.handoff_to_item(cid, item_id);
                                 self.screen = Screen::Conversations;

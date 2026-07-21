@@ -54,7 +54,8 @@ Read-only APIs on `Matter` for day-bucket chat review (**schema v34** reused —
 | API | Behavior |
 |---|---|
 | `list_conversations` | `GROUP BY conversation_id`; optional `hit_item_ids` discovery (conversations with ≥1 hit); `message_count` is **full** bucket; `hit_count` is intersection |
-| `list_conversation_messages` | Full day-bucket stream (`WHERE conversation_id = ?`); **no** FilterSpec WHERE; keyset page; default 100 / max 500 |
+| `list_conversation_messages` | Full day-bucket stream (`WHERE conversation_id = ?`); **no** FilterSpec WHERE; keyset page (after cursor); default 100 / max 500 |
+| `list_conversation_messages_before` | Older keyset page (before cursor); returns chronological ASC for UI prepend |
 | `list_conversation_messages_around` | Centered handoff window (default 50 before + anchor + 50 after); must include anchor |
 | `conversation_hit_id_set` / `filter_ids_in_conversation` | Badge helpers only — do not define stream content |
 | `list_conversation_item_ids` | All ids in bucket for bulk `apply_codes` |

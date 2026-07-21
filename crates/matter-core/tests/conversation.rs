@@ -490,3 +490,94 @@ fn stream_keyset_load_more() {
     assert_eq!(page2.len(), 3);
     assert!(page2.iter().all(|r| r.id != last.id));
 }
+
+#[test]
+fn stream_keyset_load_earlier_and_later_cover_full_set() {
+    let (_tmp, base) = utf8_tempdir();
+    let matter = Matter::create(base.join("keyset_both"), "KeysetBoth").expect("create");
+    let cid = "conv_keyset_both";
+    let mut expected_ids = Vec::new();
+    for i in 0..7 {
+        let id = format!("itm_b{i}");
+        expected_ids.push(id.clone());
+        let sent = format!("2024-06-15T14:0{i}:00Z");
+        insert_chat(
+            &matter,
+            ChatSeed {
+                id: &id,
+                conversation_id: cid,
+                sent_at: &sent,
+                from: "u@ex.com",
+                subject: "m",
+                text: Some("t"),
+            },
+        );
+    }
+
+    // Middle page of 3 (ids 2,3,4) via after-keyset from first two, then before from that.
+    let first = matter
+        .list_conversation_messages(cid, None, None, 2, false)
+        .expect("first");
+    assert_eq!(first.len(), 2);
+    let mid = matter
+        .list_conversation_messages(
+            cid,
+            first.last().unwrap().sent_at.as_deref(),
+            Some(first.last().unwrap().id.as_str()),
+            3,
+            false,
+        )
+        .expect("mid");
+    assert_eq!(
+        mid.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["itm_b2", "itm_b3", "itm_b4"]
+    );
+
+    // Load earlier from mid's first row → should get itm_b0, itm_b1.
+    let earlier = matter
+        .list_conversation_messages_before(
+            cid,
+            mid.first().unwrap().sent_at.as_deref(),
+            Some(mid.first().unwrap().id.as_str()),
+            10,
+            false,
+        )
+        .expect("earlier");
+    assert_eq!(
+        earlier.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["itm_b0", "itm_b1"]
+    );
+
+    // Load later from mid's last → itm_b5, itm_b6.
+    let later = matter
+        .list_conversation_messages(
+            cid,
+            mid.last().unwrap().sent_at.as_deref(),
+            Some(mid.last().unwrap().id.as_str()),
+            10,
+            false,
+        )
+        .expect("later");
+    assert_eq!(
+        later.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["itm_b5", "itm_b6"]
+    );
+
+    // Reconstruct full ordered set without gaps/dups.
+    let mut reconstructed: Vec<String> = earlier.iter().map(|r| r.id.clone()).collect();
+    reconstructed.extend(mid.iter().map(|r| r.id.clone()));
+    reconstructed.extend(later.iter().map(|r| r.id.clone()));
+    assert_eq!(reconstructed, expected_ids);
+
+    // Empty earlier page at the start.
+    let empty_earlier = matter
+        .list_conversation_messages_before(
+            cid,
+            earlier.first().unwrap().sent_at.as_deref(),
+            Some(earlier.first().unwrap().id.as_str()),
+            10,
+            false,
+        )
+        .expect("empty earlier");
+    assert!(empty_earlier.is_empty());
+}

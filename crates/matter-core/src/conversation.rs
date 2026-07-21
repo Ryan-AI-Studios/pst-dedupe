@@ -296,6 +296,73 @@ impl Matter {
         Ok(rows)
     }
 
+    /// Page messages **before** a keyset cursor for one `conversation_id`.
+    ///
+    /// Order returned: `sent_at ASC, id ASC` (chronological for UI prepend).
+    /// Keyset: when `before_sent_at` / `before_id` are set, returns rows strictly
+    /// **before** that cursor (`(sent_at, id) < cursor`), fetched newest-first then
+    /// reversed. When both are `None`, returns the first (oldest) page — same as
+    /// [`list_conversation_messages`] with no cursor.
+    ///
+    /// Limit clamped to [`CONVERSATION_STREAM_MAX_LIMIT`].
+    pub fn list_conversation_messages_before(
+        &self,
+        conversation_id: &str,
+        before_sent_at: Option<&str>,
+        before_id: Option<&str>,
+        limit: u64,
+        include_reply_snippets: bool,
+    ) -> Result<Vec<ConversationMessageRow>> {
+        let limit_i = clamp_conversation_stream_limit(limit) as i64;
+        let cid = conversation_id.trim();
+        if cid.is_empty() {
+            return Err(Error::Other(
+                "list_conversation_messages_before requires non-empty conversation_id".into(),
+            ));
+        }
+
+        // No cursor → oldest page (same as forward list without after).
+        if before_sent_at.is_none() && before_id.is_none() {
+            return self.list_conversation_messages(cid, None, None, limit, include_reply_snippets);
+        }
+
+        // Keyset older side: (sent_at, id) < cursor, newest-first then reverse.
+        let sql = "\
+            SELECT id, conversation_id, sent_at, from_addr, subject, text_sha256, html_sha256, \
+                   parent_item_id, chat_type, team_name, channel_name, conversation_bucket_date, \
+                   file_category, role, path \
+            FROM items \
+            WHERE matter_id = ?1 \
+              AND conversation_id = ?2 \
+              AND ( \
+                (sent_at IS NOT NULL AND ?3 IS NOT NULL AND ( \
+                    sent_at < ?3 OR (sent_at = ?3 AND id < ?4) \
+                )) \
+                OR (sent_at IS NULL AND ?3 IS NOT NULL) \
+                OR (sent_at IS NULL AND ?3 IS NULL AND id < ?4) \
+              ) \
+            ORDER BY (sent_at IS NULL) DESC, sent_at DESC, id DESC \
+            LIMIT ?5";
+        let mut stmt = self.connection().prepare(sql)?;
+        let mapped = stmt.query_map(
+            params![
+                self.id(),
+                cid,
+                before_sent_at,
+                before_id.unwrap_or(""),
+                limit_i
+            ],
+            map_message_row,
+        )?;
+        let mut rows = mapped.collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.reverse(); // chronological ASC for UI
+
+        if include_reply_snippets {
+            self.attach_reply_snippets(&mut rows)?;
+        }
+        Ok(rows)
+    }
+
     /// Load a window **centered** on `anchor_item_id` within `conversation_id`.
     ///
     /// Defaults: [`CONVERSATION_AROUND_BEFORE`] / [`CONVERSATION_AROUND_AFTER`].

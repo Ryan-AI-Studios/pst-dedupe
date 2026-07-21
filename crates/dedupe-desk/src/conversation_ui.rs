@@ -93,6 +93,15 @@ enum ConvOpResult {
         hit_ids: HashSet<String>,
         select_item_id: Option<String>,
         centered: bool,
+        /// Full day-bucket size (not loaded page length) for bulk-code honesty.
+        bucket_message_count: i64,
+        /// Rows prepended at the front (load earlier); used to preserve scroll.
+        prepended: usize,
+    },
+    /// Resolved full bucket count so bulk confirm never shows page length.
+    BulkConfirmReady {
+        payload: BulkCodeConfirmPayload,
+        code_ids: Vec<String>,
     },
     Coded {
         result: ApplyCodesResult,
@@ -118,11 +127,17 @@ pub struct ConversationState {
     pub hit_ids: HashSet<String>,
     /// Optional external hit set (from Review filter/FTS) for list discovery + badges.
     pub active_hit_ids: Option<HashSet<String>>,
+    /// Full bucket message count for the selected conversation (never page length).
+    pub bucket_message_count: Option<i64>,
     pub error: Option<String>,
     pub status: Option<String>,
     pub busy: bool,
-    /// Scroll stream so selected message is visible.
+    /// Scroll stream so selected message is visible (handoff / programmatic select).
     scroll_to_selected: bool,
+    /// One-shot vertical scroll offset for the stream `ScrollArea`.
+    pending_scroll_offset: Option<f32>,
+    /// Last known stream scroll offset (for load-earlier viewport preserve).
+    last_scroll_offset_y: f32,
     /// Body loader for selected message.
     body: BodyLoader,
     code_defs: Vec<CodeDef>,
@@ -146,10 +161,13 @@ impl Default for ConversationState {
             selected_message: None,
             hit_ids: HashSet::new(),
             active_hit_ids: None,
+            bucket_message_count: None,
             error: None,
             status: None,
             busy: false,
             scroll_to_selected: false,
+            pending_scroll_offset: None,
+            last_scroll_offset_y: 0.0,
             body: BodyLoader::default(),
             code_defs: Vec::new(),
             selected_code_ids: HashSet::new(),
@@ -214,13 +232,24 @@ impl ConversationState {
                 hit_ids,
                 select_item_id,
                 centered,
+                bucket_message_count,
+                prepended,
             }) => {
                 self.selected_conversation = Some(conversation_id);
                 self.messages = messages;
                 self.hit_ids = hit_ids;
+                self.bucket_message_count = Some(bucket_message_count);
+                if prepended > 0 {
+                    // Keep the previously visible rows in place after prepend.
+                    self.pending_scroll_offset =
+                        Some(self.last_scroll_offset_y + prepended as f32 * STREAM_ROW_HEIGHT);
+                }
                 if let Some(id) = select_item_id {
                     self.selected_message = Some(id);
-                    self.scroll_to_selected = true;
+                    // Only auto-scroll for centered handoff (not load more/earlier).
+                    if centered {
+                        self.scroll_to_selected = true;
+                    }
                 } else if self
                     .selected_message
                     .as_ref()
@@ -233,15 +262,23 @@ impl ConversationState {
                 self.error = None;
                 self.status = Some(if centered {
                     format!(
-                        "Centered handoff · {} message(s) in window",
-                        self.messages.len()
+                        "Centered handoff · {} of {} message(s) in window",
+                        self.messages.len(),
+                        bucket_message_count
                     )
                 } else {
                     format!(
-                        "{} message(s) loaded (full day context)",
-                        self.messages.len()
+                        "{} of {} message(s) loaded (full day context)",
+                        self.messages.len(),
+                        bucket_message_count
                     )
                 });
+            }
+            Ok(ConvOpResult::BulkConfirmReady { payload, code_ids }) => {
+                self.busy = false;
+                self.op_rx = None;
+                self.bucket_message_count = Some(payload.message_count);
+                self.bulk_confirm = Some(BulkConfirm { payload, code_ids });
             }
             Ok(ConvOpResult::Coded { result, message }) => {
                 self.coding_busy = false;
@@ -311,6 +348,7 @@ impl ConversationState {
         }
         self.busy = true;
         self.error = None;
+        self.bucket_message_count = None;
         let root = matter_root.to_path_buf();
         let hits = self.active_hit_ids.clone();
         let (tx, rx) = mpsc::channel();
@@ -335,6 +373,10 @@ impl ConversationState {
                         .map_err(|e| e.to_string())?;
                     (page, false)
                 };
+                let bucket_message_count = matter
+                    .list_conversation_item_ids(&conversation_id)
+                    .map_err(|e| e.to_string())?
+                    .len() as i64;
                 let page_ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
                 let hit_ids = hit_badge_ids(&page_ids, hits.as_ref());
                 // Verify in-conversation membership when hits were supplied.
@@ -351,6 +393,8 @@ impl ConversationState {
                     hit_ids,
                     select_item_id: anchor_item_id,
                     centered,
+                    bucket_message_count,
+                    prepended: 0,
                 })
             })();
             let _ = tx.send(result.unwrap_or_else(ConvOpResult::Error));
@@ -374,6 +418,7 @@ impl ConversationState {
         let existing = self.messages.clone();
         let hits = self.active_hit_ids.clone();
         let selected = self.selected_message.clone();
+        let bucket_message_count = self.bucket_message_count.unwrap_or(0);
         let (tx, rx) = mpsc::channel();
         self.op_rx = Some(rx);
         thread::spawn(move || {
@@ -390,6 +435,14 @@ impl ConversationState {
                     .map_err(|e| e.to_string())?;
                 let mut messages = existing;
                 messages.extend(more);
+                let bucket_message_count = if bucket_message_count > 0 {
+                    bucket_message_count
+                } else {
+                    matter
+                        .list_conversation_item_ids(&cid)
+                        .map_err(|e| e.to_string())?
+                        .len() as i64
+                };
                 let page_ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
                 let hit_ids = if hits.is_some() {
                     matter
@@ -404,7 +457,112 @@ impl ConversationState {
                     hit_ids,
                     select_item_id: selected,
                     centered: false,
+                    bucket_message_count,
+                    prepended: 0,
                 })
+            })();
+            let _ = tx.send(result.unwrap_or_else(ConvOpResult::Error));
+        });
+    }
+
+    fn spawn_load_earlier(&mut self, matter_root: &Utf8Path) {
+        if self.busy {
+            return;
+        }
+        let Some(cid) = self.selected_conversation.clone() else {
+            return;
+        };
+        let Some(first) = self.messages.first() else {
+            return;
+        };
+        self.busy = true;
+        let root = matter_root.to_path_buf();
+        let before_sent = first.sent_at.clone();
+        let before_id = first.id.clone();
+        let existing = self.messages.clone();
+        let hits = self.active_hit_ids.clone();
+        let selected = self.selected_message.clone();
+        let bucket_message_count = self.bucket_message_count.unwrap_or(0);
+        let (tx, rx) = mpsc::channel();
+        self.op_rx = Some(rx);
+        thread::spawn(move || {
+            let result = (|| -> Result<ConvOpResult, String> {
+                let matter = Matter::open_for_read(&root).map_err(|e| e.to_string())?;
+                let earlier = matter
+                    .list_conversation_messages_before(
+                        &cid,
+                        before_sent.as_deref(),
+                        Some(before_id.as_str()),
+                        CONVERSATION_STREAM_DEFAULT_LIMIT,
+                        true,
+                    )
+                    .map_err(|e| e.to_string())?;
+                let mut messages = earlier;
+                // Dedupe if edge overlap, then append existing.
+                let existing_ids: HashSet<String> = existing.iter().map(|m| m.id.clone()).collect();
+                messages.retain(|m| !existing_ids.contains(&m.id));
+                let prepended = messages.len();
+                messages.extend(existing);
+                let bucket_message_count = if bucket_message_count > 0 {
+                    bucket_message_count
+                } else {
+                    matter
+                        .list_conversation_item_ids(&cid)
+                        .map_err(|e| e.to_string())?
+                        .len() as i64
+                };
+                let page_ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+                let hit_ids = if hits.is_some() {
+                    matter
+                        .conversation_hit_id_set(&cid, &page_ids, hits.as_ref())
+                        .map_err(|e| e.to_string())?
+                } else {
+                    hit_badge_ids(&page_ids, hits.as_ref())
+                };
+                Ok(ConvOpResult::StreamLoaded {
+                    conversation_id: cid,
+                    messages,
+                    hit_ids,
+                    select_item_id: selected,
+                    centered: false,
+                    bucket_message_count,
+                    prepended,
+                })
+            })();
+            let _ = tx.send(result.unwrap_or_else(ConvOpResult::Error));
+        });
+    }
+
+    /// Resolve full bucket count off-thread before showing bulk confirm (never page length).
+    fn spawn_bulk_confirm_resolve(
+        &mut self,
+        matter_root: &Utf8Path,
+        code_ids: Vec<String>,
+        code_labels: Vec<String>,
+    ) {
+        if self.busy {
+            return;
+        }
+        let Some(cid) = self.selected_conversation.clone() else {
+            return;
+        };
+        self.busy = true;
+        self.error = None;
+        let root = matter_root.to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        self.op_rx = Some(rx);
+        thread::spawn(move || {
+            let result = (|| -> Result<ConvOpResult, String> {
+                let matter = Matter::open_for_read(&root).map_err(|e| e.to_string())?;
+                let count = matter
+                    .list_conversation_item_ids(&cid)
+                    .map_err(|e| e.to_string())?
+                    .len() as i64;
+                let payload = bulk_code_confirm_payload(Some(&cid), Some(count), &code_labels)
+                    .ok_or_else(|| {
+                        "Cannot bulk-code: empty conversation or no codes.".to_string()
+                    })?;
+                Ok(ConvOpResult::BulkConfirmReady { payload, code_ids })
             })();
             let _ = tx.send(result.unwrap_or_else(ConvOpResult::Error));
         });
@@ -679,18 +837,16 @@ pub fn show(
             }
 
             ui.add_space(4.0);
-            let msg_count = state
-                .conversations
-                .iter()
-                .find(|c| {
-                    Some(c.conversation_id.as_str()) == state.selected_conversation.as_deref()
-                })
-                .map(|c| c.message_count)
-                .or(if state.messages.is_empty() {
-                    None
-                } else {
-                    Some(state.messages.len() as i64)
-                });
+            // Full bucket count only — never loaded page length (P2-2 honesty).
+            let msg_count = state.bucket_message_count.or_else(|| {
+                state
+                    .conversations
+                    .iter()
+                    .find(|c| {
+                        Some(c.conversation_id.as_str()) == state.selected_conversation.as_deref()
+                    })
+                    .map(|c| c.message_count)
+            });
             let labels: Vec<String> = state
                 .code_defs
                 .iter()
@@ -700,22 +856,26 @@ pub fn show(
             if ui
                 .add_enabled(
                     !state.coding_busy
+                        && !state.busy
                         && state.selected_conversation.is_some()
                         && !state.selected_code_ids.is_empty(),
                     egui::Button::new("Code entire day bucket…"),
                 )
                 .on_hover_text(
-                    "Requires confirm with message count. Codes all ids in this conversation_id.",
+                    "Requires confirm with full day-bucket message count (not the loaded page). Codes all ids in this conversation_id.",
                 )
                 .clicked()
             {
+                let code_ids: Vec<String> = state.selected_code_ids.iter().cloned().collect();
                 if let Some(payload) = bulk_code_confirm_payload(
                     state.selected_conversation.as_deref(),
                     msg_count,
                     &labels,
                 ) {
-                    let code_ids: Vec<String> = state.selected_code_ids.iter().cloned().collect();
                     state.bulk_confirm = Some(BulkConfirm { payload, code_ids });
+                } else {
+                    // Summary/count missing (e.g. handoff without list row): resolve full count first.
+                    state.spawn_bulk_confirm_resolve(root, code_ids, labels);
                 }
             }
 
@@ -780,93 +940,98 @@ pub fn show(
             let n = state.messages.len();
             let mut clicked_id: Option<String> = None;
             let mut parent_click: Option<String> = None;
-            let scroll = egui::ScrollArea::vertical()
-                .id_salt("conv_stream_scroll")
-                .auto_shrink([false, false])
-                .show_rows(ui, STREAM_ROW_HEIGHT, n, |ui, range| {
-                    for i in range {
-                        let m = &state.messages[i];
-                        let is_sel = state.selected_message.as_deref() == Some(m.id.as_str());
-                        let is_hit = state.hit_ids.contains(&m.id);
-                        let fill = if is_sel {
-                            Color32::from_rgb(40, 70, 110)
-                        } else if is_hit {
-                            Color32::from_rgb(70, 55, 30)
-                        } else {
-                            Color32::TRANSPARENT
-                        };
-                        let (rect, resp) =
-                            ui.allocate_exact_size(egui::vec2(ui.available_width(), STREAM_ROW_HEIGHT), Sense::click());
-                        if fill != Color32::TRANSPARENT {
-                            ui.painter().rect_filled(rect, 2.0, fill);
-                        }
-                        let mut y = rect.top() + 2.0;
-                        if m.parent_item_id.is_some() {
-                            let chrome = reply_chrome_line(m.reply_snippet.as_deref());
-                            let chrome_rect = egui::Rect::from_min_size(
-                                egui::pos2(rect.left() + 8.0, y),
-                                egui::vec2(rect.width() - 16.0, 14.0),
-                            );
-                            ui.painter().text(
-                                chrome_rect.left_top(),
-                                egui::Align2::LEFT_TOP,
-                                chrome,
-                                egui::FontId::proportional(11.0),
-                                Color32::from_rgb(160, 160, 200),
-                            );
-                            // Click in chrome area selects parent when present.
-                            if resp.clicked()
-                                && ui.input(|i| {
-                                    i.pointer
-                                        .interact_pos()
-                                        .is_some_and(|p| chrome_rect.contains(p))
-                                })
-                            {
-                                if let Some(ref pid) = m.parent_item_id {
-                                    parent_click = Some(pid.clone());
-                                }
-                            }
-                            y += 14.0;
-                        }
-                        let ts = m.sent_at.as_deref().unwrap_or("—");
-                        let from = m.from_addr.as_deref().unwrap_or("?");
-                        let subj = m.subject.as_deref().unwrap_or("");
-                        let mut line = format!("{ts}  {from}  {subj}");
-                        if is_hit {
-                            line = format!("[Hit] {line}");
-                        }
-                        ui.painter().text(
-                            egui::pos2(rect.left() + 8.0, y),
-                            egui::Align2::LEFT_TOP,
-                            line,
-                            egui::FontId::proportional(13.0),
-                            if is_hit {
-                                Color32::from_rgb(240, 200, 100)
-                            } else {
-                                Color32::from_rgb(210, 210, 210)
-                            },
-                        );
-                        if resp.clicked() && parent_click.is_none() {
-                            clicked_id = Some(m.id.clone());
-                        }
-                    }
-                });
 
-            // Scroll to selection once after handoff.
+            // One-shot scroll: handoff centers selected row; load-earlier preserves viewport.
             if state.scroll_to_selected {
                 if let Some(sel) = &state.selected_message {
                     if let Some(idx) = state.messages.iter().position(|m| m.id == *sel) {
-                        let y = idx as f32 * STREAM_ROW_HEIGHT;
-                        // egui 0.34: use scroll_offset via state if available — best-effort.
-                        let _ = (scroll, y);
+                        state.pending_scroll_offset = Some(idx as f32 * STREAM_ROW_HEIGHT);
                     }
                 }
                 state.scroll_to_selected = false;
             }
+            let mut scroll_area = egui::ScrollArea::vertical()
+                .id_salt("conv_stream_scroll")
+                .auto_shrink([false, false]);
+            if let Some(y) = state.pending_scroll_offset.take() {
+                scroll_area = scroll_area.vertical_scroll_offset(y);
+            }
+            let scroll = scroll_area.show_rows(ui, STREAM_ROW_HEIGHT, n, |ui, range| {
+                for i in range {
+                    let m = &state.messages[i];
+                    let is_sel = state.selected_message.as_deref() == Some(m.id.as_str());
+                    let is_hit = state.hit_ids.contains(&m.id);
+                    let fill = if is_sel {
+                        Color32::from_rgb(40, 70, 110)
+                    } else if is_hit {
+                        Color32::from_rgb(70, 55, 30)
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), STREAM_ROW_HEIGHT),
+                        Sense::click(),
+                    );
+                    if fill != Color32::TRANSPARENT {
+                        ui.painter().rect_filled(rect, 2.0, fill);
+                    }
+                    let mut y = rect.top() + 2.0;
+                    if m.parent_item_id.is_some() {
+                        let chrome = reply_chrome_line(m.reply_snippet.as_deref());
+                        let chrome_rect = egui::Rect::from_min_size(
+                            egui::pos2(rect.left() + 8.0, y),
+                            egui::vec2(rect.width() - 16.0, 14.0),
+                        );
+                        ui.painter().text(
+                            chrome_rect.left_top(),
+                            egui::Align2::LEFT_TOP,
+                            chrome,
+                            egui::FontId::proportional(11.0),
+                            Color32::from_rgb(160, 160, 200),
+                        );
+                        // Click in chrome area selects parent when present.
+                        if resp.clicked()
+                            && ui.input(|i| {
+                                i.pointer
+                                    .interact_pos()
+                                    .is_some_and(|p| chrome_rect.contains(p))
+                            })
+                        {
+                            if let Some(ref pid) = m.parent_item_id {
+                                parent_click = Some(pid.clone());
+                            }
+                        }
+                        y += 14.0;
+                    }
+                    let ts = m.sent_at.as_deref().unwrap_or("—");
+                    let from = m.from_addr.as_deref().unwrap_or("?");
+                    let subj = m.subject.as_deref().unwrap_or("");
+                    let mut line = format!("{ts}  {from}  {subj}");
+                    if is_hit {
+                        line = format!("[Hit] {line}");
+                    }
+                    ui.painter().text(
+                        egui::pos2(rect.left() + 8.0, y),
+                        egui::Align2::LEFT_TOP,
+                        line,
+                        egui::FontId::proportional(13.0),
+                        if is_hit {
+                            Color32::from_rgb(240, 200, 100)
+                        } else {
+                            Color32::from_rgb(210, 210, 210)
+                        },
+                    );
+                    if resp.clicked() && parent_click.is_none() {
+                        clicked_id = Some(m.id.clone());
+                    }
+                }
+            });
+            state.last_scroll_offset_y = scroll.state.offset.y;
 
             if let Some(pid) = parent_click {
                 if state.messages.iter().any(|m| m.id == pid) {
                     state.selected_message = Some(pid.clone());
+                    state.scroll_to_selected = true;
                     spawn_body_for_selection(state, root, ui.ctx());
                 } else if let Some(cid) = state.selected_conversation.clone() {
                     // Parent not in page — centered load around parent.
@@ -889,13 +1054,30 @@ pub fn show(
 
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!state.busy && !state.messages.is_empty(), egui::Button::new("Load more"))
-                    .on_hover_text("Next page of this day bucket (keyset)")
+                    .add_enabled(
+                        !state.busy && !state.messages.is_empty(),
+                        egui::Button::new("Load earlier"),
+                    )
+                    .on_hover_text("Older page of this day bucket (before-keyset, prepends)")
+                    .clicked()
+                {
+                    state.spawn_load_earlier(root);
+                }
+                if ui
+                    .add_enabled(
+                        !state.busy && !state.messages.is_empty(),
+                        egui::Button::new("Load more"),
+                    )
+                    .on_hover_text("Newer page of this day bucket (after-keyset, appends)")
                     .clicked()
                 {
                     state.spawn_load_more(root);
                 }
-                ui.label(format!("{} shown", state.messages.len()));
+                let total = state
+                    .bucket_message_count
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".into());
+                ui.label(format!("{} of {} shown", state.messages.len(), total));
             });
         } else {
             ui.label("Select a conversation from the left list.");
@@ -962,11 +1144,15 @@ mod tests {
         assert!(bulk_code_confirm_payload(Some("c1"), Some(3), &[]).is_none());
         assert!(bulk_code_confirm_payload(Some("c1"), Some(0), &["Hot".into()]).is_none());
         assert!(bulk_code_confirm_payload(None, Some(3), &["Hot".into()]).is_none());
+        // Honesty: message_count is the full day-bucket size, never the loaded page length.
+        // UI resolves via summary.message_count / bucket_message_count / list_conversation_item_ids.
         let p = bulk_code_confirm_payload(Some("c1"), Some(12), &["Hot".into(), "Resp".into()])
             .expect("payload");
         assert_eq!(p.message_count, 12);
         assert_eq!(p.conversation_id, "c1");
         assert_eq!(p.code_labels.len(), 2);
+        // Page length of 3 must not be treated as the bulk target when full count is 12.
+        assert_ne!(p.message_count, 3);
     }
 
     #[test]
