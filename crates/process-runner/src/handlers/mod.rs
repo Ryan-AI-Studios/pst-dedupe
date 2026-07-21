@@ -45,6 +45,9 @@ pub mod ics;
 #[cfg(feature = "ocr")]
 pub mod ocr;
 
+#[cfg(feature = "stt")]
+pub mod transcribe;
+
 #[cfg(feature = "classify")]
 pub mod classify;
 
@@ -116,6 +119,9 @@ pub use ics::MatterIcsExtractHandler;
 
 #[cfg(feature = "ocr")]
 pub use ocr::MatterOcrHandler;
+
+#[cfg(feature = "stt")]
+pub use transcribe::MatterTranscribeHandler;
 
 #[cfg(feature = "classify")]
 pub use classify::MatterClassifyHandler;

@@ -1080,6 +1080,87 @@ impl DeskApp {
         }
     }
 
+    /// Tooltip / enablement for Workspace **Run transcription**.
+    pub(crate) fn stt_run_tooltip(&self) -> String {
+        if !self.settings.stt_enabled {
+            return "Enable local STT in Settings (Home) first — off by default".into();
+        }
+        if !self.stt_tools_look_available() {
+            return "whisper-cli and/or model not found — set paths in Settings (no silent download)"
+                .into();
+        }
+        "Run local offline STT on audio/video natives (kind=transcribe). Un-diarized — verify by listening. Rebuild FTS after.".into()
+    }
+
+    /// True when STT is enabled and whisper CLI + model appear resolvable.
+    pub(crate) fn stt_run_enabled(&self) -> bool {
+        self.settings.stt_enabled && self.stt_tools_look_available()
+    }
+
+    fn stt_tools_look_available(&self) -> bool {
+        let cli_ok = if let Some(p) = self.settings.whisper_cli_path.as_deref().map(str::trim) {
+            if !p.is_empty() {
+                std::path::Path::new(p).is_file()
+            } else {
+                which_on_path("whisper-cli")
+                    || which_on_path("whisper-cli.exe")
+                    || which_on_path("whisper")
+                    || which_on_path("whisper.exe")
+            }
+        } else {
+            which_on_path("whisper-cli")
+                || which_on_path("whisper-cli.exe")
+                || which_on_path("whisper")
+                || which_on_path("whisper.exe")
+        };
+        let model_ok = self
+            .settings
+            .stt_model_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|p| std::path::Path::new(p).is_file())
+            .unwrap_or(false);
+        cli_ok && model_ok
+    }
+
+    /// Run local STT (`transcribe`) — fails closed when Settings STT is disabled.
+    pub(crate) fn start_transcribe(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        if !self.settings.stt_enabled {
+            self.error_msg =
+                Some("STT is disabled. Enable local STT in Settings (Home) before running.".into());
+            return;
+        }
+        if !self.stt_tools_look_available() {
+            self.error_msg = Some(
+                "whisper-cli or model not found. Set paths in Settings; models are never downloaded automatically."
+                    .into(),
+            );
+            return;
+        }
+        let params = JobParams::new(params::transcribe_default_params(
+            self.settings.stt_enabled,
+            self.settings.whisper_cli_path.as_deref(),
+            self.settings.stt_model_path.as_deref(),
+            self.settings.ffmpeg_path.as_deref(),
+        ));
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "transcribe", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started transcription job {job_id}"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
     /// Classify file types (`classify`) using taxonomy_v1.
     pub(crate) fn start_classify(&mut self) {
         let Some(root) = self.matter_root.clone() else {
@@ -2123,6 +2204,77 @@ impl DeskApp {
             );
             if r.changed() || r.lost_focus() {
                 self.settings.pdf_renderer_path = if path.trim().is_empty() {
+                    None
+                } else {
+                    Some(path.trim().to_string())
+                };
+                self.settings.save();
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.heading("Local STT (optional)");
+        let stt_resp = ui.checkbox(
+            &mut self.settings.stt_enabled,
+            "Enable local STT (whisper.cpp CLI)",
+        );
+        if stt_resp.changed() {
+            self.settings.save();
+        }
+        ui.label(
+            egui::RichText::new(
+                "Off by default. Offline only — no cloud STT. Requires operator-installed \
+                 whisper.cpp + model weights (never downloaded automatically). Video needs ffmpeg \
+                 (-ar 16000 -ac 1 -c:a pcm_s16le). Un-diarized transcripts may hallucinate; \
+                 human must listen for attribution before treating as evidence. Not court reporting.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.horizontal(|ui| {
+            ui.label("whisper-cli path:");
+            let mut path = self.settings.whisper_cli_path.clone().unwrap_or_default();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut path)
+                    .desired_width(280.0)
+                    .hint_text("optional — uses PATH if empty"),
+            );
+            if r.changed() || r.lost_focus() {
+                self.settings.whisper_cli_path = if path.trim().is_empty() {
+                    None
+                } else {
+                    Some(path.trim().to_string())
+                };
+                self.settings.save();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Model path:");
+            let mut path = self.settings.stt_model_path.clone().unwrap_or_default();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut path)
+                    .desired_width(280.0)
+                    .hint_text("required — e.g. ggml-base.bin"),
+            );
+            if r.changed() || r.lost_focus() {
+                self.settings.stt_model_path = if path.trim().is_empty() {
+                    None
+                } else {
+                    Some(path.trim().to_string())
+                };
+                self.settings.save();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("ffmpeg path:");
+            let mut path = self.settings.ffmpeg_path.clone().unwrap_or_default();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut path)
+                    .desired_width(280.0)
+                    .hint_text("optional — video / complex audio"),
+            );
+            if r.changed() || r.lost_focus() {
+                self.settings.ffmpeg_path = if path.trim().is_empty() {
                     None
                 } else {
                     Some(path.trim().to_string())

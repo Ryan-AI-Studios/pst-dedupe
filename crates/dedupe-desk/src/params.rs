@@ -275,6 +275,31 @@ pub fn ocr_default_params(
     .to_string()
 }
 
+/// Default params for STT (`kind = "transcribe"`).
+///
+/// Pass desk enable flag and tool/model paths so the job fails closed when STT is off.
+pub fn transcribe_default_params(
+    enabled: bool,
+    whisper_cli_path: Option<&str>,
+    model_path: Option<&str>,
+    ffmpeg_path: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "enabled": enabled,
+        "engine": "auto",
+        "model_path": model_path,
+        "whisper_cli_path": whisper_cli_path,
+        "ffmpeg_path": ffmpeg_path,
+        "language": "en",
+        "max_duration_secs": 3600,
+        "max_native_bytes": 500000000,
+        "reset": false,
+        "batch_size": 5,
+        "scope": "all"
+    })
+    .to_string()
+}
+
 /// Default params for ICS calendar extract (`kind = "ics_extract"`).
 pub fn ics_extract_default_params() -> String {
     serde_json::json!({
@@ -823,6 +848,34 @@ mod tests {
         assert_eq!(v["tesseract_path"], r"C:\tools\tesseract.exe");
         assert_eq!(v["tessdata_dir"], r"C:\tessdata");
         assert_eq!(v["pdf_renderer_path"], r"C:\tools\pdftoppm.exe");
+    }
+
+    #[test]
+    fn transcribe_params_shape_fail_closed_by_default() {
+        let j = transcribe_default_params(false, None, None, None);
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["enabled"], false);
+        assert_eq!(v["engine"], "auto");
+        assert_eq!(v["language"], "en");
+        assert_eq!(v["reset"], false);
+        assert_eq!(v["batch_size"], 5);
+        assert_eq!(v["max_duration_secs"], 3600);
+        assert_eq!(v["max_native_bytes"], 500000000);
+    }
+
+    #[test]
+    fn transcribe_params_paths_when_enabled() {
+        let j = transcribe_default_params(
+            true,
+            Some(r"C:\tools\whisper-cli.exe"),
+            Some(r"C:\models\ggml-base.bin"),
+            Some(r"C:\tools\ffmpeg.exe"),
+        );
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["whisper_cli_path"], r"C:\tools\whisper-cli.exe");
+        assert_eq!(v["model_path"], r"C:\models\ggml-base.bin");
+        assert_eq!(v["ffmpeg_path"], r"C:\tools\ffmpeg.exe");
     }
 
     #[test]

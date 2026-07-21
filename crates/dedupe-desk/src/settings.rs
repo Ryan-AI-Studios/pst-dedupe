@@ -32,6 +32,18 @@ pub struct DeskSettings {
     /// Optional path to `pdftoppm` or `mutool` for PDF page render.
     #[serde(default)]
     pub pdf_renderer_path: Option<String>,
+    /// Enable local STT job (default **false** — opt-in).
+    #[serde(default)]
+    pub stt_enabled: bool,
+    /// Optional path to `whisper-cli` / whisper.cpp binary.
+    #[serde(default)]
+    pub whisper_cli_path: Option<String>,
+    /// Path to Whisper model weights (operator-installed; never downloaded).
+    #[serde(default)]
+    pub stt_model_path: Option<String>,
+    /// Optional path to `ffmpeg` for video / complex audio conversion.
+    #[serde(default)]
+    pub ffmpeg_path: Option<String>,
     /// Prefer semantic search features in Desk (default **false** — opt-in).
     /// Dual-writes to open matter `semantic_enabled` when toggled with a matter open.
     #[serde(default)]

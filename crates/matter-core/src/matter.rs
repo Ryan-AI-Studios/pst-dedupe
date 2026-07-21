@@ -329,6 +329,17 @@ pub struct Item {
     pub semantic_embedded_at: Option<String>,
     /// Number of chunks written for this item under the active model (NULL = never).
     pub semantic_chunk_count: Option<i64>,
+    // --- schema v32 (speech-to-text / track 0053) ---
+    /// `done` | `failed` | `skipped` | `pending` | `disabled` | NULL never attempted.
+    pub transcript_status: Option<String>,
+    pub transcript_engine: Option<String>,
+    pub transcript_model: Option<String>,
+    pub transcript_language: Option<String>,
+    /// Native digest at successful STT time (digest-skip key).
+    pub transcript_native_sha256: Option<String>,
+    pub transcript_at: Option<String>,
+    pub transcript_job_id: Option<String>,
+    pub transcript_error: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -4914,7 +4925,9 @@ const ITEM_COLUMNS: &str =
     sentiment_pos, sentiment_neu, sentiment_neg, sentiment_polarity, sentiment_method, \
     sentiment_pos_threshold, sentiment_neg_threshold, sentiment_scanned_text_sha256, \
     sentiment_scanned_at, sentiment_job_id, \
-    semantic_embedded_text_sha256, semantic_embedded_at, semantic_chunk_count";
+    semantic_embedded_text_sha256, semantic_embedded_at, semantic_chunk_count, \
+    transcript_status, transcript_engine, transcript_model, transcript_language, \
+    transcript_native_sha256, transcript_at, transcript_job_id, transcript_error";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -5059,6 +5072,14 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         semantic_embedded_text_sha256: row.get(134)?,
         semantic_embedded_at: row.get(135)?,
         semantic_chunk_count: row.get(136)?,
+        transcript_status: row.get(137)?,
+        transcript_engine: row.get(138)?,
+        transcript_model: row.get(139)?,
+        transcript_language: row.get(140)?,
+        transcript_native_sha256: row.get(141)?,
+        transcript_at: row.get(142)?,
+        transcript_job_id: row.get(143)?,
+        transcript_error: row.get(144)?,
     })
 }
 
