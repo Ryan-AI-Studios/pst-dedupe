@@ -2,13 +2,16 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use matter_core::INDEX_DIR;
+use matter_core::crypto::Dek;
+use matter_core::{DEFAULT_CHUNK_BYTES, INDEX_DIR};
 use tantivy::schema::{TantivyDocument, Term, Value as _};
 use tantivy::tokenizer::TextAnalyzer;
-use tantivy::{doc, Index, IndexWriter, Opstamp, ReloadPolicy};
+use tantivy::{doc, Index, IndexSettings, IndexWriter, Opstamp, ReloadPolicy};
 
+use crate::encrypted_dir::EncryptedDirectory;
 use crate::error::{Result, SearchError};
 use crate::pack::LangPack;
 use crate::schema::FtsSchema;
@@ -36,19 +39,58 @@ impl MatterIndex {
         matter_root.join(INDEX_DIR_NAME)
     }
 
-    /// Open an existing index or create one with the latin_default schema.
+    /// Open an existing index or create one with the latin_default schema (unencrypted).
     pub fn open_or_create(matter_root: &Utf8Path) -> Result<Self> {
         Self::open_or_create_with_pack(matter_root, LangPack::LatinDefault)
     }
 
-    /// Open an existing index or create one for the given language pack.
+    /// Open an existing index or create one for the given language pack (unencrypted mmap).
     ///
     /// Registers the hybrid CJK tokenizer when the pack requires it (before
     /// create/open so schema tokenizer names resolve).
     pub fn open_or_create_with_pack(matter_root: &Utf8Path, pack: LangPack) -> Result<Self> {
+        Self::open_or_create_with_crypto(matter_root, pack, None, DEFAULT_CHUNK_BYTES)
+    }
+
+    /// Open or create the FTS index, optionally under an encrypted Directory.
+    ///
+    /// When `dek` is `Some`, segments are AEAD-encrypted on disk and **mmap is not used**
+    /// (plaintext only in process memory). Rebuild is required when switching
+    /// between encrypted and plain modes.
+    pub fn open_or_create_with_crypto(
+        matter_root: &Utf8Path,
+        pack: LangPack,
+        dek: Option<&Dek>,
+        chunk_bytes: u32,
+    ) -> Result<Self> {
         let index_dir = Self::index_dir(matter_root);
         let fts_schema = FtsSchema::build_for_pack(pack);
         let path = index_dir.as_std_path();
+
+        if let Some(dek) = dek {
+            let dek = Arc::new(dek.clone());
+            let dir = EncryptedDirectory::with_dek(path, Arc::clone(&dek), chunk_bytes)
+                .map_err(|e| SearchError::Index(format!("encrypted index dir: {e}")))?;
+            let index = if path.exists() && !is_empty_dir(path)? {
+                Index::open(dir).map_err(|e| {
+                    SearchError::Index(format!(
+                        "failed to open encrypted FTS index at {index_dir}: {e} — try Rebuild index"
+                    ))
+                })?
+            } else {
+                fs::create_dir_all(path)?;
+                let dir = EncryptedDirectory::with_dek(path, dek, chunk_bytes)
+                    .map_err(|e| SearchError::Index(format!("encrypted index dir: {e}")))?;
+                Index::create(dir, fts_schema.schema.clone(), IndexSettings::default())?
+            };
+            register_pack_tokenizers(&index, pack)?;
+            return Ok(Self {
+                index,
+                fts_schema,
+                index_dir,
+            });
+        }
+
         if path.exists() {
             // Existing directory: try open; if empty/corrupt, recreate.
             if is_empty_dir(path)? {

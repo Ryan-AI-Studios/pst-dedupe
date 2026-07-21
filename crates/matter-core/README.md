@@ -7,7 +7,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (fields introduced across schema v2–v14; current [`SCHEMA_VERSION`] is **34**) + family graph
+6. **Normalized Item** model (fields introduced across schema v2–v35; current [`SCHEMA_VERSION`] is **35**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
@@ -21,7 +21,22 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 17. **Redaction** regions + true redacted text CAS artifact (0032)
 18. **Office extract** bookkeeping (`office_*`) for OOXML text fill (0033)
 
-Schema version: **34** (`SCHEMA_VERSION`) — includes cull, promote/review sets, coding (+ optional `guidance`), saved searches, FTS bookkeeping, notes/highlights, privilege claims/withhold, text redaction, office extract bookkeeping, PDF extract bookkeeping (`pdf_needs_ocr`), calendar/ICS fields (`cal_*`, `ics_*`), OCR bookkeeping (`ocr_*`), file-category bookkeeping (`category_*` / taxonomy_v1), supporting indexes for case overview rollups (`(matter_id, file_category)`, `(matter_id, custodian)`, `(matter_id, role)`), **production sets/items** for review-set produce (0040), **`qc_runs`** for production QC history + selection-fingerprint soft-gate (0041), **gap analysis** tables (`expected_custodians`, `expected_sources`, `gap_imports`, `gap_expected_docs`, `gap_runs`) (0042), **processing profiles** (`processing_profiles` + optional `matters.default_profile_id`) with code built-ins (`standard`, `with_ocr`, `extract_only`, `reduce_only`) (0043), **workflows** (`workflows` + `jobs.parent_job_id`) with code built-ins (`ingest_then_standard`, `extract_then_standard`, `reduce_only_chain`, `with_ocr_chain`, `qc_then_produce`) (0044), **entity / PII hits** (`item_entity_hits` + `entity_*` item rollup columns) (0046), and **people–comms graph** (`people`, `item_participants`, `people_edges`, `people_timeline` + matter build columns) (0047), **concept clustering** tables (0048), **sentiment / tone** (`sentiment_*` item columns) (0049), **semantic search bookkeeping** (`semantic_*` matter/item columns + `semantic_chunks`) (0050), **AI suggestions** (`ai_*` matter config + `item_ai_suggestions` / `ai_suggestion_runs`; no API key column) (0051), **AI suggestion citations** (`item_ai_suggestion_citations` + `citations_count`; accept audit stores offset pointers only) (0052), **speech-to-text bookkeeping** (`transcript_*`) (0053), **language packs** (`lang_pack_id` / `lang_pack_version` / `fts_lang_fingerprint` / `fts_lang_built_at` + optional `items.language_tag`) (0054), and **Teams/chat metadata** (`conversation_id`, `chat_type`, `team_name`, `channel_name`, `chat_export_format`, `conversation_bucket_date`, `teams_extract_*`) (0055). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+Schema version: **35** (`SCHEMA_VERSION`) — prior features through Teams/chat metadata (v34 / 0055) plus **optional encryption flags** (`encryption_enabled`, `encryption_cipher`, `encryption_header_version`) for track **0057**. SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+
+### Optional encryption at rest (0057)
+
+**Opt-in** — unencrypted remains the default. Pure-Rust stack (no SQLCipher / OpenSSL):
+
+| Layer | Mechanism |
+|---|---|
+| Passphrase | Argon2id → KEK wraps random DEK (`matter.crypto.json`; no raw secrets in SQL) |
+| SQLite | Whole-file chunked AES-256-GCM container (`matter.db` at rest); plain session under `workspace/temp/.enc-db/` while unlocked |
+| CAS | Chunked AEAD (default 1 MiB); digest = plaintext SHA-256 |
+| FTS | Encrypted Tantivy Directory (no mmap; decrypt into memory) |
+
+**Honesty:** lost passphrase ⇒ **permanent data loss**; wrong passphrase fails closed; secrets are never logged; temps stay under the matter workspace; **not FIPS-validated**. Change passphrase re-wraps the DEK only (no bulk re-encrypt). CLI env: `PST_DEDUPE_MATTER_PASSPHRASE`, `PST_DEDUPE_MATTER_NEW_PASSPHRASE`, and `PST_DEDUPE_MATTER_NEW_PASSPHRASE_CONFIRM` for change.
+
+**Windows ACL (operator):** matter encryption protects **at rest** against offline theft of the folder. It does not replace OS isolation. Prefer a user-only ACL on the matter directory (e.g. remove `BUILTIN\Users` / Everyone inheritance; grant only the reviewing account). Desk does not auto-set ACLs in P0 — treat ACL hardening as operator responsibility (best-effort residual).
 
 ### Processing profiles (0043)
 
@@ -69,12 +84,13 @@ Under a caller-chosen root:
 
 ```text
 <matter-root>/
-  matter.db                 # SQLite (WAL, foreign_keys ON)
-  blobs/sha256/<aa>/<hex>   # CAS — two-hex shard prefix
-  index/                    # Tantivy FTS segments (matter-search / track 0029)
+  matter.db                 # SQLite (WAL) or AEAD container when encrypted
+  matter.crypto.json        # optional encryption header (0057)
+  blobs/sha256/<aa>/<hex>   # CAS — two-hex shard prefix (ciphertext when encrypted)
+  index/                    # Tantivy FTS segments (encrypted Directory when encrypted)
   exports/                  # productions/ (0040), reports/, privilege logs, …
   logs/                     # optional file logs
-  workspace/temp/           # extractor spill (cleaned on open/create)
+  workspace/temp/           # extractor spill (cleaned on open/create; .enc-db preserved)
 ```
 
 ### Workspace temp
@@ -826,4 +842,4 @@ m.update_item(&parent.id, ItemUpdate {
 
 ## Out of scope
 
-Purview/PST parsing, bulk rehash jobs, Tantivy, review UI, encryption at rest, multi-tenant, replacing `dedup-engine` CLI Tier 1/2.
+Purview/PST parsing, bulk rehash jobs, review UI polish, multi-tenant, replacing `dedup-engine` CLI Tier 1/2. (Encryption at rest shipped in **0057**.)

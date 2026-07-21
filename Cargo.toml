@@ -60,6 +60,13 @@ serde_json = "1"
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 camino = "1"
 
+# Matter encryption at rest (track 0057) — pure-Rust; no SQLCipher/OpenSSL
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"
+
 # FTS (track 0029) — pin 0.26.x (locks to 0.26.1)
 tantivy = "0.26"
 

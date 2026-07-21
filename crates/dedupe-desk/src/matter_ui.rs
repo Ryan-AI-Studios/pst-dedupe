@@ -19,11 +19,29 @@ pub fn create_matter(parent: &Utf8Path, name: &str) -> Result<Utf8PathBuf, Strin
     Ok(root)
 }
 
+/// Create an encrypted matter under `parent / name`.
+pub fn create_matter_encrypted(
+    parent: &Utf8Path,
+    name: &str,
+    passphrase: &str,
+) -> Result<Utf8PathBuf, String> {
+    let name = validate_matter_name(name)?;
+    if passphrase.trim().is_empty() {
+        return Err("Passphrase must not be empty for encrypted matter.".into());
+    }
+    let root = parent.join(name);
+    Matter::create_encrypted(&root, name, passphrase).map_err(|e| e.to_string())?;
+    Ok(root)
+}
+
 /// Open an existing matter root; returns matter display name on success.
 ///
 /// When `cleanup_temp` is true, uses [`Matter::open`] (wipes orphaned
 /// `workspace/temp/`). Only safe when **no** process-runner job is writing.
 /// When false, uses [`Matter::open_for_read`] (no temp wipe).
+///
+/// Encrypted matters require `PST_DEDUPE_MATTER_PASSPHRASE` or use
+/// [`open_matter_with_passphrase`].
 pub fn open_matter(root: &Utf8Path, cleanup_temp: bool) -> Result<String, String> {
     let matter = if cleanup_temp {
         Matter::open(root).map_err(|e| e.to_string())?
@@ -32,6 +50,31 @@ pub fn open_matter(root: &Utf8Path, cleanup_temp: bool) -> Result<String, String
     };
     let info = matter.info().map_err(|e| e.to_string())?;
     Ok(info.name)
+}
+
+/// Open an encrypted matter with an explicit passphrase.
+pub fn open_matter_with_passphrase(
+    root: &Utf8Path,
+    passphrase: &str,
+    cleanup_temp: bool,
+) -> Result<String, String> {
+    let matter =
+        Matter::open_with_passphrase(root, passphrase, cleanup_temp).map_err(|e| e.to_string())?;
+    let info = matter.info().map_err(|e| e.to_string())?;
+    Ok(info.name)
+}
+
+/// Change passphrase for an open encrypted matter root (re-wrap DEK only).
+pub fn change_matter_passphrase(
+    root: &Utf8Path,
+    old_passphrase: &str,
+    new_passphrase: &str,
+) -> Result<(), String> {
+    let matter =
+        Matter::open_with_passphrase(root, old_passphrase, false).map_err(|e| e.to_string())?;
+    matter
+        .change_passphrase(old_passphrase, new_passphrase)
+        .map_err(|e| e.to_string())
 }
 
 /// Read-only refresh snapshot for the workspace panels.

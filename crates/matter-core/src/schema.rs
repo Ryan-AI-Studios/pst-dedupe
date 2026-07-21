@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 34;
+pub const SCHEMA_VERSION: u32 = 35;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -48,6 +48,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (32, MIGRATION_V32),
     (33, MIGRATION_V33),
     (34, MIGRATION_V34),
+    (35, MIGRATION_V35),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -1135,6 +1136,14 @@ CREATE INDEX idx_items_chat_type ON items(chat_type) WHERE chat_type IS NOT NULL
 CREATE INDEX idx_items_teams_extract_status ON items(teams_extract_status) WHERE teams_extract_status IS NOT NULL;
 "#;
 
+/// Schema v35: optional matter encryption flags (track 0057).
+/// Secrets (salt/wrapped DEK) live in external `matter.crypto.json`, not SQL.
+const MIGRATION_V35: &str = r#"
+ALTER TABLE matters ADD COLUMN encryption_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE matters ADD COLUMN encryption_cipher TEXT;
+ALTER TABLE matters ADD COLUMN encryption_header_version INTEGER;
+"#;
+
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
 ///
 /// Each migration step (SQL batch + `schema_meta` version bump) runs inside a
@@ -1215,6 +1224,20 @@ pub(crate) fn configure_connection(conn: &Connection) -> Result<()> {
         "PRAGMA foreign_keys = ON;
          PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;",
+    )?;
+    crate::filter::register_filter_functions(conn)?;
+    Ok(())
+}
+
+/// Configure connection for an **encrypted** matter session.
+///
+/// Uses `journal_mode=DELETE` so sealing the plain session DB back into the
+/// at-rest AEAD container does not leave WAL bytes outside the sealed file.
+pub(crate) fn configure_connection_encrypted(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA journal_mode = DELETE;
+         PRAGMA synchronous = FULL;",
     )?;
     crate::filter::register_filter_functions(conn)?;
     Ok(())
@@ -4646,7 +4669,8 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v30 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 34);
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 35);
 
         let has_table: bool = conn
             .query_row(
@@ -4734,7 +4758,8 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v31 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 34);
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 35);
 
         for col in [
             "transcript_status",
@@ -4813,7 +4838,8 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v33 to v34");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 34);
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 35);
 
         for col in [
             "conversation_id",
@@ -4845,6 +4871,24 @@ mod tests {
             })
             .expect("status");
         assert_eq!(status, "extracted");
+
+        // v35 encryption flag columns (track 0057)
+        for col in [
+            "encryption_enabled",
+            "encryption_cipher",
+            "encryption_header_version",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('matters') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected matters column {col}");
+        }
     }
 
     /// v32 → v33 adds language pack + FTS fingerprint + item language_tag (track 0054).
@@ -4883,7 +4927,8 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v32 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 34);
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 35);
 
         for col in [
             "lang_pack_id",

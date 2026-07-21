@@ -17,6 +17,14 @@ bundled by Tantivy 0.26 defaults (available if a field selects those tokenizers)
 
 **MSRV:** tantivy 0.26 requires Rust **≥ 1.86** (project already meets this).
 
+## Encryption (track 0057)
+
+When the matter is encrypted, FTS segments under `index/` are stored as chunked
+AEAD blobs via `EncryptedDirectory`. **mmap is not used** — each open decrypts
+file contents into process memory (`FileSlice` from `Vec`). Expect higher RAM
+and slower open/commit vs plain matters; rebuild is required if switching
+encryption mode. Plain matters keep the default mmap directory.
+
 ## Language packs (0054)
 
 Offline packs only — **not** machine translation.

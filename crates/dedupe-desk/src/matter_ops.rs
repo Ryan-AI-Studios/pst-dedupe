@@ -29,6 +29,25 @@ impl MatterOpState {
     }
 
     pub fn spawn_create(&mut self, parent: Utf8PathBuf, name: String) {
+        self.spawn_create_inner(parent, name, None);
+    }
+
+    /// Create with optional encryption passphrase (`Some` → encrypted matter).
+    pub fn spawn_create_encrypted(
+        &mut self,
+        parent: Utf8PathBuf,
+        name: String,
+        passphrase: String,
+    ) {
+        self.spawn_create_inner(parent, name, Some(passphrase));
+    }
+
+    fn spawn_create_inner(
+        &mut self,
+        parent: Utf8PathBuf,
+        name: String,
+        passphrase: Option<String>,
+    ) {
         if self.busy {
             return;
         }
@@ -38,18 +57,36 @@ impl MatterOpState {
         let _ = thread::Builder::new()
             .name("desk-matter-create".into())
             .spawn(move || {
-                let result = match matter_ui::create_matter(&parent, &name) {
-                    Ok(root) => MatterOpResult::Created {
-                        root,
-                        name: name.trim().to_string(),
+                let result = match passphrase {
+                    Some(pass) => match matter_ui::create_matter_encrypted(&parent, &name, &pass) {
+                        Ok(root) => MatterOpResult::Created {
+                            root,
+                            name: name.trim().to_string(),
+                        },
+                        Err(message) => MatterOpResult::Failed { message },
                     },
-                    Err(message) => MatterOpResult::Failed { message },
+                    None => match matter_ui::create_matter(&parent, &name) {
+                        Ok(root) => MatterOpResult::Created {
+                            root,
+                            name: name.trim().to_string(),
+                        },
+                        Err(message) => MatterOpResult::Failed { message },
+                    },
                 };
                 let _ = tx.send(result);
             });
     }
 
     pub fn spawn_open(&mut self, path: PathBuf) {
+        self.spawn_open_inner(path, None);
+    }
+
+    /// Open encrypted matter with an explicit passphrase.
+    pub fn spawn_open_with_passphrase(&mut self, path: PathBuf, passphrase: String) {
+        self.spawn_open_inner(path, Some(passphrase));
+    }
+
+    fn spawn_open_inner(&mut self, path: PathBuf, passphrase: Option<String>) {
         if self.busy {
             return;
         }
@@ -73,9 +110,17 @@ impl MatterOpState {
             .name("desk-matter-open".into())
             .spawn(move || {
                 // Idle open: cleanup orphaned workspace/temp.
-                let result = match matter_ui::open_matter(&root, true) {
-                    Ok(name) => MatterOpResult::Opened { root, name },
-                    Err(message) => MatterOpResult::Failed { message },
+                let result = match passphrase {
+                    Some(pass) => {
+                        match matter_ui::open_matter_with_passphrase(&root, &pass, true) {
+                            Ok(name) => MatterOpResult::Opened { root, name },
+                            Err(message) => MatterOpResult::Failed { message },
+                        }
+                    }
+                    None => match matter_ui::open_matter(&root, true) {
+                        Ok(name) => MatterOpResult::Opened { root, name },
+                        Err(message) => MatterOpResult::Failed { message },
+                    },
                 };
                 let _ = tx.send(result);
             });

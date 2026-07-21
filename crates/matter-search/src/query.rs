@@ -84,7 +84,13 @@ pub fn search_keyword_for_matter(matter: &Matter, q: &KeywordQuery) -> Result<Ke
         }
     }
 
-    let handle = MatterIndex::open_or_create_with_pack(matter.root(), pack)?;
+    let dek = matter.dek_arc();
+    let handle = MatterIndex::open_or_create_with_crypto(
+        matter.root(),
+        pack,
+        dek.as_deref(),
+        matter.crypto_chunk_bytes(),
+    )?;
     let hits = search_index_with_pack(handle.index(), pack, q)?;
     handle.shutdown();
     Ok(hits)

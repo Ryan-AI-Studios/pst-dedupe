@@ -17,7 +17,7 @@ use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
-use matter_core::Cas;
+use matter_core::{Cas, Matter};
 
 use crate::html_strip;
 
@@ -180,10 +180,24 @@ pub fn load_body_from_cas(
         return Err("No extracted text".into());
     };
 
-    let cas = Cas::new(matter_root);
-    let mut file = cas
-        .open_read(digest)
-        .map_err(|e| format!("CAS open failed: {e}"))?;
+    // Prefer opening through Matter so encrypted CAS decrypts correctly.
+    // Falls back to plain Cas when the matter cannot be opened (e.g. missing
+    // passphrase env for encrypted matters).
+    let mut file = if let Ok(matter) = Matter::open_for_read(matter_root) {
+        matter
+            .cas()
+            .open_read(digest)
+            .map_err(|e| format!("CAS open failed: {e}"))?
+    } else if Matter::is_encrypted_on_disk(matter_root) {
+        return Err(
+            "Matter is encrypted; set PST_DEDUPE_MATTER_PASSPHRASE or open via Desk with passphrase."
+                .into(),
+        );
+    } else {
+        Cas::new(matter_root)
+            .open_read(digest)
+            .map_err(|e| format!("CAS open failed: {e}"))?
+    };
 
     // Read up to cap + 1 to detect truncation without loading multi-GB blobs fully
     // when we only display 2 MiB. We still stop at cap+1.

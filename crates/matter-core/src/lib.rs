@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v34**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v35**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -44,14 +44,17 @@
 //! - **Language packs** (`lang_pack_*` / `fts_lang_*` + optional `items.language_tag`, schema v33) (0054)
 //! - **Teams / chat metadata** (`conversation_id`, `chat_type`, `team_name`, `channel_name`, … + `teams_extract_*`, schema v34) (0055)
 //! - **Conversation review queries** (list by day bucket, full stream, centered handoff, reply snippets) (0056)
+//! - **Optional encryption at rest** (schema v35 / track 0057): Argon2id KEK-wrap-DEK,
+//!   chunked AES-256-GCM for SQLite container + CAS; FTS via encrypted Directory (no mmap)
 //!
 //! ## Layout
 //!
 //! ```text
 //! <matter-root>/
-//!   matter.db
-//!   blobs/sha256/<aa>/<fullhex>   # CAS (two-hex shard)
-//!   index/                        # Tantivy FTS (matter-search; segments on disk)
+//!   matter.db                 # SQLite (plain) or AEAD container (encrypted)
+//!   matter.crypto.json        # optional encryption header (no raw secrets)
+//!   blobs/sha256/<aa>/<fullhex>   # CAS (two-hex shard; ciphertext when encrypted)
+//!   index/                        # Tantivy FTS (matter-search; encrypted when matter is)
 //!   semantic/{model_id}/          # local embedding vectors (matter-semantic; not git)
 //!   exports/                      # reserved (production)
 //!   logs/                         # optional file logs
@@ -64,10 +67,15 @@
 //! It is **not** the CLI `dedup-engine` Tier-2 content hash. See crate README.
 //! Pure helpers live in [`logical_hash`]; preimages are never stored in CAS as native.
 //!
+//! ## Encryption (opt-in)
+//!
+//! Unencrypted is the default. When enabled: lost passphrase ⇒ data unrecoverable;
+//! not FIPS-validated; temps stay under the matter workspace. See crate README.
+//!
 //! ## Out of scope
 //!
 //! Purview/PST I/O, full-matter process jobs, Tantivy engine (see `matter-search`),
-//! UI, encryption, multi-tenant.
+//! UI, multi-tenant, FIPS certification.
 
 pub mod ai;
 pub mod ai_verify;
@@ -77,6 +85,7 @@ pub mod cas;
 pub mod category;
 pub mod cluster;
 pub mod conversation;
+pub mod crypto;
 pub mod entity;
 pub mod error;
 pub mod filter;
@@ -122,7 +131,7 @@ pub use audit::{
     AuditHashFields, GENESIS_PREV_HASH,
 };
 pub use calendar::{ics_extract_status, ApplyIcsExtractInput, IcsCandidate, IcsExtractApplyResult};
-pub use cas::{sha256_hex, Cas, PUT_READER_BUF_SIZE};
+pub use cas::{sha256_hex, Cas, CasCrypto, CasReader, PUT_READER_BUF_SIZE};
 pub use category::{
     category_status, classify_candidate_needs_work, ApplyClassificationInput, CategoryApplyResult,
     ClassifyCandidate,
@@ -138,6 +147,10 @@ pub use conversation::{
     CONVERSATION_AROUND_BEFORE, CONVERSATION_LIST_DEFAULT_LIMIT, CONVERSATION_LIST_MAX_LIMIT,
     CONVERSATION_STREAM_DEFAULT_LIMIT, CONVERSATION_STREAM_MAX_LIMIT, REPLY_SNIPPET_MAX_CHARS,
     REPLY_SNIPPET_UNAVAILABLE,
+};
+pub use crypto::{
+    is_encrypted_matter, passphrase_from_env, CRYPTO_HEADER_FILE, DEFAULT_CHUNK_BYTES,
+    ENV_MATTER_PASSPHRASE, MAGIC_CAS, MAGIC_DB,
 };
 pub use entity::{
     entity_flags, flag_bit_for_entity_type, CreateEntityHitInput, EntityScanCandidate,

@@ -59,6 +59,18 @@ pub struct DeskApp {
     matter_op: MatterOpState,
     settings: DeskSettings,
     create_name: String,
+    /// When true, create_matter uses encryption (passphrase fields below).
+    create_encrypt: bool,
+    create_passphrase: String,
+    create_passphrase_confirm: String,
+    /// Modal: open encrypted matter passphrase entry.
+    open_passphrase_pending: Option<PathBuf>,
+    open_passphrase: String,
+    /// Modal: change passphrase for current encrypted matter.
+    change_passphrase_open: bool,
+    change_pass_old: String,
+    change_pass_new: String,
+    change_pass_confirm: String,
     error_msg: Option<String>,
     status_msg: Option<String>,
     about_open: bool,
@@ -196,6 +208,15 @@ impl DeskApp {
             matter_op: MatterOpState::default(),
             settings,
             create_name: String::new(),
+            create_encrypt: false,
+            create_passphrase: String::new(),
+            create_passphrase_confirm: String::new(),
+            open_passphrase_pending: None,
+            open_passphrase: String::new(),
+            change_passphrase_open: false,
+            change_pass_old: String::new(),
+            change_pass_new: String::new(),
+            change_pass_confirm: String::new(),
             error_msg: None,
             status_msg: None,
             about_open: false,
@@ -617,11 +638,28 @@ impl DeskApp {
                 return;
             }
         };
+        if self.create_encrypt {
+            if self.create_passphrase.trim().is_empty() {
+                self.error_msg = Some("Passphrase required for encrypted matter.".into());
+                return;
+            }
+            if self.create_passphrase != self.create_passphrase_confirm {
+                self.error_msg = Some("Passphrase and confirmation do not match.".into());
+                return;
+            }
+        }
         self.settings.last_parent_dir = Some(parent.to_string());
         self.settings.save();
         let name = self.create_name.clone();
         self.status_msg = Some("Creating matter…".into());
-        self.matter_op.spawn_create(parent, name);
+        if self.create_encrypt {
+            let pass = self.create_passphrase.clone();
+            self.create_passphrase.clear();
+            self.create_passphrase_confirm.clear();
+            self.matter_op.spawn_create_encrypted(parent, name, pass);
+        } else {
+            self.matter_op.spawn_create(parent, name);
+        }
     }
 
     fn open_matter_at(&mut self, path: PathBuf) {
@@ -636,6 +674,20 @@ impl DeskApp {
         if self.matter_op.is_busy() {
             return;
         }
+        // Detect encrypted matter on disk → passphrase prompt (unless env set).
+        if let Ok(root) = Utf8PathBuf::from_path_buf(path.clone()) {
+            if matter_core::Matter::is_encrypted_on_disk(&root) {
+                if matter_core::passphrase_from_env().is_some() {
+                    self.status_msg = Some("Opening encrypted matter…".into());
+                    self.matter_op.spawn_open(path);
+                    return;
+                }
+                self.open_passphrase_pending = Some(path);
+                self.open_passphrase.clear();
+                self.status_msg = Some("Encrypted matter — enter passphrase.".into());
+                return;
+            }
+        }
         self.status_msg = Some("Opening matter…".into());
         // Off UI thread: migrations + workspace/temp cleanup.
         self.matter_op.spawn_open(path);
@@ -646,6 +698,9 @@ impl DeskApp {
             match result {
                 MatterOpResult::Created { root, name } => {
                     self.create_name.clear();
+                    self.create_encrypt = false;
+                    self.create_passphrase.clear();
+                    self.create_passphrase_confirm.clear();
                     self.error_msg = None;
                     self.set_matter(root, name);
                 }
@@ -2048,7 +2103,10 @@ impl DeskApp {
             let can_create = !self.dialog.is_open()
                 && !self.matter_op.is_busy()
                 && !self.create_name.trim().is_empty()
-                && !self.job_may_be_writing();
+                && !self.job_may_be_writing()
+                && (!self.create_encrypt
+                    || (!self.create_passphrase.is_empty()
+                        && self.create_passphrase == self.create_passphrase_confirm));
             if ui
                 .add_enabled(can_create, egui::Button::new("Create matter…"))
                 .clicked()
@@ -2057,6 +2115,29 @@ impl DeskApp {
                 self.dialog.spawn(DialogKind::CreateParentFolder, initial);
             }
         });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.create_encrypt, "Encrypt at rest");
+            if self.create_encrypt {
+                ui.label("Passphrase:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.create_passphrase)
+                        .password(true)
+                        .desired_width(120.0),
+                );
+                ui.label("Confirm:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.create_passphrase_confirm)
+                        .password(true)
+                        .desired_width(120.0),
+                );
+            }
+        });
+        if self.create_encrypt {
+            ui.colored_label(
+                egui::Color32::from_rgb(160, 90, 40),
+                "Lost passphrase = permanent data loss. Not FIPS-validated.",
+            );
+        }
 
         ui.add_space(6.0);
         if ui
@@ -2067,6 +2148,103 @@ impl DeskApp {
             .clicked()
         {
             self.dialog.spawn(DialogKind::OpenMatterFolder, None);
+        }
+
+        // Encrypted open passphrase modal
+        if self.open_passphrase_pending.is_some() {
+            egui::Window::new("Encrypted matter")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label("Enter passphrase to unlock:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.open_passphrase)
+                            .password(true)
+                            .desired_width(240.0),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.open_passphrase_pending = None;
+                            self.open_passphrase.clear();
+                            self.status_msg = None;
+                        }
+                        let can = !self.open_passphrase.is_empty() && !self.matter_op.is_busy();
+                        if ui.add_enabled(can, egui::Button::new("Unlock")).clicked() {
+                            if let Some(path) = self.open_passphrase_pending.take() {
+                                let pass = self.open_passphrase.clone();
+                                self.open_passphrase.clear();
+                                // Seed env so subsequent open_for_read in workers can unlock.
+                                std::env::set_var(matter_core::ENV_MATTER_PASSPHRASE, &pass);
+                                self.status_msg = Some("Opening encrypted matter…".into());
+                                self.matter_op.spawn_open_with_passphrase(path, pass);
+                            }
+                        }
+                    });
+                });
+        }
+
+        // Change passphrase modal (when an encrypted matter is open)
+        if self.change_passphrase_open {
+            egui::Window::new("Change passphrase")
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label("Current passphrase:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.change_pass_old)
+                            .password(true)
+                            .desired_width(240.0),
+                    );
+                    ui.label("New passphrase:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.change_pass_new)
+                            .password(true)
+                            .desired_width(240.0),
+                    );
+                    ui.label("Confirm new:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.change_pass_confirm)
+                            .password(true)
+                            .desired_width(240.0),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.change_passphrase_open = false;
+                            self.change_pass_old.clear();
+                            self.change_pass_new.clear();
+                            self.change_pass_confirm.clear();
+                        }
+                        let can = !self.change_pass_old.is_empty()
+                            && !self.change_pass_new.is_empty()
+                            && self.change_pass_new == self.change_pass_confirm;
+                        if ui.add_enabled(can, egui::Button::new("Change")).clicked() {
+                            if let Some(ref root) = self.matter_root.clone() {
+                                match matter_ui::change_matter_passphrase(
+                                    root,
+                                    &self.change_pass_old,
+                                    &self.change_pass_new,
+                                ) {
+                                    Ok(()) => {
+                                        std::env::set_var(
+                                            matter_core::ENV_MATTER_PASSPHRASE,
+                                            &self.change_pass_new,
+                                        );
+                                        self.status_msg = Some("Passphrase changed.".into());
+                                        self.error_msg = None;
+                                    }
+                                    Err(e) => {
+                                        self.error_msg = Some(e);
+                                    }
+                                }
+                            }
+                            self.change_passphrase_open = false;
+                            self.change_pass_old.clear();
+                            self.change_pass_new.clear();
+                            self.change_pass_confirm.clear();
+                        }
+                    });
+                });
         }
 
         if self.dialog.is_open() {
@@ -2554,6 +2732,19 @@ impl DeskApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("About").clicked() {
                     self.about_open = true;
+                }
+                if let Some(ref root) = self.matter_root {
+                    if matter_core::Matter::is_encrypted_on_disk(root)
+                        && ui
+                            .button("Change passphrase…")
+                            .on_hover_text("Re-wrap DEK under a new passphrase (encrypted matters)")
+                            .clicked()
+                    {
+                        self.change_passphrase_open = true;
+                        self.change_pass_old.clear();
+                        self.change_pass_new.clear();
+                        self.change_pass_confirm.clear();
+                    }
                 }
             });
         });

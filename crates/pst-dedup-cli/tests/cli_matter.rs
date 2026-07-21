@@ -56,6 +56,65 @@ fn matter_create_and_info_json() {
 }
 
 #[test]
+fn matter_create_encrypt_open_wrong_password() {
+    let tmp = tempdir().unwrap();
+    let matter = tmp.path().join("menc");
+    let matter_s = matter.to_str().unwrap();
+
+    let out = Command::new(bin())
+        .args([
+            "matter",
+            "create",
+            "--path",
+            matter_s,
+            "--name",
+            "enc-cli",
+            "--encrypt",
+            "--json",
+        ])
+        .env("PST_DEDUPE_MATTER_PASSPHRASE", "right-pass-xyz")
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value =
+        serde_json::from_str(std::str::from_utf8(&out.stdout).unwrap().trim()).expect("json");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["encryption_enabled"], true);
+
+    // Wrong passphrase → fail closed
+    let out = Command::new(bin())
+        .args(["matter", "info", "--path", matter_s, "--json"])
+        .env("PST_DEDUPE_MATTER_PASSPHRASE", "wrong-pass")
+        .output()
+        .expect("spawn");
+    assert!(
+        !out.status.success(),
+        "wrong passphrase must fail: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // Correct passphrase → info ok
+    let out = Command::new(bin())
+        .args(["matter", "info", "--path", matter_s, "--json"])
+        .env("PST_DEDUPE_MATTER_PASSPHRASE", "right-pass-xyz")
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value =
+        serde_json::from_str(std::str::from_utf8(&out.stdout).unwrap().trim()).expect("json");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["encryption_enabled"], true);
+}
+
+#[test]
 fn job_list_empty_json() {
     let tmp = tempdir().unwrap();
     let matter = tmp.path().join("m2");

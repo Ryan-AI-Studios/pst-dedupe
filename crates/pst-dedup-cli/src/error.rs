@@ -154,7 +154,11 @@ impl From<matter_core::Error> for CliError {
             | Error::BlobNotFound(_)
             | Error::AuditChainBroken { .. }
             | Error::CrossMatterFamily(_)
-            | Error::FamilyCohesion(_) => CliError::MatterIo(e.to_string()),
+            | Error::FamilyCohesion(_)
+            | Error::PassphraseRequired(_)
+            | Error::WrongPassphrase
+            | Error::Crypto(_)
+            | Error::CryptoHeaderMissing(_) => CliError::MatterIo(e.to_string()),
         }
     }
 }

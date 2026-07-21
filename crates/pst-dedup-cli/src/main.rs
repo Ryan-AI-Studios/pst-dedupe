@@ -161,11 +161,23 @@ enum MatterCmd {
         path: PathBuf,
         #[arg(long)]
         name: String,
+        /// Encrypt at rest (requires env PST_DEDUPE_MATTER_PASSPHRASE).
+        #[arg(long)]
+        encrypt: bool,
         #[arg(long)]
         json: bool,
     },
     /// Show matter metadata (open-for-read).
     Info {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-wrap DEK under a new passphrase (encrypted matters only).
+    ///
+    /// Old: env `PST_DEDUPE_MATTER_PASSPHRASE`. New: env `PST_DEDUPE_MATTER_NEW_PASSPHRASE`.
+    ChangePassphrase {
         #[arg(long)]
         path: PathBuf,
         #[arg(long)]
@@ -366,7 +378,9 @@ fn command_wants_json(cmd: &Commands) -> bool {
         | Commands::Dups { json, .. }
         | Commands::Ingest { json, .. } => *json,
         Commands::Matter { cmd } => match cmd {
-            MatterCmd::Create { json, .. } | MatterCmd::Info { json, .. } => *json,
+            MatterCmd::Create { json, .. }
+            | MatterCmd::Info { json, .. }
+            | MatterCmd::ChangePassphrase { json, .. } => *json,
         },
         Commands::Job { cmd } => match cmd {
             JobCmd::Run { json, .. }
@@ -436,8 +450,16 @@ fn run(cli: Cli) -> Result<()> {
             json,
         } => cmd_dups(paths, no_tier2, limit, json),
         Commands::Matter { cmd } => match cmd {
-            MatterCmd::Create { path, name, json } => matter_cmd::matter_create(&path, &name, json),
+            MatterCmd::Create {
+                path,
+                name,
+                encrypt,
+                json,
+            } => matter_cmd::matter_create(&path, &name, encrypt, json),
             MatterCmd::Info { path, json } => matter_cmd::matter_info(&path, json),
+            MatterCmd::ChangePassphrase { path, json } => {
+                matter_cmd::matter_change_passphrase(&path, json)
+            }
         },
         Commands::Job { cmd } => match cmd {
             JobCmd::Run {
