@@ -1,0 +1,26 @@
+[
+  {
+    "id": "j1",
+    "body": "JSON hello",
+    "from": "alice@example.com",
+    "timestamp": "2024-06-01T10:00:00Z",
+    "team": "Team Alpha",
+    "channel": "General",
+    "chatType": "channel",
+    "reactions": [
+      { "from": "bob@example.com", "emoji": "👍" }
+    ],
+    "attachments": [
+      { "name": "notes.txt", "url": "https://sharepoint.example/notes.txt" }
+    ]
+  },
+  {
+    "id": "j2",
+    "content": "JSON day two",
+    "from": "bob@example.com",
+    "sentDateTime": "2024-06-02T11:00:00Z",
+    "team": "Team Alpha",
+    "channel": "General",
+    "chatType": "channel"
+  }
+]

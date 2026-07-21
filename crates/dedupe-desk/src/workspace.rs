@@ -271,6 +271,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
             app.start_ics_extract();
         }
         if ui
+            .add_enabled(!busy, egui::Button::new("Run Teams/chat extract"))
+            .on_hover_text(
+                "Normalize local Teams HTML/JSON/PST-shaped exports into chat items (kind=teams_extract). \
+Offline packages only — no live Graph. Review body is plain text; conversation_id is UTC day-bucketed. \
+Conversation chrome UI is 0056.",
+            )
+            .clicked()
+        {
+            app.start_teams_extract();
+        }
+        if ui
             .add_enabled(!busy, egui::Button::new("Classify file types"))
             .on_hover_text(
                 "Assign taxonomy_v1 file categories from path/mime/magic (kind=classify); retires bare attachment category",

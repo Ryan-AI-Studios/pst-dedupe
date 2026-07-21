@@ -3721,6 +3721,9 @@ fn show_filter_bar(
             if ui.small_button("Calendar").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_calendar());
             }
+            if ui.small_button("Chat").clicked() {
+                state.apply_preset(matter_root, FilterSpec::preset_chat());
+            }
             if ui.small_button("Withheld").clicked() {
                 state.apply_preset(matter_root, FilterSpec::preset_withheld());
             }

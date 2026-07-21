@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html>
+<head><title>XSS / General</title></head>
+<body>
+  <div class="conversation" data-team="XSS Team" data-channel="General" data-chat-type="channel">
+    <div class="message" data-id="xss-1" data-from="attacker@example.com" data-sent-at="2024-06-01T10:00:00Z">
+      <div class="body">Hello <script>alert(1)</script> world <img src=x onerror="alert(2)"> <a href="#" onclick="evil()">click</a></div>
+    </div>
+  </div>
+</body>
+</html>

@@ -309,6 +309,21 @@ impl FilterSpec {
         }
     }
 
+    /// Quick chip: chat / Teams messages (track 0055).
+    pub fn preset_chat() -> Self {
+        Self {
+            conditions: vec![FilterCondition {
+                field: "file_category".into(),
+                op: "eq".into(),
+                value: Some(serde_json::Value::String("chat".into())),
+                values: None,
+                start: None,
+                end: None,
+            }],
+            ..Self::default()
+        }
+    }
+
     /// Quick chip: redactions present but redacted produce artifact missing/outdated (track 0032).
     pub fn preset_redacted_text_stale() -> Self {
         Self {

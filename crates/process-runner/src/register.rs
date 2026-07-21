@@ -46,6 +46,8 @@ pub fn register_default_handlers(runner: &mut ProcessRunner) {
     runner.register(Arc::new(MatterPdfExtractHandler::new()));
     #[cfg(feature = "calendar")]
     runner.register(Arc::new(MatterIcsExtractHandler::new()));
+    #[cfg(feature = "teams")]
+    runner.register(Arc::new(MatterTeamsExtractHandler::new()));
     #[cfg(feature = "ocr")]
     runner.register(Arc::new(MatterOcrHandler::new()));
     #[cfg(feature = "stt")]
@@ -90,6 +92,7 @@ pub fn default_handler_kinds() -> &'static [&'static str] {
         "office_extract",
         "pdf_extract",
         "ics_extract",
+        "teams_extract",
         "ocr",
         "transcribe",
         "classify",
@@ -125,5 +128,6 @@ mod tests {
         assert!(default_handler_kinds().contains(&"semantic_index"));
         assert!(default_handler_kinds().contains(&"ai_suggest_codes"));
         assert!(default_handler_kinds().contains(&"transcribe"));
+        assert!(default_handler_kinds().contains(&"teams_extract"));
     }
 }

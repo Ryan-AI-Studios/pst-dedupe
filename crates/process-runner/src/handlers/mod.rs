@@ -42,6 +42,9 @@ pub mod pdf;
 #[cfg(feature = "calendar")]
 pub mod ics;
 
+#[cfg(feature = "teams")]
+pub mod teams;
+
 #[cfg(feature = "ocr")]
 pub mod ocr;
 
@@ -116,6 +119,9 @@ pub use pdf::MatterPdfExtractHandler;
 
 #[cfg(feature = "calendar")]
 pub use ics::MatterIcsExtractHandler;
+
+#[cfg(feature = "teams")]
+pub use teams::MatterTeamsExtractHandler;
 
 #[cfg(feature = "ocr")]
 pub use ocr::MatterOcrHandler;
