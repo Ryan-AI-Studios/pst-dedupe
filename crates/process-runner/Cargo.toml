@@ -6,7 +6,7 @@ description = "In-process matter job runner: single worker thread, cancel, watch
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["ingest", "extract_pst", "dedupe", "thread", "neardup", "cull", "promote", "produce", "qc", "gap", "fts", "office", "pdf", "calendar", "ocr", "stt", "classify", "entity", "people", "cluster", "sentiment", "semantic", "ai"]
+default = ["ingest", "extract_pst", "dedupe", "thread", "neardup", "cull", "promote", "produce", "qc", "gap", "fts", "office", "pdf", "calendar", "teams", "ocr", "stt", "classify", "entity", "people", "cluster", "sentiment", "semantic", "ai"]
 ingest = ["dep:ingest-purview"]
 extract_pst = ["dep:extract-pst"]
 dedupe = ["dep:matter-dedupe"]
@@ -21,6 +21,9 @@ fts = ["dep:matter-search"]
 office = ["dep:extract-office"]
 pdf = ["dep:extract-pdf"]
 calendar = ["dep:extract-calendar"]
+teams = ["dep:extract-teams"]
+# Alias for docs / CI.
+teams_extract = ["teams"]
 ocr = ["dep:ocr-plugin"]
 stt = ["dep:stt-plugin"]
 classify = ["dep:file-category"]
@@ -54,6 +57,7 @@ matter-search = { path = "../matter-search", optional = true }
 extract-office = { path = "../extract-office", optional = true }
 extract-pdf = { path = "../extract-pdf", optional = true }
 extract-calendar = { path = "../extract-calendar", optional = true }
+extract-teams = { path = "../extract-teams", optional = true }
 ocr-plugin = { path = "../ocr-plugin", optional = true }
 stt-plugin = { path = "../stt-plugin", optional = true }
 file-category = { path = "../file-category", optional = true }

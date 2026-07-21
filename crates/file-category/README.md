@@ -10,7 +10,7 @@ for Dedupe Desk (track **0037**).
 | `email` | Message item (incl. standalone `.msg`) |
 | `calendar` | Appointment / ICS event |
 | `contact` | Contact card (thin) |
-| `chat` | Chat / short message (stub for 0055) |
+| `chat` | Chat / short message (Teams/export adapters in **0055** / `extract-teams`) |
 | `document` | Word-processing / plain text |
 | `spreadsheet` | Tables / workbooks / CSV |
 | `presentation` | Slide decks |

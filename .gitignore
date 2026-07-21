@@ -5,6 +5,9 @@
 review.md
 .claude/
 *.html
+# Synthetic Teams HTML fixtures (track 0055) must be tracked for CI/tests.
+!fixtures/teams/
+!fixtures/teams/*.html
 
 # Local scratch / generated
 output/

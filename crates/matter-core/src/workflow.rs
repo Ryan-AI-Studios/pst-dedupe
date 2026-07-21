@@ -61,6 +61,7 @@ pub const ALLOWED_WORKFLOW_JOB_KINDS: &[&str] = &[
     "office_extract",
     "pdf_extract",
     "ics_extract",
+    "teams_extract",
     "ocr",
     "fts_index",
     "dedupe",

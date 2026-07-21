@@ -15,7 +15,7 @@ fn open_matter() -> (tempfile::TempDir, Matter) {
     let path = camino::Utf8PathBuf::from_path_buf(root).expect("utf8");
     let matter = Matter::create(&path, "workflow-test").expect("create");
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 33);
+    assert_eq!(SCHEMA_VERSION, 34);
     (dir, matter)
 }
 
@@ -40,7 +40,7 @@ fn minimal_body_json() -> String {
 fn schema_version_is_current() {
     let (_dir, matter) = open_matter();
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 33);
+    assert_eq!(SCHEMA_VERSION, 34);
 }
 
 #[test]

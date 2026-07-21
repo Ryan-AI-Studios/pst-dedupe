@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v33**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v34**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -42,6 +42,7 @@
 //! - **AI suggestion citations** (`item_ai_suggestion_citations` + `citations_count`, schema v31) (0052)
 //! - **Transcript / STT bookkeeping** (`transcript_*` columns, schema v32) (0053)
 //! - **Language packs** (`lang_pack_*` / `fts_lang_*` + optional `items.language_tag`, schema v33) (0054)
+//! - **Teams / chat metadata** (`conversation_id`, `chat_type`, `team_name`, `channel_name`, … + `teams_extract_*`, schema v34) (0055)
 //!
 //! ## Layout
 //!
@@ -96,6 +97,7 @@ pub mod report;
 pub mod schema;
 pub mod semantic;
 pub mod sentiment;
+pub mod teams;
 pub mod thread_headers;
 pub mod transcription;
 pub mod workflow;
@@ -220,6 +222,9 @@ pub use semantic::{
 pub use sentiment::{
     sentiment_polarity, ClearItemSentimentInput, RelabelItemSentimentInput, SentimentCandidate,
     WriteItemSentimentInput,
+};
+pub use teams::{
+    teams_extract_status, ApplyTeamsExtractInput, TeamsCandidate, TeamsExtractApplyResult,
 };
 pub use thread_headers::{
     normalize_conversation_index_to_hex, parse_in_reply_to, parse_references_header,

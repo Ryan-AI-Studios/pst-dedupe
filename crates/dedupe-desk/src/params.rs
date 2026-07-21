@@ -309,6 +309,20 @@ pub fn ics_extract_default_params() -> String {
     .to_string()
 }
 
+/// Default params for Teams/chat extract (`kind = "teams_extract"`).
+pub fn teams_extract_default_params() -> String {
+    serde_json::json!({
+        "source_id": null,
+        "formats": ["pst", "html", "json"],
+        "max_html_bytes": 20_000_000,
+        "max_messages_per_file": 50_000,
+        "reset": false,
+        "batch_size": 50,
+        "force": false
+    })
+    .to_string()
+}
+
 /// Default params for file-category classify (`kind = "classify"`).
 pub fn classify_default_params() -> String {
     serde_json::json!({
@@ -884,6 +898,17 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["force"], false);
         assert_eq!(v["batch_size"], 50);
+    }
+
+    #[test]
+    fn teams_extract_params_shape() {
+        let j = teams_extract_default_params();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["force"], false);
+        assert_eq!(v["reset"], false);
+        assert_eq!(v["batch_size"], 50);
+        assert_eq!(v["max_html_bytes"], 20_000_000);
+        assert!(v["formats"].as_array().unwrap().iter().any(|x| x == "html"));
     }
 
     #[test]

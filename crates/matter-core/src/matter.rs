@@ -53,6 +53,8 @@ pub mod item_role {
     pub const STANDALONE: &str = "standalone";
     pub const PARENT: &str = "parent";
     pub const ATTACHMENT: &str = "attachment";
+    /// Teams / chat message atom (track 0055).
+    pub const CHAT_MESSAGE: &str = "chat_message";
 }
 
 /// Matter-level dedupe role on items (schema v3 / track 0021).
@@ -340,6 +342,22 @@ pub struct Item {
     pub transcript_at: Option<String>,
     pub transcript_job_id: Option<String>,
     pub transcript_error: Option<String>,
+    // --- schema v34 (Teams / chat extract) ---
+    /// Day-bucketed conversation identity (sha256 hex).
+    pub conversation_id: Option<String>,
+    /// `one_to_one` | `group` | `channel` | `meeting` | `unknown`
+    pub chat_type: Option<String>,
+    pub team_name: Option<String>,
+    pub channel_name: Option<String>,
+    /// `pst` | `html` | `json`
+    pub chat_export_format: Option<String>,
+    /// UTC day bucket `YYYY-MM-DD` (or `unknown`) denorm of conversation_id input.
+    pub conversation_bucket_date: Option<String>,
+    /// `ok` | `skipped` | `error` | NULL never attempted (source/export leaves).
+    pub teams_extract_status: Option<String>,
+    pub teams_extract_method: Option<String>,
+    pub teams_extracted_at: Option<String>,
+    pub teams_extract_error: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -431,6 +449,13 @@ pub struct ItemInput {
     pub cal_recurrence_id: Option<String>,
     pub cal_uid: Option<String>,
     pub cal_extract_method: Option<String>,
+    // --- schema v34 (Teams / chat) — set by extract-teams ---
+    pub conversation_id: Option<String>,
+    pub chat_type: Option<String>,
+    pub team_name: Option<String>,
+    pub channel_name: Option<String>,
+    pub chat_export_format: Option<String>,
+    pub conversation_bucket_date: Option<String>,
 }
 
 /// Thin row for matter-level email parent dedupe (no body text).
@@ -989,6 +1014,13 @@ pub struct ItemUpdate {
     pub cal_recurrence_id: Option<Option<String>>,
     pub cal_uid: Option<Option<String>>,
     pub cal_extract_method: Option<Option<String>>,
+    // --- schema v34 (Teams / chat) ---
+    pub conversation_id: Option<Option<String>>,
+    pub chat_type: Option<Option<String>>,
+    pub team_name: Option<Option<String>>,
+    pub channel_name: Option<Option<String>>,
+    pub chat_export_format: Option<Option<String>>,
+    pub conversation_bucket_date: Option<Option<String>>,
 }
 
 /// An open matter: directory layout + SQLite connection + CAS handle.
@@ -1502,7 +1534,9 @@ impl Matter {
                 in_review, review_set_id, review_order, promoted_at, promote_job_id, promote_policy, \
                 message_class, cal_start_at, cal_end_at, cal_all_day, cal_location, \
                 cal_organizer, cal_attendees_json, cal_busy_status, cal_is_recurring, \
-                cal_recurrence_id, cal_uid, cal_extract_method\
+                cal_recurrence_id, cal_uid, cal_extract_method, \
+                conversation_id, chat_type, team_name, channel_name, chat_export_format, \
+                conversation_bucket_date\
              ) VALUES (\
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, \
@@ -1512,7 +1546,8 @@ impl Matter {
                 ?48, ?49, ?50, ?51, ?52, ?53, ?54, \
                 ?55, ?56, ?57, ?58, ?59, ?60, \
                 ?61, ?62, ?63, ?64, ?65, ?66, \
-                ?67, ?68, ?69, ?70, ?71, ?72, ?73, ?74, ?75, ?76, ?77, ?78\
+                ?67, ?68, ?69, ?70, ?71, ?72, ?73, ?74, ?75, ?76, ?77, ?78, \
+                ?79, ?80, ?81, ?82, ?83, ?84\
              )",
             params![
                 id,
@@ -1593,6 +1628,12 @@ impl Matter {
                 input.cal_recurrence_id,
                 input.cal_uid,
                 input.cal_extract_method,
+                input.conversation_id,
+                input.chat_type,
+                input.team_name,
+                input.channel_name,
+                input.chat_export_format,
+                input.conversation_bucket_date,
             ],
         )?;
 
@@ -1710,6 +1751,15 @@ impl Matter {
         let cal_recurrence_id = apply_opt2(update.cal_recurrence_id, current.cal_recurrence_id);
         let cal_uid = apply_opt2(update.cal_uid, current.cal_uid);
         let cal_extract_method = apply_opt2(update.cal_extract_method, current.cal_extract_method);
+        let conversation_id = apply_opt2(update.conversation_id, current.conversation_id);
+        let chat_type = apply_opt2(update.chat_type, current.chat_type);
+        let team_name = apply_opt2(update.team_name, current.team_name);
+        let channel_name = apply_opt2(update.channel_name, current.channel_name);
+        let chat_export_format = apply_opt2(update.chat_export_format, current.chat_export_format);
+        let conversation_bucket_date = apply_opt2(
+            update.conversation_bucket_date,
+            current.conversation_bucket_date,
+        );
 
         let mut family_id = family_id;
         if let Some(ref parent_id) = parent_item_id {
@@ -1764,8 +1814,10 @@ impl Matter {
                 message_class = ?65, cal_start_at = ?66, cal_end_at = ?67, cal_all_day = ?68, \
                 cal_location = ?69, cal_organizer = ?70, cal_attendees_json = ?71, \
                 cal_busy_status = ?72, cal_is_recurring = ?73, cal_recurrence_id = ?74, \
-                cal_uid = ?75, cal_extract_method = ?76 \
-             WHERE id = ?77",
+                cal_uid = ?75, cal_extract_method = ?76, \
+                conversation_id = ?77, chat_type = ?78, team_name = ?79, channel_name = ?80, \
+                chat_export_format = ?81, conversation_bucket_date = ?82 \
+             WHERE id = ?83",
             params![
                 source_id,
                 family_id,
@@ -1843,6 +1895,12 @@ impl Matter {
                 cal_recurrence_id,
                 cal_uid,
                 cal_extract_method,
+                conversation_id,
+                chat_type,
+                team_name,
+                channel_name,
+                chat_export_format,
+                conversation_bucket_date,
                 item_id,
             ],
         )?;
@@ -4927,7 +4985,10 @@ const ITEM_COLUMNS: &str =
     sentiment_scanned_at, sentiment_job_id, \
     semantic_embedded_text_sha256, semantic_embedded_at, semantic_chunk_count, \
     transcript_status, transcript_engine, transcript_model, transcript_language, \
-    transcript_native_sha256, transcript_at, transcript_job_id, transcript_error";
+    transcript_native_sha256, transcript_at, transcript_job_id, transcript_error, \
+    conversation_id, chat_type, team_name, channel_name, chat_export_format, \
+    conversation_bucket_date, teams_extract_status, teams_extract_method, \
+    teams_extracted_at, teams_extract_error";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -5080,6 +5141,16 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         transcript_at: row.get(142)?,
         transcript_job_id: row.get(143)?,
         transcript_error: row.get(144)?,
+        conversation_id: row.get(145)?,
+        chat_type: row.get(146)?,
+        team_name: row.get(147)?,
+        channel_name: row.get(148)?,
+        chat_export_format: row.get(149)?,
+        conversation_bucket_date: row.get(150)?,
+        teams_extract_status: row.get(151)?,
+        teams_extract_method: row.get(152)?,
+        teams_extracted_at: row.get(153)?,
+        teams_extract_error: row.get(154)?,
     })
 }
 

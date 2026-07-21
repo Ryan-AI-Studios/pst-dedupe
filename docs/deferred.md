@@ -277,7 +277,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 |---|---|---|---|---|
 | D-0037-01 | — | Fine-grained `file_type` subtype (e.g. docx vs category document) | P0 is closed `file_category` only | residual |
 | D-0037-02 | — | Full Nuix/Relativity 900–1000+ MIME catalog parity | Never claim; workstation-like families only | never / residual |
-| D-0037-03 | — | Chat / Teams deep type signals | Reserved `chat` category | **0055** |
+| D-0037-03 | — | Chat / Teams deep type signals | **Closed in 0055**: category `chat` + `teams_extract` HTML/PST/JSON adapters + conversation_id; deeper live Teams type signals residual | residual / D-0055-* |
 | D-0037-04 | — | Mobile / cloud package type packs | Thin reserved categories | residual |
 | D-0037-05 | — | User-editable custom taxonomy UI | Closed vocabulary P0 | residual |
 | D-0037-06 | — | AI content-based classification | Offline metadata only | Series G |
@@ -552,6 +552,22 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0054-08 | — | OCR tessdata pack manager | Residual 0036 path docs | residual |
 | D-0054-09 | — | Batch `lang_detect` job | Thin API + `set_item_language_tag` shipped; full job residual | residual |
 | D-0054-10 | P3 | Bare `+tag@example.com` QueryParser operator | Index preserves plus-address; quote in query (`"+tag@…"`) | residual polish |
+
+## From track 0055-TeamsChatAdapters (Completed — Codex luna PASS)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0055-01 | — | Live Teams Graph Export API collection | Explicit out of scope; offline packages only | residual / never default |
+| D-0055-02 | — | Physical SharePoint attachment hydrate | P0 injects `[Attachment:]` / URL lines only | residual |
+| D-0055-03 | — | Full RSMF file export format | Day-bucket conversation_id is P0; full RSMF residual | residual |
+| D-0055-04 | — | Hour-level or custom bucket grain | Fixed 24h UTC day P0 | residual |
+| D-0055-05 | — | Edit/delete version timeline UI | Not in P0 | residual / **0056** |
+| D-0055-06 | — | Conversation review chrome | Day-bounded `conversation_id` contract for **0056** | **0056** |
+| D-0055-07 | — | Meeting recording auto-STT chain | Use 0053 STT on media residual | residual / 0053 |
+| D-0055-08 | — | Private channel mailbox discovery | Collection residual; adapter sees package only | residual |
+| D-0055-09 | — | `teams_extract` in processing profiles | Explicit Desk/CLI job P0; profile stage residual | residual / profile polish |
+| D-0055-10 | P3 | Real Purview HTML variance beyond fixture parser | Versioned `html_fixture_v1` only | residual polish |
+| D-0055-11 | P3 | Full GUI smoke for Run Teams extract + Chat chip | Automated job + unit tests; operator smoke local | operator / polish |
 
 ## Hygiene
 

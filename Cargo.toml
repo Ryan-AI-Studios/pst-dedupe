@@ -26,6 +26,7 @@ members = [
     "crates/file-category",
     "crates/dedupe-desk",
     "crates/extract-calendar",
+    "crates/extract-teams",
     "crates/matter-entity",
     "crates/matter-people",
     "crates/matter-cluster",

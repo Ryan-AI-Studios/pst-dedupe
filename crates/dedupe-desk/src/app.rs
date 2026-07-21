@@ -1713,6 +1713,26 @@ impl DeskApp {
         }
     }
 
+    /// Normalize Teams/chat export leaves (`teams_extract`).
+    pub(crate) fn start_teams_extract(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params = JobParams::new(params::teams_extract_default_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "teams_extract", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started Teams/chat extract job {job_id}"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
     /// Human name for the current cull selection (resolves `user:<id>` via snapshot).
     pub(crate) fn cull_preset_display_name(&self) -> String {
         if let Some(id) = self

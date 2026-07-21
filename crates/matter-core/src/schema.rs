@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 33;
+pub const SCHEMA_VERSION: u32 = 34;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -47,6 +47,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (31, MIGRATION_V31),
     (32, MIGRATION_V32),
     (33, MIGRATION_V33),
+    (34, MIGRATION_V34),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -1115,6 +1116,23 @@ ALTER TABLE matters ADD COLUMN fts_lang_built_at TEXT;
 
 ALTER TABLE items ADD COLUMN language_tag TEXT;
 CREATE INDEX idx_items_language ON items(language_tag) WHERE language_tag IS NOT NULL;
+"#;
+
+/// Schema v34: Teams / chat export metadata + teams_extract bookkeeping (track 0055).
+const MIGRATION_V34: &str = r#"
+ALTER TABLE items ADD COLUMN conversation_id TEXT;
+ALTER TABLE items ADD COLUMN chat_type TEXT;
+ALTER TABLE items ADD COLUMN team_name TEXT;
+ALTER TABLE items ADD COLUMN channel_name TEXT;
+ALTER TABLE items ADD COLUMN chat_export_format TEXT;
+ALTER TABLE items ADD COLUMN conversation_bucket_date TEXT;
+ALTER TABLE items ADD COLUMN teams_extract_status TEXT;
+ALTER TABLE items ADD COLUMN teams_extract_method TEXT;
+ALTER TABLE items ADD COLUMN teams_extracted_at TEXT;
+ALTER TABLE items ADD COLUMN teams_extract_error TEXT;
+CREATE INDEX idx_items_conversation ON items(conversation_id) WHERE conversation_id IS NOT NULL;
+CREATE INDEX idx_items_chat_type ON items(chat_type) WHERE chat_type IS NOT NULL;
+CREATE INDEX idx_items_teams_extract_status ON items(teams_extract_status) WHERE teams_extract_status IS NOT NULL;
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -4628,7 +4646,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v30 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 33);
+        assert_eq!(v, 34);
 
         let has_table: bool = conn
             .query_row(
@@ -4716,7 +4734,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v31 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 33);
+        assert_eq!(v, 34);
 
         for col in [
             "transcript_status",
@@ -4759,6 +4777,76 @@ mod tests {
         assert_eq!(ms, SCHEMA_VERSION);
     }
 
+    /// v33 → v34 adds Teams/chat columns (track 0055).
+    #[test]
+    fn migrate_v33_to_v34_preserves_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        for &(target, sql) in MIGRATIONS {
+            if target > 33 {
+                break;
+            }
+            conn.execute_batch(sql).expect("sql");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        assert_eq!(read_schema_version(&conn).expect("read"), 33);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v33', 'V33 Matter', '2020-01-01T00:00:00Z', 33, '/tmp/v33')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, status, imported_at) \
+             VALUES ('it_v33', 'mat_v33', 'extracted', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v33 to v34");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 34);
+
+        for col in [
+            "conversation_id",
+            "chat_type",
+            "team_name",
+            "channel_name",
+            "chat_export_format",
+            "conversation_bucket_date",
+            "teams_extract_status",
+            "teams_extract_method",
+            "teams_extracted_at",
+            "teams_extract_error",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected items column {col}");
+        }
+
+        let status: String = conn
+            .query_row("SELECT status FROM items WHERE id = 'it_v33'", [], |row| {
+                row.get(0)
+            })
+            .expect("status");
+        assert_eq!(status, "extracted");
+    }
+
     /// v32 → v33 adds language pack + FTS fingerprint + item language_tag (track 0054).
     #[test]
     fn migrate_v32_to_v33_preserves_rows() {
@@ -4793,9 +4881,9 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v32 to v33");
+        let v = migrate(&conn).expect("migrate v32 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 33);
+        assert_eq!(v, 34);
 
         for col in [
             "lang_pack_id",
