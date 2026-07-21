@@ -13,6 +13,7 @@ use process_runner::{register_default_handlers, JobParams, ProcessRunner, Runner
 use tokio::sync::watch;
 
 use crate::cluster_ui::{self, ClusterState};
+use crate::conversation_ui::{self, ConversationState};
 use crate::dialogs::{DialogKind, DialogState};
 use crate::gap_ui::{self, GapState};
 use crate::matter_ops::{MatterOpResult, MatterOpState};
@@ -103,6 +104,8 @@ pub struct DeskApp {
     pub(crate) people: PeopleState,
     /// Concept / theme clusters panel (track 0048).
     pub(crate) clusters: ClusterState,
+    /// Conversation-centric chat review (track 0056).
+    pub(crate) conversations: ConversationState,
     /// Selected processing profile id (`builtin:standard` or user `pfl_…`).
     pub(crate) selected_profile_id: String,
     /// Draft name for Save profile as….
@@ -115,6 +118,56 @@ pub struct DeskApp {
     pub(crate) workflow_pst_item_id: String,
     /// Draft buffer for AI API key entry (never persisted in DeskSettings JSON).
     ai_api_key_draft: String,
+}
+
+/// Resolve `conversation_id` for a Review item.
+fn handoff_conversation_id_for_item(
+    matter_root: &Utf8Path,
+    item_id: &str,
+) -> Result<String, String> {
+    use matter_core::Matter;
+    let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
+    let item = matter.get_item(item_id).map_err(|e| e.to_string())?;
+    item.conversation_id.ok_or_else(|| {
+        "Selected item has no conversation_id (not a day-bucket chat item).".to_string()
+    })
+}
+
+/// Build hit ids for Conversations handoff from Review in-memory state.
+///
+/// Always includes `handoff_item_id`. When Review has an active filter / keyword /
+/// semantic list, also includes all currently loaded thin-row ids (and multi-select).
+///
+/// Residual: the full FTS hit set (up to ~50k) is not retained in Review UI state after
+/// list load — only loaded pages + total count. Unpaged loads (≤50k threshold) pass the
+/// full filtered id set via `rows`.
+fn review_hit_ids_for_handoff(
+    review: &review_ui::ReviewState,
+    handoff_item_id: &str,
+) -> Option<std::collections::HashSet<String>> {
+    let mut hits = std::collections::HashSet::new();
+    hits.insert(handoff_item_id.to_string());
+
+    let filter_or_search = review.filter_active
+        || review
+            .applied_keyword
+            .as_ref()
+            .is_some_and(|k| !k.trim().is_empty())
+        || review
+            .applied_semantic
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty());
+
+    if filter_or_search {
+        for row in &review.rows {
+            hits.insert(row.id.clone());
+        }
+        for id in &review.multi_selected {
+            hits.insert(id.clone());
+        }
+    }
+
+    Some(hits)
 }
 
 impl DeskApp {
@@ -174,6 +227,7 @@ impl DeskApp {
             gap: GapState::new(),
             people: PeopleState::new(),
             clusters: ClusterState::new(),
+            conversations: ConversationState::new(),
             selected_profile_id: params::PROFILE_DEFAULT_SELECTION.into(),
             profile_save_as_name: String::new(),
             selected_workflow_id: params::WORKFLOW_DEFAULT_SELECTION.into(),
@@ -281,6 +335,7 @@ impl DeskApp {
         self.cull_preset = "unique_only".into();
         // Clear review corpus state for the previous matter.
         self.review.clear_for_matter_change();
+        self.conversations.clear_for_matter_change();
         self.case_overview = None;
         self.overview_load.clear();
         self.overview_loading = false;
@@ -2454,6 +2509,7 @@ impl DeskApp {
                 Screen::Workspace,
                 Screen::StubReduce,
                 Screen::Review,
+                Screen::Conversations,
                 Screen::Produce,
                 Screen::Gap,
                 Screen::People,
@@ -2473,6 +2529,9 @@ impl DeskApp {
                     let next = nav::resolve_nav(self.screen, target, has_matter);
                     if next == Screen::Review && self.screen != Screen::Review {
                         self.review.request_reload();
+                    }
+                    if next == Screen::Conversations && self.screen != Screen::Conversations {
+                        self.conversations.request_reload();
                     }
                     if next == Screen::Gap {
                         if let Some(ref root) = self.matter_root {
@@ -2592,8 +2651,34 @@ impl eframe::App for DeskApp {
                         }
                         None => {}
                     }
+                    // Search handoff → Conversations (centered day-bucket window).
+                    if let Some(item_id) = self.review.pending_conversation_handoff.take() {
+                        match handoff_conversation_id_for_item(&root, &item_id) {
+                            Ok(cid) => {
+                                let hits = review_hit_ids_for_handoff(&self.review, &item_id);
+                                self.conversations.set_active_hits(hits);
+                                self.conversations.handoff_to_item(cid, item_id);
+                                self.screen = Screen::Conversations;
+                                self.status_msg = Some(
+                                    "Opened conversation centered on hit (day-bucket stream)."
+                                        .into(),
+                                );
+                            }
+                            Err(e) => {
+                                self.error_msg = Some(e);
+                            }
+                        }
+                    }
                 } else {
                     ui.label("Open a matter to review.");
+                }
+            }
+            Screen::Conversations => {
+                if let Some(root) = self.matter_root.clone() {
+                    let actor = self.settings.actor().to_string();
+                    conversation_ui::show(ui, &mut self.conversations, Some(&root), &actor);
+                } else {
+                    ui.label("Open a matter to review conversations.");
                 }
             }
             Screen::Gap => {

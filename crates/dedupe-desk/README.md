@@ -200,6 +200,28 @@ Flag-only membership (`in_review` / `review_order`); never deletes items or CAS.
 Bidirectional family expand is on by default. Reuses progress / cancel / resume.
 See `crates/matter-promote/README.md`.
 
+### Conversations screen (0056)
+
+Nav **Conversations** (next to Review) is a **conversation-centric** chat review surface. Linear **Review** remains for non-chat / item-list workflows.
+
+| Region | Behavior |
+|---|---|
+| Left list | Day-bucket conversations (`conversation_id`): team / channel / type / **bucket date** / message_count / hit_count |
+| Center stream | **Full day-bucket** messages (`ORDER BY sent_at, id`); **not** hits-only; fixed-height virtualized rows; **[Hit]** badge when hit set active |
+| Reply chrome | `In reply to: [snippet]` when `parent_item_id` present; missing parent → `[unavailable]` |
+| Coding | **Code selected message** (default) + explicit **Code entire day bucket…** (confirm with message count → `list_conversation_item_ids` + `apply_codes`) |
+| Handoff | Review **Open in Conversations** → centered page around the selected item (±50 messages) |
+
+**Honesty labels (UI + this README):**
+
+- Conversations are **UTC day-bounded** — multi-day channels appear as multiple list rows.
+- Stream shows **full day context**; filters **badge hits**, they do not hide neighbors.
+- Search / hit handoff opens a **centered** window (never “first page and hope”).
+- **Code entire day bucket** is explicit + confirmed (never auto-bulk on single code click).
+- Plain text bodies only (0055 XSS-safe extract) — not Teams HTML fidelity.
+
+Caps: list page 50 (max 200); stream page 100 (max 500); reply snippet 100 chars.
+
 ### Review screen (0026) + coding (0027) + filters (0028) + notes (0030) + privilege (0031) + redaction (0032)
 
 Nav **Review** (or Workspace **Open Review**) shows the default Review Corpus:

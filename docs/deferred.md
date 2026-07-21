@@ -561,13 +561,30 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0055-02 | — | Physical SharePoint attachment hydrate | P0 injects `[Attachment:]` / URL lines only | residual |
 | D-0055-03 | — | Full RSMF file export format | Day-bucket conversation_id is P0; full RSMF residual | residual |
 | D-0055-04 | — | Hour-level or custom bucket grain | Fixed 24h UTC day P0 | residual |
-| D-0055-05 | — | Edit/delete version timeline UI | Not in P0 | residual / **0056** |
-| D-0055-06 | — | Conversation review chrome | Day-bounded `conversation_id` contract for **0056** | **0056** |
+| D-0055-05 | — | Edit/delete version timeline UI | Not in P0 | residual / **D-0056-06** |
+| D-0055-06 | — | Conversation review chrome | **Closed in 0056** (Conversations screen + day-bucket stream) | — |
 | D-0055-07 | — | Meeting recording auto-STT chain | Use 0053 STT on media residual | residual / 0053 |
 | D-0055-08 | — | Private channel mailbox discovery | Collection residual; adapter sees package only | residual |
 | D-0055-09 | — | `teams_extract` in processing profiles | Explicit Desk/CLI job P0; profile stage residual | residual / profile polish |
 | D-0055-10 | P3 | Real Purview HTML variance beyond fixture parser | Versioned `html_fixture_v1` only | residual polish |
 | D-0055-11 | P3 | Full GUI smoke for Run Teams extract + Chat chip | Automated job + unit tests; operator smoke local | operator / polish |
+
+## From track 0056-ConversationReviewUi (Completed — Codex luna PASS WITH DEFERRED P3)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0056-01 | P3 | Notes / privilege panels on Conversations tools pane | Coding + body only P0; Linear Review remains for notes/privilege | residual polish |
+| D-0056-02 | P3 | Full FTS/filter hit set beyond loaded Review pages on handoff | Handoff always includes target + loaded thin rows; unpaged ≤50k passes full set via rows | residual scale |
+| D-0056-03 | — | Email `thread_id` conversation mode | Chat/`conversation_id` only P0 | residual / D-0022 |
+| D-0056-04 | — | Multi-conversation bulk code | Single day-bucket bulk is P0 | residual |
+| D-0056-05 | — | Nested reply trees (vs inline chrome) | Inline “In reply to” P0 | residual |
+| D-0056-06 | — | Edit/delete version timeline UI | From D-0055-05 | residual |
+| D-0056-07 | — | Infinite scroll auto-load | Keyset Load earlier / Load more P0 | residual polish |
+| D-0056-08 | — | Conversation transcript export HTML | Residual | residual |
+| D-0056-09 | P3 | Full GUI smoke Conversations list/stream/handoff/bulk | Automated API + unit; operator smoke local | operator / polish |
+| D-0025-02 | — | Expand full email threads into review set | Still residual (0056 did not ship email thread mode) | residual |
+| D-0022-01 | — | Full JWZ dual objects as review items | Still residual | residual |
+| D-0027-03 | — | Auto-propagate codes to full thread | Never default; day-bucket bulk is explicit opt-in only | residual |
 
 ## Hygiene
 

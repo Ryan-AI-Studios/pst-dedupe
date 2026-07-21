@@ -43,6 +43,7 @@
 //! - **Transcript / STT bookkeeping** (`transcript_*` columns, schema v32) (0053)
 //! - **Language packs** (`lang_pack_*` / `fts_lang_*` + optional `items.language_tag`, schema v33) (0054)
 //! - **Teams / chat metadata** (`conversation_id`, `chat_type`, `team_name`, `channel_name`, … + `teams_extract_*`, schema v34) (0055)
+//! - **Conversation review queries** (list by day bucket, full stream, centered handoff, reply snippets) (0056)
 //!
 //! ## Layout
 //!
@@ -75,6 +76,7 @@ pub mod calendar;
 pub mod cas;
 pub mod category;
 pub mod cluster;
+pub mod conversation;
 pub mod entity;
 pub mod error;
 pub mod filter;
@@ -129,6 +131,13 @@ pub use cluster::{
     ConceptCluster, ConceptClusterCandidate, ConceptClusterSet, ConceptClusterStatus,
     ConceptClusterWrite, ConceptMembershipWrite, ReplaceConceptClusterSetInput,
     DEFAULT_CONCEPT_SET_NAME,
+};
+pub use conversation::{
+    clamp_conversation_list_limit, clamp_conversation_stream_limit, format_reply_snippet,
+    truncate_snippet, ConversationMessageRow, ConversationSummary, CONVERSATION_AROUND_AFTER,
+    CONVERSATION_AROUND_BEFORE, CONVERSATION_LIST_DEFAULT_LIMIT, CONVERSATION_LIST_MAX_LIMIT,
+    CONVERSATION_STREAM_DEFAULT_LIMIT, CONVERSATION_STREAM_MAX_LIMIT, REPLY_SNIPPET_MAX_CHARS,
+    REPLY_SNIPPET_UNAVAILABLE,
 };
 pub use entity::{
     entity_flags, flag_bit_for_entity_type, CreateEntityHitInput, EntityScanCandidate,
