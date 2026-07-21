@@ -12,25 +12,39 @@ Target scale: 1M+ emails across multi-gigabyte PSTs.
 - PST reading implemented from [MS-PST] specification v20240820
 - Statically-linked Windows `.exe` deployment (CLI and/or GUI)
 - Must handle PST files >10GB and aggregate >1M messages
-- Commercial/government use — all dependencies must be permissively licensed
+- Product code is **proprietary commercial** (see root `LICENSE`); all **dependencies** must stay permissively licensed
 
 ---
 
-## Dual product mode (track 0058)
+## Product modes (tracks 0058 / 0059)
 
-| Mode | How | Network | Concurrency |
+| Mode | How | Auth | Tenancy |
 |---|---|---|---|
-| **Desk (default)** | Single-exe local `Matter::open` | None | One operator; free-string actor OK |
-| **Matter service (opt-in)** | `pst-dedup service serve --matter …` | Loopback HTTP (LAN only with `--allow-lan`) | Many clients; one writer process |
+| **Desk solo (default)** | Local `Matter::open` | Free-string actor | None (`tenant_id` null) |
+| **Local multi-user (0058)** | `pst-dedup service serve --matter …` | Matter password users + bearer | None / single matter |
+| **Platform / SSO (0059, opt-in)** | `serve --platform platform.db --matter …` | OIDC Auth Code + PKCE (+ optional local) | `platform.db` control plane + matter `tenant_id` |
 
-Architecture locks: exclusive OS `.matter.lock` on write-open; OCC `review_version` on mutates; item locks + batch checkout; strict actor mode in core when service hosts; matter path must be **local disk** of the host. Schema **v36** is additive — solo Desk keeps working with multi-user flag off. See `crates/matter-service/README.md`.
+Architecture locks:
+
+- Exclusive OS `.matter.lock` on write-open; OCC `review_version`; item locks + batch checkout; strict actor in service host
+- Matter path must be **local disk** of the host
+- Schema **v37** additive — solo Desk and local password multi-user stay default; platform SSO is opt-in
+- Isolation = **platform registry + matter boundary** (not a shared multi-tenant `items` table)
+- IdP secrets: env-ref **or** AEAD under Platform Master Key (`PST_DEDUPE_PLATFORM_MASTER_KEY`); never plaintext in DB
+- Registered matter paths must sit under `PLATFORM_STORAGE_ROOT`
+- JIT requires domain and/or group allowlist (open JIT forbidden)
+- Explicit logout invalidates session **and** releases that user’s locks/checkouts
+- `TenantKeyProvider` is a stub only (no cloud CMK in 0059; residual D-0057-03)
+
+See `crates/matter-service/README.md` and `crates/matter-platform/README.md`.
 
 ## Crate Architecture
 
 ```
 pst-dedup/                      (Cargo workspace)
 ├── crates/
-│   ├── matter-service/         Multi-user HTTP host (0058; axum + WriteGate)
+│   ├── matter-service/         Multi-user HTTP host (0058) + optional OIDC (0059)
+│   ├── matter-platform/        Platform control plane / platform.db (0059)
 │   ├── pst-reader/             Pure Rust PST parser (the hard part)
 │   │   src/
 │   │   ├── lib.rs              Public API: PstFile, Message, Folder iterators

@@ -3,7 +3,8 @@ name = "process-runner"
 version = "0.1.0"
 edition = "2021"
 description = "In-process matter job runner: single worker thread, cancel, watch progress"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [features]
 default = ["ingest", "extract_pst", "dedupe", "thread", "neardup", "cull", "promote", "produce", "qc", "gap", "fts", "office", "pdf", "calendar", "teams", "ocr", "stt", "classify", "entity", "people", "cluster", "sentiment", "semantic", "ai"]

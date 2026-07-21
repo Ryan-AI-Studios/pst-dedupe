@@ -3,7 +3,8 @@ name = "matter-core"
 version = "0.1.0"
 edition = "2021"
 description = "Matter store: SQLite metadata, content-addressable blob CAS, audit hash chain, jobs/checkpoints"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 rusqlite = { workspace = true }

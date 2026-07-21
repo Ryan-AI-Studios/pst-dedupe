@@ -1,0 +1,62 @@
+PROPRIETARY COMMERCIAL LICENSE
+Dedupe / Dedupe Desk / pst-dedupe
+Copyright (c) 2024–2026 Ryan / Ryan-AI-Studios. All rights reserved.
+
+IMPORTANT: THIS SOFTWARE IS NOT OPEN SOURCE.
+THERE IS NO GRANT OF RIGHTS UNDER MIT, APACHE, BSD, OR ANY OTHER PERMISSIVE LICENSE.
+
+1. Ownership
+   The Software (source code, binaries, documentation, and related materials in this
+   repository, excluding third-party components that retain their own licenses) is and
+   remains the exclusive property of the copyright holder named above ("Licensor").
+
+2. No license without payment
+   You may not use, copy, modify, merge, publish, distribute, sublicense, sell, host,
+   or otherwise exploit the Software for any purpose unless you have purchased a valid
+   commercial license from the Licensor (or are bound by a written agreement signed by
+   the Licensor that expressly grants those rights).
+
+3. Default prohibition
+   Absent a paid commercial license or other written permission from the Licensor:
+   - You may not run the Software in production or for client/case work.
+   - You may not use the Software commercially or non-commercially at scale.
+   - You may not redistribute source or binaries.
+   - You may not create derivative works for distribution or sale.
+   Viewing this repository does not grant a license to use the Software.
+
+4. Evaluation (narrow exception)
+   Unless the Licensor states otherwise in writing, you may clone and build the Software
+   solely for private technical evaluation for up to thirty (30) days, provided you do
+   not process third-party confidential data for production matters and do not
+   redistribute the Software. Evaluation does not include production use. When evaluation
+   ends, you must delete all copies unless you purchase a commercial license.
+
+5. Third-party components
+   Dependencies and other third-party materials remain under their respective licenses
+   (often MIT, Apache-2.0, or similar). This Proprietary Commercial License applies only
+   to the Licensor’s original code and packaging. Compliance with third-party licenses is
+   your responsibility when you hold a valid commercial license to use this Software.
+
+6. No warranty
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+   INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+   PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR
+   ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM USE OF THE SOFTWARE, WHETHER UNDER
+   CONTRACT, TORT, OR OTHERWISE, TO THE MAXIMUM EXTENT PERMITTED BY LAW.
+
+7. Termination
+   Any use outside this document or your paid commercial agreement automatically
+   terminates any provisional evaluation rights. Upon termination you must cease all use
+   and destroy copies of the Software in your possession, except as required by law.
+
+8. Commercial licensing
+   To purchase rights to use this Software (including production, multi-seat, service
+   hosting, or redistribution terms as negotiated), contact the Licensor
+   (Ryan / Ryan-AI-Studios). Pricing, seat limits, support, and other terms are defined
+   only in a paid commercial license or order form issued by the Licensor.
+
+9. Governing note
+   If you and the Licensor sign a separate commercial license agreement, that agreement
+   controls to the extent it conflicts with this file for the licensed use.
+
+ALL RIGHTS NOT EXPRESSLY GRANTED ARE RESERVED.

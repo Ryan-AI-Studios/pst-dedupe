@@ -3,7 +3,8 @@ name = "matter-cluster"
 version = "0.1.0"
 edition = "2021"
 description = "Offline concept clustering: tfidf_kmeans_v1 + c-TF-IDF/ICF labels (track 0048)"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 matter-core = { path = "../matter-core" }

@@ -3,7 +3,8 @@ name = "pst-dedup-cli"
 version = "0.1.0"
 edition = "2021"
 description = "Command-line surface for PST deduplication and headless matter automation"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [[bin]]
 name = "pst-dedup"
@@ -14,6 +15,7 @@ pst-reader = { path = "../pst-reader" }
 dedup-engine = { path = "../dedup-engine" }
 matter-core = { path = "../matter-core" }
 matter-service = { path = "../matter-service" }
+matter-platform = { path = "../matter-platform" }
 process-runner = { path = "../process-runner" }
 clap = { workspace = true }
 serde = { workspace = true }

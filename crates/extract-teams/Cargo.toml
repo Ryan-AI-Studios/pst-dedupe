@@ -3,7 +3,8 @@ name = "extract-teams"
 version = "0.1.0"
 edition = "2021"
 description = "Offline Teams/chat export adapters + teams_extract job (track 0055)"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 matter-core = { path = "../matter-core" }

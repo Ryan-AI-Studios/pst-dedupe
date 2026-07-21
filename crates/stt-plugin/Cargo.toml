@@ -3,7 +3,8 @@ name = "stt-plugin"
 version = "0.1.0"
 edition = "2021"
 description = "Opt-in local speech-to-text job (whisper.cpp CLI + mock engine) for Dedupe Desk (track 0053)"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 matter-core = { path = "../matter-core" }

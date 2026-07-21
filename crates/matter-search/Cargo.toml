@@ -3,7 +3,8 @@ name = "matter-search"
 version = "0.1.0"
 edition = "2021"
 description = "Per-matter Tantivy full-text keyword search (track 0029)"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 matter-core = { path = "../matter-core" }

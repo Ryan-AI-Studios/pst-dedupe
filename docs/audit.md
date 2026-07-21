@@ -299,7 +299,7 @@ The GUI uses a single background thread (`std::thread::spawn`) and polls complet
 | `eframe` | 0.34 | MIT/Apache-2.0 | GUI framework | Large dep tree |
 | `rfd` | 0.17 | MIT | File dialogs | Safe |
 
-All licenses are permissive (MIT/Apache-2.0/Unlicense). No GPL, LGPL, or copyleft dependencies. **Clean for commercial/government use.**
+Third-party dependency licenses are permissive (MIT/Apache-2.0/Unlicense). No GPL, LGPL, or copyleft dependencies. **The Dedupe product itself is proprietary commercial** (root `LICENSE`); a paid license is required to use it. Dependency stack remains suitable to ship under that commercial license.
 
 ### 7.2 Indirect Dependency Notes
 
