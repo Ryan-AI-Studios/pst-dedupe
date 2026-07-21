@@ -19,6 +19,8 @@ pub enum Screen {
     People,
     /// Concept / theme clusters (track 0048).
     Clusters,
+    /// Conversation-centric chat review (track 0056).
+    Conversations,
 }
 
 impl Screen {
@@ -32,6 +34,7 @@ impl Screen {
             Self::Gap => "Gap",
             Self::People => "People",
             Self::Clusters => "Clusters",
+            Self::Conversations => "Conversations",
         }
     }
 
@@ -139,6 +142,20 @@ mod tests {
         assert_eq!(
             resolve_nav(Screen::Workspace, Screen::People, true),
             Screen::People
+        );
+    }
+
+    #[test]
+    fn conversations_is_live_when_matter_open() {
+        assert!(!Screen::Conversations.is_stub());
+        assert_eq!(Screen::Conversations.label(), "Conversations");
+        assert_eq!(
+            resolve_nav(Screen::Home, Screen::Conversations, false),
+            Screen::Home
+        );
+        assert_eq!(
+            resolve_nav(Screen::Review, Screen::Conversations, true),
+            Screen::Conversations
         );
     }
 

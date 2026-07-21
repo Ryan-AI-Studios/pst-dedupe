@@ -47,6 +47,21 @@ Declarative multi-node recipes: ordered `job` | `profile_run` | `gate` nodes. Bu
 | Parent linkage | Orchestrated children set `jobs.parent_job_id` to the `workflow_run` (or nested `profile_run`) parent |
 | Run job | Kind `workflow_run` with `{ "workflow_id" \| "workflow_name", "run_params"? }` |
 
+### Conversation review queries (0056)
+
+Read-only APIs on `Matter` for day-bucket chat review (**schema v34** reused — no v35 migration; `idx_items_conversation` from 0055).
+
+| API | Behavior |
+|---|---|
+| `list_conversations` | `GROUP BY conversation_id`; optional `hit_item_ids` discovery (conversations with ≥1 hit); `message_count` is **full** bucket; `hit_count` is intersection |
+| `list_conversation_messages` | Full day-bucket stream (`WHERE conversation_id = ?`); **no** FilterSpec WHERE; keyset page; default 100 / max 500 |
+| `list_conversation_messages_around` | Centered handoff window (default 50 before + anchor + 50 after); must include anchor |
+| `conversation_hit_id_set` / `filter_ids_in_conversation` | Badge helpers only — do not define stream content |
+| `list_conversation_item_ids` | All ids in bucket for bulk `apply_codes` |
+| `parent_reply_snippets` | CAS text / subject truncated to 100 chars; missing → `[unavailable]` |
+
+**Honesty:** `conversation_id` is **UTC day-bounded** (0055). Stream always loads neighbors; filters only badge hits. Bulk day-bucket coding is an explicit desk action reusing `apply_codes` (full id audit).
+
 ## Layout
 
 Under a caller-chosen root:

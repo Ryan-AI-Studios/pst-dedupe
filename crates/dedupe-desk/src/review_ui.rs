@@ -681,6 +681,8 @@ pub struct ReviewState {
     protocol_draft_log_format: String,
     protocol_loaded_for: Option<Utf8PathBuf>,
     protocol_status: Option<String>,
+    /// When set, app navigates to Conversations with centered handoff (0056).
+    pub pending_conversation_handoff: Option<String>,
 }
 
 /// Result of an off-thread notes/highlights mutation.
@@ -814,6 +816,7 @@ impl ReviewState {
         self.protocol_draft_log_format = matter_core::privilege_log_format::STANDARD.into();
         self.protocol_loaded_for = None;
         self.protocol_status = None;
+        self.pending_conversation_handoff = None;
     }
 
     /// Request a thin-list reload on next show.
@@ -1329,7 +1332,8 @@ impl ReviewState {
         self.refresh_row_codes(matter_root);
     }
 
-    fn current_item_id(&self) -> Option<&str> {
+    /// Currently selected thin-list item id, if any.
+    pub fn current_item_id(&self) -> Option<&str> {
         self.selection
             .and_then(|i| self.rows.get(i))
             .map(|r| r.id.as_str())
@@ -3089,6 +3093,21 @@ pub fn show(
             }
             ui.checkbox(&mut state.privilege_export_review_only, "Review only")
                 .on_hover_text("When checked, export review corpus only; else entire matter");
+            if ui
+                .add_enabled(
+                    state.current_item_id().is_some(),
+                    egui::Button::new("Open in Conversations"),
+                )
+                .on_hover_text(
+                    "Centered handoff into the day-bucket conversation for this item (0056). \
+                     Linear Review remains for non-chat workflows.",
+                )
+                .clicked()
+            {
+                if let Some(id) = state.current_item_id() {
+                    state.pending_conversation_handoff = Some(id.to_string());
+                }
+            }
             if ui.button("Refresh list").clicked() {
                 // Preserve last_item_id across reload.
                 state.needs_reload = true;

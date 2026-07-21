@@ -8,6 +8,7 @@
 
 mod app;
 mod cluster_ui;
+mod conversation_ui;
 mod dialogs;
 mod gap_ui;
 mod html_strip;
