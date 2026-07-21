@@ -3,8 +3,9 @@
 use std::time::Instant;
 
 use matter_core::{
-    catalog_content_hash, AiSuggestCandidate, AuditEventInput, InsertAiSuggestionInput,
-    InsertAiSuggestionRunInput, Matter, AI_PROVIDER_NONE, AI_SUGGESTION_TYPE_CODE,
+    catalog_content_hash, AiSuggestCandidate, AuditEventInput, InsertAiCitationInput,
+    InsertAiSuggestionInput, InsertAiSuggestionRunInput, Matter, AI_PROVIDER_NONE,
+    AI_SUGGESTION_TYPE_CODE, MAX_CITATIONS_PER_SUGGESTION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -12,10 +13,14 @@ use serde_json::json;
 use crate::error::{AiError, Result};
 use crate::params::AiSuggestCodesParams;
 use crate::parse::extract_code_suggestions;
-use crate::prompt::{build_suggest_codes_v1, PROMPT_TEMPLATE_SUGGEST_CODES_V1};
+use crate::prompt::{build_suggest_codes_v2, PROMPT_TEMPLATE_SUGGEST_CODES_V2};
 use crate::provider::{AiProvider, AiProviderKind, MockAiProvider, OpenAiCompatibleProvider};
 use crate::secrets::resolve_api_key_optional;
-use crate::truncate::{assemble_head_tail, middle_drop};
+use crate::truncate::middle_drop;
+use crate::verify::verify_citation_for_storage;
+
+#[cfg(test)]
+use crate::truncate::assemble_head_tail;
 
 /// Job kind string for process-runner.
 pub const JOB_KIND_AI_SUGGEST_CODES: &str = "ai_suggest_codes";
@@ -276,7 +281,7 @@ fn run_body(
             "provider_kind": provider.kind().as_str(),
             "model": model,
             "is_remote": provider.is_remote(),
-            "prompt_template_id": PROMPT_TEMPLATE_SUGGEST_CODES_V1,
+            "prompt_template_id": PROMPT_TEMPLATE_SUGGEST_CODES_V2,
         })
         .to_string(),
         tool_version: env!("CARGO_PKG_VERSION").into(),
@@ -366,7 +371,7 @@ fn run_inner(
         Err(e) => return fail(summary, e.into()),
     };
     let cat_hash = catalog_content_hash(&catalog);
-    let template = PROMPT_TEMPLATE_SUGGEST_CODES_V1;
+    let template = PROMPT_TEMPLATE_SUGGEST_CODES_V2;
     let is_remote = provider.is_remote();
     let provider_kind = provider.kind().as_str().to_string();
 
@@ -557,13 +562,16 @@ fn process_one(
         return Ok(());
     }
 
-    // Load text — for middle-drop we need full-ish body; use a load cap of max(max_text*2, 200k)
-    // then middle-drop to max_text_bytes so head+tail survive.
-    let load_cap = params.max_text_bytes.saturating_mul(2).max(200_000);
-    let text = load_text_capped(matter, digest, load_cap)?;
+    // Continuous CAS prefix for verify + Desk coordinate space (not head+tail).
+    // Head+tail synthetic strings must never be used for stored offsets — they map
+    // incorrectly relative to the original CAS / Desk full body.
+    // Prompt path: middle_drop on the continuous text so head+tail of the *loaded*
+    // window survive in the model input when over max_text_bytes.
+    let text = load_text_continuous(matter, digest, MAX_VERIFY_TEXT_BYTES)?;
     let prepared = middle_drop(&text, params.max_text_bytes as usize);
+    let prepared_was_truncated = prepared != text;
 
-    let req = build_suggest_codes_v1(
+    let req = build_suggest_codes_v2(
         model,
         catalog,
         &prepared,
@@ -593,7 +601,7 @@ fn process_one(
                     })
                     .map(|d| d.id.as_str())
             });
-        matter.insert_ai_suggestion(InsertAiSuggestionInput {
+        let sid = matter.insert_ai_suggestion(InsertAiSuggestionInput {
             item_id: &cand.id,
             suggestion_type: AI_SUGGESTION_TYPE_CODE,
             code_id,
@@ -608,6 +616,68 @@ fn process_one(
             catalog_content_hash: Some(catalog_hash),
             job_id: Some(job_id),
         })?;
+
+        // Verify + persist citations against **full loaded text** (Desk coordinate space).
+        // Cap count only; quotes stored in full. When middle-drop truncated the prompt,
+        // model offsets are ignored and quote re-find runs on full text only.
+        struct VerifiedCite {
+            quote: String,
+            start: Option<i64>,
+            end: Option<i64>,
+            field: String,
+            status: String,
+        }
+        let mut verified: Vec<VerifiedCite> = Vec::new();
+        for c in s.citations.iter().take(MAX_CITATIONS_PER_SUGGESTION) {
+            let v = verify_citation_for_storage(
+                &c.quote,
+                c.start_offset,
+                c.end_offset,
+                &text,
+                prepared_was_truncated,
+            );
+            let field = c
+                .field
+                .as_deref()
+                .map(str::trim)
+                .filter(|f| !f.is_empty())
+                .unwrap_or("text")
+                .to_string();
+            // Prefer verified offsets; only fall back to model offsets when verify
+            // returned none **and** we did not truncate (prepared == full).
+            let (start, end) = if prepared_was_truncated {
+                (v.start_offset, v.end_offset)
+            } else {
+                (
+                    v.start_offset.or(c.start_offset),
+                    v.end_offset.or(c.end_offset),
+                )
+            };
+            verified.push(VerifiedCite {
+                quote: c.quote.clone(), // full quote
+                start,
+                end,
+                field,
+                status: v.status,
+            });
+        }
+        let cite_inputs: Vec<InsertAiCitationInput<'_>> = verified
+            .iter()
+            .enumerate()
+            .map(|(ord, c)| InsertAiCitationInput {
+                suggestion_id: &sid,
+                item_id: &cand.id,
+                ordinal: ord as i64,
+                quote: &c.quote,
+                start_offset: c.start,
+                end_offset: c.end,
+                field: &c.field,
+                verify_status: &c.status,
+            })
+            .collect();
+        if !cite_inputs.is_empty() {
+            matter.insert_ai_suggestion_citations(&cite_inputs)?;
+        }
         wrote += 1;
     }
 
@@ -624,12 +694,33 @@ fn process_one(
     Ok(())
 }
 
-/// Load item text for prompting.
+/// Continuous body load for verify + prompt base — matches Desk display space.
 ///
 /// - Blob ≤ `max_bytes`: full UTF-8 (lossy) decode.
-/// - Blob > `max_bytes`: true **head + tail** from CAS (seek from end), assembled
-///   with the middle-drop marker so huge docs still expose distinctive endings
-///   (§3.5.3). UTF-8 boundaries are respected on both ends.
+/// - Blob > `max_bytes`: **first** `max_bytes` only (UTF-8-safe prefix). Never
+///   head+marker+tail — synthetic coordinates must not be stored as offsets.
+///
+/// Aligns with Desk `BODY_DISPLAY_CAP_BYTES` / matter-core `AI_VERIFY_TEXT_MAX_BYTES`.
+const MAX_VERIFY_TEXT_BYTES: u64 = matter_core::AI_VERIFY_TEXT_MAX_BYTES;
+
+fn load_text_continuous(matter: &Matter, digest: &str, max_bytes: u64) -> Result<String> {
+    let len = matter.cas_len(digest)?;
+    if len == 0 {
+        return Ok(String::new());
+    }
+    if len <= max_bytes {
+        let bytes = matter.get_bytes(digest)?;
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    // Continuous prefix only (Desk-compatible offset space).
+    let bytes = matter.read_cas_prefix(digest, max_bytes as usize)?;
+    Ok(utf8_prefix(&bytes))
+}
+
+/// Optional prompt-only head+tail load for extremely large CAS blobs when a
+/// caller wants true document endings in the **prompt** without affecting
+/// verify offsets. Not used by the default suggest path (continuous + middle_drop).
+#[cfg(test)]
 fn load_text_capped(matter: &Matter, digest: &str, max_bytes: u64) -> Result<String> {
     let len = matter.cas_len(digest)?;
     if len <= max_bytes {
@@ -640,6 +731,8 @@ fn load_text_capped(matter: &Matter, digest: &str, max_bytes: u64) -> Result<Str
 }
 
 /// Read first/last `max_bytes/2` from a large CAS blob and join with truncation marker.
+/// **Prompt-only** — never use for citation verify / stored offsets.
+#[cfg(test)]
 fn load_text_head_tail(
     matter: &Matter,
     digest: &str,
@@ -650,7 +743,6 @@ fn load_text_head_tail(
 
     let half = (max_bytes / 2) as usize;
     if half == 0 {
-        // Degenerate cap: return empty (params validate max_text > 0 in practice).
         return Ok(String::new());
     }
 
@@ -687,6 +779,7 @@ fn utf8_prefix(bytes: &[u8]) -> String {
 }
 
 /// Decode a suffix starting at the first valid UTF-8 char boundary.
+#[cfg(test)]
 fn utf8_suffix(bytes: &[u8]) -> String {
     // Multi-byte UTF-8 is at most 4 bytes; scan a small window then the rest.
     let scan = bytes.len().min(4);
@@ -754,11 +847,11 @@ mod load_text_tests {
     }
 
     #[test]
-    fn load_text_head_tail_preserves_unique_tail_token() {
+    fn load_text_continuous_prefix_not_head_tail() {
         let (_tmp, base) = utf8_tempdir();
-        let matter = Matter::create(base.join("m"), "head-tail").expect("create");
+        let matter = Matter::create(base.join("m"), "continuous").expect("create");
 
-        // Cap 4k: body must exceed that. Unique keyword only in true tail.
+        // Cap smaller than body: continuous must be prefix only (no synthetic tail).
         const CAP: u64 = 4_000;
         let head = "HEAD_ONLY_PREFIX ".repeat(200); // ~3.4k
         let mid = "MID_FILL_XXXX ".repeat(20_000); // ~280k
@@ -767,29 +860,101 @@ mod load_text_tests {
         assert!(body.len() as u64 > CAP, "fixture must exceed load cap");
 
         let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
-        let loaded = load_text_capped(&matter, &digest, CAP).expect("load");
+        let loaded = load_text_continuous(&matter, &digest, CAP).expect("load");
         assert!(
             loaded.contains("HEAD_ONLY_PREFIX"),
             "head missing: {}",
             &loaded[..80.min(loaded.len())]
         );
         assert!(
-            loaded.contains("TAIL_UNIQUE_ZZZ9"),
-            "true document tail missing (prefix-only load?): {}",
-            &loaded[loaded.len().saturating_sub(120)..]
+            !loaded.contains("TAIL_UNIQUE_ZZZ9"),
+            "continuous load must not splice true tail into synthetic space"
         );
         assert!(
-            loaded.contains("[TRUNCATED]"),
-            "expected middle-drop marker in oversize load"
+            !loaded.contains("[TRUNCATED]"),
+            "continuous load must not inject middle-drop marker"
         );
-        // Middle filler should largely be gone (marker path, not full body).
         assert!(
-            loaded.len() < body.len() / 10,
-            "oversize load should not materialize full blob (len={})",
+            loaded.len() as u64 <= CAP + 4,
+            "oversize continuous load should cap near max (len={})",
             loaded.len()
         );
+        // Offsets in continuous text match original CAS prefix.
+        assert_eq!(&body[..loaded.len()], loaded.as_str());
+    }
 
-        // End-to-end: suggest job must see tail keyword "hot" after middle_drop.
+    #[test]
+    fn load_text_head_tail_prompt_only_still_works() {
+        // Head+tail helper remains available for prompt experiments; not for verify.
+        let (_tmp, base) = utf8_tempdir();
+        let matter = Matter::create(base.join("m"), "head-tail").expect("create");
+        const CAP: u64 = 4_000;
+        let head = "HEAD_ONLY_PREFIX ".repeat(200);
+        let mid = "MID_FILL_XXXX ".repeat(20_000);
+        let tail = " TAIL_UNIQUE_ZZZ9 hot confidential ending";
+        let body = format!("{head}{mid}{tail}");
+        let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+        let loaded = load_text_capped(&matter, &digest, CAP).expect("load");
+        assert!(loaded.contains("TAIL_UNIQUE_ZZZ9"));
+        assert!(loaded.contains("[TRUNCATED]"));
+    }
+
+    #[test]
+    fn continuous_verify_offsets_match_cas_not_synthetic() {
+        // Regression P1-1: quote near end of continuous region must store offsets
+        // into continuous text — not into a head+marker+tail reconstruction where
+        // a tail quote would land at a wrong (small) index after the marker.
+        let (_tmp, base) = utf8_tempdir();
+        let matter = Matter::create(base.join("m"), "offset-space").expect("create");
+
+        // ~300KB body: distinctive quote near end of first 200KB continuous region
+        // (well inside 2 MiB Desk cap, past a tiny head-only half of head+tail).
+        let prefix = "AAAA_FILL_".repeat(18_000); // ~180k
+        let quote = "UNIQUE_CONTINUOUS_QUOTE_HOT_XYZ";
+        let after = " trailing filler ".repeat(5_000); // push total > 200k
+        let body = format!("{prefix}{quote}{after}");
+        assert!(body.len() > 200_000);
+
+        let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+        let continuous =
+            load_text_continuous(&matter, &digest, MAX_VERIFY_TEXT_BYTES).expect("load");
+        assert!(
+            continuous.contains(quote),
+            "quote must be inside continuous verify window"
+        );
+        let expected = continuous.find(quote).expect("pos") as i64;
+
+        // Synthetic head+tail with a small cap would place the true tail (not our
+        // mid-body quote) at a different coordinate system — prove continuous
+        // verify finds the real CAS offset.
+        let r = verify_citation_for_storage(quote, None, None, &continuous, true);
+        assert_eq!(r.status, matter_core::VERIFY_MATCHED);
+        assert_eq!(r.start_offset, Some(expected));
+        assert_eq!(r.end_offset, Some(expected + quote.len() as i64));
+        // Same offset in original body (continuous == body for < 2 MiB).
+        assert_eq!(body.find(quote).map(|p| p as i64), Some(expected));
+
+        // Contrast: head+tail synthetic of 4k would NOT contain this mid-body quote
+        // at the same index (quote is past first 2k of a 4k head+tail load).
+        let synthetic = load_text_capped(&matter, &digest, 4_000).expect("synthetic");
+        assert!(
+            !synthetic.contains(quote) || synthetic.find(quote) != continuous.find(quote),
+            "synthetic head+tail must not share continuous mid-body offset space"
+        );
+    }
+
+    #[test]
+    fn e2e_suggest_continuous_body_hot_keyword() {
+        // ~280k body fully fits in 2 MiB continuous window; middle_drop keeps
+        // head+tail of that window for the prompt so mock still sees "hot".
+        let (_tmp, base) = utf8_tempdir();
+        let matter = Matter::create(base.join("m"), "e2e-cont").expect("create");
+        let head = "HEAD_ONLY_PREFIX ".repeat(200);
+        let mid = "MID_FILL_XXXX ".repeat(20_000);
+        let tail = " TAIL_UNIQUE_ZZZ9 hot confidential ending";
+        let body = format!("{head}{mid}{tail}");
+        let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+
         matter
             .update_ai_config(matter_core::UpdateAiMatterConfigInput {
                 enabled: true,
@@ -811,7 +976,6 @@ mod load_text_tests {
             .expect("item");
         let job = matter.create_job(JOB_KIND_AI_SUGGEST_CODES).expect("job");
         let params = AiSuggestCodesParams {
-            // load_cap = max(2*max_text, 200k); body ~280k+ so oversize path hits.
             max_text_bytes: 8_000,
             ..AiSuggestCodesParams::default()
         };
@@ -820,7 +984,7 @@ mod load_text_tests {
             AiSuggestOutcome::Succeeded(r) => {
                 assert!(
                     r.suggestion_rows >= 1 || r.suggested_count >= 1,
-                    "tail keyword 'hot' should reach mock after head+tail load: {r:?}"
+                    "tail keyword 'hot' should reach mock via continuous+middle_drop: {r:?}"
                 );
             }
             other => panic!("expected Succeeded, got {other:?}"),

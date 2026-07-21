@@ -1,15 +1,15 @@
-//! Integration tests for AI suggest job (track 0051) — Mock only, no network.
+//! Integration tests for AI suggest job (tracks 0051/0052) — Mock only, no network.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use matter_ai::{
     run_ai_suggest_codes, run_ai_suggest_codes_with_provider, AiProvider, AiProviderKind,
     AiSuggestCodesParams, AiSuggestOutcome, CompletionRequest, CompletionResponse, MockAiProvider,
-    JOB_KIND_AI_SUGGEST_CODES,
+    JOB_KIND_AI_SUGGEST_CODES, PROMPT_TEMPLATE_SUGGEST_CODES_V2,
 };
 use matter_core::{
     item_role, item_status, CodeDefInput, Matter, UpdateAiMatterConfigInput, AI_PROVIDER_MOCK,
-    AI_SUGGESTION_PENDING,
+    AI_SUGGESTION_PENDING, VERIFY_MATCHED,
 };
 use tempfile::TempDir;
 
@@ -355,6 +355,78 @@ fn withheld_item_skipped_no_provider_complete() {
         !pending_normal.is_empty(),
         "normal item should have suggestions"
     );
+}
+
+#[test]
+fn mock_job_writes_citations_and_accept_audit_pointers() {
+    let (_tmp, base) = utf8_tempdir();
+    let matter = Matter::create(base.join("m"), "AI cites").expect("create");
+    enable_mock_ai(&matter);
+    let item = put_text_item(
+        &matter,
+        "Key email",
+        "This is a hot document for the review team.",
+    );
+
+    let outcome = run_job(&matter, &AiSuggestCodesParams::default());
+    match outcome {
+        AiSuggestOutcome::Succeeded(r) => {
+            assert!(r.suggestion_rows >= 1, "expected suggestions: {r:?}");
+            assert_eq!(r.prompt_template_id, PROMPT_TEMPLATE_SUGGEST_CODES_V2);
+        }
+        other => panic!("expected Succeeded, got {other:?}"),
+    }
+
+    let pending = matter
+        .list_pending_ai_suggestions_for_item(&item.id)
+        .expect("pending");
+    assert!(!pending.is_empty());
+    let hot = pending
+        .iter()
+        .find(|s| s.code_name == "hot")
+        .expect("hot suggestion");
+    assert!(
+        hot.citations_count >= 1,
+        "mock should attach citation: count={}",
+        hot.citations_count
+    );
+    let cites = matter.list_ai_suggestion_citations(&hot.id).expect("cites");
+    assert!(!cites.is_empty());
+    assert!(
+        cites.iter().any(|c| c.verify_status == VERIFY_MATCHED),
+        "expected at least one matched citation: {cites:?}"
+    );
+    // Quote stored (for in-app promote) and non-empty.
+    assert!(!cites[0].quote.is_empty());
+
+    // Accept → audit has pointers only (no quote keys / cleartext field).
+    matter
+        .accept_ai_suggestion(&hot.id, "reviewer")
+        .expect("accept");
+    let params_json: String = matter
+        .connection()
+        .query_row(
+            "SELECT params_json FROM audit_events \
+             WHERE action = 'ai_suggestion.accept' ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("audit");
+    // No "quote" key at all (code_name may equal a short keyword quote — that is fine).
+    assert!(
+        !params_json.contains("\"quote\""),
+        "audit must not have quote keys: {params_json}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&params_json).expect("json");
+    assert_eq!(v["prompt_template_id"], PROMPT_TEMPLATE_SUGGEST_CODES_V2);
+    let arr = v["citations"].as_array().expect("citations arr");
+    assert!(!arr.is_empty());
+    for c in arr {
+        assert!(c.get("quote").is_none());
+        assert!(c.get("citation_id").is_some());
+        assert!(c.get("start_offset").is_some());
+        assert!(c.get("verify_status").is_some());
+    }
 }
 
 /// Cancel mid-batch → Paused + checkpoint; re-run same job_id → Succeeded (resume).
