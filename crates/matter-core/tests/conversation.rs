@@ -1,6 +1,6 @@
 //! Conversation-centric review API tests (track 0056).
 //!
-//! Schema stays **v34** — uses `conversation_id` + `idx_items_conversation`.
+//! Schema stays **v35** (conversation columns from v34) — uses `conversation_id` + `idx_items_conversation`.
 
 use std::collections::HashSet;
 
@@ -71,11 +71,11 @@ fn insert_chat(matter: &Matter, seed: ChatSeed<'_>) -> ConversationMessageRow {
 }
 
 #[test]
-fn schema_stays_v34() {
+fn schema_stays_v35() {
     let (_tmp, base) = utf8_tempdir();
     let matter = Matter::create(base.join("m"), "Conv Schema").expect("create");
-    assert_eq!(SCHEMA_VERSION, 34);
-    assert_eq!(matter.schema_version().expect("ver"), 34);
+    assert_eq!(SCHEMA_VERSION, 35);
+    assert_eq!(matter.schema_version().expect("ver"), 35);
 }
 
 #[test]

@@ -1129,6 +1129,74 @@ fn resume_after_pack_change_forces_rebuild() {
 }
 
 #[test]
+fn encrypted_fts_index_has_no_plaintext_token() {
+    // Unique token must not appear as UTF-8 in any on-disk index/ file after fts_index.
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-enc-noplain");
+    let pass = "fts-enc-pass-0057";
+    let token = "UNIQUEFTSTOKEN_0057_xyz";
+    let matter = Matter::create_encrypted(&root, "EncFts", pass).expect("create enc");
+    assert!(matter.encryption_enabled());
+    let _id = insert_text_item(
+        &matter,
+        "secret.txt",
+        "SecretSubject",
+        format!("{token} appears in body").as_bytes(),
+    );
+    let outcome = run_index(&matter, true);
+    assert!(
+        matches!(outcome, FtsOutcome::Succeeded(_)),
+        "fts_index must succeed on encrypted matter: {outcome:?}"
+    );
+
+    let index_dir = root.join("index");
+    assert!(index_dir.as_std_path().exists(), "index/ must exist");
+    let token_bytes = token.as_bytes();
+    let mut saw_file = false;
+    let mut stack = vec![index_dir.as_std_path().to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir).expect("read index dir");
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            saw_file = true;
+            let data = std::fs::read(&path).expect("read index file");
+            assert!(
+                !data.windows(token_bytes.len()).any(|w| w == token_bytes),
+                "plaintext token leaked in {}",
+                path.display()
+            );
+            // Encrypted segments use MAGIC_CAS (or at least must not look like plain tantivy meta).
+            if data.len() >= 8 {
+                let looks_cas = data.starts_with(matter_core::MAGIC_CAS);
+                let looks_sqlite = data.starts_with(b"SQLite format 3");
+                assert!(
+                    looks_cas || !looks_sqlite,
+                    "index file should be encrypted blob or non-SQLite: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    assert!(saw_file, "expected at least one file under index/");
+
+    // Search still works while unlocked.
+    let hits = search_keyword_for_matter(
+        &matter,
+        &KeywordQuery {
+            query: token.into(),
+            limit: 10,
+            offset: 0,
+        },
+    )
+    .expect("encrypted search");
+    assert_eq!(hits.item_ids.len(), 1);
+}
+
+#[test]
 fn lang_pack_version_mismatch_is_stale() {
     // P2-2: matching fingerprint string is not enough when version column diverges.
     let (_tmp, base) = utf8_tempdir();

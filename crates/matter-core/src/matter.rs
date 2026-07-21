@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::Utc;
@@ -11,6 +12,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::{self, AuditEvent, AuditEventInput};
 use crate::cas::Cas;
+use crate::crypto::{
+    self, b64_encode, create_header, is_encrypted_matter, load_header, passphrase_from_env,
+    save_header, unlock_dek, Dek, EncryptedDbSession, CRYPTO_HEADER_VERSION, DEFAULT_CHUNK_BYTES,
+    DEFAULT_CIPHER_ID, ENV_MATTER_PASSPHRASE, MAGIC_DB,
+};
 use crate::error::{Error, Result};
 use crate::filter::{self, FilterSpec};
 use crate::item_errors::{self, ItemError, ItemErrorInput};
@@ -1024,15 +1030,27 @@ pub struct ItemUpdate {
 }
 
 /// An open matter: directory layout + SQLite connection + CAS handle.
+///
+/// Field order matters for `Drop`: Rust drops fields in **declaration order**
+/// (first field first). `conn` is declared **before** `enc_session` so the
+/// SQLite connection closes first, then the optional [`EncryptedDbSession`]
+/// seals the plain session DB back to the at-rest AEAD container.
 pub struct Matter {
     root: Utf8PathBuf,
-    conn: Connection,
     cas: Cas,
     matter_id: String,
+    /// Present when matter encryption is active for this handle.
+    dek: Option<Arc<Dek>>,
+    chunk_bytes: u32,
+    /// SQLite connection — must drop before `enc_session` seals.
+    conn: Connection,
+    /// Seals plain session DB after `conn` closes (field never read).
+    #[allow(dead_code)]
+    enc_session: Option<EncryptedDbSession>,
 }
 
 impl Matter {
-    /// Create a new matter at `root` with the given display `name`.
+    /// Create a new **unencrypted** matter at `root` with the given display `name`.
     ///
     /// Creates:
     /// ```text
@@ -1049,7 +1067,7 @@ impl Matter {
         let root = root.as_ref().to_path_buf();
         if root.as_std_path().exists() {
             let db = root.join(DB_FILE);
-            if db.as_std_path().exists() {
+            if db.as_std_path().exists() || is_encrypted_matter(&root) {
                 return Err(Error::MatterAlreadyExists(root.to_string()));
             }
         }
@@ -1076,9 +1094,12 @@ impl Matter {
 
         let matter = Self {
             root,
-            conn,
             cas,
             matter_id: matter_id.clone(),
+            dek: None,
+            chunk_bytes: DEFAULT_CHUNK_BYTES,
+            conn,
+            enc_session: None,
         };
         matter.cleanup_workspace_temp()?;
         // Seed default coding catalog (idempotent).
@@ -1096,10 +1117,102 @@ impl Matter {
         Ok(matter)
     }
 
+    /// Create a new **encrypted** matter at `root`.
+    ///
+    /// Refuses if `matter.db` or [`CRYPTO_HEADER_FILE`] already exists.
+    /// Passphrase is never logged; only the fact of encryption is audited.
+    pub fn create_encrypted(
+        root: impl AsRef<Utf8Path>,
+        name: &str,
+        passphrase: &str,
+    ) -> Result<Self> {
+        let root = root.as_ref().to_path_buf();
+        if passphrase.trim().is_empty() {
+            return Err(Error::Crypto("passphrase must not be empty".into()));
+        }
+        let db = root.join(DB_FILE);
+        if db.as_std_path().exists() || is_encrypted_matter(&root) {
+            return Err(Error::MatterAlreadyExists(root.to_string()));
+        }
+        fs::create_dir_all(root.as_std_path())?;
+        create_layout_dirs(&root)?;
+
+        // Confidentiality fail-closed: drop crash-orphan plain session if any
+        // (no live process session for this new root).
+        if !crypto::has_active_session(&root) {
+            let _ = crypto::wipe_orphan_enc_db_session(&root);
+        }
+
+        let now = now_rfc3339();
+        let (header, dek) = create_header(passphrase, &now)?;
+        let chunk_bytes = header.cas_chunk_bytes;
+        save_header(&root, &header)?;
+
+        let dek = Arc::new(dek);
+        let enc_session = EncryptedDbSession::create(&root, dek.as_ref(), chunk_bytes)?;
+        let plain_path = enc_session.plain_path().to_path_buf();
+
+        let conn = Connection::open(plain_path.as_std_path())?;
+        schema::configure_connection_encrypted(&conn)?;
+        schema::migrate(&conn)?;
+
+        let matter_id = new_id("mat");
+        let storage_root = root.as_str().to_string();
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root, \
+             encryption_enabled, encryption_cipher, encryption_header_version) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
+            params![
+                matter_id,
+                name,
+                now,
+                SCHEMA_VERSION,
+                storage_root,
+                DEFAULT_CIPHER_ID,
+                CRYPTO_HEADER_VERSION as i64
+            ],
+        )?;
+
+        let cas = Cas::with_crypto(&root, Arc::clone(&dek), chunk_bytes);
+        cas.ensure_layout()?;
+        cas.cleanup_crypto_temps()?;
+
+        let matter = Self {
+            root,
+            cas,
+            matter_id: matter_id.clone(),
+            dek: Some(dek),
+            chunk_bytes,
+            conn,
+            enc_session: Some(enc_session),
+        };
+        // Seed only — do not wipe .enc-db session.
+        matter.seed_default_codes()?;
+
+        let _ = matter.append_audit(AuditEventInput {
+            actor: "system".into(),
+            action: "matter.create_encrypted".into(),
+            entity: format!("matter:{matter_id}"),
+            params_json: serde_json::json!({
+                "name": name,
+                "cipher": DEFAULT_CIPHER_ID,
+                "header_version": CRYPTO_HEADER_VERSION,
+            })
+            .to_string(),
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+        })?;
+
+        Ok(matter)
+    }
+
     /// Open an existing matter at `root`.
     ///
     /// Applies any pending migrations and removes leftover files under
     /// `workspace/temp/` (crash residue from prior extract materializations).
+    ///
+    /// Encrypted matters require [`ENV_MATTER_PASSPHRASE`] (or use
+    /// [`Matter::open_with_passphrase`]).
     ///
     /// **Do not** call this from a concurrent progress/status poller while
     /// another handle is extracting: temp cleanup would race CAS materialization.
@@ -1113,8 +1226,121 @@ impl Matter {
     /// Intended for concurrent read-only use (progress pollers, status queries)
     /// while a primary worker holds an open matter that may materialize PSTs
     /// under `workspace/temp/`. Still opens a separate SQLite connection (WAL).
+    ///
+    /// Encrypted matters require [`ENV_MATTER_PASSPHRASE`].
     pub fn open_for_read(root: impl AsRef<Utf8Path>) -> Result<Self> {
         Self::open_inner(root, false)
+    }
+
+    /// Open an encrypted matter with an explicit passphrase.
+    pub fn open_with_passphrase(
+        root: impl AsRef<Utf8Path>,
+        passphrase: &str,
+        cleanup_temp: bool,
+    ) -> Result<Self> {
+        let root = root.as_ref().to_path_buf();
+        if !root.as_std_path().exists() {
+            return Err(Error::MatterNotFound(root.to_string()));
+        }
+        // Recover seal/header temps **before** encrypted/db existence checks
+        // (Windows replace gap can leave only temps).
+        let _ = crypto::recover_header_temp(&root);
+        let _ = crypto::recover_seal_temp(&root);
+        if !is_encrypted_matter(&root) {
+            return Err(Error::CryptoHeaderMissing(root.to_string()));
+        }
+
+        let db_path = root.join(DB_FILE);
+        if !db_path.as_std_path().exists() {
+            return Err(Error::DatabaseMissing(root.to_string()));
+        }
+
+        // Writer open: purge crash residue. open_for_read must not delete active
+        // CAS staging under .cas-stage while concurrent workers are using it.
+        if cleanup_temp {
+            cleanup_workspace_temp_at(&root)?;
+            if !crypto::has_active_session(&root) {
+                let _ = crypto::wipe_orphan_enc_db_session(&root);
+            }
+            let _ = Cas::new(&root).cleanup_crypto_temps();
+        } else if !crypto::has_active_session(&root) {
+            // Still wipe crash-orphan plain DB on concurrent open when no live session.
+            let _ = crypto::wipe_orphan_enc_db_session(&root);
+        }
+
+        let header = load_header(&root)?;
+        let dek = Arc::new(unlock_dek(passphrase, &header)?);
+        let chunk_bytes = header.cas_chunk_bytes;
+
+        // Fail closed: never open root matter.db as plaintext SQLite when encrypted.
+        if let Ok(mut f) = fs::File::open(db_path.as_std_path()) {
+            use std::io::Read;
+            let mut magic = [0u8; 8];
+            if f.read(&mut magic).unwrap_or(0) >= 8 && magic == *MAGIC_DB {
+                // expected AEAD container
+            } else if magic.starts_with(b"SQLite") {
+                return Err(Error::Crypto(
+                    "encrypted matter header present but matter.db looks like plaintext SQLite"
+                        .into(),
+                ));
+            }
+        }
+
+        let enc_session = EncryptedDbSession::acquire(&root, dek.as_ref(), chunk_bytes)?;
+        let plain_path = enc_session.plain_path().to_path_buf();
+
+        let conn = Connection::open(plain_path.as_std_path())?;
+        schema::configure_connection_encrypted(&conn)?;
+        schema::migrate(&conn)?;
+
+        let matter_id: String = conn
+            .query_row("SELECT id FROM matters LIMIT 1", [], |row| row.get(0))
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Error::MatterRowMissing,
+                other => Error::Sqlite(other),
+            })?;
+
+        // Ensure encryption flags after migrate (v35 columns).
+        let _ = conn.execute(
+            "UPDATE matters SET encryption_enabled = 1, \
+             encryption_cipher = COALESCE(encryption_cipher, ?1), \
+             encryption_header_version = COALESCE(encryption_header_version, ?2) \
+             WHERE id = ?3",
+            params![DEFAULT_CIPHER_ID, CRYPTO_HEADER_VERSION as i64, matter_id],
+        );
+
+        create_layout_dirs(&root)?;
+        let cas = Cas::with_crypto(&root, Arc::clone(&dek), chunk_bytes);
+        cas.ensure_layout()?;
+        cas.cleanup_crypto_temps()?;
+
+        let matter = Self {
+            root,
+            cas,
+            matter_id: matter_id.clone(),
+            dek: Some(dek),
+            chunk_bytes,
+            conn,
+            enc_session: Some(enc_session),
+        };
+        if cleanup_temp {
+            matter.seed_default_codes()?;
+        }
+        // Secret-free open audit (writable path only).
+        if cleanup_temp {
+            let _ = matter.append_audit(AuditEventInput {
+                actor: "system".into(),
+                action: "matter.open_encrypted".into(),
+                entity: format!("matter:{matter_id}"),
+                params_json: serde_json::json!({
+                    "cipher": DEFAULT_CIPHER_ID,
+                    "header_version": CRYPTO_HEADER_VERSION,
+                })
+                .to_string(),
+                tool_version: env!("CARGO_PKG_VERSION").into(),
+            })?;
+        }
+        Ok(matter)
     }
 
     fn open_inner(root: impl AsRef<Utf8Path>, cleanup_temp: bool) -> Result<Self> {
@@ -1122,9 +1348,37 @@ impl Matter {
         if !root.as_std_path().exists() {
             return Err(Error::MatterNotFound(root.to_string()));
         }
+
+        // Encrypted path: never open root matter.db as SQLite.
+        // Header recovery first so encrypted detection works after rekey crash.
+        let _ = crypto::recover_header_temp(&root);
+        if is_encrypted_matter(&root) {
+            let _ = crypto::recover_seal_temp(&root);
+            if cleanup_temp {
+                if !crypto::has_active_session(&root) {
+                    let _ = crypto::wipe_orphan_enc_db_session(&root);
+                }
+                let _ = Cas::new(&root).cleanup_crypto_temps();
+            } else if !crypto::has_active_session(&root) {
+                let _ = crypto::wipe_orphan_enc_db_session(&root);
+            }
+            let passphrase = passphrase_from_env()
+                .ok_or_else(|| Error::PassphraseRequired(ENV_MATTER_PASSPHRASE.to_string()))?;
+            return Self::open_with_passphrase(&root, &passphrase, cleanup_temp);
+        }
+
         let db_path = root.join(DB_FILE);
         if !db_path.as_std_path().exists() {
             return Err(Error::DatabaseMissing(root.to_string()));
+        }
+
+        // Fail closed if someone dropped an AEAD blob without a header.
+        if let Ok(mut f) = fs::File::open(db_path.as_std_path()) {
+            use std::io::Read;
+            let mut magic = [0u8; 8];
+            if f.read(&mut magic).unwrap_or(0) >= 8 && magic == *MAGIC_DB {
+                return Err(Error::CryptoHeaderMissing(root.to_string()));
+            }
         }
 
         let conn = Connection::open(db_path.as_std_path())?;
@@ -1145,9 +1399,12 @@ impl Matter {
 
         let matter = Self {
             root,
-            conn,
             cas,
             matter_id,
+            dek: None,
+            chunk_bytes: DEFAULT_CHUNK_BYTES,
+            conn,
+            enc_session: None,
         };
         if cleanup_temp {
             matter.cleanup_workspace_temp()?;
@@ -1155,6 +1412,85 @@ impl Matter {
             matter.seed_default_codes()?;
         }
         Ok(matter)
+    }
+
+    /// Re-wrap the DEK under a new passphrase (encrypted matters only).
+    ///
+    /// Does not re-encrypt CAS or SQLite contents — only updates
+    /// [`CRYPTO_HEADER_FILE`].
+    pub fn change_passphrase(&self, old_passphrase: &str, new_passphrase: &str) -> Result<()> {
+        if self.dek.is_none() {
+            return Err(Error::Crypto(
+                "change_passphrase requires an encrypted matter".into(),
+            ));
+        }
+        if new_passphrase.trim().is_empty() {
+            return Err(Error::Crypto("new passphrase must not be empty".into()));
+        }
+        let mut header = load_header(&self.root)?;
+        let (wrapped, _dek) = crypto::change_passphrase_wrap(
+            old_passphrase,
+            new_passphrase,
+            &header.salt,
+            &header.kdf_params,
+            &header.wrapped_dek,
+        )?;
+        header.wrapped_dek = wrapped.clone();
+        header.wrapped_dek_b64 = b64_encode(&wrapped);
+        save_header(&self.root, &header)?;
+
+        let _ = self.append_audit(AuditEventInput {
+            actor: "system".into(),
+            action: "matter.change_passphrase".into(),
+            entity: format!("matter:{}", self.matter_id),
+            params_json: serde_json::json!({ "header_version": header.version }).to_string(),
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+        })?;
+        Ok(())
+    }
+
+    /// Explicit fallible seal for encrypted matters (prefer over relying on Drop).
+    ///
+    /// Closes the SQLite connection first, then seals the plain session DB into
+    /// the at-rest AEAD container. Safe no-op for unencrypted matters.
+    pub fn seal_encrypted(mut self) -> Result<()> {
+        if self.enc_session.is_none() {
+            return Ok(());
+        }
+        // Drop conn before session by replacing with a closed state:
+        // take session and seal after closing conn via drop of moved self fields.
+        let root = self.root.clone();
+        let session = self.enc_session.take();
+        // Close SQLite by dropping the connection field.
+        drop(std::mem::replace(
+            &mut self.conn,
+            Connection::open_in_memory().map_err(Error::from)?,
+        ));
+        if let Some(session) = session {
+            session.seal_now()?;
+        }
+        let _ = root;
+        Ok(())
+    }
+
+    /// Whether this handle holds an unlocked DEK (encryption active).
+    pub fn encryption_enabled(&self) -> bool {
+        self.dek.is_some()
+    }
+
+    /// True when `matter.crypto.json` is present under `root` (on-disk encrypted).
+    pub fn is_encrypted_on_disk(root: impl AsRef<Utf8Path>) -> bool {
+        is_encrypted_matter(root.as_ref())
+    }
+
+    /// Borrow the DEK for FTS / other encryptors (if encryption is active).
+    pub fn dek_arc(&self) -> Option<Arc<Dek>> {
+        self.dek.clone()
+    }
+
+    /// CAS / AEAD chunk size for this matter (default 1 MiB).
+    pub fn crypto_chunk_bytes(&self) -> u32 {
+        self.chunk_bytes
     }
 
     /// Path to `workspace/temp/` under this matter root.
@@ -1167,19 +1503,10 @@ impl Matter {
     /// Used on create/open so crash residue (e.g. CAS-materialized PSTs) cannot
     /// accumulate under the matter. Best-effort: I/O errors surface as
     /// [`Error::Io`].
+    ///
+    /// Skips `.enc-db` so an unlocked encrypted session is not wiped.
     pub fn cleanup_workspace_temp(&self) -> Result<()> {
-        let temp = self.workspace_temp_dir();
-        fs::create_dir_all(temp.as_std_path())?;
-        for entry in fs::read_dir(temp.as_std_path())? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() {
-                fs::remove_dir_all(&path)?;
-            } else {
-                fs::remove_file(&path)?;
-            }
-        }
-        Ok(())
+        cleanup_workspace_temp_at(&self.root)
     }
 
     /// Matter root directory.
@@ -4898,6 +5225,25 @@ fn create_layout_dirs(root: &Utf8Path) -> Result<()> {
             .as_std_path(),
     )?;
     // blobs/ created via Cas::ensure_layout
+    Ok(())
+}
+
+/// Wipe contents of `workspace/temp/`, preserving `.enc-db` (unlocked session).
+fn cleanup_workspace_temp_at(root: &Utf8Path) -> Result<()> {
+    let temp = root.join(WORKSPACE_DIR).join(WORKSPACE_TEMP_DIR);
+    fs::create_dir_all(temp.as_std_path())?;
+    for entry in fs::read_dir(temp.as_std_path())? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.file_name().and_then(|n| n.to_str()) == Some(".enc-db") {
+            continue;
+        }
+        if path.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
     Ok(())
 }
 

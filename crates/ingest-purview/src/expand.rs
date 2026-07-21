@@ -501,7 +501,14 @@ fn expand_zip_bytes(
 ) -> Result<()> {
     // nested_zips is incremented once in expand_zip_file when depth > 1.
     // Write to a temp file so ZipArchive can seek.
-    let mut tmp = tempfile::NamedTempFile::new().map_err(Error::Io)?;
+    // Prefer matter workspace/temp (encryption boundary) over OS %TEMP%.
+    let temp_root = session.matter.workspace_temp_dir();
+    std::fs::create_dir_all(temp_root.as_std_path()).map_err(Error::Io)?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix("purview-nested-")
+        .suffix(".zip")
+        .tempfile_in(temp_root.as_std_path())
+        .map_err(Error::Io)?;
     tmp.write_all(data).map_err(Error::Io)?;
     tmp.flush().map_err(Error::Io)?;
     expand_zip_file(session, tmp.path(), archive_stack, depth)

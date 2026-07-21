@@ -22,6 +22,11 @@
 //! Workspace pins `tantivy = "0.26"` with **default features** (mmap, stopwords,
 //! stemmer tokenizers). Document dialect in the crate README.
 //!
+//! ## Encryption (track 0057)
+//!
+//! Encrypted matters use [`encrypted_dir::EncryptedDirectory`] (no mmap; full-file
+//! decrypt into memory). Plain matters keep `create_in_dir` / `open_in_dir` mmap.
+//!
 //! ## Identity
 //!
 //! Never delete items or CAS blobs. Never write full body into Tantivy STORED
@@ -30,6 +35,7 @@
 #![forbid(unsafe_code)]
 
 pub mod compose;
+pub mod encrypted_dir;
 pub mod error;
 pub mod index;
 pub mod pack;

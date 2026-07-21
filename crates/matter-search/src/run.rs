@@ -327,7 +327,13 @@ fn run_fts_inner(
         summary = FtsSummary::default();
     }
 
-    let index = MatterIndex::open_or_create_with_pack(matter.root(), pack)?;
+    let dek = matter.dek_arc();
+    let index = MatterIndex::open_or_create_with_crypto(
+        matter.root(),
+        pack,
+        dek.as_deref(),
+        matter.crypto_chunk_bytes(),
+    )?;
     let fts_schema = index.fts_schema().clone();
     let heap = if params.writer_heap_bytes == 0 {
         DEFAULT_WRITER_HEAP_BYTES

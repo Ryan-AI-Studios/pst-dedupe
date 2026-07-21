@@ -74,6 +74,18 @@ pub enum Error {
     #[error("matter row missing from database")]
     MatterRowMissing,
 
+    #[error("matter is encrypted; passphrase required (env {0})")]
+    PassphraseRequired(String),
+
+    #[error("wrong matter passphrase")]
+    WrongPassphrase,
+
+    #[error("crypto error: {0}")]
+    Crypto(String),
+
+    #[error("crypto header missing under matter root: {0}")]
+    CryptoHeaderMissing(String),
+
     #[error("{0}")]
     Other(String),
 }

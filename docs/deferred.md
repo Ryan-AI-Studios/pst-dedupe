@@ -586,6 +586,24 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0022-01 | — | Full JWZ dual objects as review items | Still residual | residual |
 | D-0027-03 | — | Auto-propagate codes to full thread | Never default; day-bucket bulk is explicit opt-in only | residual |
 
+## From track 0057-SecurityHardener (Completed — see conductor review)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0057-01 | — | Convert existing plaintext matter → encrypted | Full re-encrypt residual; create-encrypted only P0 | residual |
+| D-0057-02 | — | Encrypted zip transfer package for counsel | Plan open item | residual |
+| D-0057-03 | — | FIPS / enterprise CMK | Series I multi-tenant | **0058/0059** residual |
+| D-0057-04 | — | Biometric unlock | Residual | residual |
+| D-0057-05 | — | Secure wipe free space after seal | Unlink-only wipe of `.enc-db` | residual polish |
+| D-0057-06 | — | FTS mmap-class perf on encrypted matters | P0 honesty accepts no-mmap EncryptedDirectory | residual research |
+| D-0057-07 | — | Encrypt `semantic/` vector store under DEK | P0 encrypts DB+CAS+FTS only | residual |
+| D-0057-08 | — | Stream-encrypt CAS put without any plaintext staging file | Staging now under `workspace/temp/.cas-stage` and purged; zero-staging residual | residual polish |
+| D-0057-09 | P3 | Desk seeds `PST_DEDUPE_MATTER_PASSPHRASE` in process env for worker opens | Prefer in-memory DEK share later; clear env on lock residual | residual polish |
+| D-0057-12 | P3 | Drop cannot return seal errors; not all paths call `seal_encrypted()` | CLI change-passphrase seals; Drop retries seal and keeps session live on fail | residual polish |
+| D-0057-10 | P3 | Full GUI smoke encrypt create / unlock / change passphrase | Automated API + unit; operator smoke local | operator / polish |
+| D-0057-11 | — | SQLCipher page encryption path | Pure-Rust AEAD file container is P0 equivalent; SQLCipher needs OpenSSL/perl | residual optional feature |
+| D-0036-12 | — | Encrypted matter-scoped temp for page bitmaps | Matter workspace/temp is boundary when encryption_enabled; deeper page-bitmap residual | residual |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.
