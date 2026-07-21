@@ -508,22 +508,35 @@ impl Matter {
             ));
         }
 
-        let mut before_n = before.unwrap_or(CONVERSATION_AROUND_BEFORE);
-        let mut after_n = after.unwrap_or(CONVERSATION_AROUND_AFTER);
-        // Clamp total window including the anchor itself.
+        // Clamp each side first so oversized inputs never overflow u64 addition.
         let max_sides = CONVERSATION_STREAM_MAX_LIMIT.saturating_sub(1);
-        if before_n + after_n > max_sides {
-            // Prefer keeping both sides proportional; shrink larger side first.
-            let excess = before_n + after_n - max_sides;
-            if before_n >= after_n {
+        let mut before_n = before.unwrap_or(CONVERSATION_AROUND_BEFORE).min(max_sides);
+        let mut after_n = after.unwrap_or(CONVERSATION_AROUND_AFTER).min(max_sides);
+        // Clamp total window including the anchor itself (`before + 1 + after`).
+        let sides = before_n.saturating_add(after_n);
+        if sides > max_sides {
+            // Split remaining budget fairly when both sides are still oversized.
+            // Prefer keeping both sides; shrink the larger side first when possible.
+            let half = max_sides / 2;
+            let other = max_sides - half;
+            if before_n >= half && after_n >= other {
+                before_n = half;
+                after_n = other;
+            } else if before_n > after_n {
+                let excess = sides - max_sides;
                 before_n = before_n.saturating_sub(excess);
+                // Re-check after shrink.
+                let sides2 = before_n.saturating_add(after_n);
+                if sides2 > max_sides {
+                    after_n = max_sides.saturating_sub(before_n);
+                }
             } else {
+                let excess = sides - max_sides;
                 after_n = after_n.saturating_sub(excess);
-            }
-            // If still over (edge), hard-cap.
-            if before_n + after_n > max_sides {
-                before_n = before_n.min(max_sides);
-                after_n = max_sides.saturating_sub(before_n);
+                let sides2 = before_n.saturating_add(after_n);
+                if sides2 > max_sides {
+                    before_n = max_sides.saturating_sub(after_n);
+                }
             }
         }
 

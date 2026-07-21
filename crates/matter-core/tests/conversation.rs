@@ -809,3 +809,43 @@ fn stream_null_sent_at_total_order_and_keysets() {
         vec!["itm_n1", "itm_n2", "itm_a_null_a", "itm_z_null_b"]
     );
 }
+
+#[test]
+fn around_oversized_before_after_clamps_without_overflow() {
+    let (_tmp, base) = utf8_tempdir();
+    let matter = Matter::create(base.join("cap"), "Cap").expect("create");
+    let cid = "conv_cap";
+
+    // Small conversation — clamp must not panic/overflow on huge sides.
+    for i in 0..5 {
+        insert_chat(
+            &matter,
+            ChatSeed {
+                id: &format!("cap_{i}"),
+                conversation_id: cid,
+                sent_at: &format!("2024-06-15T10:0{i}:00Z"),
+                from: "a@ex.com",
+                subject: "s",
+                text: Some("t"),
+            },
+        );
+    }
+
+    let around = matter
+        .list_conversation_messages_around(cid, "cap_2", Some(u64::MAX), Some(u64::MAX), false)
+        .expect("around max sides");
+    assert!(
+        around.len() <= CONVERSATION_STREAM_MAX_LIMIT as usize,
+        "window must honor hard cap, got {}",
+        around.len()
+    );
+    assert!(
+        around.iter().any(|r| r.id == "cap_2"),
+        "anchor present in clamped window"
+    );
+    // Fair split of max_sides leaves enough budget for the full small bucket.
+    assert_eq!(
+        around.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["cap_0", "cap_1", "cap_2", "cap_3", "cap_4"]
+    );
+}
