@@ -1,6 +1,6 @@
 # matter-ai
 
-Opt-in **AI provider trait** + **first-pass code suggestions** for Dedupe Desk (track **0051**).
+Opt-in **AI provider trait** + **first-pass code suggestions** for Dedupe Desk (tracks **0051** / **0052**).
 
 ## Architecture locks
 
@@ -10,6 +10,10 @@ Opt-in **AI provider trait** + **first-pass code suggestions** for Dedupe Desk (
 | Trait + Mock + OpenAI-compatible | One HTTP shape for local (Ollama / LM Studio) and cloud |
 | Remote requires `allow_remote` | No silent cloud fallback |
 | Suggestions ≠ final codes | Job writes `item_ai_suggestions` only; human accept → `item_codes` |
+| Grounded citations (0052) | Contiguous verbatim quotes + UTF-8 byte offset hints + verify status |
+| No splice/ellipsis quotes | Prompt + verify reject non-contiguous splices |
+| No hard quote truncate | Soft ~50-word guidance only; SQLite stores full quote |
+| Accept audit pointers only | suggestion_id + template/model + offsets — **no** quote cleartext |
 | Keys not in SQLite | OS keyring (Desk) + env `PST_DEDUPE_AI_API_KEY` (headless) |
 | Full catalog guidance | Prompt embeds operator definitions — no name-only inventing |
 | Middle-drop truncation | Head + tail kept when text exceeds cap |
@@ -65,17 +69,20 @@ Never store API keys in `matter.db` or audit content. Keyring failures fail clos
 
 - Fail if AI disabled
 - Skip missing text; skip withheld
-- Middle-drop text; full catalog guidance in prompt
-- Robust JSON extract (fence / prose / bare array)
-- Write **only** suggestions (`pending`); never `item_codes` from the job
+- Middle-drop text; full catalog guidance in prompt (`suggest_codes_v2`)
+- Robust JSON extract (fence / prose / bare array) including optional `citations[]`
+- Verify citations (whitespace/case normalize; re-find on mismatch; cap **count** ≤ 5)
+- Write **only** suggestions + citation rows (`pending`); never `item_codes` from the job
 - Fingerprint skip when `reset=false` (text + model + template + catalog hash)
 - Audit: kind / model / is_remote / template / counts — **no** keys or full bodies
 
 ## Human path
 
-- **Accept** → `Matter::accept_ai_suggestion` → `apply_codes` + audit `source=ai_suggestion`
+- **Accept** → `Matter::accept_ai_suggestion` → `apply_codes` + audit with provenance + citation **offset pointers** (no quote cleartext)
 - **Reject** → status `rejected`
-- Rich citations / chat → track **0052**
+- Desk promote panel: citation list + **mandatory** in-doc scroll/highlight on citation click
+- Unverified citations show a badge; Accept still allowed (P0 warn) with `citation_unverified` audit flag
+- Multi-turn chat / cross-doc RAG → residual (D-0052-*)
 
 ## Honesty
 
@@ -83,10 +90,14 @@ Never store API keys in `matter.db` or audit content. Keyring failures fail clos
 - Local models require an operator-installed OpenAI-compatible server
 - Cloud may transmit matter text — privilege and confidentiality risk
 - Suggestions hallucinate — human review mandatory; definitions come from **your catalog**
+- Citations can be wrong or cherry-picked; human must read **in context** (highlight/scroll)
+- Unverified quotes are labeled — not hidden
+- Offsets are hints after re-OCR/re-extract; audit stores offsets not cleartext quotes
 - Middle-drop truncation may omit mid-document body
 - JSON extract is best-effort against chatty models
 - Mock is not a real model
 - Not a substitute for privilege review
+- Not privilege determination
 
 ## License
 

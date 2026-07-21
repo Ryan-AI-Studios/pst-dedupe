@@ -51,19 +51,19 @@ use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense};
 use matter_core::{
     parse_bound_instant, redaction_reason, ApplyCodesInput, ApplyCodesResult, CodeDef,
-    CodeDefInput, FilterCondition, FilterSpec, ItemAiSuggestion, ItemCodeInfo, ItemEntityHit,
-    ItemHighlight, ItemNote, ItemPrivilege, ItemRedaction, Matter, ResolvedHighlight,
-    ResolvedRedaction, ReviewListRow, SavedSearch, SavedSearchInput, UpsertNoteInput,
-    UpsertPrivilegeProtocolInput,
+    CodeDefInput, FilterCondition, FilterSpec, ItemAiSuggestion, ItemAiSuggestionCitation,
+    ItemCodeInfo, ItemEntityHit, ItemHighlight, ItemNote, ItemPrivilege, ItemRedaction, Matter,
+    ResolvedHighlight, ResolvedRedaction, ReviewListRow, SavedSearch, SavedSearchInput,
+    UpsertNoteInput, UpsertPrivilegeProtocolInput, VERIFY_MATCHED,
 };
 
 use crate::review_body::{BodyLoader, BodyPane};
 use crate::review_nav;
 use crate::review_notes::{
-    body_digest_for_item, find_highlight_for_selection, find_resolved,
-    highlight_input_from_selection, highlight_ui_status, note_upsert_from_draft,
-    passage_note_hint_from_quote, resolve_for_paint, selection_from_char_range, stale_count_for_ui,
-    BodySelection,
+    approx_scroll_y_for_char, body_digest_for_item, citation_highlight_target,
+    find_highlight_for_selection, find_resolved, highlight_input_from_selection,
+    highlight_ui_status, note_upsert_from_draft, passage_note_hint_from_quote, resolve_for_paint,
+    reverify_citation_against_body, selection_from_char_range, stale_count_for_ui, BodySelection,
 };
 use crate::review_privilege::{
     assert_privilege_blocking, basis_options, default_privilege_log_path,
@@ -73,11 +73,11 @@ use crate::review_privilege::{
     upsert_protocol_blocking, PrivilegePanelDraft,
 };
 use crate::review_redaction::{
-    body_job_for_ui_with_redactions, find_resolved_redaction, focus_allows_coding_with_redact,
-    redacted_artifact_is_stale, redaction_input_from_selection, redaction_ui_status,
-    refuse_truncated_regenerate, regenerate_status_message, resolve_redactions_for_paint,
-    selection_creates_redaction, stale_redaction_count_for_ui, DEFAULT_REDACTION_REASON,
-    REDACTION_REASON_CHOICES,
+    body_job_for_ui_with_redactions, body_job_for_ui_with_redactions_ex, find_resolved_redaction,
+    focus_allows_coding_with_redact, redacted_artifact_is_stale, redaction_input_from_selection,
+    redaction_ui_status, refuse_truncated_regenerate, regenerate_status_message,
+    resolve_redactions_for_paint, selection_creates_redaction, stale_redaction_count_for_ui,
+    DEFAULT_REDACTION_REASON, REDACTION_REASON_CHOICES,
 };
 
 /// Fixed list row height (sans item spacing) for `ScrollArea::show_rows`.
@@ -541,10 +541,16 @@ pub struct ReviewState {
     coding_rx: Option<Receiver<Result<ApplyCodesResult, String>>>,
     coding_status: Option<String>,
     coding_error: Option<String>,
-    /// Pending AI code suggestions for the current selection (thin 0051 panel).
+    /// Pending AI code suggestions for the current selection (0051/0052 panel).
     ai_suggestions: Vec<ItemAiSuggestion>,
+    /// Citations keyed by suggestion id (loaded with suggestions).
+    ai_citations: HashMap<String, Vec<ItemAiSuggestionCitation>>,
     ai_suggestions_item_id: Option<String>,
     ai_suggestions_error: Option<String>,
+    /// Active AI citation highlight as **char** range for body paint (start, end).
+    ai_active_citation_highlight: Option<(usize, usize)>,
+    /// When set, body ScrollArea should scroll toward this char offset.
+    ai_scroll_to_citation: Option<usize>,
     /// Filter bar draft (edit fields).
     pub filter_draft: FilterDraft,
     /// Applied filter (None = full corpus via empty default FilterSpec path).
@@ -723,8 +729,11 @@ impl ReviewState {
         self.coding_status = None;
         self.coding_error = None;
         self.ai_suggestions.clear();
+        self.ai_citations.clear();
         self.ai_suggestions_item_id = None;
         self.ai_suggestions_error = None;
+        self.ai_active_citation_highlight = None;
+        self.ai_scroll_to_citation = None;
         self.batch_mode_add = true;
         self.propagate_family = false;
         self.filter_draft.clear();
@@ -4195,52 +4204,65 @@ Unscored is not Neutral — Neutral is a scored ~0 compound.",
                 }
             }
         };
-        egui::ScrollArea::vertical()
+        // Mandatory citation scroll (§3.7.1): force ScrollArea vertical offset toward the
+        // citation char line (newline approx). show_selectable_body refines with galley.
+        let scroll_y = match (&body_view, state.ai_scroll_to_citation) {
+            (BodyView::Ready { text, .. }, Some(char_off)) if !text.is_empty() => {
+                let lh = ui.text_style_height(&egui::TextStyle::Monospace);
+                Some(approx_scroll_y_for_char(text, char_off, lh))
+            }
+            _ => None,
+        };
+        let mut body_scroll = egui::ScrollArea::vertical()
             .id_salt("review_body_scroll")
             .max_height(body_height * 0.62)
-            .auto_shrink([false, false])
-            .show(ui, |ui| match body_view {
-                BodyView::Idle => {
-                    ui.label("…");
+            .auto_shrink([false, false]);
+        if let Some(y) = scroll_y {
+            body_scroll = body_scroll.vertical_scroll_offset(y);
+        }
+        body_scroll.show(ui, |ui| match body_view {
+            BodyView::Idle => {
+                ui.label("…");
+            }
+            BodyView::Loading => {
+                ui.label("Loading…");
+            }
+            BodyView::Ready { text, truncated } => {
+                if truncated {
+                    ui.colored_label(
+                        Color32::from_rgb(180, 120, 40),
+                        "Body truncated for display (2 MiB cap). Full text remains in CAS.",
+                    );
                 }
-                BodyView::Loading => {
-                    ui.label("Loading…");
-                }
-                BodyView::Ready { text, truncated } => {
-                    if truncated {
-                        ui.colored_label(
-                            Color32::from_rgb(180, 120, 40),
-                            "Body truncated for display (2 MiB cap). Full text remains in CAS.",
-                        );
-                    }
-                    if text.is_empty() {
-                        ui.label(
-                            RichText::new("No extracted text")
-                                .italics()
-                                .color(Color32::GRAY),
-                        );
-                    } else {
-                        show_selectable_body(
-                            ui,
-                            state,
-                            &row,
-                            &text,
-                            resolved_for_ui.as_deref().unwrap_or(&[]),
-                            resolved_red_for_ui.as_deref().unwrap_or(&[]),
-                        );
-                    }
-                }
-                BodyView::Error(e) if e.contains("No extracted text") => {
+                if text.is_empty() {
                     ui.label(
                         RichText::new("No extracted text")
                             .italics()
                             .color(Color32::GRAY),
                     );
+                    let _ = state.ai_scroll_to_citation.take();
+                } else {
+                    show_selectable_body(
+                        ui,
+                        state,
+                        &row,
+                        &text,
+                        resolved_for_ui.as_deref().unwrap_or(&[]),
+                        resolved_red_for_ui.as_deref().unwrap_or(&[]),
+                    );
                 }
-                BodyView::Error(e) => {
-                    ui.colored_label(Color32::from_rgb(200, 60, 60), format!("Body error: {e}"));
-                }
-            });
+            }
+            BodyView::Error(e) if e.contains("No extracted text") => {
+                ui.label(
+                    RichText::new("No extracted text")
+                        .italics()
+                        .color(Color32::GRAY),
+                );
+            }
+            BodyView::Error(e) => {
+                ui.colored_label(Color32::from_rgb(200, 60, 60), format!("Body error: {e}"));
+            }
+        });
 
         // Selection actions
         ui.horizontal(|ui| {
@@ -4356,13 +4378,40 @@ fn show_selectable_body(
     }
 
     let wrap_width = ui.available_width();
-    let job = body_job_for_ui_with_redactions(body, resolved, resolved_redactions, wrap_width);
+    let ai_cite = state.ai_active_citation_highlight;
+    // Prefer thin wrappers when no AI cite so both paint entry points stay live.
+    let job = match ai_cite {
+        Some(range) => body_job_for_ui_with_redactions_ex(
+            body,
+            resolved,
+            resolved_redactions,
+            wrap_width,
+            Some(range),
+        ),
+        None => body_job_for_ui_with_redactions(body, resolved, resolved_redactions, wrap_width),
+    };
 
-    // Paint highlighted / redacted body (read-only layout job).
+    // Layout once so we can (1) paint and (2) scroll to the citation span's galley row.
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+
+    // Paint highlighted / redacted / AI-citation body (read-only layout job).
     // Dual widget residual (egui 0.34): Label paints ranges; TextEdit below captures
     // selection. TextEdit uses the same layouter so redacted ranges stay blacked-out
     // in both views (glyph color == bar color).
-    ui.add(egui::Label::new(job).wrap().selectable(true));
+    let label_resp = ui.add(egui::Label::new(galley.clone()).selectable(true));
+
+    // Refine scroll to the actual citation span (handles soft wrap better than newline approx).
+    if let Some(char_off) = state.ai_scroll_to_citation.take() {
+        let cursor = egui::text::CCursor::new(char_off.min(body.chars().count()));
+        let local = galley.pos_from_cursor(cursor);
+        let target = egui::Rect::from_min_max(
+            label_resp.rect.min + local.min.to_vec2(),
+            label_resp.rect.min + local.max.to_vec2(),
+        );
+        // Expand slightly so Align::TOP lands the line near viewport top.
+        let target = target.expand2(egui::vec2(0.0, 2.0));
+        ui.scroll_to_rect(target, Some(egui::Align::TOP));
+    }
 
     // Selection capture via a second pass TextEdit (same text) — frame-less, used for cursor range.
     // Keep buffer in sync; reject mutations so CAS display is never rewritten here.
@@ -4373,12 +4422,21 @@ fn show_selectable_body(
         "Select text here to create a highlight…"
     };
     let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
-        let mut job = body_job_for_ui_with_redactions(
-            text.as_str(),
-            resolved,
-            resolved_redactions,
-            wrap_width,
-        );
+        let mut job = match ai_cite {
+            Some(range) => body_job_for_ui_with_redactions_ex(
+                text.as_str(),
+                resolved,
+                resolved_redactions,
+                wrap_width,
+                Some(range),
+            ),
+            None => body_job_for_ui_with_redactions(
+                text.as_str(),
+                resolved,
+                resolved_redactions,
+                wrap_width,
+            ),
+        };
         job.wrap.max_width = wrap_width;
         ui.fonts_mut(|f| f.layout_job(job))
     };
@@ -4988,10 +5046,25 @@ fn show_ai_suggestions_panel(
     if state.ai_suggestions_item_id.as_deref() != Some(current_item_id) {
         state.ai_suggestions_item_id = Some(current_item_id.to_string());
         state.ai_suggestions.clear();
+        state.ai_citations.clear();
         state.ai_suggestions_error = None;
+        state.ai_active_citation_highlight = None;
+        state.ai_scroll_to_citation = None;
         match Matter::open(matter_root) {
             Ok(m) => match m.list_pending_ai_suggestions_for_item(current_item_id) {
-                Ok(list) => state.ai_suggestions = list,
+                Ok(list) => {
+                    for s in &list {
+                        match m.list_ai_suggestion_citations(&s.id) {
+                            Ok(cites) => {
+                                state.ai_citations.insert(s.id.clone(), cites);
+                            }
+                            Err(e) => {
+                                state.ai_suggestions_error = Some(format!("citations load: {e}"));
+                            }
+                        }
+                    }
+                    state.ai_suggestions = list;
+                }
                 Err(e) => state.ai_suggestions_error = Some(e.to_string()),
             },
             Err(e) => state.ai_suggestions_error = Some(e.to_string()),
@@ -5002,11 +5075,74 @@ fn show_ai_suggestions_panel(
         return;
     }
 
+    // Body text for citation click → highlight/scroll (Ready pane only).
+    let body_text: Option<String> = match state.body.pane() {
+        BodyPane::Ready {
+            text: Ok(t),
+            item_id,
+            ..
+        } if item_id == current_item_id => Some(t.clone()),
+        _ => None,
+    };
+
+    // Current item body digest (for stale text_sha256 detection vs suggestion).
+    let current_body_digest: Option<String> = state
+        .rows
+        .iter()
+        .find(|r| r.id == current_item_id)
+        .and_then(|r| r.text_sha256.clone());
+
+    // When body is Ready, re-verify each citation in memory against current text
+    // so badges / highlights stay honest after re-extract / OCR (P1-2).
+    #[derive(Clone)]
+    struct DisplayCite {
+        stored: ItemAiSuggestionCitation,
+        status: String,
+        start: Option<i64>,
+        end: Option<i64>,
+    }
+    let mut display_cites: HashMap<String, Vec<DisplayCite>> = HashMap::new();
+    {
+        let suggestions_snap: Vec<ItemAiSuggestion> = state.ai_suggestions.clone();
+        for s in &suggestions_snap {
+            let stale = match (&s.text_sha256, &current_body_digest) {
+                (Some(a), Some(b)) => a != b,
+                (Some(_), None) => true,
+                (None, Some(_)) => true,
+                (None, None) => false,
+            };
+            let stored = state.ai_citations.get(&s.id).cloned().unwrap_or_default();
+            let mut out = Vec::with_capacity(stored.len());
+            for c in stored {
+                let (status, start, end) = if let Some(ref body) = body_text {
+                    reverify_citation_against_body(
+                        &c.quote,
+                        c.start_offset,
+                        c.end_offset,
+                        body,
+                        stale,
+                    )
+                } else {
+                    // Body not ready — show stored status; do not invent highlights later.
+                    (c.verify_status.clone(), c.start_offset, c.end_offset)
+                };
+                out.push(DisplayCite {
+                    stored: c,
+                    status,
+                    start,
+                    end,
+                });
+            }
+            display_cites.insert(s.id.clone(), out);
+        }
+    }
+
     ui.add_space(6.0);
     ui.label(RichText::new("AI suggestions (pending)").strong().small());
     ui.label(
         RichText::new(
-            "Suggestions only — may be wrong. Accept writes final codes; cloud risk if remote.",
+            "Suggestions only — may be wrong. Accept writes final codes; cloud risk if remote. \
+             Click a citation to scroll/highlight evidence in the body.",
         )
         .color(Color32::from_rgb(180, 120, 40))
         .small(),
@@ -5016,7 +5152,13 @@ fn show_ai_suggestions_panel(
     }
     let mut accept_id: Option<String> = None;
     let mut reject_id: Option<String> = None;
-    for s in &state.ai_suggestions {
+    let mut click_cite: Option<(Option<i64>, Option<i64>, String)> = None;
+
+    // Clone suggestion meta for iteration without holding borrow across mutation.
+    let suggestions: Vec<ItemAiSuggestion> = state.ai_suggestions.clone();
+    for s in &suggestions {
+        let cites = display_cites.get(&s.id).cloned().unwrap_or_default();
+        let any_unverified = cites.iter().any(|c| c.status != VERIFY_MATCHED);
         ui.horizontal(|ui| {
             let conf = s
                 .confidence
@@ -5027,23 +5169,110 @@ fn show_ai_suggestions_panel(
                     .small()
                     .strong(),
             );
+            if any_unverified {
+                ui.label(
+                    RichText::new("unverified")
+                        .small()
+                        .color(Color32::from_rgb(180, 100, 40)),
+                )
+                .on_hover_text(
+                    "One or more citations did not match document text. Accept still allowed.",
+                );
+            }
             if let Some(r) = &s.rationale {
                 ui.label(RichText::new(r).weak().small());
             }
-            if ui.add(egui::Button::new("Accept").small()).clicked() {
+            if ui
+                .add(egui::Button::new("Accept").small())
+                .on_hover_text(if any_unverified {
+                    "Warning: unverified citations — still allowed (audit flags citation_unverified)"
+                } else {
+                    "Promote to final code"
+                })
+                .clicked()
+            {
                 accept_id = Some(s.id.clone());
             }
             if ui.add(egui::Button::new("Reject").small()).clicked() {
                 reject_id = Some(s.id.clone());
             }
         });
+        // Citation list
+        if cites.is_empty() {
+            ui.label(
+                RichText::new("  no evidence")
+                    .small()
+                    .italics()
+                    .color(Color32::GRAY),
+            );
+        } else {
+            for c in &cites {
+                let preview: String = {
+                    let q = c.stored.quote.trim();
+                    let words: Vec<&str> = q.split_whitespace().collect();
+                    if words.len() > 12 {
+                        format!("{}…", words[..12].join(" "))
+                    } else {
+                        q.to_string()
+                    }
+                };
+                let status_badge = if c.status == VERIFY_MATCHED {
+                    ""
+                } else {
+                    " ⚠"
+                };
+                let label = format!("  “{preview}”{status_badge}");
+                let resp = ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new(label)
+                                .small()
+                                .color(Color32::from_rgb(40, 90, 160)),
+                        )
+                        .sense(Sense::click()),
+                    )
+                    .on_hover_text(format!(
+                        "Click to scroll/highlight in body · verify={}",
+                        c.status
+                    ));
+                if resp.clicked() {
+                    click_cite = Some((c.start, c.end, c.status.clone()));
+                }
+            }
+        }
     }
+
+    // Citation click → mandatory scroll + highlight (only when re-verified matched).
+    if let Some((start, end, status)) = click_cite {
+        if let Some(ref body) = body_text {
+            if let Some((cs, ce)) = citation_highlight_target(body, start, end, &status) {
+                state.ai_active_citation_highlight = Some((cs, ce));
+                state.ai_scroll_to_citation = Some(cs);
+            } else {
+                // Not matched / OOB — no invent highlight; keep quote visible in panel.
+                state.ai_active_citation_highlight = None;
+                state.ai_scroll_to_citation = None;
+            }
+        }
+    }
+
     if let Some(id) = accept_id {
+        // P0: warn if unverified but still allow (accept path re-verifies in core).
+        let unverified = display_cites
+            .get(&id)
+            .map(|c| c.iter().any(|x| x.status != VERIFY_MATCHED))
+            .unwrap_or(false);
         match Matter::open(matter_root) {
             Ok(m) => match m.accept_ai_suggestion(&id, actor) {
                 Ok(_) => {
                     state.ai_suggestions_item_id = None; // force reload
-                    state.coding_status = Some("Accepted AI suggestion → code applied.".into());
+                    state.ai_active_citation_highlight = None;
+                    state.ai_scroll_to_citation = None;
+                    let mut msg = "Accepted AI suggestion → code applied.".to_string();
+                    if unverified {
+                        msg.push_str(" (citation_unverified flagged in audit)");
+                    }
+                    state.coding_status = Some(msg);
                     state.reload_coding_catalog(matter_root);
                     // Reload row codes for current item
                     if let Ok(codes) = Matter::open(matter_root)
@@ -5066,6 +5295,8 @@ fn show_ai_suggestions_panel(
             Ok(m) => match m.reject_ai_suggestion(&id, actor) {
                 Ok(_) => {
                     state.ai_suggestions_item_id = None;
+                    state.ai_active_citation_highlight = None;
+                    state.ai_scroll_to_citation = None;
                     state.coding_status = Some("Rejected AI suggestion.".into());
                 }
                 Err(e) => state.ai_suggestions_error = Some(format!("Reject failed: {e}")),

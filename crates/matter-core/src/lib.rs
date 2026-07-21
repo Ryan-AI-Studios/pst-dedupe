@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v30**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v31**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -39,6 +39,7 @@
 //! - **Sentiment / tone** (`sentiment_*` item columns, schema v28) (0049)
 //! - **Semantic search bookkeeping** (`semantic_*` matter/item columns + `semantic_chunks`, schema v29) (0050)
 //! - **AI suggestions** (`ai_*` matter config + `item_ai_suggestions` / `ai_suggestion_runs` + code `guidance`, schema v30) (0051)
+//! - **AI suggestion citations** (`item_ai_suggestion_citations` + `citations_count`, schema v31) (0052)
 //!
 //! ## Layout
 //!
@@ -65,6 +66,7 @@
 //! UI, encryption, multi-tenant.
 
 pub mod ai;
+pub mod ai_verify;
 pub mod audit;
 pub mod calendar;
 pub mod cas;
@@ -96,10 +98,16 @@ pub mod workflow;
 
 pub use ai::{
     catalog_content_hash, suggestion_fingerprint, AiMatterConfig, AiSuggestCandidate,
-    AiSuggestionRun, InsertAiSuggestionInput, InsertAiSuggestionRunInput, ItemAiSuggestion,
-    UpdateAiMatterConfigInput, AI_PROVIDER_MOCK, AI_PROVIDER_NONE, AI_PROVIDER_OPENAI_COMPATIBLE,
-    AI_SUGGESTION_ACCEPTED, AI_SUGGESTION_PENDING, AI_SUGGESTION_REJECTED,
-    AI_SUGGESTION_SUPERSEDED, AI_SUGGESTION_TYPE_CODE,
+    AiSuggestionRun, InsertAiCitationInput, InsertAiSuggestionInput, InsertAiSuggestionRunInput,
+    ItemAiSuggestion, ItemAiSuggestionCitation, UpdateAiMatterConfigInput, AI_PROVIDER_MOCK,
+    AI_PROVIDER_NONE, AI_PROVIDER_OPENAI_COMPATIBLE, AI_SUGGESTION_ACCEPTED, AI_SUGGESTION_PENDING,
+    AI_SUGGESTION_REJECTED, AI_SUGGESTION_SUPERSEDED, AI_SUGGESTION_TYPE_CODE,
+    AI_VERIFY_TEXT_MAX_BYTES, MAX_CITATIONS_PER_SUGGESTION, VERIFY_MATCHED, VERIFY_OFFSET_MISMATCH,
+    VERIFY_QUOTE_NOT_FOUND, VERIFY_UNCHECKED,
+};
+pub use ai_verify::{
+    normalize_for_verify, verify_ai_citation_against_text, verify_citation_for_storage,
+    VerifyCitationResult,
 };
 pub use audit::{
     canonical_audit_preimage, compute_entry_hash, verify_audit_chain, AuditEvent, AuditEventInput,

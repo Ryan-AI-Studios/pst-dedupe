@@ -9,7 +9,10 @@ use matter_core::{
     ResolvedHighlight, ResolvedRedaction,
 };
 
-use crate::review_notes::{body_job_for_ui, BodySelection, HIGHLIGHT_PAINT, HIGHLIGHT_STALE_PAINT};
+use crate::review_notes::{
+    body_job_for_ui, body_job_for_ui_ex, BodySelection, AI_CITATION_PAINT, HIGHLIGHT_PAINT,
+    HIGHLIGHT_STALE_PAINT,
+};
 
 /// Solid black paint for active redaction ranges.
 pub const REDACTION_PAINT: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
@@ -220,6 +223,16 @@ pub fn body_layout_job_with_redactions(
     highlights: &[ResolvedHighlight],
     redactions: &[ResolvedRedaction],
 ) -> LayoutJob {
+    body_layout_job_with_redactions_ex(body, highlights, redactions, None)
+}
+
+/// Like [`body_layout_job_with_redactions`] with optional AI citation paint.
+pub fn body_layout_job_with_redactions_ex(
+    body: &str,
+    highlights: &[ResolvedHighlight],
+    redactions: &[ResolvedRedaction],
+    ai_cite: Option<(usize, usize)>,
+) -> LayoutJob {
     let char_len = body.chars().count();
     let mut job = LayoutJob {
         wrap: TextWrapping {
@@ -235,13 +248,13 @@ pub fn body_layout_job_with_redactions(
         ..Default::default()
     };
 
-    if highlights.is_empty() && redactions.is_empty() {
+    if highlights.is_empty() && redactions.is_empty() && ai_cite.is_none() {
         job.append(body, 0.0, base);
         return job;
     }
 
-    // Per-char coverage: 0=plain, 1=hl active, 2=hl stale, 3=red active, 4=red stale.
-    // Higher wins so redactions paint over highlights.
+    // Per-char coverage: 0=plain, 1=hl active, 2=hl stale, 5=ai cite,
+    // 3=red active, 4=red stale. Higher wins so redactions paint over highlights.
     let mut cover: Vec<u8> = vec![0; char_len];
     for r in highlights {
         if r.end_utf8 <= r.start_utf8 || r.start_utf8 < 0 {
@@ -253,6 +266,16 @@ pub fn body_layout_job_with_redactions(
         for c in cover.iter_mut().take(e).skip(s) {
             if *c < v {
                 *c = v;
+            }
+        }
+    }
+    if let Some((s, e)) = ai_cite {
+        let s = s.min(char_len);
+        let e = e.min(char_len);
+        for c in cover.iter_mut().take(e).skip(s) {
+            // AI cite paints over yellow hl but under redactions.
+            if *c < 5 && *c != 3 && *c != 4 {
+                *c = 5;
             }
         }
     }
@@ -294,6 +317,7 @@ pub fn body_layout_job_with_redactions(
         match kind {
             1 => fmt.background = HIGHLIGHT_PAINT,
             2 => fmt.background = HIGHLIGHT_STALE_PAINT,
+            5 => fmt.background = AI_CITATION_PAINT,
             3 => {
                 fmt.background = REDACTION_PAINT;
                 fmt.color = REDACTION_PAINT;
@@ -317,11 +341,28 @@ pub fn body_job_for_ui_with_redactions(
     redactions: &[ResolvedRedaction],
     wrap_width: f32,
 ) -> LayoutJob {
+    body_job_for_ui_with_redactions_ex(body, highlights, redactions, wrap_width, None)
+}
+
+/// Like [`body_job_for_ui_with_redactions`] with optional AI citation char-range paint.
+pub fn body_job_for_ui_with_redactions_ex(
+    body: &str,
+    highlights: &[ResolvedHighlight],
+    redactions: &[ResolvedRedaction],
+    wrap_width: f32,
+    ai_cite: Option<(usize, usize)>,
+) -> LayoutJob {
     if redactions.is_empty() {
-        // Fast path: reuse highlight-only painter.
-        return body_job_for_ui(body, highlights, wrap_width);
+        // Fast path: reuse highlight-only painter (with optional AI cite).
+        return match ai_cite {
+            None => body_job_for_ui(body, highlights, wrap_width),
+            Some(_) => body_job_for_ui_ex(body, highlights, wrap_width, ai_cite),
+        };
     }
-    let mut job = body_layout_job_with_redactions(body, highlights, redactions);
+    let mut job = match ai_cite {
+        None => body_layout_job_with_redactions(body, highlights, redactions),
+        Some(_) => body_layout_job_with_redactions_ex(body, highlights, redactions, ai_cite),
+    };
     job.wrap.max_width = wrap_width;
     job
 }

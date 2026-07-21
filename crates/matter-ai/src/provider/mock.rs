@@ -63,12 +63,31 @@ impl AiProvider for MockAiProvider {
             let hit = user_lower.contains(&key.to_ascii_lowercase())
                 || user_lower.contains(&name.to_ascii_lowercase());
             if hit {
-                suggestions.push(serde_json::json!({
+                // Citation: matched keyword as quote with approximate byte offsets
+                // into the user body (after the "Item text..." header when present).
+                let needle = if user_lower.contains(&key.to_ascii_lowercase()) {
+                    key.as_str()
+                } else {
+                    name.as_str()
+                };
+                let (start, end, quote) = find_keyword_offsets(&user, needle);
+                let mut obj = serde_json::json!({
                     "code_id": id,
                     "code_name": key,
                     "confidence": 0.85,
-                    "rationale_short": "mock keyword match"
-                }));
+                    "rationale_short": "mock keyword match",
+                });
+                if let (Some(s), Some(e), Some(q)) = (start, end, quote) {
+                    obj["citations"] = serde_json::json!([{
+                        "quote": q,
+                        "start_offset": s,
+                        "end_offset": e,
+                        "field": "text",
+                    }]);
+                } else {
+                    obj["citations"] = serde_json::json!([]);
+                }
+                suggestions.push(obj);
             }
         }
 
@@ -101,6 +120,39 @@ fn extract_field(line: &str, prefix: &str) -> Option<String> {
     } else {
         Some(val.to_string())
     }
+}
+
+/// Find case-insensitive keyword in the item body portion of the user message.
+///
+/// Offsets are relative to the body after the `"\n\n"` following the header so they
+/// align with prepared text used for verify (re-find still repairs on mismatch).
+fn find_keyword_offsets(user: &str, needle: &str) -> (Option<i64>, Option<i64>, Option<String>) {
+    if needle.is_empty() {
+        return (None, None, None);
+    }
+    // Body starts after first blank line following the "Item text..." header.
+    let body = if let Some(idx) = user.find("\n\n") {
+        let rest = &user[idx + 2..];
+        // Drop trailing instruction line if present.
+        if let Some(end) = rest.rfind("\n\n") {
+            &rest[..end]
+        } else {
+            rest
+        }
+    } else {
+        user
+    };
+    let lower = body.to_ascii_lowercase();
+    let n_lower = needle.to_ascii_lowercase();
+    if let Some(pos) = lower.find(&n_lower) {
+        let end = pos + needle.len();
+        if end <= body.len() && body.is_char_boundary(pos) && body.is_char_boundary(end) {
+            let quote = body[pos..end].to_string();
+            return (Some(pos as i64), Some(end as i64), Some(quote));
+        }
+    }
+    // Still return the needle as quote so verify can re-find in prepared text.
+    (None, None, Some(needle.to_string()))
 }
 
 #[cfg(test)]

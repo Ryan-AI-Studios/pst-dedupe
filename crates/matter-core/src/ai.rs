@@ -1,7 +1,12 @@
-//! AI provider config + first-pass code suggestions (schema v30 / track 0051).
+//! AI provider config + first-pass code suggestions (schema v30 / track 0051)
+//! + grounded citations (schema v31 / track 0052).
 //!
 //! Suggestions are **never** final codes — human accept promotes via
 //! [`Matter::apply_codes`]. API keys are **not** stored in SQLite.
+//!
+//! Citation offsets are UTF-8 **byte** indices into the scanned item text
+//! (entity-track style). Quotes are stored in full (no hard truncate).
+//! Accept audit stores **offset pointers only** — never quote cleartext.
 
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -32,6 +37,26 @@ pub const AI_PROVIDER_NONE: &str = "none";
 pub const AI_PROVIDER_MOCK: &str = "mock";
 /// OpenAI-compatible HTTP (`/v1/chat/completions`).
 pub const AI_PROVIDER_OPENAI_COMPATIBLE: &str = "openai_compatible";
+
+/// Citation verify: offsets in range and normalized quote matches (or re-found).
+pub const VERIFY_MATCHED: &str = "matched";
+/// Reserved / currently unused as a **stored** status.
+///
+/// Intended for intermediate "offsets wrong but re-find may recover" signaling.
+/// `matter-ai` verify repairs to [`VERIFY_MATCHED`] or falls through to
+/// [`VERIFY_QUOTE_NOT_FOUND`] and does not emit this value today.
+pub const VERIFY_OFFSET_MISMATCH: &str = "offset_mismatch";
+/// Quote not uniquely found in current text (or spliced/ellipsis invalid).
+pub const VERIFY_QUOTE_NOT_FOUND: &str = "quote_not_found";
+/// Not yet verified against body text.
+pub const VERIFY_UNCHECKED: &str = "unchecked";
+
+/// Soft cap on **count** of citations per suggestion (not quote length).
+pub const MAX_CITATIONS_PER_SUGGESTION: usize = 5;
+
+/// Continuous UTF-8 body cap for citation re-verify at accept / Desk display
+/// coordinate space (matches Desk `BODY_DISPLAY_CAP_BYTES` = 2 MiB).
+pub const AI_VERIFY_TEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -88,6 +113,40 @@ pub struct ItemAiSuggestion {
     pub created_at: String,
     pub resolved_at: Option<String>,
     pub resolved_by: Option<String>,
+    /// Number of citation rows (schema v31+).
+    pub citations_count: i64,
+}
+
+/// One grounded citation for an AI suggestion (schema v31).
+///
+/// Offsets are UTF-8 **byte** indices into the scanned field text. Quotes are
+/// stored in full — never hard-truncated on insert.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemAiSuggestionCitation {
+    pub id: String,
+    pub suggestion_id: String,
+    pub matter_id: String,
+    pub item_id: String,
+    pub ordinal: i64,
+    pub quote: String,
+    pub start_offset: Option<i64>,
+    pub end_offset: Option<i64>,
+    pub field: String,
+    pub verify_status: String,
+    pub created_at: String,
+}
+
+/// Insert one citation row (quote stored in full).
+#[derive(Debug, Clone)]
+pub struct InsertAiCitationInput<'a> {
+    pub suggestion_id: &'a str,
+    pub item_id: &'a str,
+    pub ordinal: i64,
+    pub quote: &'a str,
+    pub start_offset: Option<i64>,
+    pub end_offset: Option<i64>,
+    pub field: &'a str,
+    pub verify_status: &'a str,
 }
 
 /// Insert one pending suggestion.
@@ -421,7 +480,8 @@ impl Matter {
         let mut stmt = self.connection().prepare(
             "SELECT id, matter_id, item_id, suggestion_type, code_id, code_name, confidence, \
                     rationale, provider_kind, model, prompt_template_id, is_remote, text_sha256, \
-                    catalog_content_hash, status, job_id, created_at, resolved_at, resolved_by \
+                    catalog_content_hash, status, job_id, created_at, resolved_at, resolved_by, \
+                    citations_count \
              FROM item_ai_suggestions \
              WHERE matter_id = ?1 AND item_id = ?2 AND status = ?3 \
              ORDER BY created_at DESC, id DESC",
@@ -440,7 +500,8 @@ impl Matter {
         let mut stmt = self.connection().prepare(
             "SELECT id, matter_id, item_id, suggestion_type, code_id, code_name, confidence, \
                     rationale, provider_kind, model, prompt_template_id, is_remote, text_sha256, \
-                    catalog_content_hash, status, job_id, created_at, resolved_at, resolved_by \
+                    catalog_content_hash, status, job_id, created_at, resolved_at, resolved_by, \
+                    citations_count \
              FROM item_ai_suggestions \
              WHERE matter_id = ?1 AND status = ?2 \
              ORDER BY created_at DESC, id DESC \
@@ -460,7 +521,8 @@ impl Matter {
             .query_row(
                 "SELECT id, matter_id, item_id, suggestion_type, code_id, code_name, confidence, \
                         rationale, provider_kind, model, prompt_template_id, is_remote, text_sha256, \
-                        catalog_content_hash, status, job_id, created_at, resolved_at, resolved_by \
+                        catalog_content_hash, status, job_id, created_at, resolved_at, resolved_by, \
+                        citations_count \
                  FROM item_ai_suggestions WHERE id = ?1 AND matter_id = ?2",
                 params![suggestion_id, self.id()],
                 map_suggestion_row,
@@ -473,9 +535,110 @@ impl Matter {
             })
     }
 
+    /// Batch-insert citation rows for one suggestion; updates `citations_count`.
+    ///
+    /// Quotes are stored in full (no hard truncate). Cap count at
+    /// [`MAX_CITATIONS_PER_SUGGESTION`] at the call site before invoking.
+    pub fn insert_ai_suggestion_citations(
+        &self,
+        inputs: &[InsertAiCitationInput<'_>],
+    ) -> Result<Vec<String>> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let suggestion_id = inputs[0].suggestion_id;
+        let sugg = self.get_ai_suggestion(suggestion_id)?;
+        for input in inputs {
+            if input.suggestion_id != suggestion_id {
+                return Err(Error::Other(
+                    "insert_ai_suggestion_citations: mixed suggestion_id in batch".into(),
+                ));
+            }
+            if input.item_id != sugg.item_id {
+                return Err(Error::Other(format!(
+                    "citation item_id {} does not match suggestion item {}",
+                    input.item_id, sugg.item_id
+                )));
+            }
+        }
+        let now = now_rfc3339();
+        let mut ids = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let id = new_id("aic");
+            let field = if input.field.trim().is_empty() {
+                "text"
+            } else {
+                input.field
+            };
+            let status = if input.verify_status.trim().is_empty() {
+                VERIFY_UNCHECKED
+            } else {
+                input.verify_status
+            };
+            self.connection().execute(
+                "INSERT INTO item_ai_suggestion_citations (\
+                    id, suggestion_id, matter_id, item_id, ordinal, quote, \
+                    start_offset, end_offset, field, verify_status, created_at\
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    id,
+                    suggestion_id,
+                    self.id(),
+                    input.item_id,
+                    input.ordinal,
+                    input.quote, // full quote; do not truncate
+                    input.start_offset,
+                    input.end_offset,
+                    field,
+                    status,
+                    now,
+                ],
+            )?;
+            ids.push(id);
+        }
+        let count: i64 = self.connection().query_row(
+            "SELECT COUNT(*) FROM item_ai_suggestion_citations \
+             WHERE suggestion_id = ?1 AND matter_id = ?2",
+            params![suggestion_id, self.id()],
+            |row| row.get(0),
+        )?;
+        self.connection().execute(
+            "UPDATE item_ai_suggestions SET citations_count = ?1 \
+             WHERE id = ?2 AND matter_id = ?3",
+            params![count, suggestion_id, self.id()],
+        )?;
+        Ok(ids)
+    }
+
+    /// List citations for a suggestion (ordinal ascending).
+    pub fn list_ai_suggestion_citations(
+        &self,
+        suggestion_id: &str,
+    ) -> Result<Vec<ItemAiSuggestionCitation>> {
+        // Ensure suggestion belongs to this matter.
+        let _ = self.get_ai_suggestion(suggestion_id)?;
+        let mut stmt = self.connection().prepare(
+            "SELECT id, suggestion_id, matter_id, item_id, ordinal, quote, \
+                    start_offset, end_offset, field, verify_status, created_at \
+             FROM item_ai_suggestion_citations \
+             WHERE suggestion_id = ?1 AND matter_id = ?2 \
+             ORDER BY ordinal ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![suggestion_id, self.id()], map_citation_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
     /// Accept a pending suggestion: apply code via [`Matter::apply_codes`], mark accepted.
     ///
-    /// Audit: `coding.apply` (via apply_codes) + `ai_suggestion.accept` with source detail.
+    /// Audit: `coding.apply` (via apply_codes) + `ai_suggestion.accept` with
+    /// provenance + citation **offset pointers only** (no quote cleartext).
+    ///
+    /// Citations are re-verified against the item's current continuous CAS text
+    /// (Desk display coordinate space, capped at
+    /// [`AI_VERIFY_TEXT_MAX_BYTES`]) so accept audit reflects the body at
+    /// promote time — not a stale job-time status. Apply + status + accept
+    /// audit commit in **one** SQLite transaction (nested `with_transaction`).
     pub fn accept_ai_suggestion(
         &self,
         suggestion_id: &str,
@@ -497,39 +660,107 @@ impl Matter {
                 t.to_string()
             }
         };
-        self.apply_codes(ApplyCodesInput {
-            item_ids: vec![sugg.item_id.clone()],
-            add_code_ids: vec![code_id.clone()],
-            remove_code_ids: vec![],
-            propagate_family: false,
-            actor: actor_s.clone(),
-        })?;
-        let now = now_rfc3339();
-        self.connection().execute(
-            "UPDATE item_ai_suggestions SET status = ?1, resolved_at = ?2, resolved_by = ?3, \
-             code_id = COALESCE(code_id, ?4) \
-             WHERE id = ?5 AND matter_id = ?6",
-            params![
-                AI_SUGGESTION_ACCEPTED,
-                now,
-                actor_s,
-                code_id,
-                suggestion_id,
-                self.id()
-            ],
-        )?;
-        self.append_audit(crate::audit::AuditEventInput {
-            actor: actor_s,
-            action: "ai_suggestion.accept".into(),
-            entity: format!("item:{}", sugg.item_id),
-            params_json: serde_json::json!({
-                "suggestion_id": suggestion_id,
-                "code_id": code_id,
-                "code_name": sugg.code_name,
-                "source": "ai_suggestion",
-            })
-            .to_string(),
-            tool_version: env!("CARGO_PKG_VERSION").into(),
+        let citations = self.list_ai_suggestion_citations(suggestion_id)?;
+
+        // Re-verify against current continuous body (honest audit + stale body).
+        let item = self.get_item(&sugg.item_id)?;
+        let body_text = load_item_text_continuous_for_verify(self, item.text_sha256.as_deref())?;
+        let current_digest = item.text_sha256.as_deref();
+        let digest_stale = match (&sugg.text_sha256, current_digest) {
+            (Some(a), Some(b)) => a != b,
+            (Some(_), None) => true,
+            (None, Some(_)) => true,
+            (None, None) => false,
+        };
+
+        let mut citation_ptrs: Vec<serde_json::Value> = Vec::with_capacity(citations.len());
+        let mut citation_unverified = false;
+        for c in &citations {
+            let (status, start, end) = if let Some(ref text) = body_text {
+                // When digest differs, ignore stored offsets (body may have shifted).
+                let (so, eo) = if digest_stale {
+                    (None, None)
+                } else {
+                    (c.start_offset, c.end_offset)
+                };
+                let v = crate::ai_verify::verify_ai_citation_against_text(&c.quote, so, eo, text);
+                if v.status != VERIFY_MATCHED {
+                    citation_unverified = true;
+                }
+                (v.status, v.start_offset, v.end_offset)
+            } else {
+                // CAS body unavailable/unreadable: never claim matched at accept time.
+                // Clear offsets so audit does not present unverifiable pointers as live.
+                citation_unverified = true;
+                (VERIFY_QUOTE_NOT_FOUND.to_string(), None, None)
+            };
+            citation_ptrs.push(serde_json::json!({
+                "citation_id": c.id,
+                "start_offset": start,
+                "end_offset": end,
+                "field": c.field,
+                "verify_status": status,
+            }));
+        }
+
+        // Single transaction: code apply + suggestion accepted + accept audit.
+        let item_id = sugg.item_id.clone();
+        let code_name = sugg.code_name.clone();
+        let prompt_template_id = sugg.prompt_template_id.clone();
+        let model = sugg.model.clone();
+        let provider_kind = sugg.provider_kind.clone();
+        let is_remote = sugg.is_remote;
+        let sugg_text_sha256 = sugg.text_sha256.clone();
+        let code_id_for_apply = code_id.clone();
+        let actor_for_apply = actor_s.clone();
+
+        self.with_transaction(|_conn| {
+            self.apply_codes(ApplyCodesInput {
+                item_ids: vec![item_id.clone()],
+                add_code_ids: vec![code_id_for_apply.clone()],
+                remove_code_ids: vec![],
+                propagate_family: false,
+                actor: actor_for_apply.clone(),
+            })?;
+            let now = now_rfc3339();
+            self.connection().execute(
+                "UPDATE item_ai_suggestions SET status = ?1, resolved_at = ?2, resolved_by = ?3, \
+                 code_id = COALESCE(code_id, ?4) \
+                 WHERE id = ?5 AND matter_id = ?6",
+                params![
+                    AI_SUGGESTION_ACCEPTED,
+                    now,
+                    actor_for_apply,
+                    code_id_for_apply,
+                    suggestion_id,
+                    self.id()
+                ],
+            )?;
+            // Provenance: pointers only — never quote cleartext in audit.
+            self.append_audit(crate::audit::AuditEventInput {
+                actor: actor_for_apply,
+                action: "ai_suggestion.accept".into(),
+                entity: format!("item:{item_id}"),
+                params_json: serde_json::json!({
+                    "suggestion_id": suggestion_id,
+                    "code_id": code_id_for_apply,
+                    "code_name": code_name,
+                    "source": "ai_suggestion",
+                    "prompt_template_id": prompt_template_id,
+                    "model": model,
+                    "provider_kind": provider_kind,
+                    "is_remote": is_remote,
+                    "text_sha256": sugg_text_sha256,
+                    "current_text_sha256": current_digest,
+                    "text_sha256_stale": digest_stale,
+                    "citations": citation_ptrs,
+                    "citation_unverified": citation_unverified,
+                    "cas_text_unavailable": body_text.is_none() && current_digest.is_some(),
+                })
+                .to_string(),
+                tool_version: env!("CARGO_PKG_VERSION").into(),
+            })?;
+            Ok(())
         })?;
         self.get_ai_suggestion(suggestion_id)
     }
@@ -615,6 +846,50 @@ impl Matter {
     }
 }
 
+/// Load continuous UTF-8 prefix of item body for citation re-verify.
+///
+/// Returns `Ok(None)` when there is no digest, the digest is invalid, or the
+/// CAS blob is missing. Callers must treat `None` as **unverified** (never
+/// trust stored `matched` without re-verification). Never errors solely because
+/// a fixture used a non-hex placeholder digest.
+fn load_item_text_continuous_for_verify(
+    matter: &Matter,
+    digest: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(digest) = digest.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    // Invalid digest / missing blob → treat as no body (do not fail accept).
+    let exists = match matter.blob_exists(digest) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    if !exists {
+        return Ok(None);
+    }
+    let len = match matter.cas_len(digest) {
+        Ok(n) => n,
+        Err(_) => return Ok(None),
+    };
+    let take = len.min(AI_VERIFY_TEXT_MAX_BYTES) as usize;
+    if take == 0 {
+        return Ok(Some(String::new()));
+    }
+    // Continuous prefix only — never head+tail synthetic for offset space.
+    let bytes = if len <= AI_VERIFY_TEXT_MAX_BYTES {
+        match matter.get_bytes(digest) {
+            Ok(b) => b,
+            Err(_) => return Ok(None),
+        }
+    } else {
+        match matter.read_cas_prefix(digest, take) {
+            Ok(b) => b,
+            Err(_) => return Ok(None),
+        }
+    };
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
 fn resolve_suggestion_code_id(matter: &Matter, sugg: &ItemAiSuggestion) -> Result<String> {
     if let Some(ref cid) = sugg.code_id {
         let def = matter.get_code_definition(cid)?;
@@ -670,6 +945,23 @@ fn map_suggestion_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemAiSuggest
         created_at: row.get(16)?,
         resolved_at: row.get(17)?,
         resolved_by: row.get(18)?,
+        citations_count: row.get(19)?,
+    })
+}
+
+fn map_citation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemAiSuggestionCitation> {
+    Ok(ItemAiSuggestionCitation {
+        id: row.get(0)?,
+        suggestion_id: row.get(1)?,
+        matter_id: row.get(2)?,
+        item_id: row.get(3)?,
+        ordinal: row.get(4)?,
+        quote: row.get(5)?,
+        start_offset: row.get(6)?,
+        end_offset: row.get(7)?,
+        field: row.get(8)?,
+        verify_status: row.get(9)?,
+        created_at: row.get(10)?,
     })
 }
 

@@ -487,7 +487,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0050-06 | — | Multilingual embed models | English-centric mock/P0 | **0054** |
 | D-0050-07 | — | GPU acceleration path | CPU-only mock path | residual |
 | D-0050-08 | — | Multi-model UI + namespace GC | Namespaces exist; one active model; no GC UI | residual |
-| D-0050-09 | — | RAG chat + citations | Residual | **0052** |
+| D-0050-09 | — | RAG chat + citations | Citation-rich promote closed in **0052**; multi-turn/cross-doc RAG residual | residual / D-0052-01 |
 | D-0050-10 | — | Embedding-based clustering | Residual vs **0048** | residual |
 | D-0050-11 | — | Packed `vectors.bin` format | P0 JSON per-item files under namespace | residual polish |
 | D-0050-12 | P3 | Formal `cargo deny` in CI for semantic tree | Manual `cargo tree` audit in review.md | residual polish |
@@ -498,8 +498,8 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0051-01 | — | Streaming completions | Unary complete only | residual |
-| D-0051-02 | — | Multi-turn chat / RAG UI | P0 thin suggest only | **0052** |
-| D-0051-03 | — | Citation-rich promote UX | Thin accept/reject only | **0052** |
+| D-0051-02 | — | Multi-turn chat / RAG UI | P0 thin suggest only; multi-turn still residual | **D-0052-01** |
+| D-0051-03 | — | Citation-rich promote UX | **Closed in 0052** (citations + verify + mandatory highlight/scroll + pointer audit) | — |
 | D-0051-04 | — | Cloud embeddings via AiProvider trait | Chat completions shape only; see D-0050-02 | residual |
 | D-0051-05 | — | Auto privilege / redaction AI | Human confirm only; never silent | residual |
 | D-0051-06 | — | Prompt-injection hardening suite | Residual | residual |
@@ -507,6 +507,21 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0051-08 | — | Empty model-result fingerprint marker | Empty `[]` leaves no suggestion row; may re-call provider | residual polish |
 | D-0051-09 | P3 | Live HTTP redirect-to-remote CI proof | Fail-closed `Policy::none()` + 3xx error path unit-tested; no mock server in CI | residual polish |
 | D-0051-10 | P3 | Formal `cargo deny` in CI for matter-ai tree | Manual tree audit in review.md | residual polish |
+
+## From track 0052-AiReviewCitations (Completed — see conductor review)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0052-01 | — | Multi-turn chat / cross-doc RAG | P0 is single-item grounded citations only | residual |
+| D-0052-02 | — | Batch accept-all with sampling QC | P0 single-item promote | residual / **0058** |
+| D-0052-03 | — | Persistent multi-citation highlight sets | P0 is click-to-highlight active citation | residual polish |
+| D-0052-04 | — | Export AI provenance report pack | Still no cleartext quotes unless redacted export policy | residual |
+| D-0052-05 | — | Privilege / redaction AI with citations | Human-confirm residual | residual |
+| D-0052-06 | — | Semantic chunk inject into prompt | **0050** residual | residual |
+| D-0052-07 | — | `ai_enrich_citations` split job | Same-call v2 citations sufficient for P0 | residual |
+| D-0052-08 | P3 | Bodies larger than verify continuous cap (2 MiB) | Continuous prefix only; head+tail never used for offsets | residual scale |
+| D-0052-09 | P3 | Full egui smoke for citation scroll/paint click path | Unit helpers + API tests; operator smoke local | operator / polish |
+| D-0052-10 | P3 | `VERIFY_OFFSET_MISMATCH` stored status unused | Reserved; runtime repairs to matched or quote_not_found | residual polish |
 
 ## Hygiene
 

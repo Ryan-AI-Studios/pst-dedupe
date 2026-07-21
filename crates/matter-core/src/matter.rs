@@ -2199,18 +2199,29 @@ impl Matter {
     /// matter connection. Rolls back on error.
     ///
     /// Use for batch role writes + checkpoint that must commit together (DoD-5).
+    ///
+    /// Nestable: when the connection is already inside a write transaction
+    /// (not autocommit), runs `f` under the outer txn without a nested BEGIN —
+    /// same pattern as [`audit::append_event`].
     pub fn with_transaction<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&Connection) -> Result<T>,
     {
-        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let own_txn = self.conn.is_autocommit();
+        if own_txn {
+            self.conn.execute("BEGIN IMMEDIATE", [])?;
+        }
         match f(&self.conn) {
             Ok(v) => {
-                self.conn.execute("COMMIT", [])?;
+                if own_txn {
+                    self.conn.execute("COMMIT", [])?;
+                }
                 Ok(v)
             }
             Err(e) => {
-                let _ = self.conn.execute("ROLLBACK", []);
+                if own_txn {
+                    let _ = self.conn.execute("ROLLBACK", []);
+                }
                 Err(e)
             }
         }

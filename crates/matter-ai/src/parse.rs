@@ -1,8 +1,23 @@
-//! Robust JSON extraction from chatty model output (spec §3.5.1).
+//! Robust JSON extraction from chatty model output (spec §3.5.1 / 0052 citations).
 
 use serde::Deserialize;
 
 use crate::error::{AiError, Result};
+
+/// Soft cap on citations **count** per suggestion (not quote length).
+pub const MAX_CITATIONS_PER_SUGGESTION: usize = 5;
+
+/// One grounded citation from model JSON (offsets are UTF-8 **byte** hints).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ParsedCitation {
+    pub quote: String,
+    #[serde(default)]
+    pub start_offset: Option<i64>,
+    #[serde(default)]
+    pub end_offset: Option<i64>,
+    #[serde(default)]
+    pub field: Option<String>,
+}
 
 /// One parsed code suggestion from the model.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -15,6 +30,9 @@ pub struct ParsedCodeSuggestion {
     pub confidence: Option<f64>,
     #[serde(default)]
     pub rationale_short: Option<String>,
+    /// Grounded citations (0052). Empty allowed ("no evidence").
+    #[serde(default)]
+    pub citations: Vec<ParsedCitation>,
 }
 
 impl ParsedCodeSuggestion {
@@ -69,13 +87,19 @@ fn parse_suggestions_json(json_slice: &str) -> Result<Vec<ParsedCodeSuggestion>>
     };
     let mut out = Vec::with_capacity(arr.len());
     for (i, item) in arr.iter().enumerate() {
-        let s: ParsedCodeSuggestion = serde_json::from_value(item.clone())
+        let mut s: ParsedCodeSuggestion = serde_json::from_value(item.clone())
             .map_err(|e| AiError::json_parse(format!("item {i}: {e}")))?;
         if s.display_name().is_none() {
             return Err(AiError::json_parse(format!(
                 "item {i}: missing code_name and code_id"
             )));
         }
+        // Cap citation count only — never truncate quote strings.
+        if s.citations.len() > MAX_CITATIONS_PER_SUGGESTION {
+            s.citations.truncate(MAX_CITATIONS_PER_SUGGESTION);
+        }
+        // Drop empty-quote citations (not evidence).
+        s.citations.retain(|c| !c.quote.trim().is_empty());
         out.push(s);
     }
     Ok(out)
@@ -218,5 +242,43 @@ Hope this helps!"#;
     fn garbage_fails() {
         let err = extract_code_suggestions("no json here at all, sorry").unwrap_err();
         assert!(err.to_string().contains("ai_json_parse") || err.to_string().contains("JSON"));
+    }
+
+    #[test]
+    fn parses_citations_without_truncating_quote() {
+        let long = "word ".repeat(60);
+        let content = format!(
+            r#"[{{"code_name":"hot","confidence":0.8,"rationale_short":"r",
+              "citations":[{{"quote":"{long}","start_offset":0,"end_offset":10}}]}}]"#
+        );
+        let s = extract_code_suggestions(&content).expect("parse");
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].citations.len(), 1);
+        assert_eq!(s[0].citations[0].quote, long);
+    }
+
+    #[test]
+    fn caps_citation_count_not_quote_length() {
+        let cites: Vec<String> = (0..8)
+            .map(|i| {
+                format!(
+                    r#"{{"quote":"q{i}","start_offset":{i},"end_offset":{}}}"#,
+                    i + 1
+                )
+            })
+            .collect();
+        let content = format!(
+            r#"[{{"code_name":"hot","citations":[{}]}}]"#,
+            cites.join(",")
+        );
+        let s = extract_code_suggestions(&content).expect("parse");
+        assert_eq!(s[0].citations.len(), MAX_CITATIONS_PER_SUGGESTION);
+    }
+
+    #[test]
+    fn empty_citations_allowed() {
+        let content = r#"[{"code_name":"hot","citations":[]}]"#;
+        let s = extract_code_suggestions(content).expect("parse");
+        assert!(s[0].citations.is_empty());
     }
 }

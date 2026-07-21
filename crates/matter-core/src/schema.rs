@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 30;
+pub const SCHEMA_VERSION: u32 = 31;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -44,6 +44,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (28, MIGRATION_V28),
     (29, MIGRATION_V29),
     (30, MIGRATION_V30),
+    (31, MIGRATION_V31),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -1062,6 +1063,31 @@ CREATE TABLE ai_suggestion_runs (
   created_at TEXT NOT NULL
 );
 CREATE INDEX idx_ai_runs_matter ON ai_suggestion_runs(matter_id);
+"#;
+
+/// AI suggestion citations + count (track 0052).
+///
+/// Full quote TEXT is stored without truncation. Offsets are UTF-8 **byte**
+/// hints into scanned item text (entity-track style). `prompt_template_id`
+/// already exists on `item_ai_suggestions` from v30.
+const MIGRATION_V31: &str = r#"
+CREATE TABLE item_ai_suggestion_citations (
+  id TEXT PRIMARY KEY NOT NULL,
+  suggestion_id TEXT NOT NULL REFERENCES item_ai_suggestions(id),
+  matter_id TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  quote TEXT NOT NULL,
+  start_offset INTEGER,
+  end_offset INTEGER,
+  field TEXT NOT NULL DEFAULT 'text',
+  verify_status TEXT NOT NULL DEFAULT 'unchecked',
+  created_at TEXT NOT NULL,
+  UNIQUE (suggestion_id, ordinal)
+);
+CREATE INDEX idx_ai_cite_sugg ON item_ai_suggestion_citations(suggestion_id);
+
+ALTER TABLE item_ai_suggestions ADD COLUMN citations_count INTEGER NOT NULL DEFAULT 0;
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -4415,9 +4441,8 @@ mod tests {
         )
         .expect("code");
 
-        let v = migrate(&conn).expect("migrate v29 to v30");
+        let v = migrate(&conn).expect("migrate v29 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 30);
 
         for col in [
             "ai_enabled",
@@ -4447,7 +4472,11 @@ mod tests {
             .expect("guidance col");
         assert!(has_guidance, "expected code_definitions.guidance");
 
-        for table in ["item_ai_suggestions", "ai_suggestion_runs"] {
+        for table in [
+            "item_ai_suggestions",
+            "ai_suggestion_runs",
+            "item_ai_suggestion_citations",
+        ] {
             let has_table: bool = conn
                 .query_row(
                     &format!(
@@ -4465,6 +4494,7 @@ mod tests {
             "idx_ai_sugg_status",
             "idx_ai_sugg_fingerprint",
             "idx_ai_runs_matter",
+            "idx_ai_cite_sugg",
         ] {
             let has_idx: bool = conn
                 .query_row(
@@ -4477,6 +4507,18 @@ mod tests {
                 .expect("idx");
             assert!(has_idx, "expected {idx}");
         }
+
+        let has_cite_count: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('item_ai_suggestions') WHERE name = 'citations_count'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("citations_count col");
+        assert!(
+            has_cite_count,
+            "expected item_ai_suggestions.citations_count"
+        );
 
         let enabled: i64 = conn
             .query_row(
@@ -4508,6 +4550,102 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v29'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v30_to_v31_adds_citations() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        // Apply through v30 only.
+        for &(target, sql) in MIGRATIONS {
+            if target > 30 {
+                break;
+            }
+            conn.execute_batch(sql).expect("sql");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v30', 'V30 Matter', '2020-01-01T00:00:00Z', 30, '/tmp/v30')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, status, imported_at) \
+             VALUES ('it_v30', 'mat_v30', 'extracted', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("item");
+        conn.execute(
+            "INSERT INTO item_ai_suggestions (\
+                id, matter_id, item_id, suggestion_type, code_name, \
+                provider_kind, model, prompt_template_id, is_remote, status, created_at\
+             ) VALUES (\
+                'ais_v30', 'mat_v30', 'it_v30', 'code', 'hot', \
+                'mock', 'mock', 'suggest_codes_v1', 0, 'pending', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("sugg");
+
+        let v = migrate(&conn).expect("migrate v30 to v31");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 31);
+
+        let has_table: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_ai_suggestion_citations'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table");
+        assert!(has_table);
+
+        let count_col: i64 = conn
+            .query_row(
+                "SELECT citations_count FROM item_ai_suggestions WHERE id = 'ais_v30'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(count_col, 0);
+
+        // Long quote round-trip (no truncate on write).
+        let long_quote = "word ".repeat(200); // ~1000 chars
+        conn.execute(
+            "INSERT INTO item_ai_suggestion_citations (\
+                id, suggestion_id, matter_id, item_id, ordinal, quote, \
+                start_offset, end_offset, field, verify_status, created_at\
+             ) VALUES (\
+                'aic_long', 'ais_v30', 'mat_v30', 'it_v30', 0, ?1, \
+                0, 10, 'text', 'unchecked', '2020-01-01T00:00:00Z')",
+            [&long_quote],
+        )
+        .expect("cite");
+        let stored: String = conn
+            .query_row(
+                "SELECT quote FROM item_ai_suggestion_citations WHERE id = 'aic_long'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read quote");
+        assert_eq!(stored, long_quote);
+        assert_eq!(stored.len(), long_quote.len());
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v30'",
                 [],
                 |row| row.get(0),
             )

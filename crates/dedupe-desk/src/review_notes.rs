@@ -13,6 +13,8 @@ use matter_core::{
 pub const HIGHLIGHT_PAINT: Color32 = Color32::from_rgb(0xFF, 0xF5, 0x9D);
 /// Gray paint for stale ranges (optional dashed-like dim).
 pub const HIGHLIGHT_STALE_PAINT: Color32 = Color32::from_rgb(0xE0, 0xE0, 0xE0);
+/// Light blue temporary paint for AI citation (track 0052).
+pub const AI_CITATION_PAINT: Color32 = Color32::from_rgb(0xBB, 0xDE, 0xFB);
 
 /// Char-range selection on the display body (`start` inclusive, `end` exclusive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,19 +91,113 @@ pub fn body_digest_for_item(
     display_body_digest(display_body)
 }
 
+/// Convert UTF-8 **byte** offsets to char indices for body paint/selection.
+///
+/// AI citations store entity-style byte offsets; egui body paint uses char indices.
+pub fn byte_offsets_to_char_range(
+    text: &str,
+    start_byte: i64,
+    end_byte: i64,
+) -> Option<(usize, usize)> {
+    if start_byte < 0 || end_byte <= start_byte {
+        return None;
+    }
+    let s = start_byte as usize;
+    let e = end_byte as usize;
+    if e > text.len() || !text.is_char_boundary(s) || !text.is_char_boundary(e) {
+        return None;
+    }
+    let start_char = text[..s].chars().count();
+    let end_char = start_char + text[s..e].chars().count();
+    if end_char > start_char {
+        Some((start_char, end_char))
+    } else {
+        None
+    }
+}
+
+/// Pure helper: citation click → highlight char range (unit-testable).
+///
+/// Returns `None` when offsets are missing or OOB (do not invent a highlight).
+pub fn citation_highlight_target(
+    text: &str,
+    start_offset: Option<i64>,
+    end_offset: Option<i64>,
+    verify_status: &str,
+) -> Option<(usize, usize)> {
+    if verify_status != "matched" {
+        return None;
+    }
+    let start = start_offset?;
+    let end = end_offset?;
+    byte_offsets_to_char_range(text, start, end)
+}
+
+/// Re-verify one citation against the current body text (Desk display space).
+///
+/// When `text_sha_stale` is true (suggestion fingerprint ≠ current item
+/// `text_sha256`), stored offsets are ignored and the quote is re-found only.
+/// Returns repaired status + offsets for in-memory UI (badge / highlight).
+pub fn reverify_citation_against_body(
+    quote: &str,
+    start_offset: Option<i64>,
+    end_offset: Option<i64>,
+    body: &str,
+    text_sha_stale: bool,
+) -> (String, Option<i64>, Option<i64>) {
+    let (so, eo) = if text_sha_stale {
+        (None, None)
+    } else {
+        (start_offset, end_offset)
+    };
+    let v = matter_ai::verify_ai_citation_against_text(quote, so, eo, body);
+    (v.status, v.start_offset, v.end_offset)
+}
+
+/// Approximate vertical scroll offset (pixels) so that `char_off` is near the top
+/// of a monospace body viewer.
+///
+/// Counts newlines before `char_off` and multiplies by `line_height`. Does **not**
+/// account for soft wrap; the Review UI prefers galley `pos_from_cursor` when a
+/// layout is available, and falls back to this for ScrollArea offset wiring.
+pub fn approx_scroll_y_for_char(text: &str, char_off: usize, line_height: f32) -> f32 {
+    if line_height <= 0.0 || text.is_empty() {
+        return 0.0;
+    }
+    let line = text.chars().take(char_off).filter(|c| *c == '\n').count();
+    (line as f32) * line_height
+}
+
 /// Build a monospace [`LayoutJob`] with yellow backgrounds on active resolved ranges.
+///
+/// Optional `ai_cite` is a temporary char-range paint for AI citation highlight (0052).
 pub fn body_layout_job(body: &str, resolved: &[ResolvedHighlight]) -> LayoutJob {
-    let mut ranges: Vec<(usize, usize, bool)> = resolved
+    body_layout_job_ex(body, resolved, None)
+}
+
+/// Like [`body_layout_job`] with optional temporary AI citation paint (char range).
+pub fn body_layout_job_ex(
+    body: &str,
+    resolved: &[ResolvedHighlight],
+    ai_cite: Option<(usize, usize)>,
+) -> LayoutJob {
+    // kind: 0=active hl, 1=stale hl, 2=ai citation
+    let mut ranges: Vec<(usize, usize, u8)> = resolved
         .iter()
         .filter(|r| r.end_utf8 > r.start_utf8 && r.start_utf8 >= 0)
         .map(|r| {
             (
                 r.start_utf8 as usize,
                 r.end_utf8 as usize,
-                r.status == "active",
+                if r.status == "active" { 0u8 } else { 1u8 },
             )
         })
         .collect();
+    if let Some((s, e)) = ai_cite {
+        if e > s {
+            ranges.push((s, e, 2));
+        }
+    }
     ranges.sort_by_key(|(s, _, _)| *s);
 
     // Merge/paint non-overlapping by walking char indices (skip overlaps: first wins).
@@ -134,16 +230,16 @@ pub fn body_layout_job(body: &str, resolved: &[ResolvedHighlight]) -> LayoutJob 
             ri += 1;
         }
         if ri < ranges.len() && ranges[ri].0 <= i && i < ranges[ri].1 {
-            let (rs, re, active) = ranges[ri];
+            let (rs, re, kind) = ranges[ri];
             let start = i.max(rs);
             let end = re.min(char_len);
             if start < end {
                 let slice: String = chars[start..end].iter().collect();
                 let mut fmt = base.clone();
-                fmt.background = if active {
-                    HIGHLIGHT_PAINT
-                } else {
-                    HIGHLIGHT_STALE_PAINT
+                fmt.background = match kind {
+                    0 => HIGHLIGHT_PAINT,
+                    2 => AI_CITATION_PAINT,
+                    _ => HIGHLIGHT_STALE_PAINT,
                 };
                 job.append(&slice, 0.0, fmt);
                 i = end;
@@ -236,7 +332,20 @@ pub fn stale_count_for_ui(
 
 /// egui TextEdit layouter factory is not stored here — paint uses [`body_layout_job`].
 pub fn body_job_for_ui(body: &str, resolved: &[ResolvedHighlight], wrap_width: f32) -> LayoutJob {
-    let mut job = body_layout_job(body, resolved);
+    body_job_for_ui_ex(body, resolved, wrap_width, None)
+}
+
+/// Like [`body_job_for_ui`] with optional AI citation char-range paint.
+pub fn body_job_for_ui_ex(
+    body: &str,
+    resolved: &[ResolvedHighlight],
+    wrap_width: f32,
+    ai_cite: Option<(usize, usize)>,
+) -> LayoutJob {
+    let mut job = match ai_cite {
+        None => body_layout_job(body, resolved),
+        Some(range) => body_layout_job_ex(body, resolved, Some(range)),
+    };
     job.wrap.max_width = wrap_width;
     job
 }
@@ -376,6 +485,77 @@ mod tests {
         );
         let syn = body_digest_for_item(None, None, "hello");
         assert_eq!(syn, display_body_digest("hello"));
+    }
+
+    #[test]
+    fn citation_click_yields_char_highlight_range() {
+        let body = "prefix hot suffix";
+        let start = body.find("hot").expect("pos") as i64;
+        let end = start + 3;
+        let r = citation_highlight_target(body, Some(start), Some(end), "matched");
+        assert_eq!(r, Some((7, 10))); // "prefix " = 7 chars
+                                      // Unverified → no invent highlight
+        assert!(
+            citation_highlight_target(body, Some(start), Some(end), "quote_not_found").is_none()
+        );
+        // OOB
+        assert!(citation_highlight_target(body, Some(999), Some(1005), "matched").is_none());
+    }
+
+    #[test]
+    fn reverify_repairs_offsets_and_rejects_missing() {
+        let body = "alpha unique_evidence_token beta";
+        let quote = "unique_evidence_token";
+        // Wrong stored offsets — re-find must repair.
+        let (status, start, end) =
+            reverify_citation_against_body(quote, Some(0), Some(5), body, false);
+        assert_eq!(status, matter_core::VERIFY_MATCHED);
+        let expected = body.find(quote).expect("pos") as i64;
+        assert_eq!(start, Some(expected));
+        assert_eq!(end, Some(expected + quote.len() as i64));
+        // Highlight only when re-verified matched.
+        assert!(citation_highlight_target(body, start, end, &status).is_some());
+
+        let (st2, s2, e2) =
+            reverify_citation_against_body("not in body", Some(0), Some(3), body, false);
+        assert_eq!(st2, matter_core::VERIFY_QUOTE_NOT_FOUND);
+        assert!(citation_highlight_target(body, s2, e2, &st2).is_none());
+    }
+
+    #[test]
+    fn reverify_stale_text_sha_ignores_offsets() {
+        let body = "new body with hot material only once";
+        let quote = "hot material";
+        // Offsets that would match a different span under old body — stale forces re-find.
+        let (status, start, end) =
+            reverify_citation_against_body(quote, Some(0), Some(3), body, true);
+        assert_eq!(status, matter_core::VERIFY_MATCHED);
+        let expected = body.find(quote).expect("pos") as i64;
+        assert_eq!(start, Some(expected));
+        assert_eq!(end, Some(expected + quote.len() as i64));
+    }
+
+    #[test]
+    fn approx_scroll_y_counts_newlines_before_char() {
+        let text = "line0\nline1\nline2 target here\nline3";
+        let char_off = text.chars().position(|c| c == 't').expect("target char");
+        // Two newlines before "target"
+        assert_eq!(approx_scroll_y_for_char(text, char_off, 16.0), 32.0);
+        assert_eq!(approx_scroll_y_for_char(text, 0, 16.0), 0.0);
+        assert_eq!(approx_scroll_y_for_char("", 5, 16.0), 0.0);
+        assert_eq!(approx_scroll_y_for_char(text, char_off, 0.0), 0.0);
+    }
+
+    #[test]
+    fn byte_offsets_multibyte_chars() {
+        let body = "café hot"; // é is 2 bytes
+        let start = body.find("hot").expect("pos") as i64;
+        let end = start + 3;
+        let (cs, ce) = byte_offsets_to_char_range(body, start, end).expect("range");
+        assert_eq!(
+            &body.chars().skip(cs).take(ce - cs).collect::<String>(),
+            "hot"
+        );
     }
 
     fn sample_hl(id: &str, quote: &str, digest: &str, status: &str) -> ItemHighlight {
