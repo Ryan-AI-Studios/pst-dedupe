@@ -48,6 +48,8 @@ pub fn register_default_handlers(runner: &mut ProcessRunner) {
     runner.register(Arc::new(MatterIcsExtractHandler::new()));
     #[cfg(feature = "ocr")]
     runner.register(Arc::new(MatterOcrHandler::new()));
+    #[cfg(feature = "stt")]
+    runner.register(Arc::new(MatterTranscribeHandler::new()));
     #[cfg(feature = "classify")]
     runner.register(Arc::new(MatterClassifyHandler::new()));
     #[cfg(feature = "entity")]
@@ -89,6 +91,7 @@ pub fn default_handler_kinds() -> &'static [&'static str] {
         "pdf_extract",
         "ics_extract",
         "ocr",
+        "transcribe",
         "classify",
         "entity_scan",
         "people_graph",
@@ -121,5 +124,6 @@ mod tests {
         assert!(default_handler_kinds().contains(&"sentiment"));
         assert!(default_handler_kinds().contains(&"semantic_index"));
         assert!(default_handler_kinds().contains(&"ai_suggest_codes"));
+        assert!(default_handler_kinds().contains(&"transcribe"));
     }
 }

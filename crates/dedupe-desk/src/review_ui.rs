@@ -603,6 +603,10 @@ pub struct ReviewState {
     item_redacted_source_digest: Option<String>,
     /// PDF empty/low-text OCR candidate flag (track 0034).
     item_pdf_needs_ocr: i64,
+    /// Transcript status for A/V badge (track 0053): done/failed/skipped/pending.
+    item_transcript_status: Option<String>,
+    /// Optional `transcript_error` for failed/skipped detail (track 0053).
+    item_transcript_error: Option<String>,
     /// When true, selection creates redaction (black) not highlight (yellow).
     redact_mode: bool,
     /// Reason for new redactions (ComboBox).
@@ -765,6 +769,8 @@ impl ReviewState {
         self.item_redacted_text_sha256 = None;
         self.item_redacted_source_digest = None;
         self.item_pdf_needs_ocr = 0;
+        self.item_transcript_status = None;
+        self.item_transcript_error = None;
         self.redact_mode = false;
         self.redact_reason = DEFAULT_REDACTION_REASON.into();
         self.redact_label.clear();
@@ -1475,6 +1481,8 @@ impl ReviewState {
         let Some(item_id) = self.current_item_id().map(|s| s.to_string()) else {
             self.clear_notes_for_selection();
             self.item_pdf_needs_ocr = 0;
+            self.item_transcript_status = None;
+            self.item_transcript_error = None;
             return;
         };
         // Always reset OCR flag on selection change first, then load for this
@@ -1482,8 +1490,12 @@ impl ReviewState {
         // (Codex P2-009). Annotation failure must not clear a successfully
         // loaded flag (P2-007).
         self.item_pdf_needs_ocr = 0;
-        if let Ok(flag) = load_item_pdf_needs_ocr(matter_root, &item_id) {
+        self.item_transcript_status = None;
+        self.item_transcript_error = None;
+        if let Ok((flag, tr, tr_err)) = load_item_ocr_and_transcript(matter_root, &item_id) {
             self.item_pdf_needs_ocr = flag;
+            self.item_transcript_status = tr;
+            self.item_transcript_error = tr_err;
         }
         match load_notes_highlights_redactions(matter_root, &item_id) {
             Ok(bundle) => {
@@ -1527,6 +1539,8 @@ impl ReviewState {
         self.item_redacted_text_sha256 = bundle.redacted_text_sha256;
         self.item_redacted_source_digest = bundle.redacted_source_digest;
         self.item_pdf_needs_ocr = bundle.pdf_needs_ocr;
+        self.item_transcript_status = bundle.transcript_status;
+        self.item_transcript_error = bundle.transcript_error;
     }
 
     fn reload_privilege_for_selection(&mut self, matter_root: &Utf8Path) {
@@ -2802,6 +2816,8 @@ struct AnnotationBundle {
     redacted_text_sha256: Option<String>,
     redacted_source_digest: Option<String>,
     pdf_needs_ocr: i64,
+    transcript_status: Option<String>,
+    transcript_error: Option<String>,
 }
 
 fn load_notes_highlights_redactions(
@@ -2830,6 +2846,8 @@ fn load_notes_highlights_redactions(
         redacted_text_sha256: item.redacted_text_sha256,
         redacted_source_digest: item.redacted_source_digest,
         pdf_needs_ocr: item.pdf_needs_ocr,
+        transcript_status: item.transcript_status,
+        transcript_error: item.transcript_error,
     })
 }
 
@@ -2846,11 +2864,66 @@ pub fn safe_entity_offset_slice(text: &str, start: i64, end: i64) -> Option<&str
     Some(&text[start..end])
 }
 
-/// Load `pdf_needs_ocr` from the item row (independent of annotation queries).
-fn load_item_pdf_needs_ocr(matter_root: &Utf8Path, item_id: &str) -> Result<i64, String> {
+/// Load `pdf_needs_ocr` + `transcript_status` + `transcript_error` from the item row.
+fn load_item_ocr_and_transcript(
+    matter_root: &Utf8Path,
+    item_id: &str,
+) -> Result<(i64, Option<String>, Option<String>), String> {
     let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
     let item = matter.get_item(item_id).map_err(|e| e.to_string())?;
-    Ok(item.pdf_needs_ocr)
+    Ok((
+        item.pdf_needs_ocr,
+        item.transcript_status,
+        item.transcript_error,
+    ))
+}
+
+/// Format a Review-panel transcript status badge (track 0053).
+///
+/// Returns `(label, is_warning)` for done/failed/skipped/pending when status is
+/// set. `done` keeps un-diarized honesty language.
+pub fn format_transcript_status_badge(
+    status: Option<&str>,
+    error: Option<&str>,
+) -> Option<(String, TranscriptBadgeKind)> {
+    let raw = status?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let lower = raw.to_ascii_lowercase();
+    let err = error.map(str::trim).filter(|s| !s.is_empty());
+    match lower.as_str() {
+        "done" => Some((
+            "Transcript: done (un-diarized)".into(),
+            TranscriptBadgeKind::DoneHonesty,
+        )),
+        "failed" => {
+            let label = match err {
+                Some(e) => format!("Transcript: failed — {e}"),
+                None => "Transcript: failed".into(),
+            };
+            Some((label, TranscriptBadgeKind::Failed))
+        }
+        "skipped" => {
+            let label = match err {
+                Some(e) => format!("Transcript: skipped — {e}"),
+                None => "Transcript: skipped".into(),
+            };
+            Some((label, TranscriptBadgeKind::Skipped))
+        }
+        "pending" => Some(("Transcript: pending".into(), TranscriptBadgeKind::Pending)),
+        "disabled" => Some(("Transcript: disabled".into(), TranscriptBadgeKind::Pending)),
+        other => Some((format!("Transcript: {other}"), TranscriptBadgeKind::Pending)),
+    }
+}
+
+/// Visual kind for [`format_transcript_status_badge`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptBadgeKind {
+    DoneHonesty,
+    Failed,
+    Skipped,
+    Pending,
 }
 
 pub fn upsert_code_definition_blocking(
@@ -4122,6 +4195,25 @@ Unscored is not Neutral — Neutral is a scored ~0 compound.",
                 Color32::from_rgb(180, 100, 20),
                 "Little or no embedded text — Run OCR (Workspace) to extract searchable text.",
             );
+        }
+        if let Some((label, kind)) = format_transcript_status_badge(
+            state.item_transcript_status.as_deref(),
+            state.item_transcript_error.as_deref(),
+        ) {
+            let color = match kind {
+                TranscriptBadgeKind::DoneHonesty => Color32::from_rgb(120, 80, 20),
+                TranscriptBadgeKind::Failed => Color32::from_rgb(180, 60, 40),
+                TranscriptBadgeKind::Skipped => Color32::from_rgb(140, 110, 40),
+                TranscriptBadgeKind::Pending => Color32::from_rgb(90, 110, 140),
+            };
+            let response = ui.colored_label(color, label);
+            if kind == TranscriptBadgeKind::DoneHonesty {
+                response.on_hover_text(
+                    "STT does not identify speakers. Keyword hits in transcripts are not speaker attribution. \
+                     Whisper-class models may hallucinate on silence/noise. Not a court reporter certificate. \
+                     Verify by listening to original media before treating as attributed evidence.",
+                );
+            }
         }
         if let Some(st) = state.notes_status.clone() {
             ui.label(
@@ -5787,6 +5879,32 @@ mod tests {
         // Mirrors review_nav contract used by filter TextEdit fields.
         assert!(review_nav::focus_allows_shortcuts(true));
         assert!(!review_nav::focus_allows_shortcuts(false));
+    }
+
+    #[test]
+    fn transcript_status_badge_covers_av_states() {
+        assert!(format_transcript_status_badge(None, None).is_none());
+        assert!(format_transcript_status_badge(Some(""), None).is_none());
+
+        let (done, k) = format_transcript_status_badge(Some("done"), None).unwrap();
+        assert!(done.to_ascii_lowercase().contains("un-diarized"));
+        assert_eq!(k, TranscriptBadgeKind::DoneHonesty);
+
+        let (failed, k) =
+            format_transcript_status_badge(Some("failed"), Some("stt_engine_error: boom")).unwrap();
+        assert!(failed.contains("failed"));
+        assert!(failed.contains("stt_engine_error"));
+        assert_eq!(k, TranscriptBadgeKind::Failed);
+
+        let (skipped, k) =
+            format_transcript_status_badge(Some("skipped"), Some("stt_ffmpeg_not_found")).unwrap();
+        assert!(skipped.contains("skipped"));
+        assert!(skipped.contains("ffmpeg"));
+        assert_eq!(k, TranscriptBadgeKind::Skipped);
+
+        let (pending, k) = format_transcript_status_badge(Some("pending"), None).unwrap();
+        assert!(pending.contains("pending"));
+        assert_eq!(k, TranscriptBadgeKind::Pending);
     }
 
     #[test]

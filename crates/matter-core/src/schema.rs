@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 31;
+pub const SCHEMA_VERSION: u32 = 32;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -45,6 +45,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (29, MIGRATION_V29),
     (30, MIGRATION_V30),
     (31, MIGRATION_V31),
+    (32, MIGRATION_V32),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -1088,6 +1089,20 @@ CREATE TABLE item_ai_suggestion_citations (
 CREATE INDEX idx_ai_cite_sugg ON item_ai_suggestion_citations(suggestion_id);
 
 ALTER TABLE item_ai_suggestions ADD COLUMN citations_count INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// Schema v32: offline speech-to-text bookkeeping (track 0053).
+const MIGRATION_V32: &str = r#"
+ALTER TABLE items ADD COLUMN transcript_status TEXT;
+ALTER TABLE items ADD COLUMN transcript_engine TEXT;
+ALTER TABLE items ADD COLUMN transcript_model TEXT;
+ALTER TABLE items ADD COLUMN transcript_language TEXT;
+ALTER TABLE items ADD COLUMN transcript_native_sha256 TEXT;
+ALTER TABLE items ADD COLUMN transcript_at TEXT;
+ALTER TABLE items ADD COLUMN transcript_job_id TEXT;
+ALTER TABLE items ADD COLUMN transcript_error TEXT;
+CREATE INDEX idx_items_transcript_status
+  ON items(transcript_status) WHERE transcript_status IS NOT NULL;
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -4599,9 +4614,9 @@ mod tests {
         )
         .expect("sugg");
 
-        let v = migrate(&conn).expect("migrate v30 to v31");
+        let v = migrate(&conn).expect("migrate v30 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 31);
+        assert_eq!(v, 32);
 
         let has_table: bool = conn
             .query_row(
@@ -4646,6 +4661,85 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v30'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    /// v31 → v32 adds transcript bookkeeping columns (track 0053).
+    #[test]
+    fn migrate_v31_to_v32_adds_transcript_columns() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        for &(target, sql) in MIGRATIONS {
+            if target > 31 {
+                break;
+            }
+            conn.execute_batch(sql).expect("sql");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        assert_eq!(read_schema_version(&conn).expect("read"), 31);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v31', 'V31 Matter', '2020-01-01T00:00:00Z', 31, '/tmp/v31')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, status, imported_at) \
+             VALUES ('it_v31', 'mat_v31', 'extracted', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v31 to v32");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 32);
+
+        for col in [
+            "transcript_status",
+            "transcript_engine",
+            "transcript_model",
+            "transcript_language",
+            "transcript_native_sha256",
+            "transcript_at",
+            "transcript_job_id",
+            "transcript_error",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected column {col}");
+        }
+
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT transcript_status FROM items WHERE id = 'it_v31'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("status");
+        assert!(status.is_none());
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v31'",
                 [],
                 |row| row.get(0),
             )

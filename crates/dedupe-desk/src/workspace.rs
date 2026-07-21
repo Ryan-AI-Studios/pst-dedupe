@@ -251,6 +251,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut DeskApp) {
                 app.start_ocr();
             }
         }
+        {
+            let stt_ok = app.stt_run_enabled();
+            let tip = app.stt_run_tooltip();
+            let stt_btn = ui
+                .add_enabled(!busy && stt_ok, egui::Button::new("Run transcription"))
+                .on_hover_text(tip);
+            if stt_btn.clicked() {
+                app.start_transcribe();
+            }
+        }
         if ui
             .add_enabled(!busy, egui::Button::new("Extract ICS"))
             .on_hover_text(

@@ -523,6 +523,21 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0052-09 | P3 | Full egui smoke for citation scroll/paint click path | Unit helpers + API tests; operator smoke local | operator / polish |
 | D-0052-10 | P3 | `VERIFY_OFFSET_MISMATCH` stored status unused | Reserved; runtime repairs to matched or quote_not_found | residual polish |
 
+## From track 0053-TranscriptionPlugin (Completed — see conductor review)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0053-01 | — | Cloud STT APIs | Residual + allow_remote if ever | residual |
+| D-0053-02 | — | Speaker diarization | Un-diarized honesty is P0; human must listen for attribution | residual |
+| D-0053-03 | — | Timed segment table / SRT export | Residual | residual |
+| D-0053-04 | — | Auto-enqueue `fts_index` after transcribe | P0 documents manual rebuild | residual |
+| D-0053-05 | — | GPU-only acceleration path | Residual | residual |
+| D-0053-06 | — | Multilingual model packs UI | **0054** | **0054** |
+| D-0053-07 | — | In-app media player | Residual | residual |
+| D-0053-08 | P3 | Upgrade symphonia 0.5 → ~0.6 | P0 uses 0.5.x for stable SampleBuffer/Probe API | residual polish |
+| D-0053-09 | P3 | Pre-convert duration probe for non-WAV | Post-ffmpeg WAV duration enforced; pre-convert residual | residual polish |
+| D-0053-10 | P3 | Live whisper.cpp + ffmpeg operator CI smoke | Mock + Job Object kill tests in default CI; no weights in git | operator / polish |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

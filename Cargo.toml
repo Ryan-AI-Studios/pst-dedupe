@@ -22,6 +22,7 @@ members = [
     "crates/extract-office",
     "crates/extract-pdf",
     "crates/ocr-plugin",
+    "crates/stt-plugin",
     "crates/file-category",
     "crates/dedupe-desk",
     "crates/extract-calendar",

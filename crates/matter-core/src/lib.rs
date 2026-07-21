@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v31**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v32**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -40,6 +40,7 @@
 //! - **Semantic search bookkeeping** (`semantic_*` matter/item columns + `semantic_chunks`, schema v29) (0050)
 //! - **AI suggestions** (`ai_*` matter config + `item_ai_suggestions` / `ai_suggestion_runs` + code `guidance`, schema v30) (0051)
 //! - **AI suggestion citations** (`item_ai_suggestion_citations` + `citations_count`, schema v31) (0052)
+//! - **Transcript / STT bookkeeping** (`transcript_*` columns, schema v32) (0053)
 //!
 //! ## Layout
 //!
@@ -94,6 +95,7 @@ pub mod schema;
 pub mod semantic;
 pub mod sentiment;
 pub mod thread_headers;
+pub mod transcription;
 pub mod workflow;
 
 pub use ai::{
@@ -215,6 +217,10 @@ pub use sentiment::{
 pub use thread_headers::{
     normalize_conversation_index_to_hex, parse_in_reply_to, parse_references_header,
     parse_references_json, references_to_json, unfold_header_value, ConversationIndexInput,
+};
+pub use transcription::{
+    combine_with_transcript, strip_transcript_section, transcript_status, ApplyTranscriptInput,
+    TranscriptApplyResult, TranscriptCandidate, TRANSCRIPT_MARKER,
 };
 pub use workflow::{
     bind_workflow, builtin_workflow, builtin_workflows, collect_placeholders, evaluate_gate_kind,

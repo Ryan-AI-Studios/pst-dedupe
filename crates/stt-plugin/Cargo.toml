@@ -1,0 +1,37 @@
+[package]
+name = "stt-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "Opt-in local speech-to-text job (whisper.cpp CLI + mock engine) for Dedupe Desk (track 0053)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+matter-core = { path = "../matter-core" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+camino = { workspace = true }
+tempfile = { workspace = true }
+# Decode common audio (WAV/FLAC/OGG+Vorbis/MP3) → 16 kHz mono s16le without ffmpeg.
+# Video / complex containers still use the ffmpeg sidecar when set.
+# Pinned to 0.5.x for the stable SampleBuffer/Probe API used by the pure-Rust prep path.
+symphonia = { version = "0.5", default-features = false, features = [
+    "wav",
+    "flac",
+    "ogg",
+    "vorbis",
+    "mp3",
+    "pcm",
+] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+rusqlite = { workspace = true }
