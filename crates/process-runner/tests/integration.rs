@@ -1686,6 +1686,60 @@ fn sentiment_handler_via_process_runner() {
     assert_eq!(item.sentiment_method.as_deref(), Some("vader_lexicon_v1"));
 }
 
+/// Thin semantic_index handler smoke: mock embed + meta enabled.
+#[cfg(feature = "semantic")]
+#[test]
+fn semantic_index_handler_via_process_runner() {
+    use matter_core::{item_status, ItemInput};
+    use process_runner::MatterSemanticIndexHandler;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-semantic");
+
+    let item_id = {
+        let matter = Matter::open(&root).expect("open");
+        let text = matter
+            .put_bytes(b"fraud investigation bribery scheme confidential documents")
+            .expect("put");
+        matter
+            .insert_item(ItemInput {
+                path: Some("msg.txt".into()),
+                status: item_status::EXTRACTED.into(),
+                text_sha256: Some(text),
+                subject: Some("Investigation".into()),
+                ..Default::default()
+            })
+            .expect("item")
+            .id
+    };
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    runner.register(Arc::new(MatterSemanticIndexHandler::new()));
+
+    let job_id = runner
+        .start(&root, "semantic_index", JobParams::empty())
+        .expect("start semantic_index");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "err={:?}",
+        job.error_summary
+    );
+    assert_eq!(job.kind, "semantic_index");
+
+    let item = matter.get_item(&item_id).expect("item");
+    assert!(item.semantic_embedded_text_sha256.is_some());
+    assert!(item.semantic_chunk_count.unwrap_or(0) >= 1);
+
+    let meta = matter.get_semantic_meta().expect("meta");
+    assert!(meta.semantic_enabled);
+    assert_eq!(meta.semantic_model_id.as_deref(), Some("mock:hash_v1"));
+}
+
 /// people_graph via ProcessRunner + register_default_handlers: job succeeds, people/edges, audit.
 #[cfg(feature = "people")]
 #[test]

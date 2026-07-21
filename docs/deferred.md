@@ -448,7 +448,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0048-01 | — | Embedding / BERTopic-style pipeline | P0 classical TF–IDF only | **0050** |
+| D-0048-01 | — | Embedding / BERTopic-style pipeline | **Partial:** **0050** shipped opt-in semantic *search* (mock embeddings + chunk index). BERTopic-style *clustering* redesign still residual | residual / **0050** search done |
 | D-0048-02 | — | Hierarchical / HDBSCAN soft clusters | Residual | residual |
 | D-0048-03 | — | Multi-set UI + compare sets | Schema multi-set; Desk default set only | residual |
 | D-0048-04 | — | Cluster bubble / treemap viz | Tables-first P0 | residual polish |
@@ -463,7 +463,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0049-01 | — | Transformer / ONNX sentiment | P0 lexicon/rules only | **0050/0051** |
+| D-0049-01 | — | Transformer / ONNX sentiment | P0 lexicon/rules only; **0050** is semantic *search* (not sentiment transformers). Real MiniLM/Candle residual under **D-0050-01** / **0051** | residual / **0051** |
 | D-0049-02 | — | Multilingual lexicons | English P0 | **0054** |
 | D-0049-03 | — | Per-unit score table + highlight UI | Aggregation is unit-based; no per-unit persist | residual |
 | D-0049-04 | — | Aspect-based (entity targets) | Residual | residual |
@@ -474,6 +474,23 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0049-09 | — | Subject prepend as first unit | Optional residual | residual |
 | D-0049-10 | P3 | Wire remaining fixtures via `include_str!` | pos/neg used; hostile still partly inline | residual polish |
 | D-0049-11 | P3 | Formal `cargo deny` in CI for sentiment tree | Manual tree audit in review.md | residual |
+
+## From track 0050-SemanticSearchPlugin (Completed — see conductor review)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0050-01 | — | Full Candle / MiniLM production load | P0 MockEmbedder + fail-closed `semantic-candle` stub; no weights in git | residual / operator |
+| D-0050-02 | — | Cloud / remote embeddings | Forbidden P0 | **0051** |
+| D-0050-03 | — | Hybrid FTS ∩ semantic rank fusion | Keyword and semantic remain separate paths | residual |
+| D-0050-04 | — | Cross-encoder re-ranker | Residual | residual |
+| D-0050-05 | — | HNSW (or ANN) at multi-million scale | P0 exact cosine + pre-filter | residual |
+| D-0050-06 | — | Multilingual embed models | English-centric mock/P0 | **0054** |
+| D-0050-07 | — | GPU acceleration path | CPU-only mock path | residual |
+| D-0050-08 | — | Multi-model UI + namespace GC | Namespaces exist; one active model; no GC UI | residual |
+| D-0050-09 | — | RAG chat + citations | Residual | **0052** |
+| D-0050-10 | — | Embedding-based clustering | Residual vs **0048** | residual |
+| D-0050-11 | — | Packed `vectors.bin` format | P0 JSON per-item files under namespace | residual polish |
+| D-0050-12 | P3 | Formal `cargo deny` in CI for semantic tree | Manual `cargo tree` audit in review.md | residual polish |
 
 ## Hygiene
 

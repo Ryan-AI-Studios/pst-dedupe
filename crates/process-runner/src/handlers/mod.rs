@@ -60,6 +60,9 @@ pub mod concept_cluster;
 #[cfg(feature = "sentiment")]
 pub mod sentiment;
 
+#[cfg(feature = "semantic")]
+pub mod semantic_index;
+
 /// Sequential processing-profile runner (always available; depends only on matter-core).
 pub mod profile_run;
 
@@ -125,6 +128,9 @@ pub use concept_cluster::MatterConceptClusterHandler;
 
 #[cfg(feature = "sentiment")]
 pub use sentiment::MatterSentimentHandler;
+
+#[cfg(feature = "semantic")]
+pub use semantic_index::MatterSemanticIndexHandler;
 
 pub use profile_run::MatterProfileRunHandler;
 pub use workflow_run::MatterWorkflowRunHandler;

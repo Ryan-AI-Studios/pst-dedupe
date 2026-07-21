@@ -70,6 +70,7 @@ rust{
     "matter-entity owns offline entity/PII packs, entity_scan job logic, mask/hash hits"
     "matter-people owns people-comms graph: normalize_participant, people_graph two-pass job, edges/timeline"
     "matter-sentiment owns offline VADER-class sentiment (vader_lexicon_v1), unit-extreme aggregate, sentiment job"
+    "matter-semantic owns local semantic search: Embedder/MockEmbedder, chunk+overlap, model-namespaced store, pre-filter cosine, semantic_index job"
   invariants[2]:
     "features work offline with local model"
     "preserve Windows paths; prefer camino for UTF-8 paths"

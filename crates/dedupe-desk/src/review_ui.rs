@@ -20,11 +20,13 @@
 //! Add/Remove with optional whole-family propagate. Digits 1–9 toggle the first
 //! nine active codes on the current item when the focus gate is clear.
 //!
-//! # Filters (0028) + keyword FTS (0029)
+//! # Filters (0028) + keyword FTS (0029) + semantic (0050)
 //!
 //! Metadata [`FilterSpec`] composes with optional Tantivy keyword via
-//! `compose_keyword_filter`. Keyword / filter text fields steal focus; digit
-//! shortcuts respect `focus().is_none()`.
+//! `compose_keyword_filter`. Semantic search is a **separate** control (local
+//! embeddings, pre-filter → cosine) and never silently replaces keyword results.
+//! Keyword / semantic / filter text fields steal focus; digit shortcuts respect
+//! `focus().is_none()`.
 //!
 //! # Notes / highlights (0030)
 //!
@@ -79,6 +81,9 @@ use crate::review_redaction::{
 
 /// Fixed list row height (sans item spacing) for `ScrollArea::show_rows`.
 pub const ROW_HEIGHT: f32 = 22.0;
+
+/// Default top_n items for Review semantic search (group-before-limit).
+pub const SEMANTIC_TOP_N_ITEMS: usize = 50;
 
 /// Load all thin rows when corpus is at or under this size.
 pub const THIN_LOAD_ALL_THRESHOLD: u64 = 50_000;
@@ -551,6 +556,16 @@ pub struct ReviewState {
     pub keyword_error: Option<String>,
     /// True when index is missing/stale (banner).
     pub index_outdated: bool,
+    /// Draft semantic query box (separate from keyword — track 0050).
+    pub semantic_draft: String,
+    /// Applied semantic query (None / empty = not driving the list).
+    pub applied_semantic: Option<String>,
+    /// Best cosine scores for items in the current semantic result list.
+    pub semantic_scores: HashMap<String, f32>,
+    /// Semantic search / index errors (model mismatch, empty index, etc.).
+    pub semantic_error: Option<String>,
+    /// Eligible-set size from last semantic search (pre-filter).
+    pub semantic_eligible_count: Option<usize>,
     /// Saved searches for the open matter.
     saved_searches: Vec<SavedSearch>,
     /// Filter validation / save errors.
@@ -712,6 +727,11 @@ impl ReviewState {
         self.keyword_hit_count = None;
         self.keyword_error = None;
         self.index_outdated = false;
+        self.semantic_draft.clear();
+        self.applied_semantic = None;
+        self.semantic_scores.clear();
+        self.semantic_error = None;
+        self.semantic_eligible_count = None;
         self.saved_searches.clear();
         self.filter_error = None;
         self.filter_status = None;
@@ -826,12 +846,64 @@ impl ReviewState {
         // item_id would show permanent "Loading…" because spawn only runs on Idle.
         self.body.clear();
         self.selection_detail = None;
+        let sem = self
+            .applied_semantic
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let semantic_active = sem.is_some();
         let kw = self
             .applied_keyword
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
         let keyword_active = kw.is_some();
+
+        // Semantic list path is exclusive of keyword (separate control; no silent
+        // replacement of keyword results when keyword is the applied driver).
+        if let Some(q) = sem {
+            let spec = self.applied_filter.clone().unwrap_or_default();
+            match load_review_semantic(matter_root, q, &spec, SEMANTIC_TOP_N_ITEMS) {
+                Ok(loaded) => {
+                    self.count = loaded.count;
+                    self.rows = loaded.rows;
+                    self.semantic_scores = loaded.scores;
+                    self.semantic_eligible_count = Some(loaded.eligible_count);
+                    self.keyword_hit_count = None;
+                    self.index_outdated = false;
+                    self.semantic_error = if loaded.eligible_truncated {
+                        Some(
+                            "Eligible set was truncated by safety cap — narrow filters if needed."
+                                .into(),
+                        )
+                    } else {
+                        None
+                    };
+                    self.finish_list_load(matter_root);
+                }
+                Err(e) => {
+                    self.semantic_error = Some(e.clone());
+                    self.semantic_scores.clear();
+                    self.semantic_eligible_count = None;
+                    // Keep previous rows when possible so Clear stays usable.
+                    if self.rows.is_empty() {
+                        self.list_error = Some(e);
+                        self.count = 0;
+                        self.selection = None;
+                    } else {
+                        self.filter_error = Some(format!("Semantic search: {e}"));
+                    }
+                    self.loaded_root = Some(matter_root.to_owned());
+                    self.visible_row_range = 0..0;
+                }
+            }
+            return;
+        }
+
+        // Clearing semantic scores when not on semantic path.
+        self.semantic_scores.clear();
+        self.semantic_eligible_count = None;
+
         let load = if keyword_active || self.filter_active {
             let spec = self.applied_filter.clone().unwrap_or_default();
             // When only keyword is active, still use FilterSpec default (review_corpus).
@@ -845,28 +917,7 @@ impl ReviewState {
                 self.rows = rows;
                 self.keyword_hit_count = fts_hits;
                 self.index_outdated = false;
-                self.loaded_root = Some(matter_root.to_owned());
-                // Viewport unknown until next paint; fallback window used for first load.
-                self.visible_row_range = 0..0;
-                // Drop multi-select ids that are no longer present.
-                let present: HashSet<String> = self.rows.iter().map(|r| r.id.clone()).collect();
-                self.multi_selected.retain(|id| present.contains(id));
-                // Restore selection by id if possible.
-                let sel = if let Some(ref id) = self.last_item_id {
-                    self.rows.iter().position(|r| &r.id == id)
-                } else {
-                    None
-                };
-                self.selection = sel.or(if self.rows.is_empty() { None } else { Some(0) });
-                if let Some(i) = self.selection {
-                    if let Some(row) = self.rows.get(i) {
-                        self.last_item_id = Some(row.id.clone());
-                    }
-                    self.load_selection_detail(matter_root);
-                }
-                self.reload_coding_catalog(matter_root);
-                self.refresh_row_codes(matter_root);
-                self.reload_saved_searches(matter_root);
+                self.finish_list_load(matter_root);
             }
             Err(e) => {
                 let el = e.to_ascii_lowercase();
@@ -876,7 +927,7 @@ impl ReviewState {
                 }
                 // Filter/keyword load failures: surface so Clear stays usable.
                 // Keep previous rows when possible so the list is not blanked on a bad Apply.
-                if self.filter_active || keyword_active {
+                if self.filter_active || keyword_active || semantic_active {
                     self.filter_error = Some(format!("List load: {e}"));
                     if self.rows.is_empty() {
                         self.list_error = Some(e);
@@ -897,26 +948,89 @@ impl ReviewState {
         }
     }
 
+    /// Shared post-success list load bookkeeping.
+    fn finish_list_load(&mut self, matter_root: &Utf8Path) {
+        self.loaded_root = Some(matter_root.to_owned());
+        // Viewport unknown until next paint; fallback window used for first load.
+        self.visible_row_range = 0..0;
+        // Drop multi-select ids that are no longer present.
+        let present: HashSet<String> = self.rows.iter().map(|r| r.id.clone()).collect();
+        self.multi_selected.retain(|id| present.contains(id));
+        // Restore selection by id if possible.
+        let sel = if let Some(ref id) = self.last_item_id {
+            self.rows.iter().position(|r| &r.id == id)
+        } else {
+            None
+        };
+        self.selection = sel.or(if self.rows.is_empty() { None } else { Some(0) });
+        if let Some(i) = self.selection {
+            if let Some(row) = self.rows.get(i) {
+                self.last_item_id = Some(row.id.clone());
+            }
+            self.load_selection_detail(matter_root);
+        }
+        self.reload_coding_catalog(matter_root);
+        self.refresh_row_codes(matter_root);
+        self.reload_saved_searches(matter_root);
+    }
+
     /// Apply keyword draft and reload (Enter / Search button).
+    ///
+    /// Clears applied semantic so keyword FTS remains the explicit list driver
+    /// (semantic box stays visible with its draft).
     pub fn apply_keyword(&mut self, matter_root: &Utf8Path) {
         let kw = self.keyword_draft.trim().to_string();
         if kw.is_empty() {
             self.clear_keyword(matter_root);
             return;
         }
+        self.applied_semantic = None;
+        self.semantic_scores.clear();
+        self.semantic_error = None;
+        self.semantic_eligible_count = None;
         self.applied_keyword = Some(kw);
         self.keyword_error = None;
         self.needs_reload = true;
         self.ensure_loaded(matter_root);
     }
 
-    /// Clear keyword; restore metadata-only (or unfiltered corpus).
+    /// Clear keyword; restore metadata-only (or unfiltered corpus / semantic).
     pub fn clear_keyword(&mut self, matter_root: &Utf8Path) {
         self.keyword_draft.clear();
         self.applied_keyword = None;
         self.keyword_hit_count = None;
         self.keyword_error = None;
         self.index_outdated = false;
+        self.needs_reload = true;
+        self.ensure_loaded(matter_root);
+    }
+
+    /// Apply semantic draft and reload (Enter / Search button).
+    ///
+    /// Pre-filters current FilterSpec then ranks by cosine similarity.
+    /// Clears applied keyword so results are not a silent FTS replacement.
+    pub fn apply_semantic(&mut self, matter_root: &Utf8Path) {
+        let q = self.semantic_draft.trim().to_string();
+        if q.is_empty() {
+            self.clear_semantic(matter_root);
+            return;
+        }
+        self.applied_keyword = None;
+        self.keyword_hit_count = None;
+        self.keyword_error = None;
+        self.applied_semantic = Some(q);
+        self.semantic_error = None;
+        self.needs_reload = true;
+        self.ensure_loaded(matter_root);
+    }
+
+    /// Clear semantic query; restore keyword/metadata/corpus path.
+    pub fn clear_semantic(&mut self, matter_root: &Utf8Path) {
+        self.semantic_draft.clear();
+        self.applied_semantic = None;
+        self.semantic_scores.clear();
+        self.semantic_error = None;
+        self.semantic_eligible_count = None;
         self.needs_reload = true;
         self.ensure_loaded(matter_root);
     }
@@ -978,6 +1092,15 @@ impl ReviewState {
     /// Load more rows when count exceeds loaded (filtered or large corpus).
     pub fn load_more(&mut self, matter_root: &Utf8Path) {
         if (self.rows.len() as u64) >= self.count {
+            return;
+        }
+        // Semantic results are already capped to top_n items — no paging.
+        if self
+            .applied_semantic
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty())
+        {
             return;
         }
         let offset = self.rows.len() as u64;
@@ -2392,6 +2515,99 @@ pub fn load_review_filtered(
     Ok((count, rows, has_more))
 }
 
+/// Result of [`load_review_semantic`].
+struct SemanticListLoad {
+    count: u64,
+    rows: Vec<ReviewListRow>,
+    scores: HashMap<String, f32>,
+    eligible_count: usize,
+    eligible_truncated: bool,
+}
+
+/// Load list via local semantic search (0050).
+///
+/// **Pre-filter** `spec` → cosine on eligible only → group-before-limit → top_n
+/// items ordered by best chunk score.
+fn load_review_semantic(
+    matter_root: &Utf8Path,
+    query: &str,
+    spec: &FilterSpec,
+    top_n: usize,
+) -> Result<SemanticListLoad, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(SemanticListLoad {
+            count: 0,
+            rows: Vec::new(),
+            scores: HashMap::new(),
+            eligible_count: 0,
+            eligible_truncated: false,
+        });
+    }
+
+    let matter = Matter::open_for_read(matter_root).map_err(|e| e.to_string())?;
+    let meta = matter.get_semantic_meta().map_err(|e| e.to_string())?;
+    if !meta.semantic_enabled || meta.semantic_dims.is_none() {
+        return Err(
+            "semantic index not built — run job kind semantic_index first (Workspace or Review)"
+                .into(),
+        );
+    }
+    let model_id = meta.semantic_model_id.as_deref().ok_or_else(|| {
+        "semantic index not built — run job kind semantic_index first (Workspace or Review)"
+            .to_string()
+    })?;
+    let embedder = matter_semantic::embedder_for_model_id(model_id).map_err(|e| e.to_string())?;
+
+    let sq = matter_semantic::SemanticQuery {
+        text: q.to_string(),
+        top_n_items: top_n.max(1),
+        min_score: None,
+    };
+    let result =
+        matter_semantic::search_semantic(&matter, matter_root, &sq, spec, embedder.as_ref())
+            .map_err(|e| e.to_string())?;
+
+    let eligible_count = result.eligible_count;
+    let eligible_truncated = result.eligible_truncated;
+    if result.hits.is_empty() {
+        return Ok(SemanticListLoad {
+            count: 0,
+            rows: Vec::new(),
+            scores: HashMap::new(),
+            eligible_count,
+            eligible_truncated,
+        });
+    }
+
+    let ids: Vec<String> = result.hits.iter().map(|h| h.item_id.clone()).collect();
+    let scores: HashMap<String, f32> = result
+        .hits
+        .iter()
+        .map(|h| (h.item_id.clone(), h.score))
+        .collect();
+
+    // Hits are already pre-filtered; load thin rows for those ids and restore score order.
+    let mut rows = matter
+        .list_items_filtered_thin_in_ids(spec, &ids, ids.len() as u64, 0)
+        .map_err(|e| e.to_string())?;
+    let order: HashMap<&str, usize> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
+    rows.sort_by_key(|r| order.get(r.id.as_str()).copied().unwrap_or(usize::MAX));
+
+    let count = rows.len() as u64;
+    Ok(SemanticListLoad {
+        count,
+        rows,
+        scores,
+        eligible_count,
+        eligible_truncated,
+    })
+}
+
 /// Load list composing optional keyword FTS with metadata filter.
 ///
 /// Returns `(count, rows, has_more, fts_hit_count_approx)`.
@@ -2699,20 +2915,30 @@ pub enum FtsUiRequest {
     RebuildIndex,
 }
 
+/// Operator request from the Review semantic bar (`semantic_index` jobs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticUiRequest {
+    /// Incremental build/update (`reset: false`).
+    UpdateIndex,
+    /// Full rebuild (`reset: true`).
+    RebuildIndex,
+}
+
 /// Paint the Review screen.
 ///
-/// When the operator clicks index buttons, `fts_request` is set for the app to
-/// start `fts_index` on the process-runner worker.
+/// When the operator clicks index buttons, `fts_request` / `semantic_request`
+/// are set for the app to start jobs on the process-runner worker.
 ///
-/// `index_job_busy`: when true (runner writing / FTS rebuild), skip Tantivy
+/// `index_job_busy`: when true (runner writing / index rebuild), skip index
 /// open on the UI thread and disable Search / Update / Rebuild to avoid
-/// Windows mmap races with `remove_dir_all(index/)`.
+/// Windows races with index wipe.
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut ReviewState,
     matter_root: &Utf8Path,
     actor: &str,
     fts_request: &mut Option<FtsUiRequest>,
+    semantic_request: &mut Option<SemanticUiRequest>,
     index_job_busy: bool,
 ) {
     let ctx = ui.ctx().clone();
@@ -2738,7 +2964,16 @@ pub fn show(
             .as_deref()
             .map(str::trim)
             .is_some_and(|s| !s.is_empty());
-        if kw_on && state.filter_active {
+        let sem_on = state
+            .applied_semantic
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty());
+        if sem_on && state.filter_active {
+            ui.label("— Semantic + metadata filter");
+        } else if sem_on {
+            ui.label("— Semantic search");
+        } else if kw_on && state.filter_active {
             ui.label("— Keyword + metadata filter");
         } else if kw_on {
             ui.label("— Keyword search");
@@ -2782,8 +3017,10 @@ pub fn show(
     }
     ui.add_space(4.0);
 
-    // Keyword + filter bar always available — including when list_error is set.
+    // Keyword + semantic + filter bars always available — including when list_error is set.
     show_keyword_bar(ui, state, matter_root, fts_request, index_job_busy);
+    ui.add_space(2.0);
+    show_semantic_bar(ui, state, matter_root, semantic_request, index_job_busy);
     ui.add_space(2.0);
     show_filter_bar(ui, state, matter_root, actor);
     ui.add_space(4.0);
@@ -2975,7 +3212,8 @@ pub fn show(
                                 let selected = state.selection == Some(row_idx);
                                 let checked = state.multi_selected.contains(&row.id);
                                 let code_snip = format_code_snip(state.codes_for(&row.id));
-                                let label = format_list_row(&row, &code_snip);
+                                let score = state.semantic_scores.get(&row.id).copied();
+                                let label = format_list_row(&row, &code_snip, score);
                                 let indent = if row.parent_item_id.is_some() {
                                     14.0
                                 } else {
@@ -3161,6 +3399,105 @@ fn show_keyword_bar(
         if let Some(err) = state.keyword_error.clone() {
             ui.colored_label(Color32::from_rgb(200, 60, 60), format!("Keyword: {err}"));
         }
+    });
+}
+
+/// Semantic search bar (0050) — separate from keyword; local embeddings only.
+fn show_semantic_bar(
+    ui: &mut egui::Ui,
+    state: &mut ReviewState,
+    matter_root: &Utf8Path,
+    semantic_request: &mut Option<SemanticUiRequest>,
+    index_job_busy: bool,
+) {
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Semantic").strong());
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut state.semantic_draft)
+                    .desired_width(280.0)
+                    .hint_text("Meaning / paraphrase…"),
+            );
+            if !index_job_busy && resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                state.apply_semantic(matter_root);
+            }
+            if ui
+                .add_enabled(!index_job_busy, egui::Button::new("Apply"))
+                .on_hover_text(if index_job_busy {
+                    "Wait for the index job to finish"
+                } else {
+                    "Semantic search over current metadata filter (pre-filter → cosine)"
+                })
+                .clicked()
+            {
+                state.apply_semantic(matter_root);
+            }
+            if ui
+                .add_enabled(!index_job_busy, egui::Button::new("Clear semantic"))
+                .clicked()
+            {
+                state.clear_semantic(matter_root);
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    !index_job_busy,
+                    egui::Button::new("Build semantic index").small(),
+                )
+                .on_hover_text("Incremental semantic_index (reset:false); default mock:hash_v1")
+                .clicked()
+            {
+                *semantic_request = Some(SemanticUiRequest::UpdateIndex);
+            }
+            if ui
+                .add_enabled(
+                    !index_job_busy,
+                    egui::Button::new("Rebuild semantic").small(),
+                )
+                .on_hover_text("Full rebuild: wipe active model namespace (reset:true)")
+                .clicked()
+            {
+                *semantic_request = Some(SemanticUiRequest::RebuildIndex);
+            }
+        });
+        if index_job_busy {
+            ui.label(
+                RichText::new("Index job running — semantic search paused until complete.")
+                    .small()
+                    .color(Color32::from_rgb(180, 100, 20)),
+            );
+        }
+
+        if state
+            .applied_semantic
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty())
+        {
+            let eligible = state
+                .semantic_eligible_count
+                .map(|n| format!(" · {n} eligible"))
+                .unwrap_or_default();
+            ui.label(
+                RichText::new(format!(
+                    "{} semantic hits (score-ordered){eligible}",
+                    state.count
+                ))
+                .small()
+                .color(Color32::from_rgb(80, 60, 140)),
+            );
+        }
+
+        if let Some(err) = state.semantic_error.clone() {
+            ui.colored_label(Color32::from_rgb(200, 60, 60), format!("Semantic: {err}"));
+        }
+        ui.label(
+            RichText::new(
+                "Additive meaning search — not Boolean keyword precision. Requires semantic_index.",
+            )
+            .weak()
+            .small(),
+        );
     });
 }
 
@@ -3503,7 +3840,7 @@ fn format_code_snip(codes: &[ItemCodeInfo]) -> String {
     s
 }
 
-fn format_list_row(row: &ReviewListRow, code_snip: &str) -> String {
+fn format_list_row(row: &ReviewListRow, code_snip: &str, semantic_score: Option<f32>) -> String {
     let subj = row
         .subject
         .as_deref()
@@ -3523,6 +3860,9 @@ fn format_list_row(row: &ReviewListRow, code_snip: &str) -> String {
     };
     // Single-line; painter/text will clip visually; keep string short.
     let mut s = format!("{prefix}{subj}");
+    if let Some(score) = semantic_score {
+        s.push_str(&format!("  ·  {score:.2}"));
+    }
     if !from.is_empty() {
         s.push_str("  ·  ");
         s.push_str(from);

@@ -58,6 +58,8 @@ pub fn register_default_handlers(runner: &mut ProcessRunner) {
     runner.register(Arc::new(MatterConceptClusterHandler::new()));
     #[cfg(feature = "sentiment")]
     runner.register(Arc::new(MatterSentimentHandler::new()));
+    #[cfg(feature = "semantic")]
+    runner.register(Arc::new(MatterSemanticIndexHandler::new()));
 
     // Always available (matter-core only).
     runner.register(Arc::new(MatterProfileRunHandler::with_default_handlers()));
@@ -90,6 +92,7 @@ pub fn default_handler_kinds() -> &'static [&'static str] {
         "people_graph",
         "concept_cluster",
         "sentiment",
+        "semantic_index",
         "profile_run",
         "workflow_run",
     ]
@@ -113,5 +116,6 @@ mod tests {
         assert!(default_handler_kinds().contains(&"people_graph"));
         assert!(default_handler_kinds().contains(&"concept_cluster"));
         assert!(default_handler_kinds().contains(&"sentiment"));
+        assert!(default_handler_kinds().contains(&"semantic_index"));
     }
 }

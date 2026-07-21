@@ -326,6 +326,40 @@ pub fn sentiment_default_params() -> String {
     .to_string()
 }
 
+/// Default params for semantic index build/update (`kind = "semantic_index"`, incremental).
+///
+/// Opt-in job — local embeddings only (default `mock:hash_v1`); not keyword FTS.
+pub fn semantic_index_default_params() -> String {
+    serde_json::json!({
+        "model_id": "mock:hash_v1",
+        "chunk_chars": 800,
+        "chunk_overlap": 120,
+        "max_chunks_per_item": 48,
+        "max_text_bytes": 200_000,
+        "max_docs": 50_000,
+        "reset": false,
+        "batch_size": 16,
+        "scope": "all"
+    })
+    .to_string()
+}
+
+/// Params for full semantic index rebuild (`reset: true`) — wipe active model namespace.
+pub fn semantic_index_reset_params() -> String {
+    serde_json::json!({
+        "model_id": "mock:hash_v1",
+        "chunk_chars": 800,
+        "chunk_overlap": 120,
+        "max_chunks_per_item": 48,
+        "max_text_bytes": 200_000,
+        "max_docs": 50_000,
+        "reset": true,
+        "batch_size": 16,
+        "scope": "all"
+    })
+    .to_string()
+}
+
 /// Default params for people–comms graph (`kind = "people_graph"`).
 ///
 /// Opt-in job — headers primary. `include_entity_emails` must stay `false`
@@ -707,6 +741,27 @@ mod tests {
         let rv: serde_json::Value = serde_json::from_str(&r).unwrap();
         assert_eq!(rv["reset"], true);
         assert_eq!(rv["scope"], "all_with_text");
+    }
+
+    #[test]
+    fn semantic_index_params_shapes() {
+        let j = semantic_index_default_params();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["model_id"], "mock:hash_v1");
+        assert_eq!(v["chunk_chars"], 800);
+        assert_eq!(v["chunk_overlap"], 120);
+        assert_eq!(v["max_chunks_per_item"], 48);
+        assert_eq!(v["max_text_bytes"], 200_000);
+        assert_eq!(v["max_docs"], 50_000);
+        assert_eq!(v["reset"], false);
+        assert_eq!(v["batch_size"], 16);
+        assert_eq!(v["scope"], "all");
+
+        let r = semantic_index_reset_params();
+        let rv: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(rv["reset"], true);
+        assert_eq!(rv["model_id"], "mock:hash_v1");
+        assert_eq!(rv["scope"], "all");
     }
 
     #[test]

@@ -7,6 +7,11 @@ corpus (tracks **0020**–**0029**).
 Keyword FTS (0029): Review keyword box composes with metadata filters; Workspace
 has **Build / Update search index** and **Rebuild search index** (`fts_index`).
 
+Semantic search (0050): **separate** Review **Semantic** bar (never replaces keyword).
+Workspace **Build semantic index** / **Rebuild semantic index** (`semantic_index`).
+Default embedder `mock:hash_v1` (no weights). Settings checkbox dual-writes
+`matters.semantic_enabled`. Pre-filter FilterSpec → cosine → score-ordered list.
+
 Office extract (0033): Workspace **Extract Office text** runs `office_extract`.
 PDF extract (0034): Workspace **Extract PDF text** runs `pdf_extract`; Review shows
 Needs OCR banner when `pdf_needs_ocr=1` (empty/low-text).
