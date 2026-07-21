@@ -1107,6 +1107,90 @@ impl DeskApp {
         }
     }
 
+    /// Incremental semantic index build/update (`semantic_index`, `reset: false`).
+    pub(crate) fn start_semantic_index(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        let params = JobParams::new(params::semantic_index_default_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "semantic_index", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started semantic_index job {job_id}"));
+                self.error_msg = None;
+                self.review.semantic_error = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Full semantic index rebuild (`reset: true`).
+    pub(crate) fn start_semantic_rebuild(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        self.review.semantic_error = None;
+        let params = JobParams::new(params::semantic_index_reset_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "semantic_index", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!(
+                    "Started semantic_index rebuild job {job_id} (reset:true)"
+                ));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Dual-write desk `semantic_enabled` preference to open matter meta when possible.
+    pub(crate) fn dual_write_semantic_enabled(&mut self, enabled: bool) {
+        self.settings.semantic_enabled = enabled;
+        self.settings.save();
+        let Some(root) = self.matter_root.as_ref() else {
+            return;
+        };
+        match matter_core::Matter::open(root.as_path()) {
+            Ok(matter) => {
+                let meta = match matter.get_semantic_meta() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        self.error_msg =
+                            Some(format!("Could not read semantic meta for dual-write: {e}"));
+                        return;
+                    }
+                };
+                if let Err(e) =
+                    matter.update_semantic_matter_meta(matter_core::UpdateSemanticMatterMetaInput {
+                        enabled,
+                        model_id: meta.semantic_model_id.as_deref(),
+                        dims: meta.semantic_dims,
+                        chunk_params_json: meta.semantic_chunk_params_json.as_deref(),
+                        fingerprint: meta.semantic_fingerprint.as_deref(),
+                        built_at: meta.semantic_built_at.as_deref(),
+                        job_id: meta.semantic_job_id.as_deref(),
+                        chunk_count: meta.semantic_chunk_count,
+                    })
+                {
+                    self.error_msg = Some(format!("Could not update matter semantic_enabled: {e}"));
+                }
+            }
+            Err(e) => {
+                self.error_msg = Some(format!(
+                    "Could not open matter for semantic dual-write: {e}"
+                ));
+            }
+        }
+    }
+
     /// Offline people–comms graph build (`people_graph`).
     pub(crate) fn start_people_graph(&mut self) {
         let Some(root) = self.matter_root.clone() else {
@@ -1717,6 +1801,26 @@ impl DeskApp {
         );
 
         ui.add_space(8.0);
+        ui.heading("Local semantic search (optional)");
+        let mut semantic_on = self.settings.semantic_enabled;
+        let sem_resp = ui.checkbox(
+            &mut semantic_on,
+            "Enable semantic search (local embeddings)",
+        );
+        if sem_resp.changed() {
+            self.dual_write_semantic_enabled(semantic_on);
+        }
+        ui.label(
+            egui::RichText::new(
+                "Off by default. Additive to keyword FTS — not a replacement. \
+                 Default embedder is mock:hash_v1 (no model weights). \
+                 Run Build semantic index from Workspace or Review before searching.",
+            )
+            .weak()
+            .small(),
+        );
+
+        ui.add_space(8.0);
         ui.heading("Local OCR (optional)");
         let ocr_resp = ui.checkbox(
             &mut self.settings.ocr_enabled,
@@ -1941,6 +2045,7 @@ impl eframe::App for DeskApp {
                 if let Some(root) = self.matter_root.clone() {
                     let actor = self.settings.actor().to_string();
                     let mut fts_req = None;
+                    let mut semantic_req = None;
                     let index_job_busy = self.job_may_be_writing();
                     review_ui::show(
                         ui,
@@ -1948,11 +2053,21 @@ impl eframe::App for DeskApp {
                         &root,
                         &actor,
                         &mut fts_req,
+                        &mut semantic_req,
                         index_job_busy,
                     );
                     match fts_req {
                         Some(review_ui::FtsUiRequest::UpdateIndex) => self.start_fts_index(),
                         Some(review_ui::FtsUiRequest::RebuildIndex) => self.start_fts_rebuild(),
+                        None => {}
+                    }
+                    match semantic_req {
+                        Some(review_ui::SemanticUiRequest::UpdateIndex) => {
+                            self.start_semantic_index()
+                        }
+                        Some(review_ui::SemanticUiRequest::RebuildIndex) => {
+                            self.start_semantic_rebuild()
+                        }
                         None => {}
                     }
                 } else {

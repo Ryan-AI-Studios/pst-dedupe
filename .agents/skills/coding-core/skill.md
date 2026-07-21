@@ -17,6 +17,7 @@ description: Use when writing, modifying, or reviewing Rust code in pst-dedupe, 
 | `matter-core` | Matter layout, SQLite metadata, physical CAS (`put_bytes`/`put_reader`), audit chain, jobs/checkpoints, `workspace/temp/`. No ZIP/PST I/O. |
 | `ingest-purview` | Package detect + safe ZIP expand into matter. Blocking-worker API only; no PST message extract. |
 | `extract-pst` | PST → Normalized Items + logical_hash. Blocking-worker API only; native = pst-native-message-v1 (not EML). |
+| `matter-semantic` | Local semantic search: Embedder/MockEmbedder, chunk+overlap, model-namespaced vectors, pre-filter cosine, `semantic_index` job. |
 
 ## Rust Standards
 

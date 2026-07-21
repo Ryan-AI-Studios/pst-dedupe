@@ -6,7 +6,7 @@ description = "In-process matter job runner: single worker thread, cancel, watch
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["ingest", "extract_pst", "dedupe", "thread", "neardup", "cull", "promote", "produce", "qc", "gap", "fts", "office", "pdf", "calendar", "ocr", "classify", "entity", "people", "cluster", "sentiment"]
+default = ["ingest", "extract_pst", "dedupe", "thread", "neardup", "cull", "promote", "produce", "qc", "gap", "fts", "office", "pdf", "calendar", "ocr", "classify", "entity", "people", "cluster", "sentiment", "semantic"]
 ingest = ["dep:ingest-purview"]
 extract_pst = ["dep:extract-pst"]
 dedupe = ["dep:matter-dedupe"]
@@ -27,6 +27,7 @@ entity = ["dep:matter-entity"]
 people = ["dep:matter-people"]
 cluster = ["dep:matter-cluster"]
 sentiment = ["dep:matter-sentiment"]
+semantic = ["dep:matter-semantic"]
 # Alias for feature name in docs / CI.
 ics = ["calendar"]
 
@@ -57,6 +58,7 @@ matter-entity = { path = "../matter-entity", optional = true }
 matter-people = { path = "../matter-people", optional = true }
 matter-cluster = { path = "../matter-cluster", optional = true }
 matter-sentiment = { path = "../matter-sentiment", optional = true }
+matter-semantic = { path = "../matter-semantic", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

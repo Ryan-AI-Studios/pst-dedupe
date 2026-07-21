@@ -1,0 +1,22 @@
+[package]
+name = "matter-semantic"
+version = "0.1.0"
+edition = "2021"
+description = "Offline local semantic search: embeddings, chunk index, pre-filter cosine (track 0050)"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+# Optional pure-Rust Candle backend (fail-closed without weights). Heavy deps.
+semantic-candle = []
+
+[dependencies]
+matter-core = { path = "../matter-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+camino = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

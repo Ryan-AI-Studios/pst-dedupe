@@ -323,6 +323,12 @@ pub struct Item {
     pub sentiment_scanned_text_sha256: Option<String>,
     pub sentiment_scanned_at: Option<String>,
     pub sentiment_job_id: Option<String>,
+    // --- schema v29 (semantic search) ---
+    /// Body `text_sha256` last successfully embedded for the active semantic model.
+    pub semantic_embedded_text_sha256: Option<String>,
+    pub semantic_embedded_at: Option<String>,
+    /// Number of chunks written for this item under the active model (NULL = never).
+    pub semantic_chunk_count: Option<i64>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -4867,7 +4873,8 @@ const ITEM_COLUMNS: &str =
     sentiment_compound, sentiment_compound_min, sentiment_compound_max, \
     sentiment_pos, sentiment_neu, sentiment_neg, sentiment_polarity, sentiment_method, \
     sentiment_pos_threshold, sentiment_neg_threshold, sentiment_scanned_text_sha256, \
-    sentiment_scanned_at, sentiment_job_id";
+    sentiment_scanned_at, sentiment_job_id, \
+    semantic_embedded_text_sha256, semantic_embedded_at, semantic_chunk_count";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -5009,6 +5016,9 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         sentiment_scanned_text_sha256: row.get(131)?,
         sentiment_scanned_at: row.get(132)?,
         sentiment_job_id: row.get(133)?,
+        semantic_embedded_text_sha256: row.get(134)?,
+        semantic_embedded_at: row.get(135)?,
+        semantic_chunk_count: row.get(136)?,
     })
 }
 

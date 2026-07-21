@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v28**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v29**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -37,6 +37,7 @@
 //! - **People–comms graph** (`people`, `item_participants`, `people_edges`, `people_timeline`, schema v26) (0047)
 //! - **Concept clustering** (`concept_cluster_sets` / `concept_clusters` / `item_concept_membership`, schema v27) (0048)
 //! - **Sentiment / tone** (`sentiment_*` item columns, schema v28) (0049)
+//! - **Semantic search bookkeeping** (`semantic_*` matter/item columns + `semantic_chunks`, schema v29) (0050)
 //!
 //! ## Layout
 //!
@@ -45,6 +46,7 @@
 //!   matter.db
 //!   blobs/sha256/<aa>/<fullhex>   # CAS (two-hex shard)
 //!   index/                        # Tantivy FTS (matter-search; segments on disk)
+//!   semantic/{model_id}/          # local embedding vectors (matter-semantic; not git)
 //!   exports/                      # reserved (production)
 //!   logs/                         # optional file logs
 //!   workspace/temp/               # extractor spill (cleaned on open/create)
@@ -85,6 +87,7 @@ pub mod qc;
 pub mod redaction;
 pub mod report;
 pub mod schema;
+pub mod semantic;
 pub mod sentiment;
 pub mod thread_headers;
 pub mod workflow;
@@ -184,6 +187,10 @@ pub use report::{
     MatterReportParams, MatterReportResult, MATTER_REPORT_FORMAT_VERSION,
 };
 pub use schema::SCHEMA_VERSION;
+pub use semantic::{
+    SemanticCandidate, SemanticChunkRow, SemanticMatterMeta, UpdateSemanticMatterMetaInput,
+    UpsertSemanticChunkInput, WriteItemSemanticInput,
+};
 pub use sentiment::{
     sentiment_polarity, ClearItemSentimentInput, RelabelItemSentimentInput, SentimentCandidate,
     WriteItemSentimentInput,

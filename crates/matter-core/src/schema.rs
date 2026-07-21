@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 28;
+pub const SCHEMA_VERSION: u32 = 29;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -42,6 +42,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (26, MIGRATION_V26),
     (27, MIGRATION_V27),
     (28, MIGRATION_V28),
+    (29, MIGRATION_V29),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -968,6 +969,42 @@ CREATE INDEX idx_items_sentiment_polarity
   ON items(sentiment_polarity) WHERE sentiment_polarity IS NOT NULL;
 CREATE INDEX idx_items_sentiment_compound
   ON items(sentiment_compound) WHERE sentiment_compound IS NOT NULL;
+"#;
+
+/// Semantic search bookkeeping (track 0050).
+///
+/// Matter-level active model / fingerprint meta + per-item embed digests +
+/// optional `semantic_chunks` catalog. Vectors live on disk under
+/// `{matter}/semantic/{model_id}/` (not in SQLite).
+const MIGRATION_V29: &str = r#"
+ALTER TABLE matters ADD COLUMN semantic_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE matters ADD COLUMN semantic_model_id TEXT;
+ALTER TABLE matters ADD COLUMN semantic_dims INTEGER;
+ALTER TABLE matters ADD COLUMN semantic_chunk_params_json TEXT;
+ALTER TABLE matters ADD COLUMN semantic_fingerprint TEXT;
+ALTER TABLE matters ADD COLUMN semantic_built_at TEXT;
+ALTER TABLE matters ADD COLUMN semantic_job_id TEXT;
+ALTER TABLE matters ADD COLUMN semantic_chunk_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE items ADD COLUMN semantic_embedded_text_sha256 TEXT;
+ALTER TABLE items ADD COLUMN semantic_embedded_at TEXT;
+ALTER TABLE items ADD COLUMN semantic_chunk_count INTEGER;
+
+CREATE TABLE semantic_chunks (
+  id TEXT PRIMARY KEY NOT NULL,
+  matter_id TEXT NOT NULL,
+  item_id TEXT NOT NULL REFERENCES items(id),
+  ordinal INTEGER NOT NULL,
+  start_offset INTEGER,
+  end_offset INTEGER,
+  text_sha256 TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  UNIQUE (item_id, ordinal, model_id)
+);
+CREATE INDEX idx_semantic_chunks_item ON semantic_chunks(item_id);
+CREATE INDEX idx_semantic_chunks_matter_model ON semantic_chunks(matter_id, model_id);
+CREATE INDEX idx_items_semantic_embedded
+  ON items(semantic_embedded_text_sha256) WHERE semantic_embedded_text_sha256 IS NOT NULL;
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -3535,7 +3572,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v23 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 28);
+        assert_eq!(v, SCHEMA_VERSION);
 
         let has_table: bool = conn
             .query_row(
@@ -3656,7 +3693,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v24 to v25");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 28);
+        assert_eq!(v, SCHEMA_VERSION);
 
         for col in [
             "entity_flags",
@@ -3791,7 +3828,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v25 onward");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 28);
+        assert_eq!(v, SCHEMA_VERSION);
 
         for col in [
             "people_graph_built_at",
@@ -3948,7 +3985,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v26 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 28);
+        assert_eq!(v, SCHEMA_VERSION);
 
         for table in [
             "concept_cluster_sets",
@@ -4082,9 +4119,9 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v27 to v28");
+        let v = migrate(&conn).expect("migrate v27 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 28);
+        assert_eq!(v, 29);
 
         for col in [
             "sentiment_compound",
@@ -4142,6 +4179,142 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v27'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v28_to_v29_adds_semantic_columns() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        for &(target, sql) in MIGRATIONS {
+            if target > 28 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v28', 'V28 Matter', '2020-01-01T00:00:00Z', 28, '/tmp/v28')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, status, imported_at) \
+             VALUES ('it_v28', 'mat_v28', 'extracted', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v28 to v29");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 29);
+
+        for col in [
+            "semantic_enabled",
+            "semantic_model_id",
+            "semantic_dims",
+            "semantic_chunk_params_json",
+            "semantic_fingerprint",
+            "semantic_built_at",
+            "semantic_job_id",
+            "semantic_chunk_count",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('matters') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected matters.{col}");
+        }
+
+        for col in [
+            "semantic_embedded_text_sha256",
+            "semantic_embedded_at",
+            "semantic_chunk_count",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected items.{col}");
+        }
+
+        let has_table: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='semantic_chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table");
+        assert!(has_table, "expected semantic_chunks table");
+
+        for idx in [
+            "idx_semantic_chunks_item",
+            "idx_semantic_chunks_matter_model",
+            "idx_items_semantic_embedded",
+        ] {
+            let has_idx: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='{idx}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("idx");
+            assert!(has_idx, "expected {idx}");
+        }
+
+        let enabled: i64 = conn
+            .query_row(
+                "SELECT semantic_enabled FROM matters WHERE id = 'mat_v28'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("enabled");
+        assert_eq!(enabled, 0);
+
+        let chunk_count: i64 = conn
+            .query_row(
+                "SELECT semantic_chunk_count FROM matters WHERE id = 'mat_v28'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("chunk_count");
+        assert_eq!(chunk_count, 0);
+
+        let emb: Option<String> = conn
+            .query_row(
+                "SELECT semantic_embedded_text_sha256 FROM items WHERE id = 'it_v28'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("emb");
+        assert!(emb.is_none());
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v28'",
                 [],
                 |row| row.get(0),
             )

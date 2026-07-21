@@ -289,6 +289,25 @@ Heuristic only — not privilege/coding; Unscored ≠ Neutral; sarcasm/dilution 
             app.start_sentiment();
         }
         if ui
+            .add_enabled(!busy, egui::Button::new("Build semantic index"))
+            .on_hover_text(
+                "Local embeddings index (kind=semantic_index, reset:false). \
+Default mock:hash_v1 — additive to keyword FTS, not a replacement.",
+            )
+            .clicked()
+        {
+            app.start_semantic_index();
+        }
+        if ui
+            .add_enabled(!busy, egui::Button::new("Rebuild semantic index"))
+            .on_hover_text(
+                "Full semantic rebuild: wipe active model namespace + re-embed (reset:true)",
+            )
+            .clicked()
+        {
+            app.start_semantic_rebuild();
+        }
+        if ui
             .add_enabled(!busy, egui::Button::new("Build people graph"))
             .on_hover_text(
                 "Two-pass people–comms graph from headers (kind=people_graph); BCC separate; no self-loop edges",

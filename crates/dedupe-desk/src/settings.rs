@@ -32,6 +32,10 @@ pub struct DeskSettings {
     /// Optional path to `pdftoppm` or `mutool` for PDF page render.
     #[serde(default)]
     pub pdf_renderer_path: Option<String>,
+    /// Prefer semantic search features in Desk (default **false** — opt-in).
+    /// Dual-writes to open matter `semantic_enabled` when toggled with a matter open.
+    #[serde(default)]
+    pub semantic_enabled: bool,
 }
 
 impl DeskSettings {

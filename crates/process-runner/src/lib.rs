@@ -90,5 +90,8 @@ pub use handlers::MatterEntityScanHandler;
 #[cfg(feature = "sentiment")]
 pub use handlers::MatterSentimentHandler;
 
+#[cfg(feature = "semantic")]
+pub use handlers::MatterSemanticIndexHandler;
+
 pub use handlers::MatterProfileRunHandler;
 pub use handlers::MatterWorkflowRunHandler;
