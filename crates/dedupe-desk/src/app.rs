@@ -113,6 +113,8 @@ pub struct DeskApp {
     pub(crate) workflow_source_path: String,
     pub(crate) workflow_source_id: String,
     pub(crate) workflow_pst_item_id: String,
+    /// Draft buffer for AI API key entry (never persisted in DeskSettings JSON).
+    ai_api_key_draft: String,
 }
 
 impl DeskApp {
@@ -178,6 +180,7 @@ impl DeskApp {
             workflow_source_path: String::new(),
             workflow_source_id: String::new(),
             workflow_pst_item_id: String::new(),
+            ai_api_key_draft: String::new(),
         }
     }
 
@@ -295,9 +298,39 @@ impl DeskApp {
         self.qc_findings_error = None;
         self.qc_findings_show = false;
         self.hydrate_qc_from_matter();
+        self.hydrate_ai_settings_from_matter();
         self.refresh_produce_qc_readiness();
         self.refresh_matter_lists();
         self.status_msg = Some(format!("Opened matter at {root}"));
+    }
+
+    /// Copy matter AI config into Desk settings so the UI matches the DB on open.
+    /// Dual-write on user edit (`dual_write_ai_config`) remains the write path.
+    fn hydrate_ai_settings_from_matter(&mut self) {
+        let Some(root) = self.matter_root.as_ref() else {
+            return;
+        };
+        match matter_core::Matter::open_for_read(root.as_path()) {
+            Ok(matter) => match matter.get_ai_config() {
+                Ok(cfg) => {
+                    self.settings.ai_enabled = cfg.ai_enabled;
+                    self.settings.ai_allow_remote = cfg.ai_allow_remote;
+                    self.settings.ai_base_url = cfg.ai_base_url;
+                    self.settings.ai_model = cfg.ai_model;
+                    self.settings.ai_provider_kind = cfg.ai_provider_kind;
+                    // Persist so a cold restart after open still reflects matter.
+                    self.settings.save();
+                }
+                Err(e) => {
+                    self.error_msg = Some(format!("Could not load matter AI settings: {e}"));
+                }
+            },
+            Err(e) => {
+                self.error_msg = Some(format!(
+                    "Could not open matter for AI settings hydrate: {e}"
+                ));
+            }
+        }
     }
 
     /// Hydrate session QC fields from `qc_runs` so reopen is not forced re-QC when fresh.
@@ -1151,6 +1184,68 @@ impl DeskApp {
         }
     }
 
+    /// First-pass AI code suggestions (`ai_suggest_codes`) — suggestions only.
+    pub(crate) fn start_ai_suggest_codes(&mut self) {
+        let Some(root) = self.matter_root.clone() else {
+            self.error_msg = Some("No matter open.".into());
+            return;
+        };
+        if !self.settings.ai_enabled {
+            self.error_msg = Some(
+                "AI is off. Enable AI in Settings (and configure provider) before running suggestions."
+                    .into(),
+            );
+            return;
+        }
+        let params = JobParams::new(params::ai_suggest_codes_default_params());
+        match self
+            .runner
+            .start(Utf8Path::new(root.as_str()), "ai_suggest_codes", params)
+        {
+            Ok(job_id) => {
+                self.last_job_id = Some(job_id.clone());
+                self.status_msg = Some(format!("Started ai_suggest_codes job {job_id}"));
+                self.error_msg = None;
+            }
+            Err(e) => self.note_start_error(e),
+        }
+    }
+
+    /// Dual-write desk AI settings to open matter config when possible.
+    pub(crate) fn dual_write_ai_config(&mut self) {
+        self.settings.save();
+        let Some(root) = self.matter_root.as_ref() else {
+            return;
+        };
+        match matter_core::Matter::open(root.as_path()) {
+            Ok(matter) => {
+                let kind = self
+                    .settings
+                    .ai_provider_kind
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(if self.settings.ai_enabled {
+                        "mock"
+                    } else {
+                        "none"
+                    });
+                if let Err(e) = matter.update_ai_config(matter_core::UpdateAiMatterConfigInput {
+                    enabled: self.settings.ai_enabled,
+                    allow_remote: self.settings.ai_allow_remote,
+                    base_url: self.settings.ai_base_url.as_deref(),
+                    model: self.settings.ai_model.as_deref(),
+                    provider_kind: Some(kind),
+                }) {
+                    self.error_msg = Some(format!("Could not update matter AI config: {e}"));
+                }
+            }
+            Err(e) => {
+                self.error_msg = Some(format!("Could not open matter for AI dual-write: {e}"));
+            }
+        }
+    }
+
     /// Dual-write desk `semantic_enabled` preference to open matter meta when possible.
     pub(crate) fn dual_write_semantic_enabled(&mut self, enabled: bool) {
         self.settings.semantic_enabled = enabled;
@@ -1815,6 +1910,153 @@ impl DeskApp {
                 "Off by default. Additive to keyword FTS — not a replacement. \
                  Default embedder is mock:hash_v1 (no model weights). \
                  Run Build semantic index from Workspace or Review before searching.",
+            )
+            .weak()
+            .small(),
+        );
+
+        ui.add_space(8.0);
+        ui.heading("AI coding assist (optional)");
+        ui.label(
+            egui::RichText::new(
+                "Suggestions only — may be wrong. Human accept required for final codes. \
+                 Cloud sends matter text if remote is allowed. Not a substitute for privilege review.",
+            )
+            .color(egui::Color32::from_rgb(180, 120, 40))
+            .small(),
+        );
+        let mut ai_on = self.settings.ai_enabled;
+        if ui
+            .checkbox(&mut ai_on, "Enable AI (first-pass code suggestions)")
+            .changed()
+        {
+            self.settings.ai_enabled = ai_on;
+            if ai_on
+                && self
+                    .settings
+                    .ai_provider_kind
+                    .as_deref()
+                    .unwrap_or("")
+                    .is_empty()
+            {
+                self.settings.ai_provider_kind = Some("mock".into());
+            }
+            self.dual_write_ai_config();
+        }
+        let mut allow_remote = self.settings.ai_allow_remote;
+        if ui
+            .checkbox(
+                &mut allow_remote,
+                "Allow remote (cloud) providers — requires explicit enable",
+            )
+            .changed()
+        {
+            self.settings.ai_allow_remote = allow_remote;
+            self.dual_write_ai_config();
+        }
+        ui.horizontal(|ui| {
+            ui.label("Provider:");
+            let mut kind = self
+                .settings
+                .ai_provider_kind
+                .clone()
+                .unwrap_or_else(|| "none".into());
+            for (label, val) in [
+                ("none", "none"),
+                ("mock", "mock"),
+                ("openai_compatible", "openai_compatible"),
+            ] {
+                if ui
+                    .selectable_label(kind == val, label)
+                    .on_hover_text(val)
+                    .clicked()
+                {
+                    kind = val.into();
+                }
+            }
+            if self.settings.ai_provider_kind.as_deref() != Some(kind.as_str()) {
+                self.settings.ai_provider_kind = Some(kind);
+                self.dual_write_ai_config();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Base URL:");
+            let mut url = self.settings.ai_base_url.clone().unwrap_or_default();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut url)
+                    .desired_width(320.0)
+                    .hint_text("http://127.0.0.1:11434/v1"),
+            );
+            if r.changed() || r.lost_focus() {
+                self.settings.ai_base_url = if url.trim().is_empty() {
+                    None
+                } else {
+                    Some(url.trim().to_string())
+                };
+                self.dual_write_ai_config();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Model:");
+            let mut model = self.settings.ai_model.clone().unwrap_or_default();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut model)
+                    .desired_width(200.0)
+                    .hint_text("llama3.2 or mock"),
+            );
+            if r.changed() || r.lost_focus() {
+                self.settings.ai_model = if model.trim().is_empty() {
+                    None
+                } else {
+                    Some(model.trim().to_string())
+                };
+                self.dual_write_ai_config();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("API key:");
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut self.ai_api_key_draft)
+                    .desired_width(220.0)
+                    .password(true)
+                    .hint_text("saved to OS keyring (not SQLite)"),
+            );
+            let save_clicked = ui
+                .button("Save key")
+                .on_hover_text("Store key in OS keyring only (never DeskSettings JSON)")
+                .clicked();
+            let enter_save = (r.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                && !self.ai_api_key_draft.trim().is_empty();
+            if (save_clicked || enter_save) && !self.ai_api_key_draft.trim().is_empty() {
+                match matter_ai::store_api_key(self.ai_api_key_draft.trim()) {
+                    Ok(()) => {
+                        self.ai_api_key_draft.clear();
+                        self.status_msg = Some("API key stored in OS keyring.".into());
+                        self.error_msg = None;
+                    }
+                    Err(e) => {
+                        self.error_msg = Some(format!("Keyring store failed: {e}"));
+                    }
+                }
+            }
+            if ui
+                .button("Clear key")
+                .on_hover_text("Remove key from OS keyring")
+                .clicked()
+            {
+                match matter_ai::delete_api_key() {
+                    Ok(()) => {
+                        self.ai_api_key_draft.clear();
+                        self.status_msg = Some("API key cleared from keyring.".into());
+                    }
+                    Err(e) => self.error_msg = Some(format!("Keyring clear failed: {e}")),
+                }
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Headless: set env PST_DEDUPE_AI_API_KEY when keyring is unavailable. \
+                 Local: Ollama :11434/v1 or LM Studio :1234/v1 (operator-installed).",
             )
             .weak()
             .small(),

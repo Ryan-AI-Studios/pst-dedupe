@@ -30,6 +30,7 @@ members = [
     "crates/matter-cluster",
     "crates/matter-sentiment",
     "crates/matter-semantic",
+    "crates/matter-ai",
 ]
 
 [workspace.dependencies]
@@ -66,3 +67,7 @@ regex = "1"
 # Shared
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+
+# AI provider (track 0051) — OpenAI-compatible HTTP + OS keyring
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+keyring = "3"

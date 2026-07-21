@@ -2807,3 +2807,85 @@ fn profile_run_cancel_mid_stage_pauses_parent() {
     assert_eq!(office.len(), 1, "office_extract runs after resume");
     assert_eq!(office[0].state, JobState::Succeeded);
 }
+
+/// ai_suggest_codes via ProcessRunner + register_default_handlers (Mock matter, no network).
+#[cfg(feature = "ai")]
+#[test]
+fn ai_suggest_codes_handler_via_process_runner() {
+    use matter_core::{
+        item_role, item_status, ItemInput, UpdateAiMatterConfigInput, AI_PROVIDER_MOCK,
+        AI_SUGGESTION_PENDING,
+    };
+    use process_runner::register_default_handlers;
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = make_matter(&base, "m-ai-suggest");
+
+    {
+        let matter = Matter::open(&root).expect("open");
+        matter
+            .update_ai_config(UpdateAiMatterConfigInput {
+                enabled: true,
+                allow_remote: false,
+                base_url: None,
+                model: Some("mock"),
+                provider_kind: Some(AI_PROVIDER_MOCK),
+            })
+            .expect("enable ai mock");
+        let body = b"this is a hot document for the review team";
+        let dig = matter.cas().put_bytes(body).expect("cas");
+        matter
+            .insert_item(ItemInput {
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                subject: Some("AI runner".into()),
+                text_sha256: Some(dig),
+                in_review: Some(1),
+                ..Default::default()
+            })
+            .expect("item");
+    }
+
+    let mut runner = ProcessRunner::new(RunnerConfig::default());
+    register_default_handlers(&mut runner);
+
+    let params = JobParams::new(
+        serde_json::json!({
+            "scope": "in_review",
+            "max_items": 50,
+            "reset": false
+        })
+        .to_string(),
+    );
+    let job_id = runner
+        .start(&root, "ai_suggest_codes", params)
+        .expect("start ai_suggest_codes");
+    assert!(runner.wait_until_idle(Duration::from_secs(30)));
+
+    let matter = Matter::open(&root).expect("open");
+    let job = matter.get_job(&job_id).expect("job");
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "err={:?}",
+        job.error_summary
+    );
+    assert_eq!(job.kind, "ai_suggest_codes");
+
+    let pending = matter.list_pending_ai_suggestions(50).expect("pending");
+    assert!(
+        !pending.is_empty(),
+        "mock should write at least one suggestion"
+    );
+    assert!(pending.iter().all(|s| s.status == AI_SUGGESTION_PENDING));
+
+    // Job must not write final item_codes.
+    let item_id = pending[0].item_id.clone();
+    let codes = matter
+        .list_item_codes(std::slice::from_ref(&item_id))
+        .expect("codes");
+    assert!(
+        codes[&item_id].is_empty(),
+        "ai_suggest_codes must not apply final codes"
+    );
+}

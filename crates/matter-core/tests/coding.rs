@@ -54,6 +54,7 @@ fn coding_seed_defaults_idempotent() {
             color: None,
             sort_order: 99,
             is_active: true,
+            guidance: None,
         })
         .expect_err("dup key");
     assert!(err.to_string().contains("already exists"), "got {err}");
@@ -569,6 +570,7 @@ fn coding_inactive_definition_still_displays_and_removable() {
             color: hot.color.clone(),
             sort_order: hot.sort_order,
             is_active: false,
+            guidance: None,
         })
         .expect("deactivate");
 

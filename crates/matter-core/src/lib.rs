@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v29**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v30**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -38,6 +38,7 @@
 //! - **Concept clustering** (`concept_cluster_sets` / `concept_clusters` / `item_concept_membership`, schema v27) (0048)
 //! - **Sentiment / tone** (`sentiment_*` item columns, schema v28) (0049)
 //! - **Semantic search bookkeeping** (`semantic_*` matter/item columns + `semantic_chunks`, schema v29) (0050)
+//! - **AI suggestions** (`ai_*` matter config + `item_ai_suggestions` / `ai_suggestion_runs` + code `guidance`, schema v30) (0051)
 //!
 //! ## Layout
 //!
@@ -63,6 +64,7 @@
 //! Purview/PST I/O, full-matter process jobs, Tantivy engine (see `matter-search`),
 //! UI, encryption, multi-tenant.
 
+pub mod ai;
 pub mod audit;
 pub mod calendar;
 pub mod cas;
@@ -92,6 +94,13 @@ pub mod sentiment;
 pub mod thread_headers;
 pub mod workflow;
 
+pub use ai::{
+    catalog_content_hash, suggestion_fingerprint, AiMatterConfig, AiSuggestCandidate,
+    AiSuggestionRun, InsertAiSuggestionInput, InsertAiSuggestionRunInput, ItemAiSuggestion,
+    UpdateAiMatterConfigInput, AI_PROVIDER_MOCK, AI_PROVIDER_NONE, AI_PROVIDER_OPENAI_COMPATIBLE,
+    AI_SUGGESTION_ACCEPTED, AI_SUGGESTION_PENDING, AI_SUGGESTION_REJECTED,
+    AI_SUGGESTION_SUPERSEDED, AI_SUGGESTION_TYPE_CODE,
+};
 pub use audit::{
     canonical_audit_preimage, compute_entry_hash, verify_audit_chain, AuditEvent, AuditEventInput,
     AuditHashFields, GENESIS_PREV_HASH,

@@ -491,6 +491,22 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0050-10 | — | Embedding-based clustering | Residual vs **0048** | residual |
 | D-0050-11 | — | Packed `vectors.bin` format | P0 JSON per-item files under namespace | residual polish |
 | D-0050-12 | P3 | Formal `cargo deny` in CI for semantic tree | Manual `cargo tree` audit in review.md | residual polish |
+| D-0050-02 | — | Cloud / remote embeddings | Still residual; 0051 provides chat-shaped provider trait (not embedding API). Embed path may reuse later | residual / **0051** closed channel only |
+
+## From track 0051-AiProviderTrait (Completed — see conductor review)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0051-01 | — | Streaming completions | Unary complete only | residual |
+| D-0051-02 | — | Multi-turn chat / RAG UI | P0 thin suggest only | **0052** |
+| D-0051-03 | — | Citation-rich promote UX | Thin accept/reject only | **0052** |
+| D-0051-04 | — | Cloud embeddings via AiProvider trait | Chat completions shape only; see D-0050-02 | residual |
+| D-0051-05 | — | Auto privilege / redaction AI | Human confirm only; never silent | residual |
+| D-0051-06 | — | Prompt-injection hardening suite | Residual | residual |
+| D-0051-07 | — | Azure-specific auth variants | Base URL + key covers many; residual | residual |
+| D-0051-08 | — | Empty model-result fingerprint marker | Empty `[]` leaves no suggestion row; may re-call provider | residual polish |
+| D-0051-09 | P3 | Live HTTP redirect-to-remote CI proof | Fail-closed `Policy::none()` + 3xx error path unit-tested; no mock server in CI | residual polish |
+| D-0051-10 | P3 | Formal `cargo deny` in CI for matter-ai tree | Manual tree audit in review.md | residual polish |
 
 ## Hygiene
 

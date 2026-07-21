@@ -628,7 +628,7 @@ pub struct ReviewListRow {
     pub family_id: Option<String>,
 }
 
-/// Code definition (matter-scoped catalog, schema v8 / track 0027).
+/// Code definition (matter-scoped catalog, schema v8 / track 0027; guidance v30).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeDef {
     pub id: String,
@@ -643,6 +643,8 @@ pub struct CodeDef {
     /// 0/1 — inactive hidden from apply UI; historical membership still loads.
     pub is_active: i64,
     pub created_at: String,
+    /// Operator guidance / protocol text for AI prompts (schema v30). Empty → use label.
+    pub guidance: Option<String>,
 }
 
 /// Input for inserting or updating a code definition.
@@ -659,6 +661,8 @@ pub struct CodeDefInput {
     pub color: Option<String>,
     pub sort_order: i64,
     pub is_active: bool,
+    /// Optional coding protocol / guidance text (AI prompts). `None` leaves unchanged on update.
+    pub guidance: Option<String>,
 }
 
 /// Membership of a code on an item (with catalog metadata for chips).
@@ -3811,7 +3815,7 @@ impl Matter {
     pub fn list_code_definitions(&self) -> Result<Vec<CodeDef>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, matter_id, key, label, group_key, cardinality, color, sort_order, \
-                    is_active, created_at \
+                    is_active, created_at, guidance \
              FROM code_definitions \
              WHERE matter_id = ?1 \
              ORDER BY sort_order ASC, key ASC",
@@ -3845,6 +3849,12 @@ impl Matter {
             }
         };
         let is_active: i64 = if input.is_active { 1 } else { 0 };
+        let guidance = input
+            .guidance
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
 
         if let Some(ref id) = input.id {
             let existing = self.get_code_definition(id)?;
@@ -3854,19 +3864,37 @@ impl Matter {
                 )));
             }
             // Key is immutable on update (stable machine key).
-            self.conn.execute(
-                "UPDATE code_definitions SET label = ?1, group_key = ?2, cardinality = ?3, \
-                 color = ?4, sort_order = ?5, is_active = ?6 WHERE id = ?7",
-                params![
-                    label,
-                    group_key,
-                    cardinality,
-                    input.color,
-                    input.sort_order,
-                    is_active,
-                    id
-                ],
-            )?;
+            // guidance: Some updates; None leaves existing value.
+            if input.guidance.is_some() {
+                self.conn.execute(
+                    "UPDATE code_definitions SET label = ?1, group_key = ?2, cardinality = ?3, \
+                     color = ?4, sort_order = ?5, is_active = ?6, guidance = ?7 WHERE id = ?8",
+                    params![
+                        label,
+                        group_key,
+                        cardinality,
+                        input.color,
+                        input.sort_order,
+                        is_active,
+                        guidance,
+                        id
+                    ],
+                )?;
+            } else {
+                self.conn.execute(
+                    "UPDATE code_definitions SET label = ?1, group_key = ?2, cardinality = ?3, \
+                     color = ?4, sort_order = ?5, is_active = ?6 WHERE id = ?7",
+                    params![
+                        label,
+                        group_key,
+                        cardinality,
+                        input.color,
+                        input.sort_order,
+                        is_active,
+                        id
+                    ],
+                )?;
+            }
             return Ok(id.clone());
         }
 
@@ -3900,8 +3928,8 @@ impl Matter {
         let id = new_id("cde");
         self.conn.execute(
             "INSERT INTO code_definitions \
-             (id, matter_id, key, label, group_key, cardinality, color, sort_order, is_active, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             (id, matter_id, key, label, group_key, cardinality, color, sort_order, is_active, created_at, guidance) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
                 self.matter_id,
@@ -3912,7 +3940,8 @@ impl Matter {
                 input.color,
                 input.sort_order,
                 is_active,
-                now
+                now,
+                guidance
             ],
         )?;
         Ok(id)
@@ -3923,7 +3952,7 @@ impl Matter {
         self.conn
             .query_row(
                 "SELECT id, matter_id, key, label, group_key, cardinality, color, sort_order, \
-                        is_active, created_at \
+                        is_active, created_at, guidance \
                  FROM code_definitions WHERE id = ?1",
                 params![code_id],
                 map_code_def_row,
@@ -5240,6 +5269,7 @@ fn map_code_def_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeDef> {
         sort_order: row.get(7)?,
         is_active: row.get(8)?,
         created_at: row.get(9)?,
+        guidance: row.get(10)?,
     })
 }
 
