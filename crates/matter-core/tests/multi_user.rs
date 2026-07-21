@@ -40,12 +40,12 @@ fn first_code_id(matter: &Matter) -> String {
 }
 
 #[test]
-fn schema_version_is_36() {
-    assert_eq!(SCHEMA_VERSION, 36);
+fn schema_version_is_current() {
+    assert_eq!(SCHEMA_VERSION, 37);
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("m");
     let matter = Matter::create(&root, "MU").expect("create");
-    assert_eq!(matter.schema_version().expect("ver"), 36);
+    assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     assert!(!matter.is_multi_user_enabled().expect("flag"));
 }
 
@@ -70,6 +70,72 @@ fn create_user_auth_and_wrong_password() {
 
     let err = matter.authenticate("Alice", "wrong").expect_err("bad pass");
     assert!(matches!(err, Error::Unauthorized(_)));
+}
+
+#[test]
+fn oidc_link_session_logout_releases_locks() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("m");
+    let matter = Matter::create(&root, "MU").expect("create");
+    matter.enable_multi_user("system").expect("enable");
+    matter
+        .set_matter_tenant_id(Some("tenant-1"))
+        .expect("tenant");
+    assert_eq!(
+        matter.get_matter_tenant_id().expect("get").as_deref(),
+        Some("tenant-1")
+    );
+
+    let user = matter
+        .create_or_link_oidc_user(
+            "oidc-alice",
+            ROLE_REVIEWER,
+            "https://issuer.example",
+            "sub-alice",
+            "oidc",
+        )
+        .expect("oidc user");
+    assert_eq!(user.oidc_issuer.as_deref(), Some("https://issuer.example"));
+    assert_eq!(user.oidc_sub.as_deref(), Some("sub-alice"));
+
+    let found = matter
+        .find_user_by_oidc("https://issuer.example", "sub-alice")
+        .expect("find")
+        .expect("some");
+    assert_eq!(found.id, user.id);
+
+    // Password login cannot succeed for OIDC-only user.
+    let err = matter
+        .authenticate("oidc-alice", "anything")
+        .expect_err("no pw");
+    assert!(matches!(err, Error::Unauthorized(_)));
+
+    let issue = matter.issue_session_for_user(&user.id, 1).expect("session");
+    let item = insert_item(&matter, "locked-logout");
+    matter
+        .lock_item(&item, &user.id, None, Some(4))
+        .expect("lock");
+
+    matter.logout_user_release_locks(&user.id).expect("logout");
+    assert!(
+        matter
+            .resolve_session(&issue.token)
+            .expect_err("session dead")
+            .to_string()
+            .contains("unauthorized")
+            || matches!(
+                matter.resolve_session(&issue.token),
+                Err(Error::Unauthorized(_))
+            )
+    );
+
+    // Lock released — second user can lock.
+    let b = matter
+        .create_user("Bob", ROLE_REVIEWER, "pw", "system")
+        .expect("bob");
+    matter
+        .lock_item(&item, &b.id, None, Some(4))
+        .expect("bob lock after logout");
 }
 
 #[test]

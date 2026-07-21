@@ -27,6 +27,12 @@ pub enum ServiceCmd {
         /// Env var name holding passphrase for encrypted matters.
         #[arg(long, default_value = ENV_MATTER_PASSPHRASE)]
         passphrase_env: String,
+        /// Optional platform.db for multi-tenant SSO (0059). Matter must be registered.
+        #[arg(long)]
+        platform: Option<PathBuf>,
+        /// Use in-process mock OIDC (tests/dev only; never for production).
+        #[arg(long, default_value_t = false, hide = true)]
+        mock_oidc: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -103,6 +109,8 @@ pub fn run_service(cmd: ServiceCmd) -> Result<ExitCode> {
             bind,
             allow_lan,
             passphrase_env,
+            platform,
+            mock_oidc,
             json,
         } => {
             let root = utf8_path(&matter)?;
@@ -120,6 +128,10 @@ pub fn run_service(cmd: ServiceCmd) -> Result<ExitCode> {
             } else {
                 None
             };
+            let platform_db = match platform {
+                Some(p) => Some(utf8_path(&p)?),
+                None => None,
+            };
             emit_json(
                 json,
                 &ok_envelope(serde_json::json!({
@@ -127,6 +139,7 @@ pub fn run_service(cmd: ServiceCmd) -> Result<ExitCode> {
                     "matter": root.as_str(),
                     "bind": bind_addr.to_string(),
                     "allow_lan": allow_lan,
+                    "platform": platform_db.as_ref().map(|p| p.as_str().to_string()),
                 })),
             )?;
             let config = ServeConfig {
@@ -134,6 +147,10 @@ pub fn run_service(cmd: ServiceCmd) -> Result<ExitCode> {
                 bind: bind_addr,
                 allow_lan,
                 passphrase,
+                platform_db,
+                platform_master_key: None,
+                storage_roots: Vec::new(),
+                use_mock_oidc: mock_oidc,
             };
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

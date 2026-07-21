@@ -1,7 +1,8 @@
-//! Axum routes for the multi-user matter service.
+//! Axum routes for the multi-user matter service (+ optional platform OIDC).
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use matter_core::{
@@ -10,20 +11,29 @@ use matter_core::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, OptionalAuthUser};
 use crate::error::{ApiError, ApiResult};
-use crate::state::WriteGate;
+use crate::oidc::{complete_oidc_login, pkce_challenge_s256, random_urlsafe, PendingLogin};
+use crate::state::{PlatformState, WriteGate};
 
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
     pub gate: WriteGate,
+    /// Present when serving with `--platform` (track 0059).
+    pub platform: Option<PlatformState>,
 }
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/login", post(login))
+        .route("/v1/logout", post(logout))
+        .route("/v1/oidc/login", get(oidc_login))
+        .route("/v1/oidc/callback", get(oidc_callback))
+        .route("/v1/oidc/logout", post(logout))
+        .route("/v1/tenants/me", get(tenants_me))
+        .route("/v1/platform/matters", get(platform_matters))
         .route("/v1/users", get(list_users).post(create_user))
         .route("/v1/users/{id}/disable", post(disable_user))
         .route("/v1/items", get(list_items))
@@ -216,6 +226,15 @@ async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> ApiResult<Json<LoginResponse>> {
+    if let Some(ps) = &state.platform {
+        if ps.oidc_required {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "oidc_required",
+                "password login disabled; use OIDC SSO for this tenant",
+            ));
+        }
+    }
     let matter = state.gate.lock().await;
     let issue = matter
         .authenticate(&body.name, &body.password)
@@ -225,6 +244,355 @@ async fn login(
         user: issue.user.into(),
         expires_at: issue.expires_at,
     }))
+}
+
+/// P0: invalidate session and release that user's item locks + batch checkouts.
+async fn logout(State(state): State<AppState>, opt: OptionalAuthUser) -> ApiResult<StatusCode> {
+    let matter = state.gate.lock().await;
+    if let Some(user) = opt.user {
+        matter
+            .logout_user_release_locks(&user.id)
+            .map_err(ApiError::from)?;
+    } else if let Some(t) = opt.token.as_deref() {
+        // Best-effort: drop the single session even if already expired.
+        matter.invalidate_session(t).map_err(ApiError::from)?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcLoginQuery {
+    tenant: Option<String>,
+    /// When `json` or Accept: application/json, return authorize URL as JSON (tests/headless).
+    format: Option<String>,
+    redirect_uri: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OidcLoginJson {
+    authorize_url: String,
+    state: String,
+    /// Returned for mock/test flows only (also stored server-side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_verifier: Option<String>,
+    nonce: String,
+}
+
+async fn oidc_login(
+    State(state): State<AppState>,
+    Query(q): Query<OidcLoginQuery>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let ps = state.platform.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "platform mode not enabled",
+        )
+    })?;
+    let want_json = q
+        .format
+        .as_deref()
+        .map(|f| f.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+        || headers
+            .get(header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .map(|a| a.contains("application/json"))
+            .unwrap_or(false);
+
+    let platform = ps.platform.lock().await;
+    let tenant = match q.tenant.as_deref() {
+        Some(slug) => platform
+            .get_tenant_by_slug(slug)
+            .map_err(|e| {
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "platform", e.to_string())
+            })?
+            .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found", "tenant not found"))?,
+        None => platform
+            .get_tenant_by_id(&ps.tenant_id)
+            .map_err(|e| {
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "platform", e.to_string())
+            })?
+            .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found", "tenant not found"))?,
+    };
+    // Cross-tenant login against a matter hosted for another tenant → 404.
+    if tenant.id != ps.tenant_id {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "tenant not found",
+        ));
+    }
+    let idp = platform
+        .get_idp_config(&tenant.id)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "platform", e.to_string()))?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "idp_missing",
+                "IdP not configured for tenant",
+            )
+        })?;
+    if !idp.enabled {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "idp_disabled",
+            "IdP disabled",
+        ));
+    }
+
+    let state_tok = random_urlsafe(32);
+    let nonce = random_urlsafe(24);
+    let code_verifier = random_urlsafe(48);
+    let challenge = pkce_challenge_s256(&code_verifier);
+    // Exact allowlist: only the service callback URI (ignore client-supplied redirect).
+    let redirect_uri = crate::oidc::canonical_callback_uri(&ps.public_base);
+    if let Some(req) = q.redirect_uri.as_deref() {
+        crate::oidc::assert_redirect_allowed(&ps.public_base, req)?;
+    }
+
+    let expires = chrono::Utc::now() + chrono::Duration::seconds(600);
+    platform
+        .store_oidc_pending(
+            &state_tok,
+            &tenant.id,
+            &code_verifier,
+            &nonce,
+            &redirect_uri,
+            600,
+        )
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "platform", e.to_string()))?;
+    {
+        let mut mem = ps.oidc.memory_pending.lock().await;
+        mem.insert(
+            state_tok.clone(),
+            PendingLogin {
+                tenant_id: tenant.id.clone(),
+                code_verifier: code_verifier.clone(),
+                nonce: nonce.clone(),
+                redirect_uri: redirect_uri.clone(),
+                expires_at: expires,
+            },
+        );
+    }
+
+    let authorize_url = ps
+        .oidc
+        .provider
+        .start_authorization(&idp, &redirect_uri, &state_tok, &nonce, &challenge)
+        .await?;
+
+    if want_json {
+        // PKCE verifier is server-side secret — only expose under mock IdP for headless tests.
+        let expose_verifier = ps.oidc.is_mock();
+        return Ok(Json(OidcLoginJson {
+            authorize_url,
+            state: state_tok,
+            code_verifier: if expose_verifier {
+                Some(code_verifier)
+            } else {
+                None
+            },
+            nonce,
+        })
+        .into_response());
+    }
+    Ok(Redirect::temporary(&authorize_url).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    /// Test-only: when using mock IdP, callers may pass claims via minted code.
+    #[serde(default)]
+    format: Option<String>,
+}
+
+async fn oidc_callback(
+    State(state): State<AppState>,
+    Query(q): Query<OidcCallbackQuery>,
+) -> ApiResult<Json<LoginResponse>> {
+    let ps = state.platform.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "platform mode not enabled",
+        )
+    })?;
+    if let Some(err) = q.error {
+        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "oidc_error", err));
+    }
+    let code = q.code.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "missing_code",
+            "missing authorization code",
+        )
+    })?;
+    let state_tok = q
+        .state
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "missing_state",
+                "missing OIDC state",
+            )
+        })?;
+
+    // Single-use state: always consume both stores so a replay cannot fall back.
+    let pending_mem = {
+        let mut mem = ps.oidc.memory_pending.lock().await;
+        mem.remove(state_tok)
+    };
+    let pending_db = {
+        let platform = ps.platform.lock().await;
+        // Best-effort delete even when memory already held the state.
+        platform.take_oidc_pending(state_tok).ok()
+    };
+    let (tenant_id, code_verifier, nonce, redirect_uri) = if let Some(p) = pending_mem {
+        if p.expires_at < chrono::Utc::now() {
+            return Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "oidc_state",
+                "OIDC state expired",
+            ));
+        }
+        (p.tenant_id, p.code_verifier, p.nonce, p.redirect_uri)
+    } else if let Some(p) = pending_db {
+        // platform OidcPending stores expires_at as RFC3339 string.
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        if p.expires_at.as_str() <= now.as_str() {
+            return Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "oidc_state",
+                "OIDC state expired",
+            ));
+        }
+        (p.tenant_id, p.code_verifier, p.nonce, p.redirect_uri)
+    } else {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "oidc_state",
+            "invalid or already-used OIDC state",
+        ));
+    };
+
+    if tenant_id != ps.tenant_id {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "tenant not found",
+        ));
+    }
+
+    let (idp, client_secret) = {
+        let platform = ps.platform.lock().await;
+        let idp = platform
+            .get_idp_config(&tenant_id)
+            .map_err(|e| {
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "platform", e.to_string())
+            })?
+            .ok_or_else(|| {
+                ApiError::new(StatusCode::BAD_REQUEST, "idp_missing", "IdP not configured")
+            })?;
+        let secret = if ps.oidc.is_mock() {
+            // Mock IdP does not use the client secret; allow missing env/ciphertext.
+            platform
+                .resolve_client_secret(&tenant_id)
+                .unwrap_or_else(|_| String::new())
+        } else {
+            platform.resolve_client_secret(&tenant_id).map_err(|e| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "secret_unavailable",
+                    format!("client secret unavailable: {e}"),
+                )
+            })?
+        };
+        (idp, secret)
+    };
+
+    let claims = ps
+        .oidc
+        .provider
+        .finish_authorization(
+            &idp,
+            &redirect_uri,
+            code,
+            &code_verifier,
+            &nonce,
+            &client_secret,
+        )
+        .await?;
+
+    let platform = ps.platform.lock().await;
+    let matter = state.gate.lock().await;
+    let issue = complete_oidc_login(&platform, &matter, &tenant_id, &claims)?;
+    let _ = q.format; // reserved for future HTML vs JSON
+    Ok(Json(LoginResponse {
+        token: issue.token,
+        user: issue.user.into(),
+        expires_at: issue.expires_at,
+    }))
+}
+
+async fn tenants_me(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    auth.require_read()?;
+    let ps = state.platform.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "platform mode not enabled",
+        )
+    })?;
+    let platform = ps.platform.lock().await;
+    let tenant = platform
+        .get_tenant_by_id(&ps.tenant_id)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "platform", e.to_string()))?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found", "tenant not found"))?;
+    Ok(Json(serde_json::json!({
+        "id": tenant.id,
+        "slug": tenant.slug,
+        "display_name": tenant.display_name,
+        "status": tenant.status,
+        "jit_provision": tenant.jit_provision,
+        "oidc_required": tenant.oidc_required,
+    })))
+}
+
+async fn platform_matters(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    auth.require_read()?;
+    let ps = state.platform.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "platform mode not enabled",
+        )
+    })?;
+    let platform = ps.platform.lock().await;
+    let matters = platform
+        .list_matters(&ps.tenant_id)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "platform", e.to_string()))?;
+    Ok(Json(serde_json::json!(matters
+        .into_iter()
+        .map(|m| serde_json::json!({
+            "matter_id": m.matter_id,
+            "storage_root": m.storage_root,
+            "status": m.status,
+            "registered_at": m.registered_at,
+        }))
+        .collect::<Vec<_>>())))
 }
 
 async fn list_users(
