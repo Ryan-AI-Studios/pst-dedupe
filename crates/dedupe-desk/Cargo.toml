@@ -16,6 +16,7 @@ matter-qc = { path = "../matter-qc" }
 matter-gap = { path = "../matter-gap" }
 matter-search = { path = "../matter-search" }
 matter-semantic = { path = "../matter-semantic" }
+matter-ai = { path = "../matter-ai" }
 eframe = { workspace = true }
 rfd = { workspace = true }
 camino = { workspace = true }

@@ -36,6 +36,21 @@ pub struct DeskSettings {
     /// Dual-writes to open matter `semantic_enabled` when toggled with a matter open.
     #[serde(default)]
     pub semantic_enabled: bool,
+    /// AI assist enabled (default **false** — opt-in). Dual-writes to matter when open.
+    #[serde(default)]
+    pub ai_enabled: bool,
+    /// Allow non-loopback (cloud) AI providers (default **false**).
+    #[serde(default)]
+    pub ai_allow_remote: bool,
+    /// OpenAI-compatible base URL (e.g. `http://127.0.0.1:11434/v1`).
+    #[serde(default)]
+    pub ai_base_url: Option<String>,
+    /// Model id string (e.g. `llama3.2` or `mock`).
+    #[serde(default)]
+    pub ai_model: Option<String>,
+    /// `none` | `mock` | `openai_compatible`.
+    #[serde(default)]
+    pub ai_provider_kind: Option<String>,
 }
 
 impl DeskSettings {

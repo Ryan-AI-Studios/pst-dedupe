@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 29;
+pub const SCHEMA_VERSION: u32 = 30;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -43,6 +43,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (27, MIGRATION_V27),
     (28, MIGRATION_V28),
     (29, MIGRATION_V29),
+    (30, MIGRATION_V30),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -1005,6 +1006,62 @@ CREATE INDEX idx_semantic_chunks_item ON semantic_chunks(item_id);
 CREATE INDEX idx_semantic_chunks_matter_model ON semantic_chunks(matter_id, model_id);
 CREATE INDEX idx_items_semantic_embedded
   ON items(semantic_embedded_text_sha256) WHERE semantic_embedded_text_sha256 IS NOT NULL;
+"#;
+
+/// AI provider config + first-pass code suggestions (track 0051).
+///
+/// Matter-scoped AI settings (no API key column). Suggestions are never final
+/// codes — human accept promotes via `apply_codes`. Code catalog gains optional
+/// `guidance` text for prompt inclusion.
+const MIGRATION_V30: &str = r#"
+ALTER TABLE matters ADD COLUMN ai_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE matters ADD COLUMN ai_allow_remote INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE matters ADD COLUMN ai_base_url TEXT;
+ALTER TABLE matters ADD COLUMN ai_model TEXT;
+ALTER TABLE matters ADD COLUMN ai_provider_kind TEXT;
+
+ALTER TABLE code_definitions ADD COLUMN guidance TEXT;
+
+CREATE TABLE item_ai_suggestions (
+  id TEXT PRIMARY KEY NOT NULL,
+  matter_id TEXT NOT NULL,
+  item_id TEXT NOT NULL REFERENCES items(id),
+  suggestion_type TEXT NOT NULL,
+  code_id TEXT,
+  code_name TEXT NOT NULL,
+  confidence REAL,
+  rationale TEXT,
+  provider_kind TEXT NOT NULL,
+  model TEXT NOT NULL,
+  prompt_template_id TEXT NOT NULL,
+  is_remote INTEGER NOT NULL DEFAULT 0,
+  text_sha256 TEXT,
+  catalog_content_hash TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  job_id TEXT,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  resolved_by TEXT
+);
+CREATE INDEX idx_ai_sugg_item ON item_ai_suggestions(item_id);
+CREATE INDEX idx_ai_sugg_status ON item_ai_suggestions(matter_id, status);
+CREATE INDEX idx_ai_sugg_fingerprint ON item_ai_suggestions(
+  item_id, text_sha256, model, prompt_template_id, catalog_content_hash
+);
+
+CREATE TABLE ai_suggestion_runs (
+  id TEXT PRIMARY KEY NOT NULL,
+  matter_id TEXT NOT NULL,
+  job_id TEXT,
+  provider_kind TEXT NOT NULL,
+  model TEXT,
+  prompt_template_id TEXT NOT NULL,
+  is_remote INTEGER NOT NULL DEFAULT 0,
+  item_count INTEGER NOT NULL DEFAULT 0,
+  suggestion_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_ai_runs_matter ON ai_suggestion_runs(matter_id);
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -4121,7 +4178,7 @@ mod tests {
 
         let v = migrate(&conn).expect("migrate v27 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 29);
+        // Migrates through to current SCHEMA_VERSION (v30+).
 
         for col in [
             "sentiment_compound",
@@ -4216,9 +4273,8 @@ mod tests {
         )
         .expect("item");
 
-        let v = migrate(&conn).expect("migrate v28 to v29");
+        let v = migrate(&conn).expect("migrate v28 to current");
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 29);
 
         for col in [
             "semantic_enabled",
@@ -4315,6 +4371,143 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v28'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_v29_to_v30_adds_ai_columns() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+        for &(target, sql) in MIGRATIONS {
+            if target > 29 {
+                break;
+            }
+            conn.execute_batch(sql).expect("step");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v29', 'V29 Matter', '2020-01-01T00:00:00Z', 29, '/tmp/v29')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, status, imported_at) \
+             VALUES ('it_v29', 'mat_v29', 'extracted', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("item");
+        conn.execute(
+            "INSERT INTO code_definitions \
+             (id, matter_id, key, label, group_key, cardinality, color, sort_order, is_active, created_at) \
+             VALUES ('cde_v29', 'mat_v29', 'hot', 'Hot', 'issues', 'multi', NULL, 0, 1, '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("code");
+
+        let v = migrate(&conn).expect("migrate v29 to v30");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 30);
+
+        for col in [
+            "ai_enabled",
+            "ai_allow_remote",
+            "ai_base_url",
+            "ai_model",
+            "ai_provider_kind",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('matters') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected matters.{col}");
+        }
+
+        let has_guidance: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('code_definitions') WHERE name = 'guidance'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("guidance col");
+        assert!(has_guidance, "expected code_definitions.guidance");
+
+        for table in ["item_ai_suggestions", "ai_suggestion_runs"] {
+            let has_table: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='{table}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("table");
+            assert!(has_table, "expected {table}");
+        }
+
+        for idx in [
+            "idx_ai_sugg_item",
+            "idx_ai_sugg_status",
+            "idx_ai_sugg_fingerprint",
+            "idx_ai_runs_matter",
+        ] {
+            let has_idx: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='{idx}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("idx");
+            assert!(has_idx, "expected {idx}");
+        }
+
+        let enabled: i64 = conn
+            .query_row(
+                "SELECT ai_enabled FROM matters WHERE id = 'mat_v29'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("enabled");
+        assert_eq!(enabled, 0);
+
+        let allow: i64 = conn
+            .query_row(
+                "SELECT ai_allow_remote FROM matters WHERE id = 'mat_v29'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("allow");
+        assert_eq!(allow, 0);
+
+        let guidance: Option<String> = conn
+            .query_row(
+                "SELECT guidance FROM code_definitions WHERE id = 'cde_v29'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("guidance");
+        assert!(guidance.is_none());
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v29'",
                 [],
                 |row| row.get(0),
             )

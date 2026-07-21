@@ -360,6 +360,20 @@ pub fn semantic_index_reset_params() -> String {
     .to_string()
 }
 
+/// Default params for first-pass AI code suggestions (`kind = "ai_suggest_codes"`).
+///
+/// Opt-in job — suggestions only; never final codes without human accept.
+pub fn ai_suggest_codes_default_params() -> String {
+    serde_json::json!({
+        "scope": "in_review",
+        "max_items": 100,
+        "max_text_bytes": 8000,
+        "reset": false,
+        "temperature": 0.0
+    })
+    .to_string()
+}
+
 /// Default params for people–comms graph (`kind = "people_graph"`).
 ///
 /// Opt-in job — headers primary. `include_entity_emails` must stay `false`

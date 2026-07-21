@@ -63,6 +63,9 @@ pub mod sentiment;
 #[cfg(feature = "semantic")]
 pub mod semantic_index;
 
+#[cfg(feature = "ai")]
+pub mod ai_suggest_codes;
+
 /// Sequential processing-profile runner (always available; depends only on matter-core).
 pub mod profile_run;
 
@@ -131,6 +134,9 @@ pub use sentiment::MatterSentimentHandler;
 
 #[cfg(feature = "semantic")]
 pub use semantic_index::MatterSemanticIndexHandler;
+
+#[cfg(feature = "ai")]
+pub use ai_suggest_codes::MatterAiSuggestCodesHandler;
 
 pub use profile_run::MatterProfileRunHandler;
 pub use workflow_run::MatterWorkflowRunHandler;

@@ -299,6 +299,16 @@ Default mock:hash_v1 — additive to keyword FTS, not a replacement.",
             app.start_semantic_index();
         }
         if ui
+            .add_enabled(!busy, egui::Button::new("Run AI code suggestions"))
+            .on_hover_text(
+                "First-pass AI coding suggestions (kind=ai_suggest_codes). \
+Suggestions only — human accept required. AI must be enabled in Settings.",
+            )
+            .clicked()
+        {
+            app.start_ai_suggest_codes();
+        }
+        if ui
             .add_enabled(!busy, egui::Button::new("Rebuild semantic index"))
             .on_hover_text(
                 "Full semantic rebuild: wipe active model namespace + re-embed (reset:true)",

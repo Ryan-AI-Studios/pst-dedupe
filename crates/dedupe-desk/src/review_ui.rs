@@ -51,9 +51,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense};
 use matter_core::{
     parse_bound_instant, redaction_reason, ApplyCodesInput, ApplyCodesResult, CodeDef,
-    CodeDefInput, FilterCondition, FilterSpec, ItemCodeInfo, ItemEntityHit, ItemHighlight,
-    ItemNote, ItemPrivilege, ItemRedaction, Matter, ResolvedHighlight, ResolvedRedaction,
-    ReviewListRow, SavedSearch, SavedSearchInput, UpsertNoteInput, UpsertPrivilegeProtocolInput,
+    CodeDefInput, FilterCondition, FilterSpec, ItemAiSuggestion, ItemCodeInfo, ItemEntityHit,
+    ItemHighlight, ItemNote, ItemPrivilege, ItemRedaction, Matter, ResolvedHighlight,
+    ResolvedRedaction, ReviewListRow, SavedSearch, SavedSearchInput, UpsertNoteInput,
+    UpsertPrivilegeProtocolInput,
 };
 
 use crate::review_body::{BodyLoader, BodyPane};
@@ -540,6 +541,10 @@ pub struct ReviewState {
     coding_rx: Option<Receiver<Result<ApplyCodesResult, String>>>,
     coding_status: Option<String>,
     coding_error: Option<String>,
+    /// Pending AI code suggestions for the current selection (thin 0051 panel).
+    ai_suggestions: Vec<ItemAiSuggestion>,
+    ai_suggestions_item_id: Option<String>,
+    ai_suggestions_error: Option<String>,
     /// Filter bar draft (edit fields).
     pub filter_draft: FilterDraft,
     /// Applied filter (None = full corpus via empty default FilterSpec path).
@@ -717,6 +722,9 @@ impl ReviewState {
         self.coding_rx = None;
         self.coding_status = None;
         self.coding_error = None;
+        self.ai_suggestions.clear();
+        self.ai_suggestions_item_id = None;
+        self.ai_suggestions_error = None;
         self.batch_mode_add = true;
         self.propagate_family = false;
         self.filter_draft.clear();
@@ -2855,6 +2863,7 @@ pub fn upsert_code_definition_blocking(
             color: None,
             sort_order,
             is_active: true,
+            guidance: None,
         })
         .map_err(|e| e.to_string())
 }
@@ -4032,6 +4041,9 @@ Unscored is not Neutral — Neutral is a scored ~0 compound.",
         // Coding panel
         show_coding_panel(ui, state, matter_root, ctx, actor, &row.id);
 
+        // AI suggestions panel (0051 thin)
+        show_ai_suggestions_panel(ui, state, matter_root, actor, &row.id);
+
         // Privilege claim panel (0031)
         show_privilege_panel(ui, state, matter_root, actor, &row.id);
 
@@ -4963,6 +4975,104 @@ fn show_privilege_panel(
             }
         });
     });
+}
+
+fn show_ai_suggestions_panel(
+    ui: &mut egui::Ui,
+    state: &mut ReviewState,
+    matter_root: &Utf8Path,
+    actor: &str,
+    current_item_id: &str,
+) {
+    // Reload when selection changes.
+    if state.ai_suggestions_item_id.as_deref() != Some(current_item_id) {
+        state.ai_suggestions_item_id = Some(current_item_id.to_string());
+        state.ai_suggestions.clear();
+        state.ai_suggestions_error = None;
+        match Matter::open(matter_root) {
+            Ok(m) => match m.list_pending_ai_suggestions_for_item(current_item_id) {
+                Ok(list) => state.ai_suggestions = list,
+                Err(e) => state.ai_suggestions_error = Some(e.to_string()),
+            },
+            Err(e) => state.ai_suggestions_error = Some(e.to_string()),
+        }
+    }
+
+    if state.ai_suggestions.is_empty() && state.ai_suggestions_error.is_none() {
+        return;
+    }
+
+    ui.add_space(6.0);
+    ui.label(RichText::new("AI suggestions (pending)").strong().small());
+    ui.label(
+        RichText::new(
+            "Suggestions only — may be wrong. Accept writes final codes; cloud risk if remote.",
+        )
+        .color(Color32::from_rgb(180, 120, 40))
+        .small(),
+    );
+    if let Some(err) = &state.ai_suggestions_error {
+        ui.label(RichText::new(err).color(Color32::RED).small());
+    }
+    let mut accept_id: Option<String> = None;
+    let mut reject_id: Option<String> = None;
+    for s in &state.ai_suggestions {
+        ui.horizontal(|ui| {
+            let conf = s
+                .confidence
+                .map(|c| format!(" ({:.0}%)", c * 100.0))
+                .unwrap_or_default();
+            ui.label(
+                RichText::new(format!("{}{conf}", s.code_name))
+                    .small()
+                    .strong(),
+            );
+            if let Some(r) = &s.rationale {
+                ui.label(RichText::new(r).weak().small());
+            }
+            if ui.add(egui::Button::new("Accept").small()).clicked() {
+                accept_id = Some(s.id.clone());
+            }
+            if ui.add(egui::Button::new("Reject").small()).clicked() {
+                reject_id = Some(s.id.clone());
+            }
+        });
+    }
+    if let Some(id) = accept_id {
+        match Matter::open(matter_root) {
+            Ok(m) => match m.accept_ai_suggestion(&id, actor) {
+                Ok(_) => {
+                    state.ai_suggestions_item_id = None; // force reload
+                    state.coding_status = Some("Accepted AI suggestion → code applied.".into());
+                    state.reload_coding_catalog(matter_root);
+                    // Reload row codes for current item
+                    if let Ok(codes) = Matter::open(matter_root)
+                        .and_then(|m2| m2.list_item_codes(&[current_item_id.to_string()]))
+                    {
+                        if let Some(v) = codes.get(current_item_id) {
+                            state
+                                .row_codes
+                                .insert(current_item_id.to_string(), v.clone());
+                        }
+                    }
+                }
+                Err(e) => state.ai_suggestions_error = Some(format!("Accept failed: {e}")),
+            },
+            Err(e) => state.ai_suggestions_error = Some(e.to_string()),
+        }
+    }
+    if let Some(id) = reject_id {
+        match Matter::open(matter_root) {
+            Ok(m) => match m.reject_ai_suggestion(&id, actor) {
+                Ok(_) => {
+                    state.ai_suggestions_item_id = None;
+                    state.coding_status = Some("Rejected AI suggestion.".into());
+                }
+                Err(e) => state.ai_suggestions_error = Some(format!("Reject failed: {e}")),
+            },
+            Err(e) => state.ai_suggestions_error = Some(e.to_string()),
+        }
+    }
 }
 
 fn show_coding_panel(
@@ -5897,6 +6007,7 @@ mod tests {
                 sort_order: 0,
                 is_active: 1,
                 created_at: String::new(),
+                guidance: None,
             },
             CodeDef {
                 id: "c_not".into(),
@@ -5909,6 +6020,7 @@ mod tests {
                 sort_order: 1,
                 is_active: 1,
                 created_at: String::new(),
+                guidance: None,
             },
             CodeDef {
                 id: "c_hot".into(),
@@ -5921,6 +6033,7 @@ mod tests {
                 sort_order: 2,
                 is_active: 1,
                 created_at: String::new(),
+                guidance: None,
             },
             CodeDef {
                 id: "c_conf".into(),
@@ -5933,6 +6046,7 @@ mod tests {
                 sort_order: 3,
                 is_active: 1,
                 created_at: String::new(),
+                guidance: None,
             },
         ];
 

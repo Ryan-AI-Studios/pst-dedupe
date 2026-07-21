@@ -18,6 +18,7 @@ description: Use when writing, modifying, or reviewing Rust code in pst-dedupe, 
 | `ingest-purview` | Package detect + safe ZIP expand into matter. Blocking-worker API only; no PST message extract. |
 | `extract-pst` | PST → Normalized Items + logical_hash. Blocking-worker API only; native = pst-native-message-v1 (not EML). |
 | `matter-semantic` | Local semantic search: Embedder/MockEmbedder, chunk+overlap, model-namespaced vectors, pre-filter cosine, `semantic_index` job. |
+| `matter-ai` | Opt-in AI provider trait (Mock + OpenAI-compatible), secrets (keyring/env), first-pass `ai_suggest_codes` job (suggestions only). |
 
 ## Rust Standards
 
