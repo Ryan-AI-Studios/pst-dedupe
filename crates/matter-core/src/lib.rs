@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v36**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v37**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -49,6 +49,9 @@
 //! - **Multi-user concurrent review** (schema v36 / track 0058): local users/sessions,
 //!   item locks + batch checkout, OCC `review_version`, sampling QC; exclusive OS
 //!   `.matter.lock` on write-open; strict actor mode for the matter service
+//! - **Platform SSO hooks** (schema v37 / track 0059): optional `matters.tenant_id`
+//!   and `matter_users.oidc_issuer`/`oidc_sub` for OIDC linking; control plane lives
+//!   in `matter-platform` (`platform.db`), not a shared multi-tenant items table
 //!
 //! ## Layout
 //!
@@ -78,7 +81,7 @@
 //! ## Out of scope
 //!
 //! Purview/PST I/O, full-matter process jobs, Tantivy engine (see `matter-search`),
-//! UI, multi-tenant, FIPS certification.
+//! UI, hosted multi-tenant control plane (see `matter-platform`), FIPS certification.
 
 pub mod ai;
 pub mod ai_verify;

@@ -3,7 +3,8 @@ name = "matter-cull"
 version = "0.1.0"
 edition = "2021"
 description = "Matter-level flag-only data reduction: cull rules, presets, family policy, optional DeNIST"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 matter-core = { path = "../matter-core" }

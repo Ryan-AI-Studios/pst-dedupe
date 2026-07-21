@@ -3,7 +3,8 @@ name = "extract-calendar"
 version = "0.1.0"
 edition = "2021"
 description = "Pure-Rust ICS calendar extract + ics_extract job (track 0035)"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 matter-core = { path = "../matter-core" }

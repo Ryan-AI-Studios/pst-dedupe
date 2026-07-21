@@ -3,7 +3,8 @@ name = "matter-gap"
 version = "0.1.0"
 edition = "2021"
 description = "Gap analysis: expected custodians, date coverage, opposing DAT set-diff"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 matter-core = { path = "../matter-core" }

@@ -34,7 +34,11 @@ members = [
     "crates/matter-semantic",
     "crates/matter-ai",
     "crates/matter-service",
+    "crates/matter-platform",
 ]
+
+# OIDC client (track 0059) — pin 4.0.x, rustls via reqwest default features in openidconnect
+# (declared on matter-service; listed here for workspace discoverability)
 
 [workspace.dependencies]
 # PST reader

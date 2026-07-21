@@ -3,7 +3,8 @@ name = "extract-pst"
 version = "0.1.0"
 edition = "2021"
 description = "Blocking PST extractor: walk pst-reader → Normalized Items + logical_hash in matter-core"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 matter-core = { path = "../matter-core" }

@@ -602,13 +602,27 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0038-05 | — | Multi-matter portfolio dashboard | Still residual | residual |
 | D-0039-07 | — | Multi-matter portfolio report | Still residual | residual |
 
+## From track 0059-MultiTenantSso (Completed — Codex luna PASS)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0059-01 | — | SAML 2.0 IdP | OIDC Auth Code + PKCE is P0 | residual |
+| D-0059-02 | — | Desk browser “Sign in with SSO” UX | Builds on D-0058-01 Connect | residual polish |
+| D-0059-03 | — | IdP RP-initiated / back-channel logout | Local logout + lock release is P0 | residual |
+| D-0059-04 | — | Multi-matter single process host | Still one matter per process; D-0058-08 | residual |
+| D-0059-05 | — | Per-tenant matter CMK / external KMS | Distinct from platform IdP secret PMK; `TenantKeyProvider` stub only | **D-0057-03** |
+| D-0059-06 | — | SCIM user provisioning | Residual | residual |
+| D-0059-07 | — | Postgres / multi-region platform.db | SQLite platform.db is P0 | residual scale |
+| D-0059-08 | P3 | Configurable public base URL for OIDC redirect (TLS proxy) | P0 derives `http://{bind}` | residual polish |
+| D-0059-09 | P3 | OIDC discovery metadata cache TTL | In-process cache; process restart refreshes | residual polish |
+
 ## From track 0057-SecurityHardener (Completed — see conductor review)
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0057-01 | — | Convert existing plaintext matter → encrypted | Full re-encrypt residual; create-encrypted only P0 | residual |
 | D-0057-02 | — | Encrypted zip transfer package for counsel | Plan open item | residual |
-| D-0057-03 | — | FIPS / enterprise CMK | Series I multi-tenant | **0058/0059** residual |
+| D-0057-03 | — | FIPS / enterprise CMK | Series I multi-tenant | residual (D-0059-05) |
 | D-0057-04 | — | Biometric unlock | Residual | residual |
 | D-0057-05 | — | Secure wipe free space after seal | Unlink-only wipe of `.enc-db` | residual polish |
 | D-0057-06 | — | FTS mmap-class perf on encrypted matters | P0 honesty accepts no-mmap EncryptedDirectory | residual research |

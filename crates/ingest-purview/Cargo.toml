@@ -3,7 +3,8 @@ name = "ingest-purview"
 version = "0.1.0"
 edition = "2021"
 description = "Purview/package/ZIP ingest: detect, safe expand, matter inventory, resumable checkpoints"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 matter-core = { path = "../matter-core" }

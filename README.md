@@ -13,10 +13,10 @@ A pure Rust Windows tool for deduplicating emails across Outlook PST files.
 - Optionally **exports unique messages as `.eml` files** (GUI path).
 - Surfaces:
   - **`dedupe-desk`** — primary product shell: create/open matter, add sources, ingest/extract with live progress (track 0020)
-  - **`pst-dedup` CLI** — agent- and script-friendly PST tools plus **headless matter automation** (`matter`, `job`, `profile`, `workflow`, `ingest`, `report`, `qc`, `produce`, `gap`) and **opt-in multi-user matter service** (`service serve|bootstrap-admin|user`, track 0058)
+  - **`pst-dedup` CLI** — agent- and script-friendly PST tools plus **headless matter automation** (`matter`, `job`, `profile`, `workflow`, `ingest`, `report`, `qc`, `produce`, `gap`), **opt-in multi-user matter service** (`service serve|bootstrap-admin|user`, track 0058), and **platform control plane** (`platform tenant|idp|matter`, track 0059)
   - **`pst-dedup-gui`** — legacy egui scan/dedup wizard (still builds for regression)
 
-**Product modes:** **Desk solo** (default single-exe, local matter open) stays unchanged. **Matter service** is opt-in: one host process holds an exclusive OS lock on the matter, unlocks encrypted matters once, and exposes loopback HTTP (`127.0.0.1` by default; LAN needs `--allow-lan`) for concurrent reviewers with locks, OCC versions, batches, and sampling QC. See `ARCHITECTURE.md` and `crates/matter-service/README.md`.
+**Product modes:** **Desk solo** (default single-exe, local matter open) stays unchanged. **Matter service** is opt-in: one host process holds an exclusive OS lock on the matter, unlocks encrypted matters once, and exposes loopback HTTP (`127.0.0.1` by default; LAN needs `--allow-lan`) for concurrent reviewers with locks, OCC versions, batches, and sampling QC. **Platform SSO** is a further opt-in: `service serve --platform platform.db` plus `platform` CLI for tenants/IdP/matter registration (OIDC Auth Code + PKCE, PMK for IdP secrets, `PLATFORM_STORAGE_ROOT` sandbox). See `ARCHITECTURE.md`, `crates/matter-service/README.md`, and `crates/matter-platform/README.md`.
 
 ## Build
 
@@ -269,4 +269,8 @@ ledgerful verify
 
 ## License
 
-MIT OR Apache-2.0
+**Proprietary commercial software.** All rights reserved.
+
+This repository is **not** open source. You may not use, run, or redistribute Dedupe / Dedupe Desk for production or commercial work without a **paid commercial license** from the copyright holder (Ryan / Ryan-AI-Studios).
+
+See [`LICENSE`](LICENSE) for the full terms (including a narrow private evaluation exception). Third-party dependencies keep their own licenses (typically permissive MIT/Apache).

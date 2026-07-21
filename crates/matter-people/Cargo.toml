@@ -3,7 +3,8 @@ name = "matter-people"
 version = "0.1.0"
 edition = "2021"
 description = "Offline people–comms graph: participants, directed edges, timeline (track 0047)"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 matter-core = { path = "../matter-core" }

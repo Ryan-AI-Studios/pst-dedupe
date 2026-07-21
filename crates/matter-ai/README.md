@@ -101,4 +101,4 @@ Never store API keys in `matter.db` or audit content. Keyring failures fail clos
 
 ## License
 
-MIT OR Apache-2.0. Runtime deps include `reqwest` (rustls), `keyring`, `matter-core`.
+Proprietary commercial (see repository root [`LICENSE`](../../LICENSE)). Runtime deps include `reqwest` (rustls), `keyring`, `matter-core` under their own licenses.

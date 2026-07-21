@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 36;
+pub const SCHEMA_VERSION: u32 = 37;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -50,6 +50,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (34, MIGRATION_V34),
     (35, MIGRATION_V35),
     (36, MIGRATION_V36),
+    (37, MIGRATION_V37),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -1233,6 +1234,21 @@ CREATE TABLE qc_sample_items (
   PRIMARY KEY (sample_id, item_id)
 );
 CREATE INDEX idx_qc_sample_items_item ON qc_sample_items(item_id);
+"#;
+
+/// Schema v37: platform multi-tenant SSO hooks (track 0059).
+///
+/// Optional `matters.tenant_id` (null = desk/local unhosted) and OIDC link
+/// columns on `matter_users`. Solo Desk and local password multi-user unchanged.
+const MIGRATION_V37: &str = r#"
+ALTER TABLE matters ADD COLUMN tenant_id TEXT;
+
+ALTER TABLE matter_users ADD COLUMN oidc_issuer TEXT;
+ALTER TABLE matter_users ADD COLUMN oidc_sub TEXT;
+
+CREATE UNIQUE INDEX idx_matter_users_oidc
+  ON matter_users(oidc_issuer, oidc_sub)
+  WHERE oidc_issuer IS NOT NULL AND oidc_sub IS NOT NULL;
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -4761,7 +4777,7 @@ mod tests {
         let v = migrate(&conn).expect("migrate v30 to current");
         assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 36);
+        assert_eq!(v, SCHEMA_VERSION);
 
         let has_table: bool = conn
             .query_row(
@@ -4850,7 +4866,7 @@ mod tests {
         let v = migrate(&conn).expect("migrate v31 to current");
         assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 36);
+        assert_eq!(v, SCHEMA_VERSION);
 
         for col in [
             "transcript_status",
@@ -4930,7 +4946,7 @@ mod tests {
         let v = migrate(&conn).expect("migrate v33 to v34");
         assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 36);
+        assert_eq!(v, SCHEMA_VERSION);
 
         for col in [
             "conversation_id",
@@ -5019,7 +5035,7 @@ mod tests {
         let v = migrate(&conn).expect("migrate v32 to current");
         assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 36);
+        assert_eq!(v, SCHEMA_VERSION);
 
         for col in [
             "lang_pack_id",

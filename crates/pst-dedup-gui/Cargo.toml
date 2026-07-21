@@ -3,7 +3,8 @@ name = "pst-dedup-gui"
 version = "0.1.0"
 edition = "2021"
 description = "PST email deduplication tool — egui desktop application"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 pst-reader = { path = "../pst-reader" }

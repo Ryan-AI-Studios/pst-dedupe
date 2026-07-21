@@ -3,7 +3,8 @@ name = "matter-sentiment"
 version = "0.1.0"
 edition = "2021"
 description = "Offline VADER-class sentiment: vader_lexicon_v1 + unit-extreme (track 0049)"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 matter-core = { path = "../matter-core" }

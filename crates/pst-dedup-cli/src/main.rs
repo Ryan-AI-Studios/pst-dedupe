@@ -10,6 +10,7 @@ mod job_cmd;
 mod json_io;
 mod matter_cmd;
 mod paths;
+mod platform_cmd;
 mod profile_cmd;
 mod runner_util;
 mod scan;
@@ -157,6 +158,12 @@ enum Commands {
     Service {
         #[command(subcommand)]
         cmd: service_cmd::ServiceCmd,
+    },
+
+    /// Platform control plane (0059): tenants / IdP / matter registration.
+    Platform {
+        #[command(subcommand)]
+        cmd: platform_cmd::PlatformCmd,
     },
 }
 
@@ -427,6 +434,20 @@ fn command_wants_json(cmd: &Commands) -> bool {
                 | service_cmd::ServiceUserCmd::Disable { json, .. } => *json,
             },
         },
+        Commands::Platform { cmd } => match cmd {
+            platform_cmd::PlatformCmd::Init { json, .. } => *json,
+            platform_cmd::PlatformCmd::Tenant { cmd } => match cmd {
+                platform_cmd::PlatformTenantCmd::Create { json, .. }
+                | platform_cmd::PlatformTenantCmd::List { json, .. } => *json,
+            },
+            platform_cmd::PlatformCmd::Idp { cmd } => match cmd {
+                platform_cmd::PlatformIdpCmd::Set { json, .. } => *json,
+            },
+            platform_cmd::PlatformCmd::Matter { cmd } => match cmd {
+                platform_cmd::PlatformMatterCmd::Register { json, .. }
+                | platform_cmd::PlatformMatterCmd::List { json, .. } => *json,
+            },
+        },
     }
 }
 
@@ -559,6 +580,7 @@ fn run(cli: Cli) -> Result<()> {
             } => convenience::gap_run(&path, params_json.as_deref(), json),
         },
         Commands::Service { cmd } => service_cmd::run_service(cmd).map(|_| ()),
+        Commands::Platform { cmd } => platform_cmd::run_platform(cmd).map(|_| ()),
     }
 }
 

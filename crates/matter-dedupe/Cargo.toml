@@ -3,7 +3,8 @@ name = "matter-dedupe"
 version = "0.1.0"
 edition = "2021"
 description = "Matter-level tiered dedupe: Message-ID → logical_hash → family policy"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
 
 [dependencies]
 matter-core = { path = "../matter-core" }

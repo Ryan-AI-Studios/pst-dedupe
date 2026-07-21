@@ -52,7 +52,7 @@ pub const QC_OUTCOME_CORRECTED: &str = "corrected";
 // Types
 // ---------------------------------------------------------------------------
 
-/// Matter-scoped user (local identity only — no OIDC).
+/// Matter-scoped user (local password and/or linked OIDC identity).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatterUser {
     pub id: String,
@@ -60,6 +60,12 @@ pub struct MatterUser {
     pub role: String,
     pub created_at: String,
     pub disabled_at: Option<String>,
+    /// OIDC issuer URL when linked (schema v37+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_issuer: Option<String>,
+    /// OIDC subject (`sub`) when linked (schema v37+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_sub: Option<String>,
 }
 
 /// Issued session (raw token returned **once** at login).
@@ -253,7 +259,16 @@ fn map_user_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MatterUser> {
         role: row.get(2)?,
         created_at: row.get(3)?,
         disabled_at: row.get(4)?,
+        oidc_issuer: row.get(5)?,
+        oidc_sub: row.get(6)?,
     })
+}
+
+/// Random unusable secret for OIDC-only users (password login cannot succeed).
+fn random_unusable_secret() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    format!("oidc-disabled:{}", hex_encode(&bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +427,7 @@ pub(crate) fn is_multi_user_enabled_conn(conn: &Connection) -> Result<bool> {
 
 pub(crate) fn load_user_conn(conn: &Connection, user_id: &str) -> Result<Option<MatterUser>> {
     conn.query_row(
-        "SELECT id, display_name, role, created_at, disabled_at \
+        "SELECT id, display_name, role, created_at, disabled_at, oidc_issuer, oidc_sub \
          FROM matter_users WHERE id = ?1",
         params![user_id],
         map_user_row,
@@ -506,8 +521,8 @@ impl Matter {
                 });
             }
             conn.execute(
-                "INSERT INTO matter_users (id, display_name, role, secret_hash, created_at, disabled_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+                "INSERT INTO matter_users (id, display_name, role, secret_hash, created_at, disabled_at, oidc_issuer, oidc_sub) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)",
                 params![id, name, role, secret_hash, now],
             )?;
             audit::append_event(
@@ -535,7 +550,7 @@ impl Matter {
     /// List all users (including disabled).
     pub fn list_users(&self) -> Result<Vec<MatterUser>> {
         let mut stmt = self.connection().prepare(
-            "SELECT id, display_name, role, created_at, disabled_at \
+            "SELECT id, display_name, role, created_at, disabled_at, oidc_issuer, oidc_sub \
              FROM matter_users ORDER BY display_name COLLATE NOCASE, id",
         )?;
         let rows = stmt.query_map([], map_user_row)?;
@@ -608,7 +623,7 @@ impl Matter {
                 },
             )
             .optional()?;
-        let Some((id, display_name, role, created_at, disabled_at, secret_hash)) = row else {
+        let Some((id, _display_name, _role, _created_at, disabled_at, secret_hash)) = row else {
             return Err(Error::Unauthorized("invalid credentials".into()));
         };
         if disabled_at.is_some() {
@@ -617,13 +632,17 @@ impl Matter {
         if !verify_secret(password, &secret_hash)? {
             return Err(Error::Unauthorized("invalid credentials".into()));
         }
-        let user = MatterUser {
-            id: id.clone(),
-            display_name,
-            role,
-            created_at,
-            disabled_at: None,
-        };
+        self.issue_session_for_user(&id, ttl_hours)
+    }
+
+    /// Issue a bearer session for an existing non-disabled user (OIDC + password paths).
+    pub fn issue_session_for_user(&self, user_id: &str, ttl_hours: i64) -> Result<SessionIssue> {
+        let user = self
+            .get_user(user_id)?
+            .ok_or_else(|| Error::Unauthorized("user not found".into()))?;
+        if user.disabled_at.is_some() {
+            return Err(Error::Forbidden("user is disabled".into()));
+        }
         let token = random_token();
         let token_hash = hash_token(&token);
         let now = now_rfc3339();
@@ -632,13 +651,181 @@ impl Matter {
         self.connection().execute(
             "INSERT INTO matter_sessions (token_hash, user_id, expires_at, created_at) \
              VALUES (?1, ?2, ?3, ?4)",
-            params![token_hash, id, expires_at, now],
+            params![token_hash, user.id, expires_at, now],
         )?;
         Ok(SessionIssue {
             token,
             user,
             expires_at,
         })
+    }
+
+    /// Find a user by OIDC issuer + subject (unique when set).
+    pub fn find_user_by_oidc(&self, issuer: &str, sub: &str) -> Result<Option<MatterUser>> {
+        let issuer = issuer.trim();
+        let sub = sub.trim();
+        if issuer.is_empty() || sub.is_empty() {
+            return Ok(None);
+        }
+        self.connection()
+            .query_row(
+                "SELECT id, display_name, role, created_at, disabled_at, oidc_issuer, oidc_sub \
+                 FROM matter_users WHERE oidc_issuer = ?1 AND oidc_sub = ?2",
+                params![issuer, sub],
+                map_user_row,
+            )
+            .optional()
+            .map_err(Error::from)
+    }
+
+    /// Create or link an OIDC identity to a matter user (JIT path).
+    ///
+    /// If `(issuer, sub)` already exists, returns that user (role/display not overwritten).
+    /// Otherwise creates an OIDC-only user with a random unusable password hash.
+    pub fn create_or_link_oidc_user(
+        &self,
+        display_name: &str,
+        role: &str,
+        issuer: &str,
+        sub: &str,
+        actor: &str,
+    ) -> Result<MatterUser> {
+        let issuer = issuer.trim();
+        let sub = sub.trim();
+        if issuer.is_empty() || sub.is_empty() {
+            return Err(Error::Other(
+                "oidc_issuer and oidc_sub must not be empty".into(),
+            ));
+        }
+        if let Some(existing) = self.find_user_by_oidc(issuer, sub)? {
+            if existing.disabled_at.is_some() {
+                return Err(Error::Forbidden("user is disabled".into()));
+            }
+            return Ok(existing);
+        }
+        let name = display_name.trim();
+        if name.is_empty() {
+            return Err(Error::Other("display_name must not be empty".into()));
+        }
+        let role = parse_role(role)?;
+        let secret_hash = hash_secret(&random_unusable_secret())?;
+        // OIDC JIT runs before a matter user exists for the subject — do not require
+        // strict actor resolution (service injects "oidc" / "system" audit labels).
+        let audit_actor = {
+            let t = actor.trim();
+            if t.is_empty() {
+                "oidc".to_string()
+            } else {
+                t.to_string()
+            }
+        };
+        let now = now_rfc3339();
+        let id = uuid::Uuid::new_v4().to_string();
+
+        // Prefer unique display name; if clash, append short suffix.
+        let mut final_name = name.to_string();
+        self.with_transaction(|conn| {
+            let clash: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM matter_users WHERE lower(display_name) = lower(?1)",
+                params![final_name],
+                |row| row.get(0),
+            )?;
+            if clash {
+                final_name = format!("{name}-{}", &id[..8]);
+            }
+            conn.execute(
+                "INSERT INTO matter_users (id, display_name, role, secret_hash, created_at, disabled_at, oidc_issuer, oidc_sub) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
+                params![id, final_name, role, secret_hash, now, issuer, sub],
+            )?;
+            audit::append_event(
+                conn,
+                &AuditEventInput {
+                    actor: audit_actor.clone(),
+                    action: "user.oidc_link".into(),
+                    entity: format!("user:{id}"),
+                    params_json: serde_json::json!({
+                        "display_name": final_name,
+                        "role": role,
+                        "oidc_issuer": issuer,
+                        // sub intentionally omitted from audit (PII/stable id).
+                    })
+                    .to_string(),
+                    tool_version: env!("CARGO_PKG_VERSION").into(),
+                },
+                &now,
+            )?;
+            Ok(())
+        })?;
+
+        self.get_user(&id)?
+            .ok_or_else(|| Error::Other(format!("user {id} missing after oidc create")))
+    }
+
+    /// Invalidate a single bearer session by raw token.
+    pub fn invalidate_session(&self, token: &str) -> Result<()> {
+        let token = token.trim();
+        if token.is_empty() {
+            return Ok(());
+        }
+        let th = hash_token(token);
+        self.connection().execute(
+            "DELETE FROM matter_sessions WHERE token_hash = ?1",
+            params![th],
+        )?;
+        Ok(())
+    }
+
+    /// Logout: delete all sessions for `user_id`, release item locks, check-in batch checkouts.
+    pub fn logout_user_release_locks(&self, user_id: &str) -> Result<()> {
+        let now = now_rfc3339();
+        self.with_transaction(|conn| {
+            conn.execute(
+                "DELETE FROM matter_sessions WHERE user_id = ?1",
+                params![user_id],
+            )?;
+            conn.execute(
+                "DELETE FROM item_locks WHERE user_id = ?1",
+                params![user_id],
+            )?;
+            conn.execute(
+                "UPDATE batch_checkouts SET checked_in_at = ?1 \
+                 WHERE user_id = ?2 AND checked_in_at IS NULL",
+                params![now, user_id],
+            )?;
+            audit::append_event(
+                conn,
+                &AuditEventInput {
+                    actor: user_id.to_string(),
+                    action: "user.logout".into(),
+                    entity: format!("user:{user_id}"),
+                    params_json: "{}".into(),
+                    tool_version: env!("CARGO_PKG_VERSION").into(),
+                },
+                &now,
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Bind this matter to a platform tenant (null clears for local/desk).
+    pub fn set_matter_tenant_id(&self, tenant_id: Option<&str>) -> Result<()> {
+        let tid = tenant_id.map(str::trim).filter(|s| !s.is_empty());
+        self.connection()
+            .execute("UPDATE matters SET tenant_id = ?1", params![tid])?;
+        Ok(())
+    }
+
+    /// Platform tenant id for this matter (`None` = desk/local unhosted).
+    pub fn get_matter_tenant_id(&self) -> Result<Option<String>> {
+        let v: Option<String> = self
+            .connection()
+            .query_row("SELECT tenant_id FROM matters LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .flatten();
+        Ok(v.filter(|s| !s.trim().is_empty()))
     }
 
     /// Resolve a bearer token to a non-disabled user (expired sessions fail closed).
