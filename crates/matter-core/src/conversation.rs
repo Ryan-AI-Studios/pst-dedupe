@@ -134,16 +134,51 @@ impl Matter {
     /// When `hit_item_ids` is `None` or empty, all conversations with at least
     /// one message are listed and `hit_count` is 0.
     ///
-    /// Paging: `LIMIT` / `OFFSET` on `(last_at DESC, conversation_id ASC)`.
-    /// Limit is clamped to [`CONVERSATION_LIST_MAX_LIMIT`].
+    /// Total order: `(last_at IS NULL) ASC, last_at DESC, conversation_id ASC`
+    /// — non-null `last_at` first (newest first), null `last_at` last, then
+    /// `conversation_id` as tie-break.
+    ///
+    /// Keyset: when `after_last_at` / `after_conversation_id` are set, returns
+    /// rows strictly after that cursor in the total order. Limit is clamped to
+    /// [`CONVERSATION_LIST_MAX_LIMIT`].
     pub fn list_conversations(
         &self,
         hit_item_ids: Option<&[String]>,
+        after_last_at: Option<&str>,
+        after_conversation_id: Option<&str>,
         limit: u64,
-        offset: u64,
     ) -> Result<Vec<ConversationSummary>> {
         let limit_i = clamp_conversation_list_limit(limit) as i64;
-        let offset_i = offset as i64;
+        let use_keyset = after_last_at.is_some() || after_conversation_id.is_some();
+        let after_cid = after_conversation_id.unwrap_or("");
+
+        // Keyset: rows strictly after (cursor_last_at, cursor_cid) in
+        // (last_at IS NULL) ASC, last_at DESC, conversation_id ASC.
+        // Non-null last_at first (DESC), nulls last; then conversation_id ASC.
+        let keyset_having = "\
+            ( \
+              CASE \
+                WHEN ?2 IS NULL THEN (MAX(i.sent_at) IS NULL AND i.conversation_id > ?3) \
+                ELSE ( \
+                  (MAX(i.sent_at) IS NOT NULL AND ( \
+                      MAX(i.sent_at) < ?2 OR (MAX(i.sent_at) = ?2 AND i.conversation_id > ?3) \
+                  )) \
+                  OR (MAX(i.sent_at) IS NULL) \
+                ) \
+              END \
+            )";
+        let keyset_having_plain = "\
+            ( \
+              CASE \
+                WHEN ?2 IS NULL THEN (MAX(sent_at) IS NULL AND conversation_id > ?3) \
+                ELSE ( \
+                  (MAX(sent_at) IS NOT NULL AND ( \
+                      MAX(sent_at) < ?2 OR (MAX(sent_at) = ?2 AND conversation_id > ?3) \
+                  )) \
+                  OR (MAX(sent_at) IS NULL) \
+                ) \
+              END \
+            )";
 
         let hit_filter = hit_item_ids
             .filter(|ids| !ids.is_empty())
@@ -164,7 +199,37 @@ impl Matter {
                 }
             }
 
-            let sql = "\
+            let sql = if use_keyset {
+                format!(
+                    "\
+                SELECT \
+                    i.conversation_id, \
+                    MAX(i.chat_type), \
+                    MAX(i.team_name), \
+                    MAX(i.channel_name), \
+                    MAX(i.conversation_bucket_date), \
+                    COUNT(*) AS message_count, \
+                    SUM(CASE WHEN h.id IS NOT NULL THEN 1 ELSE 0 END) AS hit_count, \
+                    MIN(i.sent_at) AS first_at, \
+                    MAX(i.sent_at) AS last_at \
+                FROM items i \
+                LEFT JOIN tmp_conv_hits h ON h.id = i.id \
+                WHERE i.matter_id = ?1 \
+                  AND i.conversation_id IS NOT NULL \
+                  AND i.conversation_id IN ( \
+                      SELECT DISTINCT i2.conversation_id \
+                      FROM items i2 \
+                      INNER JOIN tmp_conv_hits h2 ON h2.id = i2.id \
+                      WHERE i2.matter_id = ?1 \
+                        AND i2.conversation_id IS NOT NULL \
+                  ) \
+                GROUP BY i.conversation_id \
+                HAVING {keyset_having} \
+                ORDER BY (last_at IS NULL), last_at DESC, i.conversation_id ASC \
+                LIMIT ?4"
+                )
+            } else {
+                "\
                 SELECT \
                     i.conversation_id, \
                     MAX(i.chat_type), \
@@ -188,15 +253,47 @@ impl Matter {
                   ) \
                 GROUP BY i.conversation_id \
                 ORDER BY (last_at IS NULL), last_at DESC, i.conversation_id ASC \
-                LIMIT ?2 OFFSET ?3";
+                LIMIT ?2"
+                    .to_string()
+            };
 
-            let mut stmt = self.connection().prepare(sql)?;
-            let rows = stmt.query_map(params![self.id(), limit_i, offset_i], map_summary)?;
-            let out = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+            let mut stmt = self.connection().prepare(&sql)?;
+            let out = if use_keyset {
+                let rows = stmt.query_map(
+                    params![self.id(), after_last_at, after_cid, limit_i],
+                    map_summary,
+                )?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            } else {
+                let rows = stmt.query_map(params![self.id(), limit_i], map_summary)?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
             let _ = self.connection().execute("DELETE FROM tmp_conv_hits", []);
             Ok(out)
         } else {
-            let sql = "\
+            let sql = if use_keyset {
+                format!(
+                    "\
+                SELECT \
+                    conversation_id, \
+                    MAX(chat_type), \
+                    MAX(team_name), \
+                    MAX(channel_name), \
+                    MAX(conversation_bucket_date), \
+                    COUNT(*) AS message_count, \
+                    0 AS hit_count, \
+                    MIN(sent_at) AS first_at, \
+                    MAX(sent_at) AS last_at \
+                FROM items \
+                WHERE matter_id = ?1 \
+                  AND conversation_id IS NOT NULL \
+                GROUP BY conversation_id \
+                HAVING {keyset_having_plain} \
+                ORDER BY (last_at IS NULL), last_at DESC, conversation_id ASC \
+                LIMIT ?4"
+                )
+            } else {
+                "\
                 SELECT \
                     conversation_id, \
                     MAX(chat_type), \
@@ -212,19 +309,33 @@ impl Matter {
                   AND conversation_id IS NOT NULL \
                 GROUP BY conversation_id \
                 ORDER BY (last_at IS NULL), last_at DESC, conversation_id ASC \
-                LIMIT ?2 OFFSET ?3";
+                LIMIT ?2"
+                    .to_string()
+            };
 
-            let mut stmt = self.connection().prepare(sql)?;
-            let rows = stmt.query_map(params![self.id(), limit_i, offset_i], map_summary)?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(Error::from)
+            let mut stmt = self.connection().prepare(&sql)?;
+            if use_keyset {
+                let rows = stmt.query_map(
+                    params![self.id(), after_last_at, after_cid, limit_i],
+                    map_summary,
+                )?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(Error::from)
+            } else {
+                let rows = stmt.query_map(params![self.id(), limit_i], map_summary)?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(Error::from)
+            }
         }
     }
 
     /// Page messages for one `conversation_id` (full day bucket — **no** FilterSpec WHERE).
     ///
-    /// Order: `sent_at ASC, id ASC`. Keyset: when `after_sent_at` / `after_id` are set,
-    /// returns rows strictly after that cursor. Limit clamped to
+    /// Total order: `(sent_at IS NULL) ASC, sent_at ASC, id ASC` — non-null
+    /// timestamps first chronologically, then null `sent_at` by `id`.
+    ///
+    /// Keyset: when `after_sent_at` / `after_id` are set, returns rows strictly
+    /// after that cursor in the total order. Limit clamped to
     /// [`CONVERSATION_STREAM_MAX_LIMIT`].
     ///
     /// When `include_reply_snippets` is true, batch-loads parent text previews for
@@ -246,7 +357,10 @@ impl Matter {
         }
 
         let mut rows = if after_sent_at.is_some() || after_id.is_some() {
-            // Keyset: (sent_at, id) > cursor. NULL sent_at sorts first in ASC.
+            // Keyset after: strictly after cursor in
+            // (sent_at IS NULL) ASC, sent_at ASC, id ASC.
+            // Non-null first; nulls last. After a non-null cursor includes later
+            // non-nulls and all nulls; after a null cursor is only later nulls.
             let sql = "\
                 SELECT id, conversation_id, sent_at, from_addr, subject, text_sha256, html_sha256, \
                        parent_item_id, chat_type, team_name, channel_name, conversation_bucket_date, \
@@ -255,11 +369,13 @@ impl Matter {
                 WHERE matter_id = ?1 \
                   AND conversation_id = ?2 \
                   AND ( \
-                    (sent_at IS NOT NULL AND ?3 IS NOT NULL AND ( \
-                        sent_at > ?3 OR (sent_at = ?3 AND id > ?4) \
-                    )) \
-                    OR (sent_at IS NOT NULL AND ?3 IS NULL) \
-                    OR (sent_at IS NULL AND ?3 IS NULL AND id > ?4) \
+                    CASE \
+                      WHEN ?3 IS NULL THEN (sent_at IS NULL AND id > ?4) \
+                      ELSE ( \
+                        (sent_at IS NOT NULL AND (sent_at > ?3 OR (sent_at = ?3 AND id > ?4))) \
+                        OR (sent_at IS NULL) \
+                      ) \
+                    END \
                   ) \
                 ORDER BY (sent_at IS NULL), sent_at ASC, id ASC \
                 LIMIT ?5";
@@ -298,11 +414,11 @@ impl Matter {
 
     /// Page messages **before** a keyset cursor for one `conversation_id`.
     ///
-    /// Order returned: `sent_at ASC, id ASC` (chronological for UI prepend).
-    /// Keyset: when `before_sent_at` / `before_id` are set, returns rows strictly
-    /// **before** that cursor (`(sent_at, id) < cursor`), fetched newest-first then
-    /// reversed. When both are `None`, returns the first (oldest) page — same as
-    /// [`list_conversation_messages`] with no cursor.
+    /// Order returned: `(sent_at IS NULL) ASC, sent_at ASC, id ASC` (chronological
+    /// for UI prepend). Keyset: when `before_sent_at` / `before_id` are set,
+    /// returns rows strictly **before** that cursor in the same total order as
+    /// [`list_conversation_messages`], fetched reverse then reversed. When both
+    /// are `None`, returns the first (oldest) page.
     ///
     /// Limit clamped to [`CONVERSATION_STREAM_MAX_LIMIT`].
     pub fn list_conversation_messages_before(
@@ -326,7 +442,9 @@ impl Matter {
             return self.list_conversation_messages(cid, None, None, limit, include_reply_snippets);
         }
 
-        // Keyset older side: (sent_at, id) < cursor, newest-first then reverse.
+        // Keyset before: inverse of after order. Before a non-null cursor is only
+        // earlier non-nulls (nulls sort after all non-nulls). Before a null
+        // cursor is all non-nulls plus earlier nulls.
         let sql = "\
             SELECT id, conversation_id, sent_at, from_addr, subject, text_sha256, html_sha256, \
                    parent_item_id, chat_type, team_name, channel_name, conversation_bucket_date, \
@@ -335,11 +453,15 @@ impl Matter {
             WHERE matter_id = ?1 \
               AND conversation_id = ?2 \
               AND ( \
-                (sent_at IS NOT NULL AND ?3 IS NOT NULL AND ( \
-                    sent_at < ?3 OR (sent_at = ?3 AND id < ?4) \
-                )) \
-                OR (sent_at IS NULL AND ?3 IS NOT NULL) \
-                OR (sent_at IS NULL AND ?3 IS NULL AND id < ?4) \
+                CASE \
+                  WHEN ?3 IS NULL THEN ( \
+                    (sent_at IS NOT NULL) \
+                    OR (sent_at IS NULL AND id < ?4) \
+                  ) \
+                  ELSE ( \
+                    sent_at IS NOT NULL AND (sent_at < ?3 OR (sent_at = ?3 AND id < ?4)) \
+                  ) \
+                END \
               ) \
             ORDER BY (sent_at IS NULL) DESC, sent_at DESC, id DESC \
             LIMIT ?5";
@@ -424,7 +546,7 @@ impl Matter {
             )));
         }
 
-        // Messages strictly before anchor (newest-first of the older side, then reverse).
+        // Messages strictly before anchor — same total order as stream keyset.
         let before_sql = "\
             SELECT id, conversation_id, sent_at, from_addr, subject, text_sha256, html_sha256, \
                    parent_item_id, chat_type, team_name, channel_name, conversation_bucket_date, \
@@ -433,11 +555,15 @@ impl Matter {
             WHERE matter_id = ?1 \
               AND conversation_id = ?2 \
               AND ( \
-                (sent_at IS NOT NULL AND ?3 IS NOT NULL AND ( \
-                    sent_at < ?3 OR (sent_at = ?3 AND id < ?4) \
-                )) \
-                OR (sent_at IS NULL AND ?3 IS NOT NULL) \
-                OR (sent_at IS NULL AND ?3 IS NULL AND id < ?4) \
+                CASE \
+                  WHEN ?3 IS NULL THEN ( \
+                    (sent_at IS NOT NULL) \
+                    OR (sent_at IS NULL AND id < ?4) \
+                  ) \
+                  ELSE ( \
+                    sent_at IS NOT NULL AND (sent_at < ?3 OR (sent_at = ?3 AND id < ?4)) \
+                  ) \
+                END \
               ) \
             ORDER BY (sent_at IS NULL) DESC, sent_at DESC, id DESC \
             LIMIT ?5";
@@ -459,7 +585,7 @@ impl Matter {
             v
         };
 
-        // Anchor + after (inclusive of anchor).
+        // Anchor + after (inclusive of anchor) in the same total order.
         let after_limit = (after_n + 1) as i64;
         let after_sql = "\
             SELECT id, conversation_id, sent_at, from_addr, subject, text_sha256, html_sha256, \
@@ -469,12 +595,16 @@ impl Matter {
             WHERE matter_id = ?1 \
               AND conversation_id = ?2 \
               AND ( \
-                (sent_at IS NOT NULL AND ?3 IS NOT NULL AND ( \
-                    sent_at > ?3 OR (sent_at = ?3 AND id >= ?4) \
-                )) \
-                OR (sent_at IS NULL AND ?3 IS NULL AND id >= ?4) \
-                OR (sent_at IS NOT NULL AND ?3 IS NULL) \
-                OR (id = ?4) \
+                id = ?4 \
+                OR ( \
+                  CASE \
+                    WHEN ?3 IS NULL THEN (sent_at IS NULL AND id > ?4) \
+                    ELSE ( \
+                      (sent_at IS NOT NULL AND (sent_at > ?3 OR (sent_at = ?3 AND id > ?4))) \
+                      OR (sent_at IS NULL) \
+                    ) \
+                  END \
+                ) \
               ) \
             ORDER BY (sent_at IS NULL), sent_at ASC, id ASC \
             LIMIT ?5";

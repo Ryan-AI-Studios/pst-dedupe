@@ -387,13 +387,15 @@ fn list_discovery_with_hits_full_message_count() {
     );
 
     // Unfiltered: both conversations.
-    let all = matter.list_conversations(None, 50, 0).expect("all");
+    let all = matter
+        .list_conversations(None, None, None, 50)
+        .expect("all");
     assert_eq!(all.len(), 2);
 
     // Hit filter: only conv_with_hit.
     let hits = vec![hit.id.clone()];
     let filtered = matter
-        .list_conversations(Some(&hits), 50, 0)
+        .list_conversations(Some(&hits), None, None, 50)
         .expect("filtered");
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].conversation_id, cid_hit);
@@ -405,6 +407,82 @@ fn list_discovery_with_hits_full_message_count() {
     assert_eq!(filtered[0].bucket_date.as_deref(), Some("2024-06-15"));
     assert_eq!(filtered[0].team_name.as_deref(), Some("Team Alpha"));
     assert_eq!(filtered[0].channel_name.as_deref(), Some("general"));
+}
+
+#[test]
+fn list_conversations_keyset_pages_without_dups() {
+    let (_tmp, base) = utf8_tempdir();
+    let matter = Matter::create(base.join("list_keyset"), "ListKeyset").expect("create");
+
+    // 55 distinct conversation_ids with staggered last_at so order is stable.
+    for i in 0..55 {
+        let cid = format!("conv_page_{i:03}");
+        let id = format!("itm_page_{i:03}");
+        // Higher i → later last_at → appears earlier in DESC order.
+        let sent = format!("2024-06-15T{:02}:{:02}:00Z", 10 + i / 60, i % 60);
+        insert_chat(
+            &matter,
+            ChatSeed {
+                id: &id,
+                conversation_id: &cid,
+                sent_at: &sent,
+                from: "u@ex.com",
+                subject: "m",
+                text: Some("t"),
+            },
+        );
+    }
+
+    let page1 = matter
+        .list_conversations(None, None, None, 50)
+        .expect("page1");
+    assert_eq!(page1.len(), 50, "first page is full limit");
+
+    let last = page1.last().expect("last of page1");
+    let page2 = matter
+        .list_conversations(
+            None,
+            last.last_at.as_deref(),
+            Some(last.conversation_id.as_str()),
+            50,
+        )
+        .expect("page2");
+    assert_eq!(page2.len(), 5, "second page gets the rest");
+
+    // No overlap.
+    let p1_ids: HashSet<String> = page1.iter().map(|c| c.conversation_id.clone()).collect();
+    let p2_ids: HashSet<String> = page2.iter().map(|c| c.conversation_id.clone()).collect();
+    assert!(
+        p1_ids.is_disjoint(&p2_ids),
+        "pages must not share conversation_ids"
+    );
+
+    // Full reconstructed set is 55 unique, stable total order.
+    let mut all: Vec<String> = page1.iter().map(|c| c.conversation_id.clone()).collect();
+    all.extend(page2.iter().map(|c| c.conversation_id.clone()));
+    assert_eq!(all.len(), 55);
+    let full = matter
+        .list_conversations(None, None, None, 200)
+        .expect("full");
+    assert_eq!(
+        all,
+        full.iter()
+            .map(|c| c.conversation_id.clone())
+            .collect::<Vec<_>>(),
+        "paged order must match single full page"
+    );
+
+    // Empty third page.
+    let last2 = page2.last().expect("last of page2");
+    let page3 = matter
+        .list_conversations(
+            None,
+            last2.last_at.as_deref(),
+            Some(last2.conversation_id.as_str()),
+            50,
+        )
+        .expect("page3");
+    assert!(page3.is_empty());
 }
 
 #[test]
@@ -580,4 +658,154 @@ fn stream_keyset_load_earlier_and_later_cover_full_set() {
         )
         .expect("empty earlier");
     assert!(empty_earlier.is_empty());
+}
+
+/// Insert a chat item with optional null `sent_at` (stream NULL-order tests).
+fn insert_chat_opt_sent(
+    matter: &Matter,
+    id: &str,
+    conversation_id: &str,
+    sent_at: Option<&str>,
+    subject: &str,
+) -> ConversationMessageRow {
+    let text_sha = matter.put_bytes(b"t").expect("put text");
+    let item = matter
+        .insert_item(ItemInput {
+            id: Some(id.into()),
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::STANDALONE.into()),
+            conversation_id: Some(conversation_id.into()),
+            chat_type: Some("channel".into()),
+            team_name: Some("Team Alpha".into()),
+            channel_name: Some("general".into()),
+            conversation_bucket_date: Some("2024-06-15".into()),
+            chat_export_format: Some("html".into()),
+            sent_at: sent_at.map(|s| s.into()),
+            from_addr: Some("u@ex.com".into()),
+            subject: Some(subject.into()),
+            text_sha256: Some(text_sha),
+            file_category: Some("chat".into()),
+            ..Default::default()
+        })
+        .expect("insert chat opt sent");
+    ConversationMessageRow {
+        id: item.id,
+        conversation_id: conversation_id.into(),
+        sent_at: item.sent_at,
+        from_addr: item.from_addr,
+        subject: item.subject,
+        text_sha256: item.text_sha256,
+        html_sha256: item.html_sha256,
+        parent_item_id: item.parent_item_id,
+        chat_type: item.chat_type,
+        team_name: item.team_name,
+        channel_name: item.channel_name,
+        conversation_bucket_date: item.conversation_bucket_date,
+        file_category: item.file_category,
+        role: item.role,
+        path: item.path,
+        reply_snippet: None,
+    }
+}
+
+#[test]
+fn stream_null_sent_at_total_order_and_keysets() {
+    let (_tmp, base) = utf8_tempdir();
+    let matter = Matter::create(base.join("null_sent"), "NullSent").expect("create");
+    let cid = "conv_null_sent";
+
+    // Mix: two non-null, two null. Order must be non-null chronologically, then null by id.
+    insert_chat_opt_sent(&matter, "itm_n2", cid, Some("2024-06-15T11:00:00Z"), "n2");
+    insert_chat_opt_sent(&matter, "itm_z_null_b", cid, None, "null_b");
+    insert_chat_opt_sent(&matter, "itm_n1", cid, Some("2024-06-15T10:00:00Z"), "n1");
+    insert_chat_opt_sent(&matter, "itm_a_null_a", cid, None, "null_a");
+
+    let full = matter
+        .list_conversation_messages(cid, None, None, 100, false)
+        .expect("full");
+    let full_ids: Vec<&str> = full.iter().map(|r| r.id.as_str()).collect();
+    // Non-null first by sent_at ASC; nulls last by id ASC.
+    assert_eq!(
+        full_ids,
+        vec!["itm_n1", "itm_n2", "itm_a_null_a", "itm_z_null_b"],
+        "deterministic total order with mixed null sent_at"
+    );
+
+    // After mid non-null (n1) → n2 then both nulls (not wrongly reordering nulls first).
+    let after_n1 = matter
+        .list_conversation_messages(cid, Some("2024-06-15T10:00:00Z"), Some("itm_n1"), 10, false)
+        .expect("after n1");
+    assert_eq!(
+        after_n1.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["itm_n2", "itm_a_null_a", "itm_z_null_b"]
+    );
+
+    // After last non-null → only nulls.
+    let after_n2 = matter
+        .list_conversation_messages(cid, Some("2024-06-15T11:00:00Z"), Some("itm_n2"), 10, false)
+        .expect("after n2");
+    assert_eq!(
+        after_n2.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["itm_a_null_a", "itm_z_null_b"]
+    );
+
+    // After first null → only later null.
+    let after_null_a = matter
+        .list_conversation_messages(cid, None, Some("itm_a_null_a"), 10, false)
+        .expect("after null a");
+    assert_eq!(
+        after_null_a
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["itm_z_null_b"]
+    );
+
+    // Before first non-null → empty (nothing earlier).
+    let before_n1 = matter
+        .list_conversation_messages_before(
+            cid,
+            Some("2024-06-15T10:00:00Z"),
+            Some("itm_n1"),
+            10,
+            false,
+        )
+        .expect("before n1");
+    assert!(before_n1.is_empty(), "nothing before earliest non-null");
+
+    // Before first null → both non-nulls only (nulls sort after non-nulls).
+    let before_null_a = matter
+        .list_conversation_messages_before(cid, None, Some("itm_a_null_a"), 10, false)
+        .expect("before null a");
+    assert_eq!(
+        before_null_a
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["itm_n1", "itm_n2"]
+    );
+
+    // Around a null-timestamp message includes correct neighbors.
+    let around_null = matter
+        .list_conversation_messages_around(cid, "itm_a_null_a", Some(2), Some(2), false)
+        .expect("around null");
+    let around_ids: Vec<&str> = around_null.iter().map(|r| r.id.as_str()).collect();
+    assert!(
+        around_ids.contains(&"itm_a_null_a"),
+        "anchor present: {around_ids:?}"
+    );
+    // Neighbors: both non-nulls before, and later null after.
+    assert_eq!(
+        around_ids,
+        vec!["itm_n1", "itm_n2", "itm_a_null_a", "itm_z_null_b"]
+    );
+
+    // Around mid non-null.
+    let around_n2 = matter
+        .list_conversation_messages_around(cid, "itm_n2", Some(1), Some(2), false)
+        .expect("around n2");
+    assert_eq!(
+        around_n2.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["itm_n1", "itm_n2", "itm_a_null_a", "itm_z_null_b"]
+    );
 }

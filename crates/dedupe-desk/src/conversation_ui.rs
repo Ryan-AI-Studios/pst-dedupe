@@ -83,9 +83,12 @@ pub fn reply_chrome_line(snippet: Option<&str>) -> String {
 enum ConvOpResult {
     ListLoaded {
         conversations: Vec<ConversationSummary>,
-        total_hint: usize,
+        /// Page may be truncated; desk can offer Load more when true.
+        has_more: bool,
         /// Present when catalog was empty and loaded with the list.
         code_defs: Option<Vec<CodeDef>>,
+        /// When true, append to existing list (keyset next page).
+        append: bool,
     },
     StreamLoaded {
         conversation_id: String,
@@ -120,6 +123,8 @@ struct BulkConfirm {
 /// Desk conversation review state.
 pub struct ConversationState {
     pub conversations: Vec<ConversationSummary>,
+    /// True when the last conversation list page returned a full limit (more may exist).
+    pub conversations_has_more: bool,
     pub selected_conversation: Option<String>,
     pub messages: Vec<ConversationMessageRow>,
     pub selected_message: Option<String>,
@@ -156,6 +161,7 @@ impl Default for ConversationState {
     fn default() -> Self {
         Self {
             conversations: Vec::new(),
+            conversations_has_more: false,
             selected_conversation: None,
             messages: Vec::new(),
             selected_message: None,
@@ -214,17 +220,38 @@ impl ConversationState {
         match rx.try_recv() {
             Ok(ConvOpResult::ListLoaded {
                 conversations,
-                total_hint,
+                has_more,
                 code_defs,
+                append,
             }) => {
-                self.conversations = conversations;
+                if append {
+                    // Dedupe by conversation_id while appending keyset pages.
+                    let existing: HashSet<String> = self
+                        .conversations
+                        .iter()
+                        .map(|c| c.conversation_id.clone())
+                        .collect();
+                    for c in conversations {
+                        if !existing.contains(&c.conversation_id) {
+                            self.conversations.push(c);
+                        }
+                    }
+                } else {
+                    self.conversations = conversations;
+                }
+                self.conversations_has_more = has_more;
                 if let Some(defs) = code_defs {
                     self.code_defs = defs;
                 }
                 self.busy = false;
                 self.op_rx = None;
                 self.error = None;
-                self.status = Some(format!("{total_hint} conversation(s)"));
+                let n = self.conversations.len();
+                self.status = Some(if has_more {
+                    format!("{n} conversation(s) loaded (more available)")
+                } else {
+                    format!("{n} conversation(s)")
+                });
             }
             Ok(ConvOpResult::StreamLoaded {
                 conversation_id,
@@ -309,19 +336,21 @@ impl ConversationState {
         }
         self.busy = true;
         self.error = None;
+        self.conversations_has_more = false;
         let root = matter_root.to_path_buf();
         let hits = self.active_hit_ids.clone();
         let (tx, rx) = mpsc::channel();
         self.op_rx = Some(rx);
         let need_codes = self.code_defs.is_empty();
+        let limit = CONVERSATION_LIST_DEFAULT_LIMIT;
         thread::spawn(move || {
             let result = (|| -> Result<ConvOpResult, String> {
                 let matter = Matter::open_for_read(&root).map_err(|e| e.to_string())?;
                 let hit_vec: Option<Vec<String>> = hits.map(|h| h.into_iter().collect());
                 let conversations = matter
-                    .list_conversations(hit_vec.as_deref(), CONVERSATION_LIST_DEFAULT_LIMIT, 0)
+                    .list_conversations(hit_vec.as_deref(), None, None, limit)
                     .map_err(|e| e.to_string())?;
-                let n = conversations.len();
+                let has_more = conversations.len() as u64 >= limit;
                 let code_defs = if need_codes {
                     Some(matter.list_code_definitions().map_err(|e| e.to_string())?)
                 } else {
@@ -329,8 +358,50 @@ impl ConversationState {
                 };
                 Ok(ConvOpResult::ListLoaded {
                     conversations,
-                    total_hint: n,
+                    has_more,
                     code_defs,
+                    append: false,
+                })
+            })();
+            let _ = tx.send(result.unwrap_or_else(ConvOpResult::Error));
+        });
+    }
+
+    /// Keyset next page for the conversation catalog (append).
+    fn spawn_list_more(&mut self, matter_root: &Utf8Path) {
+        if self.busy || !self.conversations_has_more {
+            return;
+        }
+        let Some(last) = self.conversations.last() else {
+            return;
+        };
+        self.busy = true;
+        self.error = None;
+        let root = matter_root.to_path_buf();
+        let hits = self.active_hit_ids.clone();
+        let after_last_at = last.last_at.clone();
+        let after_cid = last.conversation_id.clone();
+        let (tx, rx) = mpsc::channel();
+        self.op_rx = Some(rx);
+        let limit = CONVERSATION_LIST_DEFAULT_LIMIT;
+        thread::spawn(move || {
+            let result = (|| -> Result<ConvOpResult, String> {
+                let matter = Matter::open_for_read(&root).map_err(|e| e.to_string())?;
+                let hit_vec: Option<Vec<String>> = hits.map(|h| h.into_iter().collect());
+                let conversations = matter
+                    .list_conversations(
+                        hit_vec.as_deref(),
+                        after_last_at.as_deref(),
+                        Some(after_cid.as_str()),
+                        limit,
+                    )
+                    .map_err(|e| e.to_string())?;
+                let has_more = conversations.len() as u64 >= limit;
+                Ok(ConvOpResult::ListLoaded {
+                    conversations,
+                    has_more,
+                    code_defs: None,
+                    append: true,
                 })
             })();
             let _ = tx.send(result.unwrap_or_else(ConvOpResult::Error));
@@ -793,6 +864,27 @@ pub fn show(
                 });
             if let Some(cid) = open_cid {
                 state.spawn_stream(root, cid, None);
+            }
+            if state.conversations_has_more {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Showing {} conversation(s); list is paged (limit {}).",
+                        state.conversations.len(),
+                        CONVERSATION_LIST_DEFAULT_LIMIT
+                    ))
+                    .small()
+                    .color(Color32::from_rgb(160, 100, 40)),
+                );
+                if ui
+                    .add_enabled(!state.busy, egui::Button::new("Load more conversations"))
+                    .on_hover_text(
+                        "Next page of conversations (keyset on last_at, conversation_id)",
+                    )
+                    .clicked()
+                {
+                    state.spawn_list_more(root);
+                }
             }
         });
 
