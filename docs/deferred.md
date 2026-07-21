@@ -146,7 +146,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0029-01 | P3 | FTS hit window capped at 50k unique ids before filter intersect | Documented `DEFAULT_FTS_FETCH_LIMIT`; keyset/streaming deferred (Codex residual) | residual scale |
-| D-0029-02 | — | CJK tokenizers (jieba/lindera) | P0 Latin `default` tokenizer only | **0054** |
+| D-0029-02 | — | CJK tokenizers (jieba/lindera) | **Closed in 0054**: hybrid CJK n-gram FTS (`cjk_ngram_v1`); dictionary jieba/lindera residual | **D-0054-01** |
 | D-0029-03 | — | Fuzzy / proximity dtSearch parity | P0 Boolean + phrases only | residual |
 | D-0029-04 | — | Snippet highlight UI | Optional SnippetGenerator / temporary FTS hit paint | residual / **0030** (nice-to-have; not DoD) |
 | D-0029-05 | — | SQLite FTS5 primary | Forbidden by plan §4.7 | never |
@@ -452,7 +452,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0048-02 | — | Hierarchical / HDBSCAN soft clusters | Residual | residual |
 | D-0048-03 | — | Multi-set UI + compare sets | Schema multi-set; Desk default set only | residual |
 | D-0048-04 | — | Cluster bubble / treemap viz | Tables-first P0 | residual polish |
-| D-0048-05 | — | Multilingual stopwords / CJK tokenizers | English P0 | **0054** |
+| D-0048-05 | — | Multilingual stopwords / CJK tokenizers | **Partial 0054**: CJK FTS n-gram; multi-lang stopword lists residual | **D-0054-03** |
 | D-0048-06 | — | Mid-iteration empty-centroid reseed | Final empty drop always applied | residual |
 | D-0048-07 | — | Deeper reply-quote strip for clustering | Shares D-0023-01 residual | residual |
 | D-0048-08 | — | Exclude near-dup members by default | Residual param; off by default | residual |
@@ -464,7 +464,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0049-01 | — | Transformer / ONNX sentiment | P0 lexicon/rules only; **0050** is semantic *search* (not sentiment transformers). Real MiniLM/Candle residual under **D-0050-01** / **0051** | residual / **0051** |
-| D-0049-02 | — | Multilingual lexicons | English P0 | **0054** |
+| D-0049-02 | — | Multilingual lexicons | English P0; residual after 0054 FTS packs | **D-0054-04** |
 | D-0049-03 | — | Per-unit score table + highlight UI | Aggregation is unit-based; no per-unit persist | residual |
 | D-0049-04 | — | Aspect-based (entity targets) | Residual | residual |
 | D-0049-05 | — | Emotion taxonomy beyond pos/neu/neg | Residual | residual |
@@ -484,7 +484,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0050-03 | — | Hybrid FTS ∩ semantic rank fusion | Keyword and semantic remain separate paths | residual |
 | D-0050-04 | — | Cross-encoder re-ranker | Residual | residual |
 | D-0050-05 | — | HNSW (or ANN) at multi-million scale | P0 exact cosine + pre-filter | residual |
-| D-0050-06 | — | Multilingual embed models | English-centric mock/P0 | **0054** |
+| D-0050-06 | — | Multilingual embed models | English-centric mock/P0; residual after 0054 FTS packs | **D-0054-05** |
 | D-0050-07 | — | GPU acceleration path | CPU-only mock path | residual |
 | D-0050-08 | — | Multi-model UI + namespace GC | Namespaces exist; one active model; no GC UI | residual |
 | D-0050-09 | — | RAG chat + citations | Citation-rich promote closed in **0052**; multi-turn/cross-doc RAG residual | residual / D-0052-01 |
@@ -532,11 +532,26 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0053-03 | — | Timed segment table / SRT export | Residual | residual |
 | D-0053-04 | — | Auto-enqueue `fts_index` after transcribe | P0 documents manual rebuild | residual |
 | D-0053-05 | — | GPU-only acceleration path | Residual | residual |
-| D-0053-06 | — | Multilingual model packs UI | **0054** | **0054** |
+| D-0053-06 | — | Multilingual model packs UI | Residual after 0054 FTS packs | **D-0054-06** |
 | D-0053-07 | — | In-app media player | Residual | residual |
 | D-0053-08 | P3 | Upgrade symphonia 0.5 → ~0.6 | P0 uses 0.5.x for stable SampleBuffer/Probe API | residual polish |
 | D-0053-09 | P3 | Pre-convert duration probe for non-WAV | Post-ffmpeg WAV duration enforced; pre-convert residual | residual polish |
 | D-0053-10 | P3 | Live whisper.cpp + ffmpeg operator CI smoke | Mock + Job Object kill tests in default CI; no weights in git | operator / polish |
+
+## From track 0054-MultilingualPacks (Completed — see conductor review)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0054-01 | — | jieba / lindera dictionary tokenizers | P0 is hybrid CJK n-gram (`cjk_hybrid_v1`); dictionary residual if tantivy 0.26 pin allows | residual |
+| D-0054-02 | — | Machine translation plugin | Explicit out of scope; never default cloud | residual / never default |
+| D-0054-03 | — | Full multi-lang cluster stopwords | English list in 0048; zh/ja/ko thin sets residual | residual |
+| D-0054-04 | — | Multilingual sentiment lexicons | English VADER P0 | residual (was D-0049-02) |
+| D-0054-05 | — | Multilingual embed models | English-centric semantic P0 | residual (was D-0050-06) |
+| D-0054-06 | — | STT multi-model language UI | Whisper model path only in 0053 | residual (was D-0053-06) |
+| D-0054-07 | — | Per-item pack routing | Matter-level pack P0 only | residual |
+| D-0054-08 | — | OCR tessdata pack manager | Residual 0036 path docs | residual |
+| D-0054-09 | — | Batch `lang_detect` job | Thin API + `set_item_language_tag` shipped; full job residual | residual |
+| D-0054-10 | P3 | Bare `+tag@example.com` QueryParser operator | Index preserves plus-address; quote in query (`"+tag@…"`) | residual polish |
 
 ## Hygiene
 

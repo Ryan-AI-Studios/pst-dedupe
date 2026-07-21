@@ -63,15 +63,27 @@ pub struct DeskSettings {
     /// `none` | `mock` | `openai_compatible`.
     #[serde(default)]
     pub ai_provider_kind: Option<String>,
+    /// Matter language pack for FTS (`latin_default` | `cjk_ngram_v1`).
+    /// Dual-writes to open matter when changed; hydrated from matter on open.
+    #[serde(default = "default_lang_pack_id")]
+    pub lang_pack_id: String,
+}
+
+fn default_lang_pack_id() -> String {
+    "latin_default".into()
 }
 
 impl DeskSettings {
     pub fn load() -> Self {
         let path = settings_path();
-        match fs::read_to_string(&path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        let mut s = match fs::read_to_string(&path) {
+            Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
             Err(_) => Self::default(),
+        };
+        if s.lang_pack_id.trim().is_empty() {
+            s.lang_pack_id = default_lang_pack_id();
         }
+        s
     }
 
     pub fn save(&self) {

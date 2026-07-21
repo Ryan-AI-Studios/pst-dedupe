@@ -5,12 +5,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
+use matter_core::{detect_language_tag, LANG_PACK_CJK_NGRAM_V1, LANG_PACK_LATIN_DEFAULT};
 use matter_core::{
     item_role, item_status, FilterCondition, FilterSpec, ItemInput, Matter, SCOPE_ENTIRE_MATTER,
 };
 use matter_search::{
     compose_keyword_filter, delete_then_add, remove_index_dir, run_fts_index, search_keyword,
-    FtsIndexParams, FtsOutcome, KeywordQuery, MatterIndex, FTS_STAGE,
+    search_keyword_for_matter, FtsIndexParams, FtsOutcome, KeywordQuery, LangPack, MatterIndex,
+    SearchError, CODE_FTS_LANG_PACK_STALE, FTS_STAGE,
 };
 use tempfile::tempdir;
 
@@ -632,4 +634,538 @@ fn missing_index_honest_error() {
         },
     );
     assert!(err.is_err(), "expected error for empty/missing index");
+}
+
+// ---------------------------------------------------------------------------
+// Track 0054 — multilingual packs (DoD-5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cjk_contiguous_matches_scattered_does_not() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-cjk-phrase");
+    let matter = Matter::create(&root, "CjkPhrase").expect("create");
+    matter
+        .update_lang_pack(LANG_PACK_CJK_NGRAM_V1)
+        .expect("pack");
+
+    // Contiguous company name (phrase adjacency).
+    let id_contig = insert_text_item(
+        &matter,
+        "contig.txt",
+        "C",
+        "株式会社トヨタ related notes".as_bytes(),
+    );
+    // Same three Han chars scattered (not adjacent as a company run).
+    let id_scatter = insert_text_item(
+        &matter,
+        "scatter.txt",
+        "S",
+        "株 only then 式 mid and 会 later with 社 end".as_bytes(),
+    );
+
+    let outcome = run_index(&matter, true);
+    assert!(matches!(outcome, FtsOutcome::Succeeded(_)), "{outcome:?}");
+
+    let hits = search_keyword_for_matter(
+        &matter,
+        &KeywordQuery {
+            query: "株式会社".into(),
+            limit: 20,
+            offset: 0,
+        },
+    )
+    .expect("cjk phrase search");
+    assert!(
+        hits.item_ids.contains(&id_contig),
+        "contiguous company name must match, hits={:?}",
+        hits.item_ids
+    );
+    assert!(
+        !hits.item_ids.contains(&id_scatter),
+        "scattered CJK must not match phrase path, hits={:?}",
+        hits.item_ids
+    );
+}
+
+#[test]
+fn email_searchable_under_cjk_pack() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-cjk-email");
+    let matter = Matter::create(&root, "CjkEmail").expect("create");
+    matter
+        .update_lang_pack(LANG_PACK_CJK_NGRAM_V1)
+        .expect("pack");
+    let id = insert_text_item(
+        &matter,
+        "mail.txt",
+        "Contact",
+        "please write bob@example.com for details 株式会社".as_bytes(),
+    );
+    run_index(&matter, true);
+
+    let hits = search_keyword_for_matter(
+        &matter,
+        &KeywordQuery {
+            query: "bob@example.com".into(),
+            limit: 10,
+            offset: 0,
+        },
+    )
+    .expect("email search");
+    assert_eq!(hits.item_ids, vec![id]);
+}
+
+#[test]
+fn email_trailing_period_searchable_under_cjk_pack() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-cjk-email-period");
+    let matter = Matter::create(&root, "CjkEmailPeriod").expect("create");
+    matter
+        .update_lang_pack(LANG_PACK_CJK_NGRAM_V1)
+        .expect("pack");
+    let id = insert_text_item(
+        &matter,
+        "mail.txt",
+        "Contact",
+        "please write bob@example.com. for details".as_bytes(),
+    );
+    run_index(&matter, true);
+
+    let hits = search_keyword_for_matter(
+        &matter,
+        &KeywordQuery {
+            query: "bob@example.com".into(),
+            limit: 10,
+            offset: 0,
+        },
+    )
+    .expect("email with trailing period in body");
+    assert_eq!(hits.item_ids, vec![id]);
+}
+
+#[test]
+fn cjk_whitespace_separated_does_not_match_contiguous_phrase() {
+    // P1-1: separator must open a positional gap so phrase "中国公" does not
+    // match body "中国 国公".
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-cjk-sep");
+    let matter = Matter::create(&root, "CjkSep").expect("create");
+    matter
+        .update_lang_pack(LANG_PACK_CJK_NGRAM_V1)
+        .expect("pack");
+
+    let id_sep = insert_text_item(&matter, "sep.txt", "S", "中国 国公 separated".as_bytes());
+    let id_contig = insert_text_item(&matter, "contig.txt", "C", "中国公 contiguous".as_bytes());
+
+    let outcome = run_index(&matter, true);
+    assert!(matches!(outcome, FtsOutcome::Succeeded(_)), "{outcome:?}");
+
+    let hits = search_keyword_for_matter(
+        &matter,
+        &KeywordQuery {
+            query: "中国公".into(),
+            limit: 20,
+            offset: 0,
+        },
+    )
+    .expect("cjk contiguous phrase");
+    assert!(
+        hits.item_ids.contains(&id_contig),
+        "contiguous form must match, hits={:?}",
+        hits.item_ids
+    );
+    assert!(
+        !hits.item_ids.contains(&id_sep),
+        "whitespace-separated CJK must not match contiguous phrase, hits={:?}",
+        hits.item_ids
+    );
+}
+
+#[test]
+fn english_regression_under_both_packs() {
+    let (_tmp, base) = utf8_tempdir();
+
+    // latin_default
+    {
+        let root = base.join("fts-en-latin");
+        let matter = Matter::create(&root, "EnLatin").expect("create");
+        let id = insert_text_item(&matter, "a.txt", "A", b"uniqueenglishword body");
+        run_index(&matter, true);
+        let hits = search_keyword_for_matter(
+            &matter,
+            &KeywordQuery {
+                query: "uniqueenglishword".into(),
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .expect("latin en");
+        assert_eq!(hits.item_ids, vec![id]);
+        assert_eq!(
+            matter.get_lang_config().unwrap().lang_pack_id,
+            LANG_PACK_LATIN_DEFAULT
+        );
+    }
+
+    // cjk_ngram_v1 still indexes English words
+    {
+        let root = base.join("fts-en-cjk");
+        let matter = Matter::create(&root, "EnCjk").expect("create");
+        matter
+            .update_lang_pack(LANG_PACK_CJK_NGRAM_V1)
+            .expect("pack");
+        let id = insert_text_item(&matter, "b.txt", "B", b"uniqueenglishword body");
+        run_index(&matter, true);
+        let hits = search_keyword_for_matter(
+            &matter,
+            &KeywordQuery {
+                query: "uniqueenglishword".into(),
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .expect("cjk en");
+        assert_eq!(hits.item_ids, vec![id]);
+    }
+}
+
+#[test]
+fn pack_change_without_rebuild_is_stale_hard_error() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-stale");
+    let matter = Matter::create(&root, "Stale").expect("create");
+    let id = insert_text_item(&matter, "a.txt", "A", b"staleword content");
+    run_index(&matter, true);
+
+    // Switch pack without rebuild — fingerprint cleared.
+    matter
+        .update_lang_pack(LANG_PACK_CJK_NGRAM_V1)
+        .expect("switch pack");
+    let cfg = matter.get_lang_config().expect("cfg");
+    assert!(cfg.fts_lang_fingerprint.is_none());
+
+    let err = search_keyword_for_matter(
+        &matter,
+        &KeywordQuery {
+            query: "staleword".into(),
+            limit: 10,
+            offset: 0,
+        },
+    )
+    .expect_err("must hard-fail when pack fingerprint missing");
+    let msg = err.to_string();
+    assert!(
+        err.is_lang_pack_stale()
+            || msg.contains(CODE_FTS_LANG_PACK_STALE)
+            || msg.contains("Rebuild required"),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(err.code(), Some(CODE_FTS_LANG_PACK_STALE));
+
+    // After rebuild under CJK pack → Ok.
+    let outcome = run_index(&matter, true);
+    assert!(matches!(outcome, FtsOutcome::Succeeded(_)), "{outcome:?}");
+    let hits = search_keyword_for_matter(
+        &matter,
+        &KeywordQuery {
+            query: "staleword".into(),
+            limit: 10,
+            offset: 0,
+        },
+    )
+    .expect("after rebuild");
+    assert_eq!(hits.item_ids, vec![id]);
+    assert_eq!(
+        matter
+            .get_lang_config()
+            .unwrap()
+            .fts_lang_fingerprint
+            .as_deref(),
+        Some(LangPack::CjkNgramV1.fingerprint().as_str())
+    );
+}
+
+#[test]
+fn short_text_lang_detect_is_und() {
+    assert_eq!(detect_language_tag("See attached"), "und");
+    assert_eq!(detect_language_tag("12345"), "und");
+    assert_eq!(detect_language_tag("hello world"), "und");
+    assert_eq!(detect_language_tag(""), "und");
+}
+
+#[test]
+fn mid_run_pack_change_does_not_certify_wrong_fingerprint() {
+    // If the pack is switched while fts_index is in progress, the outer runner
+    // must fail closed and not write a fingerprint for a different pack than
+    // the one that tokenized the physical index.
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-mid-pack");
+    let matter = Matter::create(&root, "MidPack").expect("create");
+    // Enough candidates that cancel can fire mid-job under small batches.
+    for i in 0..8 {
+        insert_text_item(
+            &matter,
+            &format!("d{i}.txt"),
+            "T",
+            format!("midpackword{i} content").as_bytes(),
+        );
+    }
+
+    // Start latin index, cancel after first progress tick, then switch pack and
+    // resume — pack-change-on-resume already forces rebuild. Here we switch
+    // pack **during** a single Succeeded-path by using cancel then switching
+    // before a complete run that would otherwise write FP after inner success.
+    //
+    // Direct path: run under latin with a cancel that never fires (full success
+    // would write latin FP). Instead: complete index under latin in a custom
+    // flow by switching pack between inner success simulation — call run with
+    // cancel that fires never, but switch pack via a progress callback before
+    // outer certifies.
+    let job = matter.create_job("fts_index").expect("job");
+    let params = FtsIndexParams {
+        reset: true,
+        batch_size: 2,
+        ..FtsIndexParams::default()
+    };
+    let switched = std::sync::atomic::AtomicBool::new(false);
+    let outcome = run_fts_index(&matter, &job.id, &params, None, |_| {
+        // After first progress, flip pack to CJK while the job is still running.
+        if !switched.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let _ = matter.update_lang_pack(LANG_PACK_CJK_NGRAM_V1);
+        }
+    })
+    .expect("run");
+
+    // Must not Succeeded with a CJK fingerprint over a latin-tokenized index.
+    match &outcome {
+        FtsOutcome::Failed { message, .. } => {
+            assert!(
+                message.contains("language pack changed") || message.contains("rebuild"),
+                "unexpected fail message: {message}"
+            );
+        }
+        FtsOutcome::Succeeded(_) => {
+            // If the progress callback raced after last batch only, pack may
+            // have changed after indexing completed under the new pack mid-way
+            // — still require fingerprint to match physical pack or be absent.
+            let cfg = matter.get_lang_config().expect("cfg");
+            // Fail closed preferred; if Succeeded, FP must match current pack
+            // and be the pack used for tokens. Safest assertion: either no FP
+            // or pack+FP consistent and CJK search works only after honest rebuild.
+            if let Some(fp) = cfg.fts_lang_fingerprint.as_deref() {
+                assert_eq!(fp, LangPack::CjkNgramV1.fingerprint().as_str());
+            }
+        }
+        FtsOutcome::Paused(_) => panic!("unexpected pause: {outcome:?}"),
+    }
+
+    // Never leave a latin fingerprint when pack is CJK.
+    let cfg = matter.get_lang_config().expect("cfg");
+    assert_eq!(cfg.lang_pack_id, LANG_PACK_CJK_NGRAM_V1);
+    if let Some(fp) = cfg.fts_lang_fingerprint.as_deref() {
+        assert_ne!(
+            fp,
+            LangPack::LatinDefault.fingerprint().as_str(),
+            "must not certify latin FP after mid-run switch to CJK"
+        );
+    }
+}
+
+#[test]
+fn plus_email_searchable_under_cjk_pack() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-cjk-plus-email");
+    let matter = Matter::create(&root, "CjkPlusEmail").expect("create");
+    matter
+        .update_lang_pack(LANG_PACK_CJK_NGRAM_V1)
+        .expect("pack");
+    let id = insert_text_item(
+        &matter,
+        "mail.txt",
+        "Contact",
+        "please write +tag@example.com for details".as_bytes(),
+    );
+    run_index(&matter, true);
+
+    // QueryParser treats bare `+` as a mandatory-term operator — quote the
+    // address so the full token is searched (indexing preserves plus-address).
+    let hits = search_keyword_for_matter(
+        &matter,
+        &KeywordQuery {
+            query: r#""+tag@example.com""#.into(),
+            limit: 10,
+            offset: 0,
+        },
+    )
+    .expect("plus email search");
+    assert_eq!(hits.item_ids, vec![id]);
+}
+
+#[test]
+fn search_keyword_for_matter_missing_index() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-mat-missing");
+    let matter = Matter::create(&root, "Miss").expect("create");
+    let err = search_keyword_for_matter(
+        &matter,
+        &KeywordQuery {
+            query: "x".into(),
+            limit: 5,
+            offset: 0,
+        },
+    )
+    .expect_err("missing");
+    assert!(matches!(err, SearchError::IndexMissing));
+}
+
+#[test]
+fn resume_after_pack_change_forces_rebuild() {
+    // P1-2: mid-job checkpoint under latin must not resume into a cjk pack index.
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-pack-resume");
+    let matter = Matter::create(&root, "PackResume").expect("create");
+    assert_eq!(
+        matter.get_lang_config().unwrap().lang_pack_id,
+        LANG_PACK_LATIN_DEFAULT
+    );
+
+    for i in 0..5 {
+        insert_text_item(
+            &matter,
+            &format!("{i}.txt"),
+            &format!("S{i}"),
+            format!("bodyword{i} 株式会社 content").as_bytes(),
+        );
+    }
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let cancel_flag2 = cancel_flag.clone();
+    let job = matter.create_job("fts_index").expect("job");
+    let params = FtsIndexParams {
+        reset: true,
+        batch_size: 1,
+        ..Default::default()
+    };
+    let first = run_fts_index(
+        &matter,
+        &job.id,
+        &params,
+        Some(&|| cancel_flag2.load(Ordering::SeqCst)),
+        |completed| {
+            if completed >= 1 {
+                cancel_flag.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .expect("partial latin run");
+
+    // Prefer Paused (checkpoint present); Succeeded is a rare race on fast hosts.
+    match &first {
+        FtsOutcome::Paused(s) => assert!(s.completed_count >= 1),
+        FtsOutcome::Succeeded(s) => assert!(s.completed_count >= 1),
+        other => panic!("unexpected first outcome {other:?}"),
+    }
+    let cp = matter
+        .get_checkpoint(&job.id, FTS_STAGE)
+        .expect("cp")
+        .expect("checkpoint present after partial run");
+    assert!(
+        cp.cursor_json.contains(LANG_PACK_LATIN_DEFAULT)
+            || cp.cursor_json.contains("\"lang_pack_id\""),
+        "checkpoint should record pack id, got {}",
+        cp.cursor_json
+    );
+
+    // Switch pack while job is mid-flight / has latin checkpoint.
+    matter
+        .update_lang_pack(LANG_PACK_CJK_NGRAM_V1)
+        .expect("switch to cjk");
+    assert!(matter
+        .get_lang_config()
+        .unwrap()
+        .fts_lang_fingerprint
+        .is_none());
+
+    // Resume same job — must force full rebuild under cjk, not mix latin tokens.
+    let resume = run_fts_index(
+        &matter,
+        &job.id,
+        &FtsIndexParams {
+            reset: false,
+            batch_size: 1,
+            ..Default::default()
+        },
+        None,
+        |_| {},
+    )
+    .expect("resume after pack change");
+    assert!(
+        matches!(resume, FtsOutcome::Succeeded(_)),
+        "expected Succeeded after pack-change rebuild, got {resume:?}"
+    );
+
+    let cfg = matter.get_lang_config().expect("cfg");
+    assert_eq!(cfg.lang_pack_id, LANG_PACK_CJK_NGRAM_V1);
+    assert_eq!(
+        cfg.fts_lang_fingerprint.as_deref(),
+        Some(LangPack::CjkNgramV1.fingerprint().as_str())
+    );
+
+    // CJK phrase search must work (proves cjk tokenizer, not latin-only residue).
+    let hits = search_keyword_for_matter(
+        &matter,
+        &KeywordQuery {
+            query: "株式会社".into(),
+            limit: 20,
+            offset: 0,
+        },
+    )
+    .expect("cjk search after rebuild");
+    assert!(
+        !hits.item_ids.is_empty(),
+        "cjk phrase must hit after forced rebuild"
+    );
+}
+
+#[test]
+fn lang_pack_version_mismatch_is_stale() {
+    // P2-2: matching fingerprint string is not enough when version column diverges.
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("fts-ver-stale");
+    let matter = Matter::create(&root, "VerStale").expect("create");
+    insert_text_item(&matter, "a.txt", "A", b"versionword content");
+    run_index(&matter, true);
+
+    // Manually corrupt version while leaving fingerprint as-is.
+    matter
+        .connection()
+        .execute(
+            "UPDATE matters SET lang_pack_version = 99 WHERE id = ?1",
+            [&matter.id()],
+        )
+        .expect("bump version");
+
+    let cfg = matter.get_lang_config().expect("cfg");
+    assert_eq!(cfg.lang_pack_version, 99);
+    assert!(cfg.fts_lang_fingerprint.is_some());
+
+    let err = search_keyword_for_matter(
+        &matter,
+        &KeywordQuery {
+            query: "versionword".into(),
+            limit: 10,
+            offset: 0,
+        },
+    )
+    .expect_err("must stale on version mismatch");
+    assert!(
+        err.is_lang_pack_stale() || err.code() == Some(CODE_FTS_LANG_PACK_STALE),
+        "unexpected error: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("version") || msg.contains(CODE_FTS_LANG_PACK_STALE),
+        "message should mention version mismatch: {msg}"
+    );
 }

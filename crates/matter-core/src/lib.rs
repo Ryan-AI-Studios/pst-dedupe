@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v32**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v33**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -41,6 +41,7 @@
 //! - **AI suggestions** (`ai_*` matter config + `item_ai_suggestions` / `ai_suggestion_runs` + code `guidance`, schema v30) (0051)
 //! - **AI suggestion citations** (`item_ai_suggestion_citations` + `citations_count`, schema v31) (0052)
 //! - **Transcript / STT bookkeeping** (`transcript_*` columns, schema v32) (0053)
+//! - **Language packs** (`lang_pack_*` / `fts_lang_*` + optional `items.language_tag`, schema v33) (0054)
 //!
 //! ## Layout
 //!
@@ -79,6 +80,7 @@ pub mod filter;
 pub mod gap;
 pub mod item_errors;
 pub mod jobs;
+pub mod lang;
 pub mod logical_hash;
 pub mod matter;
 pub mod ocr;
@@ -144,6 +146,11 @@ pub use gap::{
 };
 pub use item_errors::{ItemError, ItemErrorInput};
 pub use jobs::{Job, JobCheckpoint, JobState};
+pub use lang::{
+    detect_language_tag, is_cjk_char, is_known_lang_pack, validate_lang_pack_id, LangMatterConfig,
+    KNOWN_LANG_PACKS, LANG_DETECT_MIN_CHARS, LANG_DETECT_MIN_CONFIDENCE, LANG_PACK_CJK_NGRAM_V1,
+    LANG_PACK_LATIN_DEFAULT, LANG_PACK_VERSION_V1,
+};
 pub use logical_hash::{
     compute_email_logical_hash, compute_non_email_logical_hash, email_logical_preimage,
     non_email_logical_preimage, normalize_address, normalize_address_list, normalize_body,
