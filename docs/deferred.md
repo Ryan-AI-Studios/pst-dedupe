@@ -630,6 +630,23 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0060-08 | P3 | Volume README.txt hardcodes DATA/NATIVES/TEXT + UTC wording | Profile layout/date may differ; DAT is authoritative | residual polish |
 | D-0041-05 | — | Multi-jurisdiction QC packs | **Partial close in 0060** (named packs + profile binding) | residual firm packs |
 
+## From track 0061-CloudBlobJobBackends (Completed — Codex luna PASS)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0061-01 | — | Full remote worker fleet / K8s via HTTP JobBackend client | Physics locked (HTTP to matter-service only; never remote SQL); LocalProcessRunner P0 | residual |
+| D-0061-02 | — | Azure Blob backend open path | Feature flag residual; trait ready; P0 is S3-compatible | residual |
+| D-0061-03 | — | GCS object backend | residual | residual |
+| D-0061-04 | — | Live dual-write / migration local→S3 | Single active backend P0; migrate tooling residual | residual |
+| D-0061-05 | — | Hosted SQLite / network matter.db | Explicitly out of P0 (never NFS) | residual / never |
+| D-0061-06 | — | OpenSearch SearchBackend | residual Series later | residual |
+| D-0061-07 | — | External per-tenant CMK for object store | Overlaps D-0057-03 | residual |
+| D-0061-08 | P3 | Cache re-hash on every hit | Size/path consistency P0 | residual polish |
+| D-0061-09 | P3 | Multipart upload tuning at TB scale | 10 MiB × 2 concurrent is P0 ceiling | residual polish |
+| D-0061-10 | — | Desk UI settings panel for storage backend | Headless + CLI P0; admin UI residual (dangerous) | residual polish |
+| D-0061-11 | P3 | Live mid-handle rebind after `storage set` without reopen | Config persisted; CAS activation on next open | residual polish |
+| D-0061-12 | P3 | Encrypted remote `blob_len` streams object for AEAD header | Correct; optional HEAD/metadata residual | residual polish |
+
 ## From track 0057-SecurityHardener (Completed — see conductor review)
 
 | ID | Severity | Item | Notes | Owner |

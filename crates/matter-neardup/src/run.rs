@@ -539,7 +539,7 @@ fn run_neardup_inner(
 }
 
 fn read_cas_text(matter: &Matter, digest_hex: &str) -> Result<String> {
-    let mut file = matter.cas().open_read(digest_hex)?;
+    let mut file = matter.open_read(digest_hex)?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)?;
     // Lossy UTF-8; empty after lossy still returns Ok (caller may skip on prep).

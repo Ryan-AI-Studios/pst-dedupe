@@ -181,7 +181,11 @@ fn cas_put_get_round_trip_and_reject_clobber() {
     // expected content path — we force collision by writing garbage to the
     // object path of a *new* payload after computing its digest... easier path:
     // write garbage where digest-of-A lives, then put A again.
-    let path = matter.cas().object_path(&digest).expect("obj path");
+    let path = matter
+        .cas()
+        .expect("local cas")
+        .object_path(&digest)
+        .expect("obj path");
     fs::write(path.as_std_path(), b"TAMPERED DIFFERENT BYTES").expect("tamper");
 
     let err = matter.put_bytes(data).expect_err("must reject clobber");
@@ -381,11 +385,158 @@ fn audit_append_verify_and_detect_broken_chain() {
 }
 
 #[test]
+fn storage_backend_config_default_local_and_set_s3_no_secrets() {
+    use matter_core::{StorageBackendConfig, StorageBackendKind};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-storage-cfg");
+    let matter = Matter::create(&root, "StorageCfg").expect("create");
+    let cfg = matter.get_storage_backend_config().expect("get");
+    assert_eq!(cfg.kind, StorageBackendKind::Local);
+    assert_eq!(
+        matter.get_job_backend_kind().expect("job").as_str(),
+        "local"
+    );
+    assert!(!matter.uses_remote_blobs());
+
+    let mid = matter.info().expect("info").id;
+    let s3 = StorageBackendConfig {
+        kind: StorageBackendKind::S3,
+        bucket: Some("bucket-a".into()),
+        region: Some("us-east-1".into()),
+        endpoint: None,
+        prefix: Some("pfx".into()),
+        tenant_id: Some("t1".into()),
+        matter_id: None, // auto-bound to this matter
+        sse: None,
+        cache_max_bytes: Some(1_000_000),
+    };
+    matter.set_storage_backend_config(&s3).expect("set");
+    let back = matter.get_storage_backend_config().expect("get2");
+    assert_eq!(back.kind, StorageBackendKind::S3);
+    assert_eq!(back.bucket.as_deref(), Some("bucket-a"));
+    assert_eq!(back.matter_id.as_deref(), Some(mid.as_str()));
+    // JSON in DB must not contain secret field names.
+    let raw: Option<String> = matter
+        .connection()
+        .query_row(
+            "SELECT storage_backend_json FROM matters LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("raw");
+    let raw = raw.expect("some");
+    assert!(!raw.to_ascii_lowercase().contains("secret"));
+    assert!(!raw.to_ascii_lowercase().contains("password"));
+}
+
+#[test]
+fn storage_backend_rejects_wrong_matter_and_tenant() {
+    use matter_core::{StorageBackendConfig, StorageBackendKind};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-storage-bind");
+    let matter = Matter::create(&root, "Bind").expect("create");
+    matter
+        .set_matter_tenant_id(Some("tenant-a"))
+        .expect("tenant");
+
+    let wrong_matter = StorageBackendConfig {
+        kind: StorageBackendKind::S3,
+        bucket: Some("b".into()),
+        matter_id: Some("mat-other".into()),
+        tenant_id: Some("tenant-a".into()),
+        ..Default::default()
+    };
+    assert!(matter.set_storage_backend_config(&wrong_matter).is_err());
+
+    let wrong_tenant = StorageBackendConfig {
+        kind: StorageBackendKind::S3,
+        bucket: Some("b".into()),
+        matter_id: None,
+        tenant_id: Some("tenant-b".into()),
+        ..Default::default()
+    };
+    assert!(matter.set_storage_backend_config(&wrong_tenant).is_err());
+
+    let ok = StorageBackendConfig {
+        kind: StorageBackendKind::S3,
+        bucket: Some("b".into()),
+        matter_id: None,
+        tenant_id: None, // auto-fill from matter
+        ..Default::default()
+    };
+    matter.set_storage_backend_config(&ok).expect("set");
+    let back = matter.get_storage_backend_config().expect("get");
+    assert_eq!(back.tenant_id.as_deref(), Some("tenant-a"));
+    assert_eq!(
+        back.matter_id.as_deref(),
+        Some(matter.info().expect("i").id.as_str())
+    );
+}
+
+#[test]
+#[cfg(not(feature = "cloud-s3"))]
+fn storage_s3_reopen_fails_closed_without_cloud_feature() {
+    // Default matter-core builds without cloud-s3: storing config is OK; open fails closed.
+    use matter_core::{StorageBackendConfig, StorageBackendKind};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-storage-fail-closed");
+    {
+        let matter = Matter::create(&root, "FailClosed").expect("create");
+        let s3 = StorageBackendConfig {
+            kind: StorageBackendKind::S3,
+            bucket: Some("bucket-x".into()),
+            region: Some("us-east-1".into()),
+            ..Default::default()
+        };
+        matter
+            .set_storage_backend_config(&s3)
+            .expect("set config ok");
+        assert!(!matter.uses_remote_blobs()); // set does not activate mid-handle
+    }
+    match Matter::open(&root) {
+        Ok(_) => panic!("open must fail closed when cloud-s3 feature is absent"),
+        Err(err) => {
+            let msg = err.to_string().to_ascii_lowercase();
+            assert!(
+                msg.contains("cloud-s3") || msg.contains("fail closed") || msg.contains("s3"),
+                "unexpected open error: {msg}"
+            );
+        }
+    }
+}
+
+#[test]
+fn storage_local_config_reopen_still_local() {
+    use matter_core::{StorageBackendConfig, StorageBackendKind};
+
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-storage-local");
+    {
+        let matter = Matter::create(&root, "LocalCfg").expect("create");
+        matter
+            .set_storage_backend_config(&StorageBackendConfig::local())
+            .expect("set local");
+        let d = matter.put_bytes(b"local-cas").expect("put");
+        assert!(matter.blob_exists(&d).expect("ex"));
+        assert!(!matter.uses_remote_blobs());
+    }
+    let matter = Matter::open(&root).expect("reopen");
+    assert_eq!(
+        matter.get_storage_backend_config().expect("cfg").kind,
+        StorageBackendKind::Local
+    );
+    assert!(!matter.uses_remote_blobs());
+}
+
+#[test]
 fn schema_v12_on_create() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-v12");
     let matter = Matter::create(&root, "V12").expect("create");
-    assert_eq!(SCHEMA_VERSION, 38);
+    assert_eq!(SCHEMA_VERSION, 39);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     assert_eq!(matter.info().expect("info").schema_version, SCHEMA_VERSION);
     // Default coding catalog seeded on create.

@@ -6,6 +6,8 @@
 //! - **Cancel** via [`CancelToken`] (`Arc<AtomicBool>`, cooperative)
 //! - **Progress** via `tokio::sync::watch` (latest snapshot) + optional broadcast
 //! - **Option C:** runner is sole creator of job rows for orchestrated runs
+//! - **JobBackend** trait (track 0061): local process-runner is P0; remote residual
+//!   is **HTTP to matter-service only** — never remote SQLite/NFS
 //!
 //! ## Never call extract/ingest on the UI thread
 //!
@@ -16,6 +18,11 @@
 //!
 //! [`ProcessRunner::shutdown`] and [`Drop`] set cancel and **join** the worker
 //! so in-flight SQLite batches can finish or cleanly pause.
+//!
+//! ## Remote workers (design lock)
+//!
+//! SQLite stays on the service host. Future remote workers claim jobs over
+//! matter-service HTTP APIs. See [`job_backend`].
 
 #![forbid(unsafe_code)]
 
@@ -24,6 +31,7 @@ pub mod config;
 pub mod error;
 pub mod handler;
 pub mod handlers;
+pub mod job_backend;
 pub mod progress;
 pub mod register;
 pub mod runner;
@@ -32,6 +40,7 @@ pub use cancel::CancelToken;
 pub use config::RunnerConfig;
 pub use error::{Result, RunnerError};
 pub use handler::{JobContext, JobHandler, JobOutcome, JobParams};
+pub use job_backend::{ClaimedJob, JobBackend, LocalProcessRunnerBackend};
 pub use progress::{JobProgressSnapshot, ProgressEvent, ProgressSink};
 pub use register::{default_handler_kinds, register_default_handlers};
 pub use runner::{JobSnapshot, ProcessRunner};

@@ -24,6 +24,16 @@ zeroize = { workspace = true }
 base64 = { workspace = true }
 uuid = { workspace = true }
 fs4 = "0.13"
+# Storage config types + BlobStore (default: no cloud SDKs).
+# Optional `cloud-s3` enables matter-storage/cloud-s3 so open can activate S3 (fail closed without it).
+matter-storage = { path = "../matter-storage" }
+tempfile = { workspace = true }
+
+[features]
+default = []
+# Opt-in: open S3 BlobStore when matters.storage_backend_json kind=s3.
+# Desk stays offline (default features empty). CLI/service may enable for hosted pilots.
+cloud-s3 = ["matter-storage/cloud-s3"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

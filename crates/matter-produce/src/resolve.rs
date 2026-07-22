@@ -91,7 +91,7 @@ pub fn is_email_like(item: &Item) -> bool {
 
 /// Stream-copy CAS native to dest; hash while writing.
 pub fn copy_cas_native(matter: &Matter, digest: &str, dest: &Path) -> Result<NativeArtifact> {
-    let mut reader = matter.cas().open_read(digest)?;
+    let mut reader = matter.open_read(digest)?;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -311,7 +311,7 @@ fn write_text_from_cas(
     text_dir: &Path,
     control: &str,
 ) -> Result<String> {
-    let mut reader = matter.cas().open_read(digest)?;
+    let mut reader = matter.open_read(digest)?;
     fs::create_dir_all(text_dir)?;
     let dest = text_dir.join(format!("{control}.txt"));
     let mut file = File::create(&dest)?;

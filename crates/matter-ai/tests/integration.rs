@@ -66,7 +66,7 @@ fn enable_mock_ai(matter: &Matter) {
 }
 
 fn put_text_item(matter: &Matter, subject: &str, body: &str) -> matter_core::Item {
-    let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+    let digest = matter.put_bytes(body.as_bytes()).expect("cas");
     matter
         .insert_item(matter_core::ItemInput {
             status: item_status::EXTRACTED.into(),

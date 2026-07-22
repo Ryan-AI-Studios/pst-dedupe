@@ -13,7 +13,7 @@ fn open_matter() -> (tempfile::TempDir, Matter) {
     let path = camino::Utf8PathBuf::from_path_buf(root).expect("utf8");
     let matter = Matter::create(&path, "prod-profile-test").expect("create");
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 38);
+    assert_eq!(SCHEMA_VERSION, 39);
     (dir, matter)
 }
 

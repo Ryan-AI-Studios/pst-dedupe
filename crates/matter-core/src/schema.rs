@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 38;
+pub const SCHEMA_VERSION: u32 = 39;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -52,6 +52,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (36, MIGRATION_V36),
     (37, MIGRATION_V37),
     (38, MIGRATION_V38),
+    (39, MIGRATION_V39),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -1271,6 +1272,17 @@ CREATE UNIQUE INDEX idx_production_profiles_matter_slug ON production_profiles(m
 CREATE INDEX idx_production_profiles_matter ON production_profiles(matter_id);
 
 ALTER TABLE production_sets ADD COLUMN profile_slug TEXT;
+"#;
+
+/// Schema v39: opt-in cloud CAS + job backend config (track 0061).
+///
+/// - `storage_backend_json` null/absent = local filesystem CAS (Desk default).
+///   JSON must **not** contain credentials (env/keyring/IAM only).
+/// - `job_backend_kind` default `local` (process-runner). Remote residual = HTTP
+///   to matter-service only — never remote SQLite.
+const MIGRATION_V39: &str = r#"
+ALTER TABLE matters ADD COLUMN storage_backend_json TEXT;
+ALTER TABLE matters ADD COLUMN job_backend_kind TEXT NOT NULL DEFAULT 'local';
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -5140,7 +5152,7 @@ mod tests {
         assert_eq!(ms, SCHEMA_VERSION);
     }
 
-    /// v37 → v38 adds production_profiles + production_sets.profile_slug (track 0060).
+    /// v37 → current adds production_profiles + production_sets.profile_slug (track 0060).
     #[test]
     fn migrate_v37_to_v38_production_profiles() {
         let conn = Connection::open_in_memory().expect("open");
@@ -5168,7 +5180,7 @@ mod tests {
         )
         .expect("matter");
 
-        let v = migrate(&conn).expect("migrate v37 to v38");
+        let v = migrate(&conn).expect("migrate v37 to current");
         assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
 
@@ -5193,6 +5205,84 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v37'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    /// v38 → v39 adds storage_backend_json + job_backend_kind (track 0061).
+    #[test]
+    fn migrate_v38_to_v39_storage_backend() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        for &(target, sql) in MIGRATIONS {
+            if target > 38 {
+                break;
+            }
+            conn.execute_batch(sql).expect("sql");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        assert_eq!(read_schema_version(&conn).expect("read"), 38);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v38', 'V38 Matter', '2020-01-01T00:00:00Z', 38, '/tmp/v38')",
+            [],
+        )
+        .expect("matter");
+
+        let v = migrate(&conn).expect("migrate v38 to v39");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
+
+        let has_storage: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('matters') WHERE name = 'storage_backend_json'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("col");
+        assert!(has_storage);
+
+        let has_job: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('matters') WHERE name = 'job_backend_kind'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("col");
+        assert!(has_job);
+
+        let kind: String = conn
+            .query_row(
+                "SELECT job_backend_kind FROM matters WHERE id = 'mat_v38'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("kind");
+        assert_eq!(kind, "local");
+
+        let backend: Option<String> = conn
+            .query_row(
+                "SELECT storage_backend_json FROM matters WHERE id = 'mat_v38'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("backend");
+        assert!(backend.is_none());
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v38'",
                 [],
                 |row| row.get(0),
             )

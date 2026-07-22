@@ -6235,10 +6235,7 @@ mod tests {
         let set = matter
             .ensure_default_review_set(DEFAULT_REVIEW_SET_NAME)
             .expect("set");
-        let digest = matter
-            .cas()
-            .put_bytes(b"Body text for review")
-            .expect("cas");
+        let digest = matter.put_bytes(b"Body text for review").expect("cas");
         let item = matter
             .insert_item(ItemInput {
                 status: item_status::EXTRACTED.into(),
@@ -6528,7 +6525,7 @@ mod tests {
         let root = base.join("matter-passage-draft");
         let matter = Matter::create(&root, "Passage Draft").expect("create");
         let body = "The confidential clause is material.";
-        let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+        let digest = matter.put_bytes(body.as_bytes()).expect("cas");
         let item = matter
             .insert_item(ItemInput {
                 status: item_status::EXTRACTED.into(),

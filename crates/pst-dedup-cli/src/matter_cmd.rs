@@ -1,7 +1,9 @@
-//! `matter create` / `matter info` / `matter change-passphrase` commands.
+//! `matter create` / `matter info` / `matter change-passphrase` / `matter storage` commands.
 
 use camino::Utf8Path;
-use matter_core::{passphrase_from_env, Matter, ENV_MATTER_PASSPHRASE};
+use matter_core::{
+    passphrase_from_env, Matter, StorageBackendConfig, StorageBackendKind, ENV_MATTER_PASSPHRASE,
+};
 use serde_json::json;
 
 use crate::error::{CliError, Result};
@@ -160,4 +162,125 @@ pub fn open_matter(root: &Utf8Path) -> Result<Matter> {
 
 pub fn open_matter_read(root: &Utf8Path) -> Result<Matter> {
     Matter::open_for_read(root).map_err(CliError::from)
+}
+
+/// Show non-secret storage + job backend config (schema v39).
+pub fn matter_storage_show(path: &std::path::Path, json: bool) -> Result<()> {
+    let root = resolve_matter_root(path)?;
+    let matter = Matter::open_for_read(&root).map_err(CliError::from)?;
+    let storage = matter
+        .get_storage_backend_config()
+        .map_err(CliError::from)?;
+    let job_kind = matter.get_job_backend_kind().map_err(CliError::from)?;
+    let redacted = storage.redacted_for_audit();
+    if json {
+        emit_json(
+            true,
+            &ok_envelope(json!({
+                "path": root.as_str(),
+                "storage": redacted,
+                "job_backend_kind": job_kind.as_str(),
+            })),
+        )?;
+    } else {
+        println!("matter storage at {root}");
+        println!("  kind:      {}", storage.kind.as_str());
+        if let Some(b) = &storage.bucket {
+            println!("  bucket:    {b}");
+        }
+        if let Some(r) = &storage.region {
+            println!("  region:    {r}");
+        }
+        if let Some(e) = &storage.endpoint {
+            println!("  endpoint:  {e}");
+        }
+        if let Some(p) = &storage.prefix {
+            println!("  prefix:    {p}");
+        }
+        if let Some(t) = &storage.tenant_id {
+            println!("  tenant_id: {t}");
+        }
+        if let Some(m) = &storage.matter_id {
+            println!("  matter_id: {m}");
+        }
+        println!("  job:       {}", job_kind.as_str());
+        println!("  credentials: env/IAM only (never stored in matter.db)");
+    }
+    Ok(())
+}
+
+/// Set non-secret storage backend config.
+#[allow(clippy::too_many_arguments)]
+pub fn matter_storage_set(
+    path: &std::path::Path,
+    kind: &str,
+    bucket: Option<&str>,
+    region: Option<&str>,
+    endpoint: Option<&str>,
+    prefix: Option<&str>,
+    tenant_id: Option<&str>,
+    matter_id: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let root = resolve_matter_root(path)?;
+    let kind = StorageBackendKind::parse(kind).map_err(|e| CliError::Usage(e.to_string()))?;
+    let config = StorageBackendConfig {
+        kind,
+        bucket: bucket
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        region: region
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        endpoint: endpoint
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        prefix: prefix
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        tenant_id: tenant_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        matter_id: matter_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        sse: None,
+        cache_max_bytes: None,
+    };
+    config
+        .validate()
+        .map_err(|e| CliError::Usage(format!("storage config: {e}")))?;
+    let matter = Matter::open(&root).map_err(CliError::from)?;
+    matter
+        .set_storage_backend_config(&config)
+        .map_err(CliError::from)?;
+    // Seal path for encrypted matters is handled by Drop / open write.
+    drop(matter);
+    if json {
+        emit_json(
+            true,
+            &ok_envelope(json!({
+                "path": root.as_str(),
+                "storage": config.redacted_for_audit(),
+            })),
+        )?;
+    } else {
+        println!(
+            "storage backend set to kind={} (secrets remain env/IAM only)",
+            config.kind.as_str()
+        );
+        if config.kind.is_cloud() {
+            println!(
+                "note: cloud CAS activates on next matter open; requires binary built with \
+                 --features cloud-s3 (open fails closed without it — no local fallback)"
+            );
+        }
+    }
+    Ok(())
 }

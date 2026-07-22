@@ -2,8 +2,9 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v38**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v39**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
+//!   (local default; opt-in cloud via `matter-storage` / track 0061)
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
 //! - Item-level error accumulator for honest partial success
@@ -54,6 +55,10 @@
 //!   in `matter-platform` (`platform.db`), not a shared multi-tenant items table
 //! - **Production profiles** (schema v38 / track 0060): matter-local `production_profiles`
 //!   + built-in multi-jurisdiction packaging presets; optional `production_sets.profile_slug`
+//! - **Cloud blob / job backends** (schema v39 / track 0061): opt-in `storage_backend_json`
+//!   and `job_backend_kind` (default local); CAS local by default; on open, cloud kinds
+//!   activate `BlobStore` via `open_blob_store` (**fail closed** without `cloud-s3`);
+//!   encryption uses `put_at_digest`; no secrets in DB; SQLite host-local; remote workers HTTP-only
 //!
 //! ## Layout
 //!
@@ -62,6 +67,7 @@
 //!   matter.db                 # SQLite (plain) or AEAD container (encrypted)
 //!   matter.crypto.json        # optional encryption header (no raw secrets)
 //!   blobs/sha256/<aa>/<fullhex>   # CAS (two-hex shard; ciphertext when encrypted)
+//!   .cache/blobs/                 # optional LRU for cloud CAS gets (0061)
 //!   index/                        # Tantivy FTS (matter-search; encrypted when matter is)
 //!   semantic/{model_id}/          # local embedding vectors (matter-semantic; not git)
 //!   exports/                      # reserved (production)
@@ -90,6 +96,7 @@ pub mod ai_verify;
 pub mod audit;
 pub mod calendar;
 pub mod cas;
+pub mod cas_backend;
 pub mod category;
 pub mod cluster;
 pub mod conversation;
@@ -118,6 +125,9 @@ pub mod report;
 pub mod schema;
 pub mod semantic;
 pub mod sentiment;
+
+// Re-export storage config types (no cloud feature on matter-core).
+pub use matter_storage::{JobBackendKind, SseMode, StorageBackendConfig, StorageBackendKind};
 pub mod teams;
 pub mod thread_headers;
 pub mod transcription;

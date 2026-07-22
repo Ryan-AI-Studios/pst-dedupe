@@ -207,6 +207,46 @@ enum MatterCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Show matter storage backend config (non-secret; schema v39 / track 0061).
+    Storage {
+        #[command(subcommand)]
+        cmd: MatterStorageCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MatterStorageCmd {
+    /// Show storage backend + job backend kind.
+    Show {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set non-secret storage backend config (credentials stay in env/IAM).
+    ///
+    /// Config can always be stored; open activates S3 only with `--features cloud-s3` (fail closed).
+    Set {
+        #[arg(long)]
+        path: PathBuf,
+        /// Backend kind: local | s3 | azure
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        bucket: Option<String>,
+        #[arg(long)]
+        region: Option<String>,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long)]
+        tenant_id: Option<String>,
+        #[arg(long)]
+        matter_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -457,6 +497,9 @@ fn command_wants_json(cmd: &Commands) -> bool {
             MatterCmd::Create { json, .. }
             | MatterCmd::Info { json, .. }
             | MatterCmd::ChangePassphrase { json, .. } => *json,
+            MatterCmd::Storage { cmd } => match cmd {
+                MatterStorageCmd::Show { json, .. } | MatterStorageCmd::Set { json, .. } => *json,
+            },
         },
         Commands::Job { cmd } => match cmd {
             JobCmd::Run { json, .. }
@@ -565,6 +608,32 @@ fn run(cli: Cli) -> Result<()> {
             MatterCmd::ChangePassphrase { path, json } => {
                 matter_cmd::matter_change_passphrase(&path, json)
             }
+            MatterCmd::Storage { cmd } => match cmd {
+                MatterStorageCmd::Show { path, json } => {
+                    matter_cmd::matter_storage_show(&path, json)
+                }
+                MatterStorageCmd::Set {
+                    path,
+                    kind,
+                    bucket,
+                    region,
+                    endpoint,
+                    prefix,
+                    tenant_id,
+                    matter_id,
+                    json,
+                } => matter_cmd::matter_storage_set(
+                    &path,
+                    &kind,
+                    bucket.as_deref(),
+                    region.as_deref(),
+                    endpoint.as_deref(),
+                    prefix.as_deref(),
+                    tenant_id.as_deref(),
+                    matter_id.as_deref(),
+                    json,
+                ),
+            },
         },
         Commands::Job { cmd } => match cmd {
             JobCmd::Run {
