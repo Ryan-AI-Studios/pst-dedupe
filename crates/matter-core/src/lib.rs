@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v37**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v38**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //! - Append-only audit log with integrity hash chain
 //! - Jobs + checkpoints for resumable work
@@ -52,6 +52,8 @@
 //! - **Platform SSO hooks** (schema v37 / track 0059): optional `matters.tenant_id`
 //!   and `matter_users.oidc_issuer`/`oidc_sub` for OIDC linking; control plane lives
 //!   in `matter-platform` (`platform.db`), not a shared multi-tenant items table
+//! - **Production profiles** (schema v38 / track 0060): matter-local `production_profiles`
+//!   + built-in multi-jurisdiction packaging presets; optional `production_sets.profile_slug`
 //!
 //! ## Layout
 //!
@@ -108,6 +110,7 @@ pub mod overview;
 pub mod pdf;
 pub mod people;
 pub mod privilege;
+pub mod production_profile;
 pub mod profile;
 pub mod qc;
 pub mod redaction;
@@ -232,6 +235,20 @@ pub use privilege::{
     PrivilegeLogExportParams, PrivilegeLogExportResult, PrivilegeProtocol,
     UpsertItemPrivilegeInput, UpsertPrivilegeProtocolInput, PRIVILEGE_LOG_COLUMNS,
 };
+pub use production_profile::{
+    builtin_production_profile, builtin_production_profiles, default_production_profile_body,
+    format_load_datetime, identity_field_map, included_headers, included_sources,
+    is_canonical_source, is_forbidden_source, known_qc_pack_ids, normalize_qc_pack_id,
+    parse_production_profile_body, production_builtin_id, production_profile_body_to_json,
+    production_profile_config_hash, relativity_alias_field_map, strip_production_builtin_prefix,
+    us_date_field_map, validate_production_profile_body, BatesConfig, FieldMapEntry, LayoutConfig,
+    LoadFileConfig, PackagingConfig, ProductionProfile, ProductionProfileBody,
+    ProductionProfileInput, ProductionQcConfig, BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1,
+    BUILTIN_US_CONCORDANCE_REL_ALIAS_V1, BUILTIN_US_STRICT_QC_CONCORDANCE_V1,
+    CANONICAL_DAT_SOURCES, FORBIDDEN_FIELD_SOURCES, PRODUCTION_PROFILE_BODY_MAX_BYTES,
+    PRODUCTION_PROFILE_BODY_VERSION, QC_PACK_DEFAULT_V1, QC_PACK_LEGACY_DEFAULT,
+    QC_PACK_NATIVE_HEAVY_V1, QC_PACK_STRICT_PRIVILEGE_V1, RESERVED_PRODUCTION_PROFILE_SLUGS,
+};
 pub use profile::{
     builtin_id, builtin_profile, builtin_profiles, expand_profile_stage, is_allowlisted_stage,
     parse_profile_body, profile_body_to_json, profile_stage_plan, strip_builtin_prefix,
@@ -240,7 +257,10 @@ pub use profile::{
     CANONICAL_STAGE_ORDER, JOB_KIND_PROFILE_RUN, PROFILE_BODY_MAX_BYTES, PROFILE_BODY_VERSION,
     RESERVED_BUILTIN_NAMES,
 };
-pub use qc::{qc_run_is_fresh, selection_fingerprint, InsertQcRunInput, QcRunRecord};
+pub use qc::{
+    qc_run_is_fresh, qc_run_is_fresh_for_pack, selection_fingerprint,
+    selection_fingerprint_with_pack, InsertQcRunInput, QcRunRecord,
+};
 pub use redaction::{
     build_redacted_text, merge_redaction_intervals, redaction_reason, redaction_status,
     resolve_redaction_against_body, CreateRedactionInput, ItemRedaction, RedactedTextResult,

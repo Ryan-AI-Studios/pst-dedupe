@@ -28,7 +28,7 @@ Architecture locks:
 
 - Exclusive OS `.matter.lock` on write-open; OCC `review_version`; item locks + batch checkout; strict actor in service host
 - Matter path must be **local disk** of the host
-- Schema **v37** additive — solo Desk and local password multi-user stay default; platform SSO is opt-in
+- Schema **v38** additive — solo Desk and local password multi-user stay default; platform SSO is opt-in; production profiles (0060) are config packs, not legal compliance
 - Isolation = **platform registry + matter boundary** (not a shared multi-tenant `items` table)
 - IdP secrets: env-ref **or** AEAD under Platform Master Key (`PST_DEDUPE_PLATFORM_MASTER_KEY`); never plaintext in DB
 - Registered matter paths must sit under `PLATFORM_STORAGE_ROOT`

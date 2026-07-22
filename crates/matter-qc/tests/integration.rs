@@ -134,7 +134,7 @@ fn insert_child(
 #[test]
 fn schema_v21_qc_runs_table() {
     let (_tmp, matter) = temp_matter("schema-v21");
-    assert_eq!(SCHEMA_VERSION, 37);
+    assert_eq!(SCHEMA_VERSION, 38);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     let has: bool = matter
         .connection()
@@ -521,6 +521,89 @@ fn only_withheld_set_level_error() {
     assert_eq!(f.len(), 1);
     assert_eq!(f[0].severity, QcSeverity::Error);
     assert!(f[0].item_id.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// 0060 QC packs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn strict_pack_escalates_withheld_family_to_error() {
+    use matter_qc::{
+        resolve_rules_for_pack, PACK_DEFAULT_V1, PACK_STRICT_PRIVILEGE_V1,
+        RULE_BROKEN_FAMILY_INCOMPLETE_PARENT, RULE_WITHHELD_FAMILY_MEMBER,
+    };
+
+    let def = resolve_rules_for_pack(PACK_DEFAULT_V1, &[]);
+    assert_eq!(def.severity(RULE_WITHHELD_FAMILY_MEMBER), QcSeverity::Warn);
+    assert_eq!(
+        def.severity(RULE_BROKEN_FAMILY_INCOMPLETE_PARENT),
+        QcSeverity::Warn
+    );
+
+    let strict = resolve_rules_for_pack(PACK_STRICT_PRIVILEGE_V1, &[]);
+    assert_eq!(
+        strict.severity(RULE_WITHHELD_FAMILY_MEMBER),
+        QcSeverity::Error
+    );
+    assert_eq!(
+        strict.severity(RULE_BROKEN_FAMILY_INCOMPLETE_PARENT),
+        QcSeverity::Error
+    );
+}
+
+#[test]
+fn strict_pack_fails_where_default_warns_incomplete_family() {
+    use matter_qc::{PACK_DEFAULT_V1, PACK_STRICT_PRIVILEGE_V1};
+
+    let (_tmp, matter) = temp_matter("strict-family");
+    // Parent + 0 of 2 non-withheld kids → incomplete (warn under default).
+    let (parent, family_id) = insert_family_parent(&matter, "p.eml", 1);
+    for i in 0..2 {
+        insert_child(&matter, &parent, &family_id, &format!("c{i}.bin"), 0);
+    }
+
+    let job_def = matter.create_job(JOB_KIND_QC).expect("job");
+    let r_def = run_qc(
+        &matter,
+        &job_def.id,
+        &QcParams {
+            pack_id: Some(PACK_DEFAULT_V1.into()),
+            ..Default::default()
+        },
+    );
+    let inc_def = findings_of(&r_def, RULE_BROKEN_FAMILY_INCOMPLETE_PARENT);
+    assert!(!inc_def.is_empty(), "default pack should find incomplete");
+    assert_eq!(inc_def[0].severity, QcSeverity::Warn);
+    assert!(r_def.passed, "warns alone still pass");
+
+    let job_strict = matter.create_job(JOB_KIND_QC).expect("job2");
+    let r_strict = run_qc(
+        &matter,
+        &job_strict.id,
+        &QcParams {
+            pack_id: Some(PACK_STRICT_PRIVILEGE_V1.into()),
+            ..Default::default()
+        },
+    );
+    let inc_s = findings_of(&r_strict, RULE_BROKEN_FAMILY_INCOMPLETE_PARENT);
+    assert!(!inc_s.is_empty());
+    assert_eq!(inc_s[0].severity, QcSeverity::Error);
+    assert!(!r_strict.passed, "strict pack must fail produce gate");
+}
+
+#[test]
+fn fingerprint_includes_pack_id() {
+    use matter_core::{
+        selection_fingerprint_with_pack, QC_PACK_DEFAULT_V1, QC_PACK_STRICT_PRIVILEGE_V1,
+    };
+
+    let ids = vec!["a".into(), "b".into()];
+    let fp_def = selection_fingerprint_with_pack(&ids, QC_PACK_DEFAULT_V1);
+    let fp_strict = selection_fingerprint_with_pack(&ids, QC_PACK_STRICT_PRIVILEGE_V1);
+    assert_ne!(fp_def, fp_strict);
+    let fp_empty = selection_fingerprint_with_pack(&ids, "");
+    assert_ne!(fp_def, fp_empty);
 }
 
 /// Cancel callback during evaluate returns Cancelled.

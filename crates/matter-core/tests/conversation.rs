@@ -74,7 +74,7 @@ fn insert_chat(matter: &Matter, seed: ChatSeed<'_>) -> ConversationMessageRow {
 fn schema_is_current() {
     let (_tmp, base) = utf8_tempdir();
     let matter = Matter::create(base.join("m"), "Conv Schema").expect("create");
-    assert_eq!(SCHEMA_VERSION, 37);
+    assert_eq!(SCHEMA_VERSION, 38);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
 }
 

@@ -531,21 +531,40 @@ fn produce_and_gap_run_terminal() {
         "matter", "create", "--path", matter_s, "--name", "pg", "--json",
     ]);
 
-    for (cmd, kind) in [("produce", "produce"), ("gap", "gap")] {
-        let out = run_status(&[cmd, "run", "--path", matter_s, "--json"]);
-        let code = out.status.code();
-        assert!(
-            matches!(code, Some(0) | Some(4)),
-            "{cmd} exit {:?} stdout={} stderr={}",
-            code,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let v: Value =
-            serde_json::from_str(std::str::from_utf8(&out.stdout).unwrap().trim()).unwrap();
-        assert_eq!(v["kind"], kind);
-        assert!(v.get("job_id").is_some());
-    }
+    // Produce requires job-time --bates-start (track 0060).
+    let out = run_status(&[
+        "produce",
+        "run",
+        "--path",
+        matter_s,
+        "--bates-start",
+        "1",
+        "--json",
+    ]);
+    let code = out.status.code();
+    assert!(
+        matches!(code, Some(0) | Some(4)),
+        "produce exit {:?} stdout={} stderr={}",
+        code,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_str(std::str::from_utf8(&out.stdout).unwrap().trim()).unwrap();
+    assert_eq!(v["kind"], "produce");
+    assert!(v.get("job_id").is_some());
+
+    let out = run_status(&["gap", "run", "--path", matter_s, "--json"]);
+    let code = out.status.code();
+    assert!(
+        matches!(code, Some(0) | Some(4)),
+        "gap exit {:?} stdout={} stderr={}",
+        code,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_str(std::str::from_utf8(&out.stdout).unwrap().trim()).unwrap();
+    assert_eq!(v["kind"], "gap");
+    assert!(v.get("job_id").is_some());
 }
 
 #[test]

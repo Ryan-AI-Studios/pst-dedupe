@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 37;
+pub const SCHEMA_VERSION: u32 = 38;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -51,6 +51,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (35, MIGRATION_V35),
     (36, MIGRATION_V36),
     (37, MIGRATION_V37),
+    (38, MIGRATION_V38),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -1249,6 +1250,27 @@ ALTER TABLE matter_users ADD COLUMN oidc_sub TEXT;
 CREATE UNIQUE INDEX idx_matter_users_oidc
   ON matter_users(oidc_issuer, oidc_sub)
   WHERE oidc_issuer IS NOT NULL AND oidc_sub IS NOT NULL;
+"#;
+
+/// Schema v38: multi-jurisdiction production profiles (track 0060).
+///
+/// Matter-local production profile presets + optional profile slug on
+/// production_sets. Built-ins live in code (not DB rows).
+const MIGRATION_V38: &str = r#"
+CREATE TABLE production_profiles (
+  id TEXT PRIMARY KEY NOT NULL,
+  matter_id TEXT NOT NULL REFERENCES matters(id),
+  slug TEXT NOT NULL,
+  label TEXT NOT NULL,
+  jurisdiction_tag TEXT,
+  body_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_production_profiles_matter_slug ON production_profiles(matter_id, slug);
+CREATE INDEX idx_production_profiles_matter ON production_profiles(matter_id);
+
+ALTER TABLE production_sets ADD COLUMN profile_slug TEXT;
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -5111,6 +5133,66 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v32'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    /// v37 → v38 adds production_profiles + production_sets.profile_slug (track 0060).
+    #[test]
+    fn migrate_v37_to_v38_production_profiles() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        for &(target, sql) in MIGRATIONS {
+            if target > 37 {
+                break;
+            }
+            conn.execute_batch(sql).expect("sql");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        assert_eq!(read_schema_version(&conn).expect("read"), 37);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v37', 'V37 Matter', '2020-01-01T00:00:00Z', 37, '/tmp/v37')",
+            [],
+        )
+        .expect("matter");
+
+        let v = migrate(&conn).expect("migrate v37 to v38");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
+
+        let has_table: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='production_profiles'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table");
+        assert!(has_table);
+
+        let has_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('production_sets') WHERE name = 'profile_slug'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("col");
+        assert!(has_col);
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v37'",
                 [],
                 |row| row.get(0),
             )

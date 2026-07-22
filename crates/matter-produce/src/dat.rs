@@ -5,6 +5,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use matter_core::{format_load_datetime, FieldMapEntry};
 
 use crate::error::{ProduceError, Result};
 
@@ -113,6 +114,82 @@ impl LoadRow {
             self.prod_status.as_str(),
         ]
     }
+
+    /// Value for a canonical source field name (case-insensitive).
+    pub fn value_for_source(&self, source: &str) -> &str {
+        match source.trim().to_ascii_uppercase().as_str() {
+            "BEGBATES" | "ENDBATES" | "CONTROL_NUMBER" => self.control_number.as_str(),
+            "ITEM_ID" => self.item_id.as_str(),
+            "PARENT_ITEM_ID" => self.parent_item_id.as_str(),
+            "FAMILY_ID" => self.family_id.as_str(),
+            "CUSTODIAN" => self.custodian.as_str(),
+            "FILE_NAME" => self.file_name.as_str(),
+            "FILE_EXT" => self.file_ext.as_str(),
+            "FILE_CATEGORY" => self.file_category.as_str(),
+            "MIME_TYPE" => self.mime_type.as_str(),
+            "FILE_SIZE" => self.file_size.as_str(),
+            "SHA256" => self.sha256.as_str(),
+            "DATE_SENT" => self.date_sent.as_str(),
+            "DATE_RECEIVED" => self.date_received.as_str(),
+            "DATE_CREATED" => self.date_created.as_str(),
+            "FROM" => self.from.as_str(),
+            "TO" => self.to.as_str(),
+            "CC" => self.cc.as_str(),
+            "BCC" => self.bcc.as_str(),
+            "SUBJECT" => self.subject.as_str(),
+            "NATIVE_PATH" => self.native_path.as_str(),
+            "TEXT_PATH" => self.text_path.as_str(),
+            "HAS_REDACTED_TEXT" => self.has_redacted_text.as_str(),
+            "WITHHELD" => self.withheld.as_str(),
+            "PROD_STATUS" => self.prod_status.as_str(),
+            _ => "",
+        }
+    }
+
+    /// Project this row through a field map (included columns only, profile order).
+    pub fn mapped_values(&self, field_map: &[FieldMapEntry]) -> Vec<String> {
+        field_map
+            .iter()
+            .filter(|e| e.include)
+            .map(|e| self.value_for_source(&e.source).to_string())
+            .collect()
+    }
+}
+
+/// Headers for included field-map entries (profile order).
+pub fn mapped_headers(field_map: &[FieldMapEntry]) -> Vec<String> {
+    field_map
+        .iter()
+        .filter(|e| e.include)
+        .map(|e| e.header.clone())
+        .collect()
+}
+
+/// Format a datetime for load-file output using optional field-map modifiers.
+///
+/// Falls back to engine UTC ISO when format is unset. Errors from invalid TZ
+/// at format time surface as empty string only for unparsable input; invalid TZ
+/// should have been rejected at profile validate.
+pub fn format_datetime_for_field(
+    raw: Option<&str>,
+    date_format: Option<&str>,
+    timezone: Option<&str>,
+) -> String {
+    format_load_datetime(raw, date_format, timezone).unwrap_or_default()
+}
+
+/// Look up date_format / timezone for a DATE_* source from a field map.
+pub fn date_mods_for_source(
+    field_map: &[FieldMapEntry],
+    source: &str,
+) -> (Option<String>, Option<String>) {
+    let upper = source.trim().to_ascii_uppercase();
+    for e in field_map {
+        if e.source.trim().eq_ignore_ascii_case(&upper) {
+            return (e.date_format.clone(), e.timezone.clone());
+        }
+    }
+    (None, None)
 }
 
 /// Map CR / LF / CRLF sequences inside a field to Concordance `®`.
@@ -151,14 +228,34 @@ pub fn format_utc_datetime(raw: Option<&str>) -> String {
     String::new()
 }
 
-/// Write Concordance DAT with UTF-8 BOM + header + rows.
+/// Write Concordance DAT with UTF-8 BOM + header + rows (canonical field order).
 pub fn write_load_dat(path: &Path, rows: &[LoadRow]) -> Result<()> {
+    write_load_dat_mapped(path, rows, None)
+}
+
+/// Write Concordance DAT using an optional field map (headers + column order).
+///
+/// When `field_map` is `None`, uses [`DAT_FIELDS`] / [`LoadRow::field_values`].
+pub fn write_load_dat_mapped(
+    path: &Path,
+    rows: &[LoadRow],
+    field_map: Option<&[FieldMapEntry]>,
+) -> Result<()> {
     let file = File::create(path)?;
     let mut w = BufWriter::new(file);
     w.write_all(&UTF8_BOM)?;
-    write_dat_line(&mut w, DAT_FIELDS.iter().copied())?;
-    for row in rows {
-        write_dat_line(&mut w, row.field_values())?;
+    if let Some(map) = field_map {
+        let headers = mapped_headers(map);
+        write_dat_line(&mut w, headers.iter().map(String::as_str))?;
+        for row in rows {
+            let vals = row.mapped_values(map);
+            write_dat_line(&mut w, vals.iter().map(String::as_str))?;
+        }
+    } else {
+        write_dat_line(&mut w, DAT_FIELDS.iter().copied())?;
+        for row in rows {
+            write_dat_line(&mut w, row.field_values())?;
+        }
     }
     w.flush()?;
     Ok(())
@@ -183,17 +280,39 @@ where
 
 /// Write optional CSV twin (UTF-8 BOM, RFC4180).
 pub fn write_load_csv(path: &Path, rows: &[LoadRow]) -> Result<()> {
+    write_load_csv_mapped(path, rows, None)
+}
+
+/// Write CSV twin using an optional field map.
+pub fn write_load_csv_mapped(
+    path: &Path,
+    rows: &[LoadRow],
+    field_map: Option<&[FieldMapEntry]>,
+) -> Result<()> {
     let file = File::create(path)?;
     let mut w = BufWriter::new(file);
     w.write_all(&UTF8_BOM)?;
     let mut writer = csv::Writer::from_writer(w);
-    writer
-        .write_record(DAT_FIELDS)
-        .map_err(|e| ProduceError::Other(format!("csv header: {e}")))?;
-    for row in rows {
+    if let Some(map) = field_map {
+        let headers = mapped_headers(map);
         writer
-            .write_record(row.field_values())
-            .map_err(|e| ProduceError::Other(format!("csv row: {e}")))?;
+            .write_record(&headers)
+            .map_err(|e| ProduceError::Other(format!("csv header: {e}")))?;
+        for row in rows {
+            let vals = row.mapped_values(map);
+            writer
+                .write_record(&vals)
+                .map_err(|e| ProduceError::Other(format!("csv row: {e}")))?;
+        }
+    } else {
+        writer
+            .write_record(DAT_FIELDS)
+            .map_err(|e| ProduceError::Other(format!("csv header: {e}")))?;
+        for row in rows {
+            writer
+                .write_record(row.field_values())
+                .map_err(|e| ProduceError::Other(format!("csv row: {e}")))?;
+        }
     }
     writer
         .flush()

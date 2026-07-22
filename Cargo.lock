@@ -3373,6 +3373,7 @@ dependencies = [
  "base64 0.22.1",
  "camino",
  "chrono",
+ "chrono-tz",
  "csv",
  "fs4",
  "rand 0.8.7",
@@ -3501,6 +3502,7 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "chrono",
+ "chrono-tz",
  "csv",
  "dedup-engine",
  "matter-core",

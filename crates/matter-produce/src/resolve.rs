@@ -9,7 +9,6 @@ use matter_core::{join_addrs_json, path_basename, Item, Matter};
 use sha2::{Digest, Sha256};
 
 use crate::error::{ProduceError, Result};
-use crate::params::ProduceParams;
 
 /// Result of writing a native file.
 #[derive(Debug, Clone)]
@@ -206,7 +205,7 @@ pub fn load_body_for_eml(
 pub fn resolve_native(
     matter: &Matter,
     item: &Item,
-    params: &ProduceParams,
+    export_eml_if_missing_native: bool,
     natives_dir: &Path,
     control: &str,
     eml_body: Option<String>,
@@ -229,7 +228,7 @@ pub fn resolve_native(
         return Ok(Ok(art));
     }
 
-    if params.export_eml_if_missing_native && is_email_like(item) {
+    if export_eml_if_missing_native && is_email_like(item) {
         let body = match eml_body {
             Some(b) => b,
             None => match load_body_for_eml(matter, item)? {

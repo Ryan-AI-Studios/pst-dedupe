@@ -18,10 +18,34 @@ use crate::matter::{new_id, now_rfc3339, Matter};
 ///
 /// Empty list → hash of the empty string (stable).
 /// Order-independent: input is cloned and sorted before hashing.
+///
+/// Prefer [`selection_fingerprint_with_pack`] for produce-gate authorization
+/// so a different QC pack cannot reuse a pass under another severity profile.
 pub fn selection_fingerprint(ids: &[String]) -> String {
+    selection_fingerprint_with_pack(ids, "")
+}
+
+/// SHA-256 hex of sorted candidate ids + optional QC pack id (track **0060**).
+///
+/// Format (stable):
+/// ```text
+/// <sorted ids joined by \n>
+/// \n#pack=<pack_id>
+/// ```
+/// When `pack_id` is empty, the `#pack=` suffix is omitted so the digest matches
+/// the historical selection-only fingerprint used before multi-pack QC.
+pub fn selection_fingerprint_with_pack(ids: &[String], pack_id: &str) -> String {
     let mut sorted: Vec<&str> = ids.iter().map(String::as_str).collect();
     sorted.sort_unstable();
-    let joined = sorted.join("\n");
+    let mut joined = sorted.join("\n");
+    let pack = pack_id.trim();
+    if !pack.is_empty() {
+        if !joined.is_empty() {
+            joined.push('\n');
+        }
+        joined.push_str("#pack=");
+        joined.push_str(pack);
+    }
     let digest = Sha256::digest(joined.as_bytes());
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -77,12 +101,29 @@ pub struct InsertQcRunInput {
 /// passed
 ///   && scope matches
 ///   && candidate_count == current.len()
-///   && fingerprint == fingerprint(current)
+///   && fingerprint == fingerprint(current, pack)
 /// ```
+///
+/// Uses the pack id recorded on the run (`profile` column, normalized) so
+/// workflow and other callers that do not pass an explicit pack still match
+/// runs created with pack-aware fingerprints (track **0060**). Prefer
+/// [`qc_run_is_fresh_for_pack`] when the *produce* profile binds a specific pack.
 pub fn qc_run_is_fresh(
     stored: &QcRunRecord,
     current_scope: &str,
     current_candidate_ids: &[String],
+) -> bool {
+    let pack = crate::production_profile::normalize_qc_pack_id(&stored.profile);
+    qc_run_is_fresh_for_pack(stored, current_scope, current_candidate_ids, &pack)
+}
+
+/// Like [`qc_run_is_fresh`], but fingerprints include `pack_id` so a pass under
+/// one severity pack cannot authorize produce bound to another (track **0060**).
+pub fn qc_run_is_fresh_for_pack(
+    stored: &QcRunRecord,
+    current_scope: &str,
+    current_candidate_ids: &[String],
+    pack_id: &str,
 ) -> bool {
     if !stored.passed {
         return false;
@@ -93,7 +134,7 @@ pub fn qc_run_is_fresh(
     if stored.candidate_count != current_candidate_ids.len() as u64 {
         return false;
     }
-    let fp = selection_fingerprint(current_candidate_ids);
+    let fp = selection_fingerprint_with_pack(current_candidate_ids, pack_id);
     stored.selection_fingerprint == fp
 }
 
@@ -238,11 +279,12 @@ mod tests {
     #[test]
     fn qc_run_is_fresh_requires_pass_scope_count_fp() {
         let ids = vec!["i1".into(), "i2".into()];
-        let fp = selection_fingerprint(&ids);
+        let pack = crate::production_profile::QC_PACK_DEFAULT_V1;
+        let fp = selection_fingerprint_with_pack(&ids, pack);
         let stored = QcRunRecord {
             id: "qcr1".into(),
             matter_id: "m1".into(),
-            profile: "default_production_qc_v1".into(),
+            profile: pack.into(),
             created_at: "2020-01-01T00:00:00Z".into(),
             passed: true,
             error_count: 0,
@@ -256,6 +298,19 @@ mod tests {
             rules_json: None,
         };
         assert!(qc_run_is_fresh(&stored, "review_corpus", &ids));
+        assert!(qc_run_is_fresh_for_pack(
+            &stored,
+            "review_corpus",
+            &ids,
+            pack
+        ));
+        // Different pack → not fresh.
+        assert!(!qc_run_is_fresh_for_pack(
+            &stored,
+            "review_corpus",
+            &ids,
+            crate::production_profile::QC_PACK_STRICT_PRIVILEGE_V1
+        ));
 
         // failed
         let mut failed = stored.clone();

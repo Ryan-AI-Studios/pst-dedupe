@@ -1,15 +1,19 @@
-//! Produce-screen QC preflight and findings display helpers (track **0041**).
+//! Produce-screen QC preflight and findings display helpers (track **0041** / **0060**).
 //!
 //! Soft-gate readiness uses the same selection + gate logic as produce:
 //! `review_corpus` scope, `expand_family` matching the produce checkbox, and
-//! [`matter_qc::check_qc_gate`]. Opens matter read-only for cheap SQL only.
+//! [`matter_qc::check_qc_gate_for_pack`] with the default production profile pack
+//! (`qc_default_v1`). Fingerprints include `#pack=` (track 0060); empty-pack
+//! authorization would permanently stale the soft-gate after any modern QC run.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
 use camino::Utf8Path;
-use matter_core::Matter;
-use matter_qc::{check_qc_gate, select_item_ids, QcGateBlock, QcParams, SCOPE_REVIEW_CORPUS};
+use matter_core::{Matter, QC_PACK_DEFAULT_V1};
+use matter_qc::{
+    check_qc_gate_for_pack, select_item_ids, QcGateBlock, QcParams, SCOPE_REVIEW_CORPUS,
+};
 
 /// Max findings rows loaded into the desk panel.
 pub const FINDINGS_DISPLAY_CAP: usize = 200;
@@ -94,10 +98,29 @@ pub struct HydratedQcSummary {
 ///
 /// `expand_family` must match the produce dialog checkbox (same as
 /// `expand_family_for_scan` on the QC job).
+///
+/// Soft-gate fingerprints with [`QC_PACK_DEFAULT_V1`] — the pack bound to the
+/// default production profile (`us_concordance_native_text_v1`). When Desk gains
+/// a profile dropdown, pass that profile's `qc.pack_id` instead.
 pub fn evaluate_produce_qc_readiness(
     matter_root: &Utf8Path,
     require_qc_pass: bool,
     expand_family: bool,
+) -> ProduceQcReadiness {
+    evaluate_produce_qc_readiness_for_pack(
+        matter_root,
+        require_qc_pass,
+        expand_family,
+        QC_PACK_DEFAULT_V1,
+    )
+}
+
+/// Like [`evaluate_produce_qc_readiness`] but fingerprints with an explicit pack id.
+pub fn evaluate_produce_qc_readiness_for_pack(
+    matter_root: &Utf8Path,
+    require_qc_pass: bool,
+    expand_family: bool,
+    pack_id: &str,
 ) -> ProduceQcReadiness {
     if !require_qc_pass {
         return ProduceQcReadiness::Allowed;
@@ -109,13 +132,14 @@ pub fn evaluate_produce_qc_readiness(
     let params = QcParams {
         scope: SCOPE_REVIEW_CORPUS.into(),
         expand_family_for_scan: expand_family,
+        pack_id: Some(pack_id.to_string()),
         ..Default::default()
     };
     let ids = match select_item_ids(&matter, &params) {
         Ok(ids) => ids,
         Err(e) => return ProduceQcReadiness::Unavailable(e.to_string()),
     };
-    match check_qc_gate(&matter, SCOPE_REVIEW_CORPUS, &ids) {
+    match check_qc_gate_for_pack(&matter, SCOPE_REVIEW_CORPUS, &ids, pack_id) {
         Ok(None) => ProduceQcReadiness::Allowed,
         Ok(Some(QcGateBlock::Missing)) => ProduceQcReadiness::Missing,
         Ok(Some(QcGateBlock::Failed {
@@ -252,5 +276,57 @@ mod tests {
     fn blocks_when_unknown() {
         let r = ProduceQcReadiness::Unknown;
         assert!(!r.allows_produce());
+    }
+
+    #[test]
+    fn soft_gate_allows_after_default_pack_qc() {
+        use matter_core::{
+            selection_fingerprint_with_pack, InsertQcRunInput, Matter, QC_PACK_DEFAULT_V1,
+            QC_PACK_STRICT_PRIVILEGE_V1,
+        };
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = camino::Utf8Path::from_path(tmp.path())
+            .expect("utf8")
+            .join("matter");
+        let matter = Matter::create(&root, "desk-gate").expect("create");
+        // Insert a passed pack-aware run matching empty review corpus selection.
+        let ids: Vec<String> = Vec::new();
+        let fp = selection_fingerprint_with_pack(&ids, QC_PACK_DEFAULT_V1);
+        matter
+            .insert_qc_run(InsertQcRunInput {
+                profile: QC_PACK_DEFAULT_V1.into(),
+                passed: true,
+                error_count: 0,
+                warn_count: 0,
+                candidate_count: 0,
+                selection_fingerprint: fp,
+                scope: "review_corpus".into(),
+                scope_json: None,
+                report_path: None,
+                job_id: None,
+                rules_json: None,
+            })
+            .expect("insert qc");
+
+        let ready = evaluate_produce_qc_readiness(&root, true, false);
+        assert_eq!(
+            ready,
+            ProduceQcReadiness::Allowed,
+            "default pack soft-gate must match pack-aware QC fingerprint"
+        );
+
+        // Strict pack must not match default-pack QC.
+        let strict =
+            evaluate_produce_qc_readiness_for_pack(&root, true, false, QC_PACK_STRICT_PRIVILEGE_V1);
+        assert!(
+            matches!(
+                strict,
+                ProduceQcReadiness::Stale { .. }
+                    | ProduceQcReadiness::Failed { .. }
+                    | ProduceQcReadiness::Missing
+            ),
+            "strict pack should not match default-pack QC: {strict:?}"
+        );
     }
 }

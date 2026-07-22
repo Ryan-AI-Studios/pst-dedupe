@@ -1,6 +1,6 @@
 # matter-qc
 
-Pre-production **QC engine** for Dedupe Desk (track **0041**). Scans a produce candidate set, emits structured findings, writes a CSV report pack, and records a `qc_runs` row with a **selection fingerprint** so produce can refuse stale QC.
+Pre-production **QC engine** for Dedupe Desk (tracks **0041** / **0060**). Scans a produce candidate set, emits structured findings, writes a CSV report pack, and records a `qc_runs` row with a **selection + pack fingerprint** so produce can refuse stale QC (including pack changes).
 
 ## Job
 
@@ -8,7 +8,7 @@ Pre-production **QC engine** for Dedupe Desk (track **0041**). Scans a produce c
 |---|---|
 | Kind | `qc` |
 | Stage | `qc` |
-| Default profile | `default_production_qc_v1` |
+| Default pack | `qc_default_v1` (legacy alias: `default_production_qc_v1`) |
 | Default scope | `review_corpus` (`in_review = 1`) |
 
 ```json
@@ -18,13 +18,26 @@ Pre-production **QC engine** for Dedupe Desk (track **0041**). Scans a produce c
   "expand_family_for_scan": false,
   "rules": [],
   "report_dir": null,
-  "profile": "default_production_qc_v1"
+  "profile": "qc_default_v1",
+  "pack_id": null
 }
 ```
 
-Empty `rules` → default pack. Per-rule severity override: `off` / `warn` / `error`.
+Empty `rules` → pack severities. Per-rule severity override: `off` / `warn` / `error` (applied after pack).
 
-## Default pack `default_production_qc_v1`
+`pack_id` (when set) overrides `profile` for severity resolution and fingerprinting. Produce profiles bind a pack via `qc.pack_id`.
+
+## QC packs (0060)
+
+| Pack id | Intent |
+|---|---|
+| `qc_default_v1` | Current 0041 defaults (alias `default_production_qc_v1`) |
+| `qc_strict_privilege_v1` | `withheld_in_selection`, `withheld_family_member`, `broken_family_incomplete_parent` → **Error** |
+| `qc_native_heavy_v1` | `missing_native` / `zero_size` → **Error**; missing text stays taxonomy-aware Warn base |
+
+Fingerprint = SHA-256 of sorted item ids + `#pack=<pack_id>`. Different pack → produce gate miss under `require_qc_pass`.
+
+## Default pack `qc_default_v1`
 
 | Rule id | Default | Finding when |
 |---|---|---|
@@ -78,19 +91,25 @@ Under `<matter>/exports/qc/qc_YYYYMMDD_HHMMSS/` (or `report_dir`):
 
 ## Produce gate
 
-`matter-produce` param `require_qc_pass` (default **true**):
+`matter-produce` param `require_qc_pass` (default **true** via production profile):
 
 1. Select current produce candidates
 2. Load latest `qc_runs` for matching scope
-3. Require `passed` **and** fresh selection fingerprint (sorted-id SHA-256 + count + scope)
+3. Require `passed` **and** fresh selection fingerprint: sorted-id SHA-256 **+ `#pack=<pack_id>`** + count + scope
 4. Else fail closed: “QC required” / “QC failed” / “QC stale: selection changed…”
 
-Helpers: `matter_core::selection_fingerprint`, `matter_core::qc_run_is_fresh`, `matter_qc::check_qc_gate`.
+A QC pass under `qc_default_v1` does **not** authorize produce bound to `qc_strict_privilege_v1` (and vice versa).
+
+Helpers:
+
+- `matter_core::selection_fingerprint_with_pack` / `qc_run_is_fresh_for_pack`
+- `matter_qc::check_qc_gate_for_pack(matter, scope, ids, pack_id)`
+- Legacy `check_qc_gate` / empty-pack fingerprints are for pre-0060 rows only — Desk soft-gate and produce use pack-aware helpers
 
 ## Schema
 
-Requires matter-core **schema v21** table `qc_runs`.
+Requires matter-core **schema v21** table `qc_runs` (current workspace schema **v38**). Pack id is stored in `qc_runs.profile`.
 
 ## Audit
 
-`qc.start` / `qc.complete` / `qc.fail` with counts, fingerprint, report path.
+`qc.start` / `qc.complete` / `qc.fail` with counts, fingerprint, **pack_id**, report path.

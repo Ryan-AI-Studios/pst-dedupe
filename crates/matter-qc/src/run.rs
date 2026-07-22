@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use camino::Utf8PathBuf;
 use chrono::Utc;
-use matter_core::{selection_fingerprint, AuditEventInput, InsertQcRunInput, Matter};
+use matter_core::{selection_fingerprint_with_pack, AuditEventInput, InsertQcRunInput, Matter};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -15,7 +15,8 @@ use crate::error::{QcError, Result};
 use crate::params::{QcParams, QcSeverity};
 use crate::report::{count_severities, default_qc_report_dir, write_qc_report, QcReportMeta};
 use crate::rules::{
-    empty_selection_finding, evaluate_one_item, only_withheld_finding, resolve_rules, QcFinding,
+    empty_selection_finding, evaluate_one_item, only_withheld_finding, resolve_rules_for_pack,
+    QcFinding,
 };
 use crate::select::select_item_ids;
 
@@ -119,12 +120,30 @@ pub fn run_production_qc(
         .as_ref()
         .is_some_and(|p| params_match(p, &params_json) && p.phase != "done");
 
+    let pack_id = call_params.resolved_pack_id();
+    let rules = crate::rules::resolve_rules_for_pack(&pack_id, &call_params.rules);
+    let rules_json = serde_json::to_value(rules.to_configs()).unwrap_or_else(|_| json!([]));
+    let config_hash = {
+        use sha2::{Digest, Sha256};
+        let payload = json!({
+            "pack_id": pack_id,
+            "rules": rules_json,
+        });
+        let s = payload.to_string();
+        let digest = Sha256::digest(s.as_bytes());
+        digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
     matter.append_audit(AuditEventInput {
         actor: "system".into(),
         action: "qc.start".into(),
         entity: format!("job:{job_id}"),
         params_json: json!({
             "params": params_json,
+            "pack_id": pack_id,
+            "config_hash": config_hash,
             "resume": resuming,
         })
         .to_string(),
@@ -156,6 +175,7 @@ pub fn run_production_qc(
                     "report_path": r.report_path,
                     "qc_run_id": r.qc_run_id,
                     "profile": r.profile,
+                    "pack_id": r.profile,
                     "duration_ms": started.elapsed().as_millis() as u64,
                 })
                 .to_string(),
@@ -277,12 +297,10 @@ fn run_qc_inner(
     progress: &impl Fn(u64),
     prior: Option<CheckpointCursor>,
 ) -> Result<QcOutcome> {
-    let rules = resolve_rules(&params.rules);
-    let profile = if params.profile.trim().is_empty() {
-        rules.profile.clone()
-    } else {
-        params.profile.clone()
-    };
+    let pack_id = params.resolved_pack_id();
+    let rules = resolve_rules_for_pack(&pack_id, &params.rules);
+    // Store canonical pack id on qc_runs.profile (pack-bound fingerprint identity).
+    let profile = rules.profile.clone();
     let rules_json = serde_json::to_string(&rules.to_configs()).unwrap_or_else(|_| "[]".into());
     let scope = params.scope.clone();
 
@@ -339,7 +357,10 @@ fn run_qc_inner(
         let ordered = select_item_ids(matter, params)?;
         cursor.ordered_ids = ordered;
         cursor.candidate_count = cursor.ordered_ids.len() as u64;
-        cursor.selection_fingerprint = selection_fingerprint(&cursor.ordered_ids);
+        // Fingerprint includes pack id so produce gate cannot reuse a pass
+        // under a different severity pack (track 0060).
+        cursor.selection_fingerprint =
+            selection_fingerprint_with_pack(&cursor.ordered_ids, &profile);
         // Persist selection freeze early so a cancel mid-eval resumes same set.
         write_checkpoint(matter, job_id, &cursor)?;
     }

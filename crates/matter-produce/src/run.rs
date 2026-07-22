@@ -11,13 +11,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::dat::{format_utc_datetime, write_load_csv, write_load_dat, LoadRow};
+use crate::dat::{
+    date_mods_for_source, format_datetime_for_field, write_load_csv_mapped, write_load_dat_mapped,
+    LoadRow,
+};
 use crate::error::{ProduceError, Result};
 use crate::layout::{
-    production_stamp, resolve_output_root, sanitize_filename_part, write_readme, VolumeLayout,
-    PRODUCTIONS_DIR,
+    production_stamp, resolve_output_root_with_layout, sanitize_filename_part, write_readme,
+    VolumeLayout, PRODUCTIONS_DIR,
 };
 use crate::params::{ProduceParams, SCOPE_ITEM_IDS, SCOPE_REVIEW_CORPUS};
+use crate::profile::{
+    effective_bates_prefix, effective_pad_width, effective_qc_pack_id, resolve_produce_config,
+    ResolvedProduceConfig,
+};
 use crate::resolve::{is_email_like, load_body_for_eml, resolve_native, resolve_text};
 
 /// Job kind string for process-runner.
@@ -112,13 +119,23 @@ pub fn run_produce(
     let started = Instant::now();
     let prior = load_prior_checkpoint(matter, job_id)?;
     let effective = resolve_params(params, prior.as_ref())?;
+    let resolved = resolve_produce_config(matter, &effective)?;
     let params_json = serde_json::to_value(&effective).unwrap_or_else(|_| json!({}));
 
     matter.append_audit(AuditEventInput {
         actor: "system".into(),
         action: "produce.start".into(),
         entity: format!("job:{job_id}"),
-        params_json: json!({ "params": params_json }).to_string(),
+        params_json: json!({
+            "params": params_json,
+            "production_profile": resolved.profile_slug,
+            "profile_id": resolved.profile_id,
+            "config_hash": resolved.config_hash,
+            "bates_start": resolved.bates_start,
+            "bates_prefix": effective_bates_prefix(&resolved),
+            "qc_pack_id": effective_qc_pack_id(&resolved),
+        })
+        .to_string(),
         tool_version: env!("CARGO_PKG_VERSION").into(),
     })?;
 
@@ -126,6 +143,7 @@ pub fn run_produce(
         matter,
         job_id,
         &effective,
+        &resolved,
         cancel,
         &progress,
         &params_json,
@@ -134,6 +152,7 @@ pub fn run_produce(
 
     match &result {
         Ok(ProduceOutcome::Succeeded(s)) => {
+            let bates_end = s.next_seq.saturating_sub(1);
             if let Err(e) = matter.append_audit(AuditEventInput {
                 actor: "system".into(),
                 action: "produce.complete".into(),
@@ -146,6 +165,13 @@ pub fn run_produce(
                     "errors": s.error_count,
                     "production_set_id": s.production_set_id,
                     "output_root": s.output_root,
+                    "production_profile": resolved.profile_slug,
+                    "profile_id": resolved.profile_id,
+                    "config_hash": resolved.config_hash,
+                    "qc_pack_id": effective_qc_pack_id(&resolved),
+                    "bates_prefix": effective_bates_prefix(&resolved),
+                    "bates_start": resolved.bates_start,
+                    "bates_end": bates_end,
                     "duration_ms": started.elapsed().as_millis() as u64,
                 })
                 .to_string(),
@@ -253,15 +279,24 @@ fn resolve_params(call: &ProduceParams, prior: Option<&CheckpointCursor>) -> Res
     Ok(effective)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_produce_inner(
     matter: &Matter,
     job_id: &str,
     params: &ProduceParams,
+    resolved: &ResolvedProduceConfig,
     cancel: Option<&dyn Fn() -> bool>,
     progress: &impl Fn(u64),
     params_json: &serde_json::Value,
     prior: Option<CheckpointCursor>,
 ) -> Result<ProduceOutcome> {
+    let bates_prefix = effective_bates_prefix(resolved).to_string();
+    let pad_width = effective_pad_width(resolved);
+    let qc_pack_id = effective_qc_pack_id(resolved);
+    // Effective packaging / gate flags after profile + job Option overlay.
+    let require_qc_pass = resolved.body.qc.require_qc_pass;
+    let expand_family = resolved.body.packaging.expand_family;
+
     let mut cursor = if let Some(mut prior) = prior {
         prior.params = params_json.clone();
         prior
@@ -275,7 +310,7 @@ fn run_produce_inner(
             skipped_withheld: 0,
             skipped_other: 0,
             error_count: 0,
-            next_seq: 1,
+            next_seq: resolved.bates_start,
             production_set_id: String::new(),
             production_name: String::new(),
             output_root: String::new(),
@@ -290,12 +325,12 @@ fn run_produce_inner(
         return Ok(ProduceOutcome::Succeeded(summary_from_cursor(&cursor)));
     }
     if cursor.phase == "finalize" {
-        return finalize_volume(matter, job_id, params, &mut cursor);
+        return finalize_volume(matter, job_id, params, resolved, &mut cursor);
     }
 
     // Fresh selection + production set.
     if cursor.ordered_ids.is_empty() {
-        let ordered = select_item_ids(matter, params)?;
+        let ordered = select_item_ids(matter, params, expand_family)?;
         if ordered.is_empty() {
             return Ok(ProduceOutcome::Failed {
                 message:
@@ -305,10 +340,12 @@ fn run_produce_inner(
             });
         }
 
-        // 0041: require fresh passed QC before packaging (fail closed).
-        // Uses matter-qc gate helpers so desk preflight and produce stay aligned.
-        if params.require_qc_pass {
-            if let Some(block) = matter_qc::check_qc_gate(matter, &params.scope, &ordered)? {
+        // 0041/0060: require fresh passed QC before packaging (fail closed).
+        // Fingerprint includes QC pack id so a pass under another pack is stale.
+        if require_qc_pass {
+            if let Some(block) =
+                matter_qc::check_qc_gate_for_pack(matter, &params.scope, &ordered, &qc_pack_id)?
+            {
                 return Ok(ProduceOutcome::Failed {
                     message: block.message(),
                     summary: summary_from_cursor(&cursor),
@@ -320,7 +357,7 @@ fn run_produce_inner(
         // audit (mark_failed_from_checkpoint) reports selected_count > 0.
         cursor.selected_count = ordered.len() as u64;
         cursor.ordered_ids = ordered;
-        cursor.next_seq = 1;
+        cursor.next_seq = resolved.bates_start;
         save_checkpoint(matter, job_id, &cursor)?;
     }
 
@@ -344,7 +381,13 @@ fn run_produce_inner(
             }
         }
 
-        let output_root = resolve_output_root(matter, params)?;
+        let output_root = resolve_output_root_with_layout(
+            matter,
+            params,
+            &resolved.body.layout.data,
+            &resolved.body.layout.natives,
+            &resolved.body.layout.text,
+        )?;
         // Safety: default path stays under matter exports/productions.
         if params.output_dir.is_none() {
             let expected_prefix = matter.root().join(EXPORTS_DIR).join(PRODUCTIONS_DIR);
@@ -371,9 +414,11 @@ fn run_produce_inner(
             matter,
             job_id,
             &name,
-            params.bates_prefix_clean(),
+            &bates_prefix,
             params_json,
             output_root.as_str(),
+            Some(resolved.profile_slug.as_str()),
+            resolved.bates_start,
         )?;
 
         cursor.production_set_id = set_id;
@@ -388,7 +433,12 @@ fn run_produce_inner(
         ));
     }
 
-    let layout = VolumeLayout::create(camino::Utf8Path::new(&cursor.output_root))?;
+    let layout = VolumeLayout::create_with_names(
+        camino::Utf8Path::new(&cursor.output_root),
+        &resolved.body.layout.data,
+        &resolved.body.layout.natives,
+        &resolved.body.layout.text,
+    )?;
     // Index existing rows.jsonl so resume after crash-between-append-and-checkpoint
     // does not re-produce / re-append (idempotent by ITEM_ID).
     let mut jsonl_by_item = index_rows_jsonl_by_item_id(&layout)?;
@@ -501,7 +551,7 @@ fn run_produce_inner(
                 recover_done_from_existing_row(
                     &mut cursor,
                     &mut done,
-                    params.bates_prefix_clean(),
+                    &bates_prefix,
                     &item_id,
                     &existing.control_number,
                 );
@@ -555,20 +605,16 @@ fn run_produce_inner(
         // do not burn a new sequence value.
         let control_safe = if let Some(prior) = prior_ok_control.as_deref() {
             let safe = sanitize_filename_part(prior);
-            advance_next_seq_for_control(&mut cursor, params.bates_prefix_clean(), prior);
+            advance_next_seq_for_control(&mut cursor, &bates_prefix, prior);
             safe
         } else {
-            let control = format_control(
-                params.bates_prefix_clean(),
-                cursor.next_seq,
-                params.seq_width,
-            );
+            let control = format_control(&bates_prefix, cursor.next_seq, pad_width);
             let safe = sanitize_filename_part(&control);
             cursor.next_seq += 1;
             safe
         };
 
-        match produce_one_item(matter, params, &item, &layout, &control_safe) {
+        match produce_one_item(matter, params, resolved, &item, &layout, &control_safe) {
             Ok(ProducedOne::Ok {
                 native_relpath,
                 text_relpath,
@@ -704,7 +750,7 @@ fn run_produce_inner(
 
     cursor.phase = "finalize".into();
     save_checkpoint(matter, job_id, &cursor)?;
-    finalize_volume(matter, job_id, params, &mut cursor)
+    finalize_volume(matter, job_id, params, resolved, &mut cursor)
 }
 
 enum ProducedOne {
@@ -723,14 +769,15 @@ enum ProducedOne {
 
 fn produce_one_item(
     matter: &Matter,
-    params: &ProduceParams,
+    _params: &ProduceParams,
+    resolved: &ResolvedProduceConfig,
     item: &Item,
     layout: &VolumeLayout,
     control: &str,
 ) -> Result<ProducedOne> {
     // Package both text + native fully before returning Ok; on any Error/Err after
     // writes, delete partial control artifacts so withhold/failure never leaves bytes.
-    let result = produce_one_item_inner(matter, params, item, layout, control);
+    let result = produce_one_item_inner(matter, resolved, item, layout, control);
     match &result {
         Ok(ProducedOne::Ok { .. }) | Ok(ProducedOne::Skipped { .. }) => {}
         Ok(ProducedOne::Error { .. }) | Err(_) => {
@@ -742,7 +789,7 @@ fn produce_one_item(
 
 fn produce_one_item_inner(
     matter: &Matter,
-    params: &ProduceParams,
+    resolved: &ResolvedProduceConfig,
     item: &Item,
     layout: &VolumeLayout,
     control: &str,
@@ -771,13 +818,14 @@ fn produce_one_item_inner(
 
     // When synthetic EML may be generated, load production body from the correct
     // CAS (redacted when redactions apply) so the .eml matches TEXT/.
+    let export_eml = resolved.body.packaging.export_eml_if_missing_native;
     let needs_eml = item
         .native_sha256
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .is_none()
-        && params.export_eml_if_missing_native
+        && export_eml
         && is_email_like(item);
     let eml_body = if needs_eml {
         match load_body_for_eml(matter, item)? {
@@ -793,7 +841,7 @@ fn produce_one_item_inner(
     let native_result = resolve_native(
         matter,
         item,
-        params,
+        export_eml,
         layout.natives.as_std_path(),
         control,
         eml_body,
@@ -801,7 +849,7 @@ fn produce_one_item_inner(
 
     let (native_art, native_relpath, file_ext, mime, size, sha) = match native_result {
         Ok(art) => {
-            let rel = VolumeLayout::native_relpath(control, &art.file_ext);
+            let rel = layout.native_relpath(control, &art.file_ext);
             let ext = art.file_ext.clone();
             let mime = art.mime_type.clone();
             let size = art.file_size.to_string();
@@ -829,7 +877,7 @@ fn produce_one_item_inner(
         .map(|t| t.sha256.clone())
         .unwrap_or_default();
     let text_relpath = if text_art.is_some() {
-        Some(VolumeLayout::text_relpath(control))
+        Some(layout.text_relpath(control))
     } else {
         None
     };
@@ -847,6 +895,11 @@ fn produce_one_item_inner(
         }
     };
 
+    let field_map = &resolved.body.load_file.field_map;
+    let (sent_fmt, sent_tz) = date_mods_for_source(field_map, "DATE_SENT");
+    let (recv_fmt, recv_tz) = date_mods_for_source(field_map, "DATE_RECEIVED");
+    let (created_fmt, created_tz) = date_mods_for_source(field_map, "DATE_CREATED");
+
     let file_name = path_basename(item.path.as_deref());
     let row = LoadRow {
         control_number: control.to_string(),
@@ -860,9 +913,21 @@ fn produce_one_item_inner(
         mime_type: mime,
         file_size: size,
         sha256: sha,
-        date_sent: format_utc_datetime(item.sent_at.as_deref()),
-        date_received: format_utc_datetime(item.received_at.as_deref()),
-        date_created: format_utc_datetime(item.created_at.as_deref()),
+        date_sent: format_datetime_for_field(
+            item.sent_at.as_deref(),
+            sent_fmt.as_deref(),
+            sent_tz.as_deref(),
+        ),
+        date_received: format_datetime_for_field(
+            item.received_at.as_deref(),
+            recv_fmt.as_deref(),
+            recv_tz.as_deref(),
+        ),
+        date_created: format_datetime_for_field(
+            item.created_at.as_deref(),
+            created_fmt.as_deref(),
+            created_tz.as_deref(),
+        ),
         from: item.from_addr.clone().unwrap_or_default(),
         to: join_addrs_json(item.to_addrs_json.as_deref()),
         cc: join_addrs_json(item.cc_addrs_json.as_deref()),
@@ -914,9 +979,15 @@ fn finalize_volume(
     matter: &Matter,
     job_id: &str,
     params: &ProduceParams,
+    resolved: &ResolvedProduceConfig,
     cursor: &mut CheckpointCursor,
 ) -> Result<ProduceOutcome> {
-    let layout = VolumeLayout::create(camino::Utf8Path::new(&cursor.output_root))?;
+    let layout = VolumeLayout::create_with_names(
+        camino::Utf8Path::new(&cursor.output_root),
+        &resolved.body.layout.data,
+        &resolved.body.layout.natives,
+        &resolved.body.layout.text,
+    )?;
     // Hold may land after the last work-item commit but before finalize writes DAT.
     let mut jsonl_by_item = index_rows_jsonl_by_item_id(&layout)?;
     let mut done: HashSet<String> = cursor.done_item_ids.iter().cloned().collect();
@@ -932,9 +1003,10 @@ fn finalize_volume(
     }
     let rows = load_rows_from_jsonl(&layout)?;
 
-    write_load_dat(layout.load_dat.as_std_path(), &rows)?;
-    if params.include_csv_twin {
-        write_load_csv(layout.load_csv.as_std_path(), &rows)?;
+    let field_map = &resolved.body.load_file.field_map;
+    write_load_dat_mapped(layout.load_dat.as_std_path(), &rows, Some(field_map))?;
+    if resolved.body.packaging.include_csv_twin {
+        write_load_csv_mapped(layout.load_csv.as_std_path(), &rows, Some(field_map))?;
     }
 
     let counts_line = format!(
@@ -948,7 +1020,7 @@ fn finalize_volume(
     write_readme(
         &layout.readme,
         &cursor.production_name,
-        params.expand_family,
+        resolved.body.packaging.expand_family,
         &counts_line,
     )?;
 
@@ -1451,11 +1523,15 @@ fn format_control(prefix: &str, seq: u64, width: u32) -> String {
     format!("{prefix}{seq:0width$}", width = width as usize)
 }
 
-fn select_item_ids(matter: &Matter, params: &ProduceParams) -> Result<Vec<String>> {
+fn select_item_ids(
+    matter: &Matter,
+    params: &ProduceParams,
+    expand_family: bool,
+) -> Result<Vec<String>> {
     match params.scope.as_str() {
         SCOPE_REVIEW_CORPUS => {
             let mut ids = list_in_review_ids(matter)?;
-            if params.expand_family {
+            if expand_family {
                 ids = expand_family_ids(matter, &ids)?;
             }
             Ok(ids)
@@ -1465,7 +1541,7 @@ fn select_item_ids(matter: &Matter, params: &ProduceParams) -> Result<Vec<String
             // Stable unique order preserving first occurrence.
             let mut seen = HashSet::new();
             ids.retain(|id| seen.insert(id.clone()));
-            if params.expand_family {
+            if expand_family {
                 ids = expand_family_ids(matter, &ids)?;
             }
             Ok(ids)
@@ -1521,6 +1597,7 @@ fn expand_family_ids(matter: &Matter, base: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_production_set(
     matter: &Matter,
     job_id: &str,
@@ -1528,14 +1605,18 @@ fn create_production_set(
     bates_prefix: &str,
     params_json: &serde_json::Value,
     output_root: &str,
+    profile_slug: Option<&str>,
+    bates_start: u64,
 ) -> Result<String> {
     let id = new_id("prod");
     let now = Utc::now().to_rfc3339();
     let params_s = params_json.to_string();
+    let start = bates_start.max(1);
     matter.connection().execute(
         "INSERT INTO production_sets \
-         (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, params_json, output_root, job_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'running', ?7, ?8, ?9)",
+         (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, \
+          params_json, output_root, job_id, profile_slug) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8, ?9, ?10, ?11)",
         params![
             id,
             matter.id(),
@@ -1543,9 +1624,11 @@ fn create_production_set(
             now,
             now,
             bates_prefix,
+            start as i64,
             params_s,
             output_root,
-            job_id
+            job_id,
+            profile_slug
         ],
     )?;
     Ok(id)

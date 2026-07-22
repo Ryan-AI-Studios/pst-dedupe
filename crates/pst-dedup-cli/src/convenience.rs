@@ -61,9 +61,49 @@ pub fn qc_run(path: &std::path::Path, params_json: Option<&str>, json: bool) -> 
     run_kind(path, "qc", params_json, json)
 }
 
-pub fn produce_run(path: &std::path::Path, params_json: Option<&str>, json: bool) -> Result<()> {
-    // If params include relative output_dir, load_params_json rejects it.
-    run_kind(path, "produce", params_json, json)
+/// Produce with optional CLI flags merged into params JSON (track **0060**).
+///
+/// Flag precedence: explicit CLI flags override keys in `params_json`.
+pub fn produce_run(
+    path: &std::path::Path,
+    params_json: Option<&str>,
+    profile: Option<&str>,
+    bates_start: Option<u64>,
+    bates_prefix: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let root = resolve_matter_root(path)?;
+    let mut params: Value = load_params_json(params_json)?;
+    let obj = params
+        .as_object_mut()
+        .ok_or_else(|| CliError::Usage("produce params_json must be a JSON object".into()))?;
+    if let Some(p) = profile.map(str::trim).filter(|s| !s.is_empty()) {
+        obj.insert("production_profile".into(), json!(p));
+    }
+    if let Some(start) = bates_start {
+        if start == 0 {
+            return Err(CliError::Usage(
+                "bates-start must be >= 1 (job-time Bates start)".into(),
+            ));
+        }
+        obj.insert("bates_start".into(), json!(start));
+    }
+    if let Some(prefix) = bates_prefix.map(str::trim).filter(|s| !s.is_empty()) {
+        obj.insert("bates_prefix".into(), json!(prefix));
+    }
+    // Bates start is required (job-time only; never in profile). No silent default.
+    if !obj.contains_key("bates_start")
+        || obj.get("bates_start").map(|v| v.is_null()).unwrap_or(true)
+    {
+        return Err(CliError::Usage(
+            "produce requires --bates-start <n> (or bates_start in params JSON); \
+             multi-volume must set the next start explicitly"
+                .into(),
+        ));
+    }
+    let params_str = serde_json::to_string(&params)?;
+    let _job = run_job_wait(&root, "produce", &params_str, json)?;
+    Ok(())
 }
 
 pub fn gap_run(path: &std::path::Path, params_json: Option<&str>, json: bool) -> Result<()> {
