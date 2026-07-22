@@ -24,47 +24,62 @@ pub struct ProduceParams {
     /// Production display name (folder stamp when set).
     #[serde(default)]
     pub name: Option<String>,
-    /// Bates / control number prefix (default `PROD`).
-    #[serde(default = "default_bates_prefix")]
-    pub bates_prefix: String,
-    /// Zero-pad width for sequence (default 6 → `PROD000001`).
-    #[serde(default = "default_seq_width")]
-    pub seq_width: u32,
+    /// Bates / control number prefix.
+    ///
+    /// `None` = not set by job → production profile `bates.prefix` wins.
+    /// When set (including explicit `"PROD"`), overrides the profile.
+    #[serde(default)]
+    pub bates_prefix: Option<String>,
+    /// Zero-pad width for sequence.
+    ///
+    /// `None` = not set by job → production profile `bates.pad_width` wins.
+    #[serde(default)]
+    pub seq_width: Option<u32>,
+    /// Job-time Bates start sequence (1-based). **Never** stored in a profile.
+    ///
+    /// **Required** at produce time (`Some(n)` with `n >= 1`). Multi-volume
+    /// productions must set this explicitly (e.g. volume 2 starts at 5001).
+    /// Omitted / null → invalid params (no silent default of 1).
+    #[serde(default)]
+    pub bates_start: Option<u64>,
+    /// Production profile slug (built-in or matter-local). When null, uses
+    /// `us_concordance_native_text_v1`.
+    #[serde(default)]
+    pub production_profile: Option<String>,
+    /// Optional QC pack id override (otherwise taken from the profile).
+    #[serde(default)]
+    pub qc_pack_id: Option<String>,
     /// Abort entire job if any selected item is withheld.
     #[serde(default)]
     pub fail_if_withheld: bool,
     /// Generate export-only EML for email items missing native.
-    #[serde(default = "default_true")]
-    pub export_eml_if_missing_native: bool,
-    /// Write `DATA/load.csv` twin alongside DAT.
-    #[serde(default = "default_true")]
-    pub include_csv_twin: bool,
-    /// Family expand residual (default false — produce exact selection).
+    ///
+    /// `None` = not set by job → production profile value wins.
     #[serde(default)]
-    pub expand_family: bool,
+    pub export_eml_if_missing_native: Option<bool>,
+    /// Write `DATA/load.csv` twin alongside DAT.
+    ///
+    /// `None` = not set by job → production profile value wins.
+    #[serde(default)]
+    pub include_csv_twin: Option<bool>,
+    /// Family expand residual (default false — produce exact selection).
+    ///
+    /// `None` = not set by job → production profile value wins.
+    #[serde(default)]
+    pub expand_family: Option<bool>,
     /// Output root; when null, `exports/productions/<name_or_stamp>/` under matter.
     #[serde(default)]
     pub output_dir: Option<String>,
     /// Require a fresh passed production QC run for the same selection (track 0041).
-    /// Default **true** (fail closed).
-    #[serde(default = "default_true")]
-    pub require_qc_pass: bool,
+    /// Fingerprint includes the bound QC pack id.
+    ///
+    /// `None` = not set by job → production profile value wins (built-in default true).
+    #[serde(default)]
+    pub require_qc_pass: Option<bool>,
 }
 
 fn default_scope() -> String {
     SCOPE_REVIEW_CORPUS.into()
-}
-
-fn default_bates_prefix() -> String {
-    DEFAULT_BATES_PREFIX.into()
-}
-
-fn default_seq_width() -> u32 {
-    6
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl Default for ProduceParams {
@@ -73,14 +88,22 @@ impl Default for ProduceParams {
             scope: default_scope(),
             item_ids: Vec::new(),
             name: None,
-            bates_prefix: default_bates_prefix(),
-            seq_width: default_seq_width(),
+            // Tests / Desk: set explicit values. Empty JSON must include bates_start.
+            bates_prefix: None,
+            seq_width: None,
+            // Default helper for unit/integration tests that use `..Default`.
+            // Engine `from_json` without bates_start still fails validation.
+            bates_start: Some(1),
+            production_profile: None,
+            qc_pack_id: None,
             fail_if_withheld: false,
-            export_eml_if_missing_native: true,
-            include_csv_twin: true,
-            expand_family: false,
+            // None → profile/engine defaults (include_csv true, export_eml true,
+            // expand false, require_qc true on built-in US profile).
+            export_eml_if_missing_native: None,
+            include_csv_twin: None,
+            expand_family: None,
             output_dir: None,
-            require_qc_pass: true,
+            require_qc_pass: None,
         }
     }
 }
@@ -114,31 +137,58 @@ impl ProduceParams {
                 )));
             }
         }
-        let prefix = self.bates_prefix.trim();
-        if prefix.is_empty() {
-            return Err(ProduceError::InvalidParams(
-                "bates_prefix must be non-empty".into(),
-            ));
+        if let Some(ref prefix_raw) = self.bates_prefix {
+            let prefix = prefix_raw.trim();
+            if prefix.is_empty() {
+                return Err(ProduceError::InvalidParams(
+                    "bates_prefix must be non-empty when set".into(),
+                ));
+            }
+            if prefix
+                .chars()
+                .any(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+            {
+                return Err(ProduceError::InvalidParams(
+                    "bates_prefix may only contain ASCII alphanumeric, '_' or '-'".into(),
+                ));
+            }
         }
-        if prefix
-            .chars()
-            .any(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
-        {
-            return Err(ProduceError::InvalidParams(
-                "bates_prefix may only contain ASCII alphanumeric, '_' or '-'".into(),
-            ));
+        if let Some(w) = self.seq_width {
+            if w == 0 || w > 12 {
+                return Err(ProduceError::InvalidParams(
+                    "seq_width must be 1..=12 when set".into(),
+                ));
+            }
         }
-        if self.seq_width == 0 || self.seq_width > 12 {
-            return Err(ProduceError::InvalidParams(
-                "seq_width must be 1..=12".into(),
-            ));
+        match self.bates_start {
+            None => {
+                return Err(ProduceError::InvalidParams(
+                    "bates_start is required (job-time Bates start >= 1; never stored in profile)"
+                        .into(),
+                ));
+            }
+            Some(0) => {
+                return Err(ProduceError::InvalidParams(
+                    "bates_start must be >= 1 (job-time Bates start; never stored in profile)"
+                        .into(),
+                ));
+            }
+            Some(_) => {}
         }
         Ok(())
     }
 
-    /// Sanitized Bates prefix.
-    pub fn bates_prefix_clean(&self) -> &str {
-        self.bates_prefix.trim()
+    /// Sanitized Bates prefix when the job set one; else `None` (use profile).
+    pub fn bates_prefix_clean(&self) -> Option<&str> {
+        self.bates_prefix
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Job-time Bates start (validated present).
+    pub fn bates_start_value(&self) -> u64 {
+        self.bates_start.unwrap_or(1)
     }
 }
 
@@ -147,16 +197,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_from_empty() {
-        let p = ProduceParams::from_json("{}").unwrap();
+    fn defaults_from_empty_requires_bates_start() {
+        let err = ProduceParams::from_json("{}").unwrap_err();
+        assert!(
+            err.to_string().contains("bates_start"),
+            "empty JSON must require bates_start: {err}"
+        );
+    }
+
+    #[test]
+    fn defaults_with_bates_start() {
+        let p = ProduceParams::from_json(r#"{"bates_start":1}"#).unwrap();
         assert_eq!(p.scope, "review_corpus");
-        assert_eq!(p.bates_prefix, "PROD");
+        assert!(p.bates_prefix.is_none());
+        assert_eq!(p.bates_start, Some(1));
+        assert!(p.production_profile.is_none());
         assert!(!p.fail_if_withheld);
-        assert!(p.export_eml_if_missing_native);
-        assert!(p.include_csv_twin);
-        assert!(!p.expand_family);
+        // Packaging knobs omitted → profile wins after resolve.
+        assert!(p.export_eml_if_missing_native.is_none());
+        assert!(p.include_csv_twin.is_none());
+        assert!(p.expand_family.is_none());
         assert!(p.output_dir.is_none());
-        assert!(p.require_qc_pass);
+        assert!(p.require_qc_pass.is_none());
+    }
+
+    #[test]
+    fn default_struct_has_bates_start_for_tests() {
+        let p = ProduceParams::default();
+        assert_eq!(p.bates_start, Some(1));
+        p.validate_shape().unwrap();
     }
 
     #[test]

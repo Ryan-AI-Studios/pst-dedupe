@@ -346,7 +346,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0041-02 | — | TEXT folder privilege-term search | Human/residual | residual |
 | D-0041-03 | — | Auto-fix (auto expand family, auto regenerate redacted, auto slip-sheet) | Report-only P0 | residual |
 | D-0041-04 | — | Custom user-defined QC SQL rules | Builtin pack P0 | residual |
-| D-0041-05 | — | Multi-jurisdiction QC packs | | **0060** |
+| D-0041-05 | — | Multi-jurisdiction QC packs | **Partial close in 0060**: named packs `qc_default_v1` / `qc_strict_privilege_v1` / `qc_native_heavy_v1` bound by production profiles; fingerprint includes pack id | residual firm packs |
 | D-0041-06 | — | Sampling / multi-reviewer QC UI | **Partial close in 0058**: API sampling QC + JSON report; Desk QC UI residual | residual / **D-0058-01** |
 | D-0041-07 | — | CLI `qc run` | **Closed in 0045** (`qc run`) | — |
 | D-0041-08 | — | Full findings table in SQLite | CSV + qc_runs + fingerprint enough P0 | residual |
@@ -615,6 +615,20 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0059-07 | — | Postgres / multi-region platform.db | SQLite platform.db is P0 | residual scale |
 | D-0059-08 | P3 | Configurable public base URL for OIDC redirect (TLS proxy) | P0 derives `http://{bind}` | residual polish |
 | D-0059-09 | P3 | OIDC discovery metadata cache TTL | In-process cache; process restart refreshes | residual polish |
+
+## From track 0060-MultiJurisdictionProduction (Completed — Codex luna PASS WITH DEFERRED P3)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0060-01 | — | CP1252 / legacy encoding DAT path | UTF-8 BOM default; fail-closed CP1252 residual (D-0040-06) | residual |
+| D-0060-02 | — | Desk produce profile dropdown | CLI + headless DoD met; Desk uses default profile + pack-aware soft-gate | residual polish |
+| D-0060-03 | — | Auto suggest next Bates (MAX prefix) | Start still explicit required | residual |
+| D-0060-04 | — | Image + OPT/LFP production profiles | D-0040-01; name_by_bates extends to images | residual |
+| D-0060-05 | — | Full Relativity load-file suite | Alias map only P0 | residual |
+| D-0060-06 | — | Firm-wide profile pack sync | Matter-local upsert is enough P0 | residual |
+| D-0060-07 | — | UK/EU/AU full protocol packs | Beyond template tags / jurisdiction_tag | residual |
+| D-0060-08 | P3 | Volume README.txt hardcodes DATA/NATIVES/TEXT + UTC wording | Profile layout/date may differ; DAT is authoritative | residual polish |
+| D-0041-05 | — | Multi-jurisdiction QC packs | **Partial close in 0060** (named packs + profile binding) | residual firm packs |
 
 ## From track 0057-SecurityHardener (Completed — see conductor review)
 

@@ -171,6 +171,7 @@ pub fn produce_params(
         "scope": "review_corpus",
         "name": name,
         "bates_prefix": bates_prefix,
+        "bates_start": 1,
         "fail_if_withheld": fail_if_withheld,
         "export_eml_if_missing_native": true,
         "include_csv_twin": true,

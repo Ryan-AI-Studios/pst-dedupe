@@ -9,8 +9,11 @@ pub const SCOPE_REVIEW_CORPUS: &str = "review_corpus";
 /// Scope: explicit item id list.
 pub const SCOPE_ITEM_IDS: &str = "item_ids";
 
-/// Builtin profile id.
+/// Builtin profile id (legacy 0041 string; alias of `qc_default_v1`).
 pub const PROFILE_DEFAULT_PRODUCTION_QC_V1: &str = "default_production_qc_v1";
+
+/// Canonical default QC pack id (track 0060).
+pub const PACK_DEFAULT_V1: &str = "qc_default_v1";
 
 /// Per-rule severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,9 +85,16 @@ pub struct QcParams {
     /// Optional report directory (must not already exist when set).
     #[serde(default)]
     pub report_dir: Option<String>,
-    /// Profile name stored on `qc_runs` (default `default_production_qc_v1`).
+    /// Profile / pack name stored on `qc_runs` (default `qc_default_v1`).
+    ///
+    /// Accepts legacy `default_production_qc_v1` as an alias of `qc_default_v1`.
     #[serde(default = "default_profile")]
     pub profile: String,
+    /// Explicit QC pack id (track **0060**). When set, overrides `profile` for
+    /// severity resolution and gate fingerprinting. When null, `profile` is
+    /// treated as the pack id (with legacy alias normalization).
+    #[serde(default)]
+    pub pack_id: Option<String>,
 }
 
 fn default_scope() -> String {
@@ -92,7 +102,8 @@ fn default_scope() -> String {
 }
 
 fn default_profile() -> String {
-    PROFILE_DEFAULT_PRODUCTION_QC_V1.into()
+    // Prefer canonical 0060 pack id; legacy alias still accepted on input.
+    PACK_DEFAULT_V1.into()
 }
 
 impl Default for QcParams {
@@ -104,11 +115,23 @@ impl Default for QcParams {
             rules: Vec::new(),
             report_dir: None,
             profile: default_profile(),
+            pack_id: None,
         }
     }
 }
 
 impl QcParams {
+    /// Resolved pack id for severity resolution + fingerprint (canonical).
+    pub fn resolved_pack_id(&self) -> String {
+        if let Some(ref p) = self.pack_id {
+            let t = p.trim();
+            if !t.is_empty() {
+                return matter_core::normalize_qc_pack_id(t);
+            }
+        }
+        matter_core::normalize_qc_pack_id(&self.profile)
+    }
+
     /// Parse from JSON, applying defaults for missing keys.
     pub fn from_json(json: &str) -> Result<Self> {
         if json.trim().is_empty() {
@@ -140,6 +163,25 @@ impl QcParams {
         if self.profile.trim().is_empty() {
             return Err(QcError::InvalidParams("profile must be non-empty".into()));
         }
+        // Fail closed on unknown pack ids (no silent default severities).
+        let pack = self.resolved_pack_id();
+        if !crate::packs::is_known_pack_id(&pack)
+            && !crate::packs::is_known_pack_id(self.profile.trim())
+        {
+            return Err(QcError::InvalidParams(format!(
+                "unknown QC pack_id '{pack}' (supported: qc_default_v1, \
+                 qc_strict_privilege_v1, qc_native_heavy_v1, default_production_qc_v1)"
+            )));
+        }
+        if let Some(ref p) = self.pack_id {
+            let t = p.trim();
+            if !t.is_empty() && !crate::packs::is_known_pack_id(t) {
+                return Err(QcError::InvalidParams(format!(
+                    "unknown QC pack_id '{t}' (supported: qc_default_v1, \
+                     qc_strict_privilege_v1, qc_native_heavy_v1, default_production_qc_v1)"
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -154,7 +196,8 @@ mod tests {
         assert_eq!(p.scope, "review_corpus");
         assert!(!p.expand_family_for_scan);
         assert!(p.rules.is_empty());
-        assert_eq!(p.profile, PROFILE_DEFAULT_PRODUCTION_QC_V1);
+        assert_eq!(p.profile, PACK_DEFAULT_V1);
+        assert_eq!(p.resolved_pack_id(), PACK_DEFAULT_V1);
     }
 
     #[test]
@@ -167,5 +210,11 @@ mod tests {
     fn severity_roundtrip() {
         assert_eq!(QcSeverity::parse("ERROR"), Some(QcSeverity::Error));
         assert_eq!(QcSeverity::Warn.as_str(), "warn");
+    }
+
+    #[test]
+    fn rejects_unknown_pack_id() {
+        let err = QcParams::from_json(r#"{"pack_id":"qc_typo_not_real"}"#).unwrap_err();
+        assert!(err.to_string().contains("unknown QC pack"), "got: {err}");
     }
 }

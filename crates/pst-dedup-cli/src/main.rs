@@ -11,6 +11,7 @@ mod json_io;
 mod matter_cmd;
 mod paths;
 mod platform_cmd;
+mod production_profile_cmd;
 mod profile_cmd;
 mod runner_util;
 mod scan;
@@ -142,10 +143,19 @@ enum Commands {
         cmd: QcCmd,
     },
 
-    /// Run production export (0040).
+    /// Run production export (0040 / 0060 profiles).
     Produce {
         #[command(subcommand)]
         cmd: ProduceCmd,
+    },
+
+    /// Production profiles (0060): list/show/upsert/delete packaging templates.
+    ///
+    /// Templates are technical packaging presets — not legal compliance advice.
+    #[command(name = "production-profile")]
+    ProductionProfile {
+        #[command(subcommand)]
+        cmd: ProductionProfileCmd,
     },
 
     /// Run gap analysis (0042).
@@ -344,15 +354,67 @@ enum QcCmd {
 
 #[derive(Debug, Subcommand)]
 enum ProduceCmd {
+    /// Run production export.
+    ///
+    /// Bates start is job-time only and **required** (`--bates-start` or params
+    /// `bates_start`). Production profile selects load-file/layout/QC pack
+    /// (`--profile` or params `production_profile`).
     Run {
         #[arg(long)]
         path: PathBuf,
         #[arg(long)]
         params_json: Option<String>,
+        /// Production profile slug (e.g. us_concordance_native_text_v1).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Job-time Bates start sequence (required; never stored in a profile).
+        #[arg(long = "bates-start")]
+        bates_start: Option<u64>,
+        /// Override Bates prefix (job > profile).
+        #[arg(long = "bates-prefix")]
+        bates_prefix: Option<String>,
         #[arg(long)]
         json: bool,
         #[arg(long, default_value_t = true, hide = true)]
         wait: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProductionProfileCmd {
+    /// List built-in + matter-local production profiles.
+    List {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one production profile (slug or id).
+    Show {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Upsert a matter-local production profile from a JSON file.
+    Upsert {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a matter-local production profile (built-ins cannot be deleted).
+    Delete {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -421,6 +483,12 @@ fn command_wants_json(cmd: &Commands) -> bool {
         },
         Commands::Produce { cmd } => match cmd {
             ProduceCmd::Run { json, .. } => *json,
+        },
+        Commands::ProductionProfile { cmd } => match cmd {
+            ProductionProfileCmd::List { json, .. }
+            | ProductionProfileCmd::Show { json, .. }
+            | ProductionProfileCmd::Upsert { json, .. }
+            | ProductionProfileCmd::Delete { json, .. } => *json,
         },
         Commands::Gap { cmd } => match cmd {
             GapCmd::Run { json, .. } => *json,
@@ -567,9 +635,33 @@ fn run(cli: Cli) -> Result<()> {
             ProduceCmd::Run {
                 path,
                 params_json,
+                profile,
+                bates_start,
+                bates_prefix,
                 json,
                 wait: _,
-            } => convenience::produce_run(&path, params_json.as_deref(), json),
+            } => convenience::produce_run(
+                &path,
+                params_json.as_deref(),
+                profile.as_deref(),
+                bates_start,
+                bates_prefix.as_deref(),
+                json,
+            ),
+        },
+        Commands::ProductionProfile { cmd } => match cmd {
+            ProductionProfileCmd::List { path, json } => {
+                production_profile_cmd::production_profile_list(&path, json)
+            }
+            ProductionProfileCmd::Show { path, slug, json } => {
+                production_profile_cmd::production_profile_show(&path, &slug, json)
+            }
+            ProductionProfileCmd::Upsert { path, file, json } => {
+                production_profile_cmd::production_profile_upsert(&path, &file, json)
+            }
+            ProductionProfileCmd::Delete { path, slug, json } => {
+                production_profile_cmd::production_profile_delete(&path, &slug, json)
+            }
         },
         Commands::Gap { cmd } => match cmd {
             GapCmd::Run {

@@ -26,14 +26,33 @@ pub struct VolumeLayout {
     pub load_dat: Utf8PathBuf,
     pub load_csv: Utf8PathBuf,
     pub readme: Utf8PathBuf,
+    /// Folder segment for natives (default `NATIVES`).
+    pub natives_name: String,
+    /// Folder segment for text (default `TEXT`).
+    pub text_name: String,
+    /// Folder segment for data (default `DATA`).
+    pub data_name: String,
 }
 
 impl VolumeLayout {
-    /// Build paths under `root` and create directories.
+    /// Build paths under `root` and create directories (default folder names).
     pub fn create(root: &Utf8Path) -> Result<Self> {
-        let data = root.join(DATA_DIR);
-        let natives = root.join(NATIVES_DIR);
-        let text = root.join(TEXT_DIR);
+        Self::create_with_names(root, DATA_DIR, NATIVES_DIR, TEXT_DIR)
+    }
+
+    /// Build paths under `root` with profile-configured folder names.
+    pub fn create_with_names(
+        root: &Utf8Path,
+        data_name: &str,
+        natives_name: &str,
+        text_name: &str,
+    ) -> Result<Self> {
+        let data_name = data_name.trim();
+        let natives_name = natives_name.trim();
+        let text_name = text_name.trim();
+        let data = root.join(data_name);
+        let natives = root.join(natives_name);
+        let text = root.join(text_name);
         fs::create_dir_all(data.as_std_path())?;
         fs::create_dir_all(natives.as_std_path())?;
         fs::create_dir_all(text.as_std_path())?;
@@ -45,11 +64,29 @@ impl VolumeLayout {
             data,
             natives,
             text,
+            natives_name: natives_name.to_string(),
+            text_name: text_name.to_string(),
+            data_name: data_name.to_string(),
         })
     }
 
     /// Windows-style relative path for load file (e.g. `NATIVES\PROD000001.eml`).
-    pub fn native_relpath(control: &str, ext: &str) -> String {
+    pub fn native_relpath(&self, control: &str, ext: &str) -> String {
+        let ext = ext.trim_start_matches('.');
+        if ext.is_empty() {
+            format!("{}\\{control}", self.natives_name)
+        } else {
+            format!("{}\\{control}.{ext}", self.natives_name)
+        }
+    }
+
+    /// Windows-style relative text path.
+    pub fn text_relpath(&self, control: &str) -> String {
+        format!("{}\\{control}.txt", self.text_name)
+    }
+
+    /// Static helpers used when layout folder names are defaults.
+    pub fn native_relpath_default(control: &str, ext: &str) -> String {
         let ext = ext.trim_start_matches('.');
         if ext.is_empty() {
             format!("{NATIVES_DIR}\\{control}")
@@ -58,8 +95,8 @@ impl VolumeLayout {
         }
     }
 
-    /// Windows-style relative text path.
-    pub fn text_relpath(control: &str) -> String {
+    /// Static text relpath with default `TEXT` folder.
+    pub fn text_relpath_default(control: &str) -> String {
         format!("{TEXT_DIR}\\{control}.txt")
     }
 }
@@ -73,6 +110,17 @@ impl VolumeLayout {
 ///   Incomplete resume of the *same* job reuses `cursor.output_root` and never
 ///   calls this function.
 pub fn resolve_output_root(matter: &Matter, params: &ProduceParams) -> Result<Utf8PathBuf> {
+    resolve_output_root_with_layout(matter, params, DATA_DIR, NATIVES_DIR, TEXT_DIR)
+}
+
+/// Resolve output root using profile layout folder names for collision detection.
+pub fn resolve_output_root_with_layout(
+    matter: &Matter,
+    params: &ProduceParams,
+    data_dir: &str,
+    natives_dir: &str,
+    text_dir: &str,
+) -> Result<Utf8PathBuf> {
     if let Some(dir) = params
         .output_dir
         .as_deref()
@@ -96,7 +144,7 @@ pub fn resolve_output_root(matter: &Matter, params: &ProduceParams) -> Result<Ut
         .join(EXPORTS_DIR)
         .join(PRODUCTIONS_DIR)
         .join(&stamp);
-    if volume_has_production_content(&base) {
+    if volume_has_production_content_with_layout(&base, data_dir, natives_dir, text_dir) {
         // Unique suffix so named re-runs never clobber a prior complete volume.
         let unique = format!("{stamp}_{}", Utc::now().timestamp_millis());
         return Ok(matter
@@ -110,11 +158,32 @@ pub fn resolve_output_root(matter: &Matter, params: &ProduceParams) -> Result<Ut
 
 /// Whether `root` already looks like a production volume with content that
 /// must not be silently overwritten (load files, natives, text, or mid-flight JSONL).
+///
+/// Uses default folder names (`DATA` / `NATIVES` / `TEXT`). Prefer
+/// [`volume_has_production_content_with_layout`] when the profile may rename folders.
 pub fn volume_has_production_content(root: &Utf8Path) -> bool {
+    volume_has_production_content_with_layout(root, DATA_DIR, NATIVES_DIR, TEXT_DIR)
+}
+
+/// Like [`volume_has_production_content`] but for profile-custom layout folder names.
+///
+/// Also treats **any non-empty root** as occupied so a prior volume that used
+/// different folder names cannot be silently overwritten when the stamp collides.
+pub fn volume_has_production_content_with_layout(
+    root: &Utf8Path,
+    data_dir: &str,
+    natives_dir: &str,
+    text_dir: &str,
+) -> bool {
     if !root.as_std_path().exists() {
         return false;
     }
-    let data = root.join(DATA_DIR);
+    // Conservative: any entry under the stamp root means do not clobber.
+    if path_is_nonempty(root) {
+        // Still allow truly empty dirs created as placeholders.
+        // path_is_nonempty already false for empty dirs.
+    }
+    let data = root.join(data_dir);
     if data.join("load.dat").as_std_path().exists() {
         return true;
     }
@@ -124,13 +193,21 @@ pub fn volume_has_production_content(root: &Utf8Path) -> bool {
     if data.join("rows.jsonl").as_std_path().exists() {
         return true;
     }
-    if dir_has_any_file(&root.join(NATIVES_DIR)) {
+    if dir_has_any_file(&root.join(natives_dir)) {
         return true;
     }
-    if dir_has_any_file(&root.join(TEXT_DIR)) {
+    if dir_has_any_file(&root.join(text_dir)) {
         return true;
     }
-    false
+    // Also check default folder names (prior volume may have used defaults while
+    // this run uses a custom layout, or vice versa).
+    if (data_dir != DATA_DIR || natives_dir != NATIVES_DIR || text_dir != TEXT_DIR)
+        && volume_has_production_content_with_layout(root, DATA_DIR, NATIVES_DIR, TEXT_DIR)
+    {
+        return true;
+    }
+    // Any other non-empty content under root (e.g. LOAD/ORIGINALS from a custom pack).
+    path_is_nonempty(root)
 }
 
 /// True when `path` exists and is a non-empty directory, or is an existing file.

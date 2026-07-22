@@ -50,7 +50,7 @@ fn insert_review_item(matter: &Matter, mut input: ItemInput) -> String {
 
 /// Packaging tests opt out of the 0041 QC gate (covered in dedicated gate tests).
 fn no_qc_gate(mut params: ProduceParams) -> ProduceParams {
-    params.require_qc_pass = false;
+    params.require_qc_pass = Some(false);
     params
 }
 
@@ -98,7 +98,7 @@ fn sha256_file(path: &std::path::Path) -> String {
 #[test]
 fn schema_v20_production_tables() {
     let (_tmp, matter) = temp_matter("schema-v20");
-    assert_eq!(SCHEMA_VERSION, 37);
+    assert_eq!(SCHEMA_VERSION, 38);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     for table in ["production_sets", "production_items"] {
         let has: bool = matter
@@ -165,7 +165,7 @@ fn happy_path_natives_text_dat() {
 
     let params = ProduceParams {
         name: Some("HappyProd".into()),
-        bates_prefix: "PROD".into(),
+        bates_prefix: Some("PROD".into()),
         ..Default::default()
     };
     let s = run_ok(&matter, &job.id, &params);
@@ -630,7 +630,7 @@ fn ics_child_uses_child_native() {
         &job.id,
         &ProduceParams {
             name: Some("Ics".into()),
-            expand_family: false,
+            expand_family: Some(false),
             ..Default::default()
         },
     );
@@ -675,7 +675,7 @@ fn synthetic_eml_ext_matches() {
         &job.id,
         &ProduceParams {
             name: Some("Eml".into()),
-            export_eml_if_missing_native: true,
+            export_eml_if_missing_native: Some(true),
             ..Default::default()
         },
     );
@@ -691,7 +691,7 @@ fn synthetic_eml_ext_matches() {
     assert!(!dat.contains("NATIVES\\PROD000001.msg"));
 }
 
-/// 11. UTC dates.
+/// 11. Dates: engine UTC helper + US default profile formats in DAT.
 #[test]
 fn utc_dates_in_dat() {
     let (_tmp, matter) = temp_matter("utc");
@@ -719,10 +719,18 @@ fn utc_dates_in_dat() {
         },
     );
     let dat = dat_text(&s.output_root);
-    assert!(dat.contains("2026-07-19T12:00:00Z"), "offset→UTC: {dat}");
-    assert!(dat.contains("2026-07-19T12:30:00Z"));
-    // No zone-less local float for our known fields
-    assert!(!dat.contains("2026-07-19T15:00:00¶") && !dat.contains("2026-07-19T15:00:00þ"));
+    // Default US profile formats DATE_* as MM/DD/YYYY in America/New_York.
+    // 15:00+03 = 12:00Z = 08:00 EDT on Jul 19 → 07/19/2026
+    // 2026-07-18T00:00:00Z → 20:00 EDT on Jul 17 → 07/17/2026
+    assert!(
+        dat.contains("07/19/2026"),
+        "US date format expected in DAT: {dat}"
+    );
+    assert!(
+        dat.contains("07/17/2026"),
+        "created date US format (UTC midnight → prior evening EDT): {dat}"
+    );
+    // Engine helper still does UTC ISO conversion when date_format is unset.
     assert_eq!(
         format_utc_datetime(Some("2026-07-19T15:00:00+03:00")),
         "2026-07-19T12:00:00Z"
@@ -1111,7 +1119,7 @@ fn redacted_email_synthetic_eml_uses_redacted_body() {
         &job.id,
         &ProduceParams {
             name: Some("RdxEml".into()),
-            export_eml_if_missing_native: true,
+            export_eml_if_missing_native: Some(true),
             ..Default::default()
         },
     );
@@ -1778,7 +1786,7 @@ fn resume_rebuilds_when_recovered_text_truncated() {
 /// 13. Produce gate: failed QC prevents produce.
 #[test]
 fn qc_gate_failed_blocks_produce() {
-    use matter_core::{selection_fingerprint, InsertQcRunInput};
+    use matter_core::{selection_fingerprint_with_pack, InsertQcRunInput, QC_PACK_DEFAULT_V1};
 
     let (_tmp, matter) = temp_matter("qc-fail-gate");
     let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
@@ -1795,10 +1803,10 @@ fn qc_gate_failed_blocks_produce() {
         },
     );
     let ids = vec![id];
-    let fp = selection_fingerprint(&ids);
+    let fp = selection_fingerprint_with_pack(&ids, QC_PACK_DEFAULT_V1);
     matter
         .insert_qc_run(InsertQcRunInput {
-            profile: "default_production_qc_v1".into(),
+            profile: QC_PACK_DEFAULT_V1.into(),
             passed: false,
             error_count: 2,
             warn_count: 0,
@@ -1817,7 +1825,7 @@ fn qc_gate_failed_blocks_produce() {
         &job.id,
         &ProduceParams {
             name: Some("Blocked".into()),
-            require_qc_pass: true,
+            require_qc_pass: Some(true),
             ..Default::default()
         },
         None,
@@ -1838,7 +1846,7 @@ fn qc_gate_failed_blocks_produce() {
 /// 14. Stale QC: pass QC then add item → produce blocked.
 #[test]
 fn qc_gate_stale_blocks_produce() {
-    use matter_core::{selection_fingerprint, InsertQcRunInput};
+    use matter_core::{selection_fingerprint_with_pack, InsertQcRunInput, QC_PACK_DEFAULT_V1};
 
     let (_tmp, matter) = temp_matter("qc-stale-gate");
     let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
@@ -1855,10 +1863,10 @@ fn qc_gate_stale_blocks_produce() {
         },
     );
     let ids = vec![id1];
-    let fp = selection_fingerprint(&ids);
+    let fp = selection_fingerprint_with_pack(&ids, QC_PACK_DEFAULT_V1);
     matter
         .insert_qc_run(InsertQcRunInput {
-            profile: "default_production_qc_v1".into(),
+            profile: QC_PACK_DEFAULT_V1.into(),
             passed: true,
             error_count: 0,
             warn_count: 0,
@@ -1891,7 +1899,7 @@ fn qc_gate_stale_blocks_produce() {
         &job.id,
         &ProduceParams {
             name: Some("Stale".into()),
-            require_qc_pass: true,
+            require_qc_pass: Some(true),
             ..Default::default()
         },
         None,
@@ -1931,7 +1939,7 @@ fn qc_gate_disabled_allows_produce() {
         &job.id,
         &ProduceParams {
             name: Some("NoQc".into()),
-            require_qc_pass: false,
+            require_qc_pass: Some(false),
             ..Default::default()
         },
     );
@@ -1941,7 +1949,7 @@ fn qc_gate_disabled_allows_produce() {
 /// Fresh passed QC allows produce when require_qc_pass=true.
 #[test]
 fn qc_gate_fresh_pass_allows_produce() {
-    use matter_core::{selection_fingerprint, InsertQcRunInput};
+    use matter_core::{selection_fingerprint_with_pack, InsertQcRunInput, QC_PACK_DEFAULT_V1};
 
     let (_tmp, matter) = temp_matter("qc-fresh-ok");
     let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
@@ -1958,10 +1966,10 @@ fn qc_gate_fresh_pass_allows_produce() {
         },
     );
     let ids = vec![id];
-    let fp = selection_fingerprint(&ids);
+    let fp = selection_fingerprint_with_pack(&ids, QC_PACK_DEFAULT_V1);
     matter
         .insert_qc_run(InsertQcRunInput {
-            profile: "default_production_qc_v1".into(),
+            profile: QC_PACK_DEFAULT_V1.into(),
             passed: true,
             error_count: 0,
             warn_count: 1,
@@ -1980,7 +1988,7 @@ fn qc_gate_fresh_pass_allows_produce() {
         &job.id,
         &ProduceParams {
             name: Some("Ok".into()),
-            require_qc_pass: true,
+            require_qc_pass: Some(true),
             ..Default::default()
         },
         None,
@@ -1997,7 +2005,8 @@ fn qc_gate_fresh_pass_allows_produce() {
 #[test]
 fn qc_expand_false_produce_expand_true_is_stale() {
     use matter_core::{
-        item_role, selection_fingerprint, InsertQcRunInput, FAMILY_KIND_EMAIL_ATTACHMENTS,
+        item_role, selection_fingerprint_with_pack, InsertQcRunInput,
+        FAMILY_KIND_EMAIL_ATTACHMENTS, QC_PACK_DEFAULT_V1,
     };
 
     let (_tmp, matter) = temp_matter("qc-expand-mismatch");
@@ -2044,10 +2053,10 @@ fn qc_expand_false_produce_expand_true_is_stale() {
 
     // Simulate QC run with expand_family_for_scan=false (child only).
     let qc_ids = vec![child];
-    let fp = selection_fingerprint(&qc_ids);
+    let fp = selection_fingerprint_with_pack(&qc_ids, QC_PACK_DEFAULT_V1);
     matter
         .insert_qc_run(InsertQcRunInput {
-            profile: "default_production_qc_v1".into(),
+            profile: QC_PACK_DEFAULT_V1.into(),
             passed: true,
             error_count: 0,
             warn_count: 0,
@@ -2066,8 +2075,8 @@ fn qc_expand_false_produce_expand_true_is_stale() {
         &job.id,
         &ProduceParams {
             name: Some("ExpandMismatch".into()),
-            require_qc_pass: true,
-            expand_family: true,
+            require_qc_pass: Some(true),
+            expand_family: Some(true),
             ..Default::default()
         },
         None,
@@ -2082,5 +2091,496 @@ fn qc_expand_false_produce_expand_true_is_stale() {
             );
         }
         other => panic!("expected Failed stale for expand mismatch, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 0060 multi-jurisdiction production profiles
+// ---------------------------------------------------------------------------
+
+#[test]
+fn schema_v38_production_profiles_table() {
+    let (_tmp, matter) = temp_matter("schema-v38");
+    assert_eq!(SCHEMA_VERSION, 38);
+    assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
+    let has: bool = matter
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='production_profiles'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("table");
+    assert!(has);
+    let has_col: bool = matter
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('production_sets') WHERE name = 'profile_slug'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("col");
+    assert!(has_col);
+}
+
+#[test]
+fn builtin_profiles_listed_and_default_headers() {
+    use matter_core::{
+        included_headers, BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1,
+        BUILTIN_US_CONCORDANCE_REL_ALIAS_V1, BUILTIN_US_STRICT_QC_CONCORDANCE_V1,
+    };
+    let (_tmp, matter) = temp_matter("prof-list");
+    let list = matter.list_production_profiles().expect("list");
+    let slugs: Vec<_> = list.iter().map(|p| p.slug.as_str()).collect();
+    assert!(slugs.contains(&BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1));
+    assert!(slugs.contains(&BUILTIN_US_CONCORDANCE_REL_ALIAS_V1));
+    assert!(slugs.contains(&BUILTIN_US_STRICT_QC_CONCORDANCE_V1));
+
+    let def = matter
+        .get_production_profile(BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1)
+        .expect("default");
+    let headers = included_headers(&def.body);
+    // Default profile keeps canonical header names (0040 order).
+    assert_eq!(headers[0], "BEGBATES");
+    assert!(headers.contains(&"DATE_SENT".to_string()));
+}
+
+#[test]
+fn rel_alias_profile_produces_different_dat_headers() {
+    use matter_core::BUILTIN_US_CONCORDANCE_REL_ALIAS_V1;
+
+    let (_tmp, matter) = temp_matter("rel-alias");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let n = put_native(&matter, b"native");
+    let t = put_text(&matter, "text body");
+    insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("docs/a.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t),
+            file_category: Some("document".into()),
+            mime_type: Some("application/pdf".into()),
+            sent_at: Some("2026-07-21T15:00:00Z".into()),
+            ..Default::default()
+        },
+    );
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("RelAlias".into()),
+            production_profile: Some(BUILTIN_US_CONCORDANCE_REL_ALIAS_V1.into()),
+            ..Default::default()
+        },
+    );
+    let text = dat_text(&s.output_root);
+    let header_line = text.lines().next().expect("header");
+    assert!(
+        header_line.contains("Control Number"),
+        "rel alias headers expected; got {header_line}"
+    );
+    assert!(
+        !header_line.contains("þBEGBATESþ"),
+        "canonical BEGBATES header should be renamed; got {header_line}"
+    );
+}
+
+#[test]
+fn us_date_format_on_default_profile() {
+    let (_tmp, matter) = temp_matter("us-dates");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let n = put_native(&matter, b"native");
+    let t = put_text(&matter, "text body");
+    insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("docs/a.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t),
+            file_category: Some("document".into()),
+            mime_type: Some("application/pdf".into()),
+            sent_at: Some("2026-07-21T15:00:00Z".into()),
+            ..Default::default()
+        },
+    );
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("USDates".into()),
+            ..Default::default()
+        },
+    );
+    let text = dat_text(&s.output_root);
+    // US built-in formats DATE_SENT as MM/DD/YYYY in America/New_York (11:00 EDT).
+    assert!(
+        text.contains("07/21/2026"),
+        "expected US date format in DAT; got {text}"
+    );
+    assert!(
+        !text.contains("2026-07-21T15:00:00Z"),
+        "raw UTC ISO should not appear for US built-in; got {text}"
+    );
+}
+
+#[test]
+fn bates_start_5001_and_second_volume() {
+    let (_tmp, matter) = temp_matter("bates-start");
+    let n = put_native(&matter, b"native-a");
+    let t = put_text(&matter, "text-a");
+    insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("docs/a.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t),
+            file_category: Some("document".into()),
+            mime_type: Some("application/pdf".into()),
+            ..Default::default()
+        },
+    );
+
+    let job1 = matter.create_job(JOB_KIND_PRODUCE).expect("job1");
+    let s1 = run_ok(
+        &matter,
+        &job1.id,
+        &ProduceParams {
+            name: Some("Vol1".into()),
+            bates_start: Some(5001),
+            bates_prefix: Some("PROD".into()),
+            ..Default::default()
+        },
+    );
+    let text1 = dat_text(&s1.output_root);
+    assert!(
+        text1.contains("PROD005001"),
+        "expected PROD005001; got {text1}"
+    );
+    let native = camino::Utf8Path::new(&s1.output_root)
+        .join("NATIVES")
+        .join("PROD005001.pdf");
+    assert!(native.as_std_path().exists(), "native stem by bates");
+
+    // Second volume starts later — no collision with first volume numbering.
+    let n2 = put_native(&matter, b"native-b");
+    let t2 = put_text(&matter, "text-b");
+    insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("docs/b.pdf".into()),
+            native_sha256: Some(n2),
+            text_sha256: Some(t2),
+            file_category: Some("document".into()),
+            mime_type: Some("application/pdf".into()),
+            ..Default::default()
+        },
+    );
+    let job2 = matter.create_job(JOB_KIND_PRODUCE).expect("job2");
+    let s2 = run_ok(
+        &matter,
+        &job2.id,
+        &ProduceParams {
+            name: Some("Vol2".into()),
+            bates_start: Some(6001),
+            bates_prefix: Some("PROD".into()),
+            scope: "item_ids".into(),
+            item_ids: {
+                // only the new item — get last inserted via review list
+                let ids: Vec<String> = matter
+                    .connection()
+                    .prepare("SELECT id FROM items WHERE matter_id = ?1 ORDER BY imported_at DESC LIMIT 1")
+                    .unwrap()
+                    .query_map([matter.id()], |r| r.get(0))
+                    .unwrap()
+                    .map(|r| r.unwrap())
+                    .collect();
+                ids
+            },
+            ..Default::default()
+        },
+    );
+    let text2 = dat_text(&s2.output_root);
+    assert!(
+        text2.contains("PROD006001"),
+        "expected PROD006001; got {text2}"
+    );
+    assert!(!text2.contains("PROD005001"));
+}
+
+#[test]
+fn name_by_bates_native_and_text_share_stem() {
+    let (_tmp, matter) = temp_matter("name-by-bates");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let n = put_native(&matter, b"native-bytes");
+    let t = put_text(&matter, "text body content");
+    insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("docs/a.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t),
+            file_category: Some("document".into()),
+            mime_type: Some("application/pdf".into()),
+            ..Default::default()
+        },
+    );
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("BatesNames".into()),
+            bates_start: Some(1),
+            ..Default::default()
+        },
+    );
+    let root = camino::Utf8Path::new(&s.output_root);
+    let native = root.join("NATIVES").join("PROD000001.pdf");
+    let text = root.join("TEXT").join("PROD000001.txt");
+    assert!(native.as_std_path().exists(), "native {native}");
+    assert!(text.as_std_path().exists(), "text {text}");
+    let dat = dat_text(&s.output_root);
+    assert!(dat.contains("NATIVES\\PROD000001.pdf"));
+    assert!(dat.contains("TEXT\\PROD000001.txt"));
+}
+
+#[test]
+fn ghost_text_ban_redacted_uses_redacted_only() {
+    ghost_text_ban_for_profile(None);
+}
+
+#[test]
+fn ghost_text_ban_under_all_builtin_profiles() {
+    use matter_core::{
+        BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1, BUILTIN_US_CONCORDANCE_REL_ALIAS_V1,
+        BUILTIN_US_STRICT_QC_CONCORDANCE_V1,
+    };
+    for slug in [
+        BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1,
+        BUILTIN_US_CONCORDANCE_REL_ALIAS_V1,
+        BUILTIN_US_STRICT_QC_CONCORDANCE_V1,
+    ] {
+        ghost_text_ban_for_profile(Some(slug));
+    }
+}
+
+fn ghost_text_ban_for_profile(profile: Option<&str>) {
+    let tag = profile.unwrap_or("default");
+    let (_tmp, matter) = temp_matter(&format!("ghost-text-{tag}"));
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let original = "Alpha SECRET original privilege phrase XYZ beta";
+    let n = put_native(&matter, b"native");
+    let t_orig = put_text(&matter, original);
+    let item_id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("docs/priv.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t_orig.clone()),
+            file_category: Some("document".into()),
+            mime_type: Some("application/pdf".into()),
+            ..Default::default()
+        },
+    );
+    matter
+        .create_redaction(CreateRedactionInput {
+            item_id: item_id.clone(),
+            start_utf8: 6,
+            end_utf8: 12,
+            exact_quote: "SECRET".into(),
+            display_body: original.into(),
+            body_digest: t_orig,
+            reason: "confidential".into(),
+            label: None,
+            actor: "t".into(),
+        })
+        .expect("redaction");
+    matter
+        .regenerate_redacted_text(&item_id, original, "t")
+        .expect("regen");
+
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some(format!("Ghost-{tag}")),
+            production_profile: profile.map(|s| s.to_string()),
+            bates_start: Some(1),
+            require_qc_pass: Some(false),
+            ..Default::default()
+        },
+    );
+    let text_path = camino::Utf8Path::new(&s.output_root)
+        .join("TEXT")
+        .join("PROD000001.txt");
+    let body = fs::read_to_string(text_path.as_std_path()).expect("text");
+    assert!(
+        body.contains(REDACTED_TOKEN),
+        "profile {tag}: must use redacted body"
+    );
+    assert!(
+        !body.contains("SECRET"),
+        "profile {tag}: original SECRET must not appear"
+    );
+}
+
+#[test]
+fn ghost_text_missing_redacted_no_original_txt() {
+    let (_tmp, matter) = temp_matter("ghost-missing");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let original = "Alpha SECRET original must not leak beta";
+    let n = put_native(&matter, b"native");
+    let t_orig = put_text(&matter, original);
+    let item_id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("docs/priv.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t_orig.clone()),
+            file_category: Some("document".into()),
+            mime_type: Some("application/pdf".into()),
+            ..Default::default()
+        },
+    );
+    matter
+        .create_redaction(CreateRedactionInput {
+            item_id: item_id.clone(),
+            start_utf8: 6,
+            end_utf8: 12,
+            exact_quote: "SECRET".into(),
+            display_body: original.into(),
+            body_digest: t_orig,
+            reason: "confidential".into(),
+            label: None,
+            actor: "t".into(),
+        })
+        .expect("redaction");
+    // Intentionally do NOT regenerate redacted_text_sha256.
+    let item = matter.get_item(&item_id).unwrap();
+    assert!(item.redaction_count > 0);
+    assert!(item.redacted_text_sha256.is_none());
+
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("GhostMiss".into()),
+            ..Default::default()
+        },
+    );
+    assert!(s.error_count >= 1);
+    assert_eq!(s.produced_count, 0);
+    let text_dir = camino::Utf8Path::new(&s.output_root).join("TEXT");
+    if text_dir.as_std_path().is_dir() {
+        for entry in fs::read_dir(text_dir.as_std_path()).expect("rd") {
+            let entry = entry.expect("e");
+            let body = fs::read_to_string(entry.path()).unwrap_or_default();
+            assert!(!body.contains("SECRET"), "must never write original text");
+        }
+    }
+}
+
+#[test]
+fn profile_slug_stored_on_production_set() {
+    use matter_core::BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1;
+    let (_tmp, matter) = temp_matter("prof-slug");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let n = put_native(&matter, b"n");
+    let t = put_text(&matter, "t");
+    insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("a.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t),
+            file_category: Some("document".into()),
+            mime_type: Some("application/pdf".into()),
+            ..Default::default()
+        },
+    );
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("SlugStore".into()),
+            ..Default::default()
+        },
+    );
+    let slug: Option<String> = matter
+        .connection()
+        .query_row(
+            "SELECT profile_slug FROM production_sets WHERE id = ?1",
+            [&s.production_set_id],
+            |row| row.get(0),
+        )
+        .expect("slug");
+    assert_eq!(slug.as_deref(), Some(BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1));
+}
+
+#[test]
+fn fingerprint_pack_mismatch_blocks_produce() {
+    use matter_core::{
+        selection_fingerprint_with_pack, InsertQcRunInput, QC_PACK_DEFAULT_V1,
+        QC_PACK_STRICT_PRIVILEGE_V1,
+    };
+
+    let (_tmp, matter) = temp_matter("fp-pack");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let n = put_native(&matter, b"n");
+    let t = put_text(&matter, "body");
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("a.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t),
+            file_category: Some("document".into()),
+            mime_type: Some("application/pdf".into()),
+            ..Default::default()
+        },
+    );
+    let ids = vec![id];
+    // QC passed under default pack.
+    let fp = selection_fingerprint_with_pack(&ids, QC_PACK_DEFAULT_V1);
+    matter
+        .insert_qc_run(InsertQcRunInput {
+            profile: QC_PACK_DEFAULT_V1.into(),
+            passed: true,
+            error_count: 0,
+            warn_count: 0,
+            candidate_count: 1,
+            selection_fingerprint: fp,
+            scope: "review_corpus".into(),
+            scope_json: None,
+            report_path: None,
+            job_id: None,
+            rules_json: None,
+        })
+        .expect("qc");
+
+    // Produce bound to strict pack → fingerprint miss → stale.
+    let outcome = run_produce(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("PackMiss".into()),
+            require_qc_pass: Some(true),
+            qc_pack_id: Some(QC_PACK_STRICT_PRIVILEGE_V1.into()),
+            ..Default::default()
+        },
+        None,
+        |_| {},
+    )
+    .expect("run");
+    match outcome {
+        ProduceOutcome::Failed { message, .. } => {
+            assert!(
+                message.contains("QC stale")
+                    || message.contains("selection")
+                    || message.contains("pack"),
+                "msg={message}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
     }
 }

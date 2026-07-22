@@ -2,9 +2,10 @@
 
 use matter_core::item_status;
 use matter_core::{
-    bind_workflow, builtin_workflows, parse_workflow_body, selection_fingerprint,
+    bind_workflow, builtin_workflows, parse_workflow_body, selection_fingerprint_with_pack,
     validate_workflow, workflow_definition_hash, InsertQcRunInput, ItemInput, Matter,
-    WorkflowInput, WorkflowNodeType, JOB_KIND_WORKFLOW_RUN, SCHEMA_VERSION, WORKFLOW_BODY_VERSION,
+    WorkflowInput, WorkflowNodeType, JOB_KIND_WORKFLOW_RUN, QC_PACK_DEFAULT_V1, SCHEMA_VERSION,
+    WORKFLOW_BODY_VERSION,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -15,7 +16,7 @@ fn open_matter() -> (tempfile::TempDir, Matter) {
     let path = camino::Utf8PathBuf::from_path_buf(root).expect("utf8");
     let matter = Matter::create(&path, "workflow-test").expect("create");
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 37);
+    assert_eq!(SCHEMA_VERSION, 38);
     (dir, matter)
 }
 
@@ -40,7 +41,7 @@ fn minimal_body_json() -> String {
 fn schema_version_is_current() {
     let (_dir, matter) = open_matter();
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 37);
+    assert_eq!(SCHEMA_VERSION, 38);
 }
 
 #[test]
@@ -301,10 +302,10 @@ fn evaluate_gate_require_qc_pass_fresh_then_stale_after_selection_change() {
 
     // Empty review corpus: insert a passed QC run whose fingerprint matches empty set.
     let empty: Vec<String> = vec![];
-    let fp = selection_fingerprint(&empty);
+    let fp = selection_fingerprint_with_pack(&empty, QC_PACK_DEFAULT_V1);
     matter
         .insert_qc_run(InsertQcRunInput {
-            profile: "default_production_qc_v1".into(),
+            profile: QC_PACK_DEFAULT_V1.into(),
             passed: true,
             error_count: 0,
             warn_count: 0,

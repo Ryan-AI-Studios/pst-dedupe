@@ -22,6 +22,7 @@
 
 pub mod error;
 pub mod gate;
+pub mod packs;
 pub mod params;
 pub mod report;
 pub mod rules;
@@ -29,7 +30,12 @@ pub mod run;
 pub mod select;
 
 pub use error::{QcError, Result};
-pub use gate::{check_qc_gate, QcGateBlock};
+pub use gate::{check_qc_gate, check_qc_gate_for_pack, QcGateBlock};
+pub use packs::{
+    canonical_pack_id, is_known_pack_id, list_pack_ids, merge_pack_with_overrides, pack_default_v1,
+    pack_native_heavy_v1, pack_rules, pack_rules_checked, pack_strict_privilege_v1,
+    PACK_DEFAULT_V1, PACK_LEGACY_DEFAULT, PACK_NATIVE_HEAVY_V1, PACK_STRICT_PRIVILEGE_V1,
+};
 pub use params::{
     QcParams, QcRuleConfig, QcSeverity, PROFILE_DEFAULT_PRODUCTION_QC_V1, SCOPE_ITEM_IDS,
     SCOPE_REVIEW_CORPUS,
@@ -38,11 +44,11 @@ pub use report::{count_severities, default_qc_report_dir, write_qc_report, QcRep
 pub use rules::{
     default_rule_pack, empty_selection_finding, evaluate_candidates,
     evaluate_candidates_with_cancel, evaluate_one_item, is_email_like, only_withheld_finding,
-    resolve_rules, QcFinding, ResolvedRules, RULE_BROKEN_FAMILY_INCOMPLETE_PARENT,
-    RULE_BROKEN_FAMILY_ORPHAN_CHILD, RULE_EMPTY_SELECTION, RULE_ITEM_STATUS_ERROR,
-    RULE_MISSING_NATIVE, RULE_MISSING_TEXT, RULE_ONLY_WITHHELD, RULE_PDF_NEEDS_OCR,
-    RULE_REDACTED_TEXT_MISSING, RULE_WITHHELD_FAMILY_MEMBER, RULE_WITHHELD_IN_SELECTION,
-    RULE_ZERO_SIZE,
+    resolve_rules, resolve_rules_for_pack, QcFinding, ResolvedRules,
+    RULE_BROKEN_FAMILY_INCOMPLETE_PARENT, RULE_BROKEN_FAMILY_ORPHAN_CHILD, RULE_EMPTY_SELECTION,
+    RULE_ITEM_STATUS_ERROR, RULE_MISSING_NATIVE, RULE_MISSING_TEXT, RULE_ONLY_WITHHELD,
+    RULE_PDF_NEEDS_OCR, RULE_REDACTED_TEXT_MISSING, RULE_WITHHELD_FAMILY_MEMBER,
+    RULE_WITHHELD_IN_SELECTION, RULE_ZERO_SIZE,
 };
 pub use run::{run_production_qc, QcOutcome, QcReport, QcSummary, JOB_KIND_QC, QC_STAGE};
 pub use select::select_item_ids;

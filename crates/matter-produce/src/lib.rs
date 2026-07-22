@@ -29,19 +29,26 @@ pub mod dat;
 pub mod error;
 pub mod layout;
 pub mod params;
+pub mod profile;
 pub mod resolve;
 pub mod run;
 
 pub use dat::{
-    encode_dat_field, format_utc_datetime, write_load_csv, write_load_dat, LoadRow, DAT_FIELDS,
-    DAT_NEWLINE, DAT_QUALIFIER, DAT_SEPARATOR, UTF8_BOM,
+    date_mods_for_source, encode_dat_field, format_datetime_for_field, format_utc_datetime,
+    mapped_headers, write_load_csv, write_load_csv_mapped, write_load_dat, write_load_dat_mapped,
+    LoadRow, DAT_FIELDS, DAT_NEWLINE, DAT_QUALIFIER, DAT_SEPARATOR, UTF8_BOM,
 };
 pub use error::{ProduceError, Result};
 pub use layout::{
-    production_stamp, resolve_output_root, volume_has_production_content, VolumeLayout, DATA_DIR,
-    NATIVES_DIR, PRODUCTIONS_DIR, TEXT_DIR,
+    production_stamp, resolve_output_root, resolve_output_root_with_layout,
+    volume_has_production_content, volume_has_production_content_with_layout, VolumeLayout,
+    DATA_DIR, NATIVES_DIR, PRODUCTIONS_DIR, TEXT_DIR,
 };
 pub use params::{ProduceParams, DEFAULT_BATES_PREFIX, SCOPE_ITEM_IDS, SCOPE_REVIEW_CORPUS};
+pub use profile::{
+    effective_bates_prefix, effective_pad_width, effective_qc_pack_id, resolve_produce_config,
+    ResolvedProduceConfig,
+};
 pub use run::{
     run_produce, ProduceOutcome, ProduceSummary, JOB_KIND_PRODUCE, JOB_KIND_PRODUCTION_EXPORT,
     PRODUCE_STAGE,

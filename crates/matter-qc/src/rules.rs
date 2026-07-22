@@ -65,59 +65,9 @@ impl ResolvedRules {
     }
 }
 
-/// Default pack `default_production_qc_v1`.
+/// Default pack `qc_default_v1` (alias of legacy `default_production_qc_v1`).
 pub fn default_rule_pack() -> Vec<QcRuleConfig> {
-    vec![
-        QcRuleConfig {
-            id: RULE_BROKEN_FAMILY_ORPHAN_CHILD.into(),
-            severity: QcSeverity::Error,
-        },
-        QcRuleConfig {
-            id: RULE_BROKEN_FAMILY_INCOMPLETE_PARENT.into(),
-            severity: QcSeverity::Warn,
-        },
-        QcRuleConfig {
-            id: RULE_WITHHELD_IN_SELECTION.into(),
-            severity: QcSeverity::Error,
-        },
-        QcRuleConfig {
-            id: RULE_WITHHELD_FAMILY_MEMBER.into(),
-            severity: QcSeverity::Warn,
-        },
-        QcRuleConfig {
-            id: RULE_REDACTED_TEXT_MISSING.into(),
-            severity: QcSeverity::Error,
-        },
-        QcRuleConfig {
-            id: RULE_MISSING_NATIVE.into(),
-            severity: QcSeverity::Error,
-        },
-        // Base severity unused for taxonomy path; Off still disables.
-        QcRuleConfig {
-            id: RULE_MISSING_TEXT.into(),
-            severity: QcSeverity::Warn,
-        },
-        QcRuleConfig {
-            id: RULE_PDF_NEEDS_OCR.into(),
-            severity: QcSeverity::Warn,
-        },
-        QcRuleConfig {
-            id: RULE_ZERO_SIZE.into(),
-            severity: QcSeverity::Warn,
-        },
-        QcRuleConfig {
-            id: RULE_ITEM_STATUS_ERROR.into(),
-            severity: QcSeverity::Warn,
-        },
-        QcRuleConfig {
-            id: RULE_EMPTY_SELECTION.into(),
-            severity: QcSeverity::Error,
-        },
-        QcRuleConfig {
-            id: RULE_ONLY_WITHHELD.into(),
-            severity: QcSeverity::Error,
-        },
-    ]
+    crate::packs::pack_default_v1()
 }
 
 /// Merge operator overrides over the default pack.
@@ -125,15 +75,39 @@ pub fn default_rule_pack() -> Vec<QcRuleConfig> {
 /// Unknown rule ids in overrides are accepted (forward-compatible) but ignored
 /// by the evaluator if no matching rule exists.
 pub fn resolve_rules(overrides: &[QcRuleConfig]) -> ResolvedRules {
-    let mut by_id: HashMap<String, QcSeverity> = default_rule_pack()
-        .into_iter()
-        .map(|r| (r.id, r.severity))
-        .collect();
-    for r in overrides {
-        by_id.insert(r.id.clone(), r.severity);
+    resolve_rules_for_pack(PROFILE_DEFAULT_PRODUCTION_QC_V1, overrides)
+}
+
+/// Merge a named pack + operator overrides.
+///
+/// `pack_id` accepts canonical ids (`qc_default_v1`, `qc_strict_privilege_v1`, …)
+/// and the legacy `default_production_qc_v1` alias. Unknown packs resolve to an
+/// empty severity map — callers must validate via [`QcParams::validate_shape`]
+/// (fail closed). Prefer known packs only.
+pub fn resolve_rules_for_pack(pack_id: &str, overrides: &[QcRuleConfig]) -> ResolvedRules {
+    let canonical = crate::packs::canonical_pack_id(pack_id);
+    let mut by_id =
+        if crate::packs::is_known_pack_id(pack_id) || crate::packs::is_known_pack_id(&canonical) {
+            crate::packs::merge_pack_with_overrides(&canonical, overrides)
+        } else {
+            // Fail-closed: no silent default severities for typos.
+            std::collections::HashMap::new()
+        };
+    // Known pack should never be empty; if it is, use default pack as safety net
+    // for the known-id path only.
+    if by_id.is_empty()
+        && (crate::packs::is_known_pack_id(pack_id) || crate::packs::is_known_pack_id(&canonical))
+    {
+        by_id = default_rule_pack()
+            .into_iter()
+            .map(|r| (r.id, r.severity))
+            .collect();
+        for r in overrides {
+            by_id.insert(r.id.clone(), r.severity);
+        }
     }
     ResolvedRules {
-        profile: PROFILE_DEFAULT_PRODUCTION_QC_V1.into(),
+        profile: canonical,
         by_id,
     }
 }
