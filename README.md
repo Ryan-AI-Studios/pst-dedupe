@@ -69,6 +69,20 @@ cargo build --release -p pst-dedup-gui
 .\target\release\pst-dedup.exe scan a.pst b.pst --json --dups --limit 50
 .\target\release\pst-dedup.exe scan a.pst b.pst --mode strict --json
 .\target\release\pst-dedup.exe scan good.pst bad.pst --allow-failed-files --json
+
+# Export keep-set (policy resolve + decision CSV + winners JSON; source PSTs read-only)
+# Paths may be positional and/or repeated --input (merged; sorted for determinism).
+.\target\release\pst-dedup.exe keep-set a.pst b.pst `
+  --policy first_seen `
+  --decision-csv output\decisions.csv `
+  --keep-set-json output\keepset.json `
+  --json
+.\target\release\pst-dedup.exe keep-set --input a.pst --input b.pst `
+  --policy first_seen --decision-csv output\decisions.csv --json
+.\target\release\pst-dedup.exe keep-set a.pst b.pst --policy keep_largest --materialize --json
+.\target\release\pst-dedup.exe keep-set archive.pst primary.pst `
+  --policy prefer_path --prefer-path-contains Primary `
+  --family-policy parents_only --decision-csv output\dec.csv
 ```
 
 Useful flags: `--no-tier2`, `--no-attachments`, `--mode best-effort|strict`,
@@ -84,6 +98,19 @@ skips them and exits non-zero. Preflight recommendation (`ok` / `re_export_recom
 **Non-zero exit still flushes** CSV/integrity/JSON artifacts first (safe for automation
 and 0066 force-consume of partial recoverable sets). Empty `folder_path` alone is not
 orphan; use `is_orphaned`. Intentional Tier-2 4KB body preview is **not** `BODY_TRUNCATED`.
+
+**Keep-set export (track 0066, schema `keep_set_v1`):** single artifact for unique EML/PST/report.
+
+| Concern | Behavior |
+|---|---|
+| **Policies** | `first_seen` (default), `keep_largest`, `prefer_path` — applied **after** fidelity preference |
+| **Fidelity** | Non-degraded always beats degraded within a group; degraded may win only if no clean peer |
+| **Determinism** | Absolute input paths are sorted before scan; ties break on `(path_key, nid)` |
+| **Orchestration** | Phase 1 scan/groups → Phase 2 resolve → Phase 2b materialize+promote → Phase 3 decision stream |
+| **Promotion** | Hard materialize fail promotes next peer; never ghost-drops a group when a peer exists |
+| **Family** | `keep_attachments_with_parent` (default) vs `parents_only` (no attach payloads) |
+| **EDRM MIH** | Optional MD5 of normalized Message-ID (interop id only — **not** a suppress tier) |
+| **Outputs** | Decision CSV only **after** resolve; keep-set JSON = winners + stats (no bodies) |
 
 ### Headless matter automation (track 0045)
 

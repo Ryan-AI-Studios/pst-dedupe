@@ -665,15 +665,24 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0057-11 | — | SQLCipher page encryption path | Pure-Rust AEAD file container is P0 equivalent; SQLCipher needs OpenSSL/perl | residual optional feature |
 | D-0036-12 | — | Encrypted matter-scoped temp for page bitmaps | Matter workspace/temp is boundary when encryption_enabled; deeper page-bitmap residual | residual |
 
-## From track 0065-ScanIntegrityReport (In Progress / residuals)
+## From track 0065-ScanIntegrityReport (residuals)
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0065-orphan-walk | — | NBT orphan discovery (messages without resolvable folder path) | P0 ships `is_orphaned` always `false` from folder walker; field + reasons ready | residual |
 | D-0065-resume | — | Multi-GB mid-folder checkpoint/resume | Full re-walk every run; multi-file continues under `--allow-failed-files` | residual |
 | D-0065-ansi | — | ANSI PST support | Maps to `ANSI_UNSUPPORTED`; no read path | residual |
-| D-0065-soft-body | P3 | Soft partial body byte recovery (keep truncated text) | P0 sets `body_incomplete` on truncation/CRC body Err without partial bytes | residual |
+| D-0065-soft-body | P3 | Soft partial body byte recovery (keep truncated text) | P0 sets `body_incomplete` on truncation/CRC body Err without partial bytes; materialize honors unavailable flags | residual |
 | D-0065-class-b | — | Soft structural Class B rebuild of broken folder tables | Out of scope; Class C repair forever out | residual / never |
+
+## From track 0066-DedupKeepSetExport (residuals)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0066-disk-groups | — | Disk-backed group/candidate store for multi-million message runs | P0 holds O(n) candidate metadata in RAM; streaming outputs only | residual / scale |
+| D-0066-materialize-dir | — | Optional `--materialize-dir` smoke export of winner bodies | Unit mock + CLI `--materialize` cover promotion; full EML pack is **0067** | residual / **0067** |
+| D-0066-soft-body | P3 | Soft partial body bytes on materialize when extract returns incomplete | P0 surfaces `BODY_UNAVAILABLE` / scan degraded flags; no partial-byte recovery | residual (D-0065-soft-body) |
+| D-0066-fine-fidelity | — | Multi-level fidelity rank (soft reasons vs body/attach loss) | P0: non-degraded beats degraded only | residual polish |
 
 ## Hygiene
 

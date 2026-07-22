@@ -1496,6 +1496,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "csv",
+ "md-5 0.10.6",
  "pst-reader",
  "serde",
  "serde_json",

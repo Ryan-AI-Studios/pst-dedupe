@@ -51,7 +51,7 @@ pub fn compute_dedup_keys(
 /// - Trim whitespace
 /// - Remove angle brackets `<` `>`
 /// - Remove any CFWS (comments, folding whitespace)
-fn normalize_message_id(mid: &str) -> String {
+pub fn normalize_message_id(mid: &str) -> String {
     mid.trim()
         .trim_start_matches('<')
         .trim_end_matches('>')
