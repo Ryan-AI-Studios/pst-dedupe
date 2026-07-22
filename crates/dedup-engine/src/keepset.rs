@@ -274,6 +274,9 @@ pub struct CanonicalAttachment {
     /// Attachment subnode NID for `open_attachment_data` (streaming handle key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_nid: Option<u64>,
+    /// PidTagAttachMethod when known (e.g. ATTACH_EMBEDDED_MSG = 0x5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_method: Option<i32>,
 }
 
 /// Fully materialized winner message (bodies held one-at-a-time by callers).
@@ -1567,6 +1570,7 @@ mod tests {
                                 data: Some(vec![1, 2, 3]),
                                 stream_available: true,
                                 attach_nid: Some(i as u64 + 100),
+                                attach_method: Some(1),
                             })
                             .collect()
                     };
@@ -2025,5 +2029,68 @@ mod tests {
         );
         // silence
         let _ = &mut resolved;
+    }
+
+    #[test]
+    fn keep_set_winners_sorted_path_nid_not_group_order() {
+        // Two singleton groups: scan/group order is z then a; keep_set sorts a then z.
+        let z = item(
+            "C:/z.pst",
+            "z.pst",
+            "I",
+            10,
+            Some("z@x"),
+            [9; 32],
+            10,
+            0,
+            false,
+        );
+        let a = item(
+            "C:/a.pst",
+            "a.pst",
+            "I",
+            20,
+            Some("a@x"),
+            [8; 32],
+            10,
+            1,
+            false,
+        );
+        let mut mat = MockMaterializer {
+            map: HashMap::from([(10, Ok(0)), (20, Ok(0))]),
+            family: FamilyPolicy::default(),
+        };
+        let mut finalize_order: Vec<(String, u64)> = Vec::new();
+        let (ks, _dec, count) = build_keep_set_materialized(
+            vec![z, a],
+            MaterializeBuildOpts {
+                policy: KeepPolicy::FirstSeen,
+                family_policy: FamilyPolicy::default(),
+                prefer_path: &[],
+                tier2_enabled: true,
+                created_from: None,
+            },
+            &mut mat,
+            |msg| {
+                finalize_order.push((msg.locus.source_path.clone(), msg.locus.nid));
+                Ok(())
+            },
+        )
+        .expect("build");
+        assert_eq!(count, 2);
+        // Group iteration follows scan/group order (z before a).
+        assert_eq!(finalize_order[0].0, "C:/z.pst");
+        assert_eq!(finalize_order[1].0, "C:/a.pst");
+        // keep_set.winners is path+nid sorted (a before z) — export must follow this.
+        assert_eq!(ks.winners.len(), 2);
+        assert_eq!(ks.winners[0].locus.source_path, "C:/a.pst");
+        assert_eq!(ks.winners[0].locus.nid, 20);
+        assert_eq!(ks.winners[1].locus.source_path, "C:/z.pst");
+        assert_eq!(ks.winners[1].locus.nid, 10);
+        assert_ne!(
+            finalize_order.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+            ks.winners.iter().map(|w| w.locus.nid).collect::<Vec<_>>(),
+            "finalize on_winner order must differ from keep_set winner order in this fixture"
+        );
     }
 }

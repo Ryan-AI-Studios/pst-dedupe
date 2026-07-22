@@ -82,6 +82,49 @@ fn normalize_abs(path: &Path) -> PathBuf {
     }
 }
 
+/// Strip Windows verbatim (`\\?\` / `\\?\UNC\`) prefixes so paths compare cleanly.
+pub fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        if let Some(unc) = rest.strip_prefix("UNC\\") {
+            PathBuf::from(format!(r"\\{unc}"))
+        } else if let Some(unc) = rest.strip_prefix("UNC/") {
+            PathBuf::from(format!(r"\\{unc}"))
+        } else {
+            PathBuf::from(rest)
+        }
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Normalize a path for equality / ancestry checks (no symlink follow).
+///
+/// - Strips Windows verbatim prefixes
+/// - Collapses `.` / `..` components
+/// - Lowercases on Windows for case-insensitive compare
+pub fn normalize_for_compare(path: &Path) -> PathBuf {
+    let stripped = strip_verbatim_prefix(path);
+    let norm = normalize_abs(&stripped);
+    if cfg!(windows) {
+        PathBuf::from(norm.to_string_lossy().to_lowercase())
+    } else {
+        norm
+    }
+}
+
+/// True when `a` and `b` refer to the same path after compare-normalization.
+pub fn paths_equal(a: &Path, b: &Path) -> bool {
+    normalize_for_compare(a) == normalize_for_compare(b)
+}
+
+/// True when `path` is equal to `root`, or is a descendant of `root` (component-wise).
+pub fn is_same_or_under(path: &Path, root: &Path) -> bool {
+    let path = normalize_for_compare(path);
+    let root = normalize_for_compare(root);
+    path == root || path.starts_with(&root)
+}
+
 fn path_buf_to_utf8(p: PathBuf) -> Result<Utf8PathBuf> {
     Utf8PathBuf::from_path_buf(p)
         .map_err(|p| CliError::Usage(format!("path is not valid UTF-8: {}", p.display())))
@@ -191,5 +234,40 @@ mod tests {
     fn nested_relative_rejected() {
         let v = serde_json::json!({ "nested": { "output_dir": "out/here" } });
         assert!(validate_params_paths_absolute(&v).is_err());
+    }
+
+    #[test]
+    fn strip_verbatim_and_paths_equal() {
+        let a = Path::new(r"C:\Data\mail.pst");
+        let b = Path::new(r"\\?\C:\Data\mail.pst");
+        assert!(paths_equal(a, b));
+        if cfg!(windows) {
+            assert!(paths_equal(
+                Path::new(r"C:\Data\Mail.pst"),
+                Path::new(r"c:\data\mail.pst")
+            ));
+        }
+    }
+
+    #[test]
+    fn is_same_or_under_component_safe() {
+        let root = Path::new(r"C:\out");
+        assert!(is_same_or_under(Path::new(r"C:\out"), root));
+        assert!(is_same_or_under(Path::new(r"C:\out\mail.pst"), root));
+        assert!(is_same_or_under(Path::new(r"\\?\C:\out\sub\x.pst"), root));
+        // Must not treat C:\output as under C:\out
+        assert!(!is_same_or_under(Path::new(r"C:\output\x.pst"), root));
+        assert!(!is_same_or_under(Path::new(r"C:\other\mail.pst"), root));
+    }
+
+    #[test]
+    fn normalize_collapses_dotdot() {
+        let p = Path::new(r"C:\data\pack\..\mail.pst");
+        let n = normalize_for_compare(p);
+        assert!(
+            paths_equal(&n, Path::new(r"C:\data\mail.pst")),
+            "got {}",
+            n.display()
+        );
     }
 }

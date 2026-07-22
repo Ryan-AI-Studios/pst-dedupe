@@ -14,9 +14,11 @@ mod paths;
 mod platform_cmd;
 mod production_profile_cmd;
 mod profile_cmd;
+mod pst_materializer;
 mod runner_util;
 mod scan;
 mod service_cmd;
+mod unique_eml_cmd;
 mod workflow_cmd;
 
 use std::path::PathBuf;
@@ -166,6 +168,70 @@ enum Commands {
         /// Materialize winners (full extract); hard fail promotes next peer.
         #[arg(long)]
         materialize: bool,
+        #[arg(long)]
+        no_tier2: bool,
+        #[arg(long)]
+        no_attachments: bool,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "best-effort", value_parser = parse_scan_mode)]
+        mode: ScanMode,
+        #[arg(long, default_value_t = 0.05, value_parser = parse_rate_threshold)]
+        max_skip_rate: f64,
+        #[arg(long, default_value_t = 0.01, value_parser = parse_rate_threshold)]
+        max_crc_skip_rate: f64,
+        #[arg(long, default_value_t = 0.0, value_parser = parse_rate_threshold)]
+        max_failed_file_rate: f64,
+        #[arg(long)]
+        allow_failed_files: bool,
+        #[arg(long)]
+        integrity_csv: Option<PathBuf>,
+        #[arg(long, default_value_t = 10_000)]
+        skip_limit: usize,
+    },
+
+    /// Export unique messages as a volume-batched EML pack (`eml_pack_v1`).
+    ///
+    /// Driven only by keep-set (no re-dedupe): integrity → resolve → materialize+promote →
+    /// write one `.eml` per exportable winner under `VOL001`… Source PSTs are read-only.
+    #[command(name = "unique-eml")]
+    UniqueEml {
+        /// PST path(s) as positional arguments (same style as `scan` / `keep-set`).
+        #[arg(required = false)]
+        paths: Vec<PathBuf>,
+        /// PST path(s) via repeated `--input` (merge with positionals).
+        #[arg(long = "input", action = clap::ArgAction::Append)]
+        input: Vec<PathBuf>,
+        /// Pack root directory (required). Created if missing; refuse non-empty unless `--overwrite`.
+        #[arg(long)]
+        out: PathBuf,
+        /// Winner policy after fidelity: first_seen (default), keep_largest, prefer_path.
+        #[arg(long, default_value = "first_seen", value_parser = parse_keep_policy)]
+        policy: KeepPolicy,
+        /// Parent+attach family: keep_attachments_with_parent (default) or parents_only.
+        #[arg(long, default_value = "keep_attachments_with_parent", value_parser = parse_family_policy)]
+        family_policy: FamilyPolicy,
+        /// Path/folder substring preferred under prefer_path (repeatable).
+        #[arg(long = "prefer-path-contains")]
+        prefer_path_contains: Vec<String>,
+        /// Streaming decision CSV (post-promotion roles).
+        #[arg(long)]
+        decision_csv: Option<PathBuf>,
+        /// Keep-set JSON (winners + stats; no bodies).
+        #[arg(long)]
+        keep_set_json: Option<PathBuf>,
+        /// Pack manifest JSON (default: `{out}/manifest.json`).
+        #[arg(long)]
+        manifest_json: Option<PathBuf>,
+        /// Allow writing into a non-empty `--out` (clears contents first).
+        #[arg(long)]
+        overwrite: bool,
+        /// Max `.eml` files per volume directory (default 10000; clamped [1000, 50000]).
+        #[arg(long, default_value_t = 10_000)]
+        files_per_volume: u32,
+        /// Volume directory prefix (default `VOL` → `VOL001`, …).
+        #[arg(long, default_value = "VOL")]
+        volume_prefix: String,
         #[arg(long)]
         no_tier2: bool,
         #[arg(long)]
@@ -587,6 +653,7 @@ fn command_wants_json(cmd: &Commands) -> bool {
         | Commands::Inspect { json, .. }
         | Commands::Dups { json, .. }
         | Commands::KeepSet { json, .. }
+        | Commands::UniqueEml { json, .. }
         | Commands::Ingest { json, .. } => *json,
         Commands::Matter { cmd } => match cmd {
             MatterCmd::Create { json, .. }
@@ -771,6 +838,61 @@ fn run(cli: Cli) -> Result<()> {
                 decision_csv,
                 keep_set_json,
                 materialize,
+                no_tier2,
+                no_attachments,
+                json,
+                mode,
+                max_skip_rate,
+                max_crc_skip_rate,
+                max_failed_file_rate,
+                allow_failed_files,
+                integrity_csv,
+                skip_limit,
+            })
+        }
+        Commands::UniqueEml {
+            paths,
+            input,
+            out,
+            policy,
+            family_policy,
+            prefer_path_contains,
+            decision_csv,
+            keep_set_json,
+            manifest_json,
+            overwrite,
+            files_per_volume,
+            volume_prefix,
+            no_tier2,
+            no_attachments,
+            json,
+            mode,
+            max_skip_rate,
+            max_crc_skip_rate,
+            max_failed_file_rate,
+            allow_failed_files,
+            integrity_csv,
+            skip_limit,
+        } => {
+            let mut all = paths;
+            all.extend(input);
+            if all.is_empty() {
+                return Err(CliError::Usage(
+                    "unique-eml requires at least one PST path (positional or --input)".into(),
+                ));
+            }
+            unique_eml_cmd::run_unique_eml(unique_eml_cmd::UniqueEmlCliArgs {
+                paths: all,
+                out,
+                policy,
+                family_policy,
+                prefer_path_contains,
+                decision_csv,
+                keep_set_json,
+                manifest_json,
+                overwrite,
+                files_per_volume,
+                volume_prefix,
                 no_tier2,
                 no_attachments,
                 json,

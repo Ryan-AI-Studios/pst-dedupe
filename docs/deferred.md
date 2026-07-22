@@ -680,9 +680,18 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0066-disk-groups | — | Disk-backed group/candidate store for multi-million message runs | P0 holds O(n) candidate metadata in RAM; streaming outputs only | residual / scale |
-| D-0066-materialize-dir | — | Optional `--materialize-dir` smoke export of winner bodies | Unit mock + CLI `--materialize` cover promotion; full EML pack is **0067** | residual / **0067** |
+| D-0066-materialize-dir | — | Optional `--materialize-dir` smoke export of winner bodies | **Closed by 0067** — product surface is `pst-dedup unique-eml --out` (volume-batched EML pack) | **closed / 0067** |
 | D-0066-soft-body | P3 | Soft partial body bytes on materialize when extract returns incomplete | P0 surfaces `BODY_UNAVAILABLE` / scan degraded flags; no partial-byte recovery | residual (D-0065-soft-body) |
 | D-0066-fine-fidelity | — | Multi-level fidelity rank (soft reasons vs body/attach loss) | P0: non-degraded beats degraded only | residual polish |
+
+## From track 0067-UniqueEmlPackCli (residuals)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0067-gui-keepset | — | GUI `export_unique_eml` still uses legacy scan path + plain `export_eml` | P0 is CLI `unique-eml`; shared MIME writer in `dedup-engine` ready for later adopt | residual / **0072** soft |
+| D-0067-embedded-depth | — | Full recursive nested MAPI extract for embedded messages | P0 labels `message/rfc822` + streams raw bytes; `embedded_message_unparsed` honesty flag; max depth 3 residual | residual |
+| D-0067-long-path | — | Windows `\\?\` long-path support when abs root already > budget | P0 truncates subject to keep abs ≤250; extreme deep roots may still fail that file | residual |
+| D-0067-cloud-attaches | — | Resolve hyperlink-only / cloud modern attachments | Not downloaded; no invented file bytes | residual |
 
 ## Hygiene
 

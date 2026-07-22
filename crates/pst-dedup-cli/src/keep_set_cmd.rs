@@ -3,21 +3,17 @@
 //! Phases: sort paths → integrity scan (collect candidates) → resolve →
 //! optional materialize+promote → stream decision CSV + keep-set JSON.
 
-use std::collections::HashMap;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use dedup_engine::integrity::{IntegrityThresholds, ScanMode, SCAN_INTEGRITY_SCHEMA};
 use dedup_engine::keepset::{
     finalize_with_materialize, resolve_groups, sort_input_paths, write_keep_set_json,
-    CanonicalAttachment, CanonicalMessage, DecisionCsvWriter, FamilyPolicy, KeepPolicy,
-    KeepSetProvenance, MaterializeError, MessageLocus, MessageMaterializer,
+    DecisionCsvWriter, FamilyPolicy, KeepPolicy, KeepSetProvenance,
 };
-use dedup_engine::reason_from_pst_error;
-use pst_reader::{NodeId, PstFile};
 use serde::Serialize;
 
 use crate::error::{CliError, Result};
+use crate::pst_materializer::PstMaterializer;
 use crate::scan::{evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions, ScanSummary};
 
 /// CLI options for `keep-set`.
@@ -51,281 +47,6 @@ struct KeepSetSummaryOut {
     decision_csv: Option<String>,
     keep_set_json: Option<String>,
     materialized: u64,
-}
-
-/// Materializer holding open PST handles (source PSTs remain read-only).
-struct PstMaterializer {
-    /// Absolute path string → open file.
-    psts: HashMap<String, PstFile>,
-    /// When false / parents_only, skip loading attach bytes (metadata list may still be empty).
-    load_attach_payloads: bool,
-    /// parents_only: do not list attaches at all for payload purposes.
-    parents_only: bool,
-}
-
-impl PstMaterializer {
-    fn new(family: FamilyPolicy) -> Self {
-        Self {
-            psts: HashMap::new(),
-            load_attach_payloads: family == FamilyPolicy::KeepAttachmentsWithParent,
-            parents_only: family == FamilyPolicy::ParentsOnly,
-        }
-    }
-
-    fn open_pst(&mut self, path: &str) -> std::result::Result<&mut PstFile, MaterializeError> {
-        if !self.psts.contains_key(path) {
-            let pst = PstFile::open(Path::new(path))
-                .map_err(|e| MaterializeError::Hard(format!("open {}: {e}", path)))?;
-            self.psts.insert(path.to_string(), pst);
-        }
-        self.psts
-            .get_mut(path)
-            .ok_or_else(|| MaterializeError::Hard(format!("pst missing after open: {path}")))
-    }
-}
-
-/// True hard failures that must promote peers. Everything else may soft-recover
-/// via `read_message_properties` (scan already classified many of these as recoverable).
-fn is_hard_structural_reason(reason: dedup_engine::IntegrityReason) -> bool {
-    use dedup_engine::IntegrityReason::*;
-    matches!(
-        reason,
-        OpenFailed
-            | AnsiUnsupported
-            | UnsupportedCrypt
-            | FolderWalkFailed
-            | NodeNotFound
-            | BlockNotFound
-            | PathNotFound
-            | NotPst
-            | ReadError
-    )
-}
-
-impl MessageMaterializer for PstMaterializer {
-    fn materialize(
-        &mut self,
-        locus: &MessageLocus,
-    ) -> std::result::Result<CanonicalMessage, MaterializeError> {
-        // Full attach-byte streaming / EML pack is track 0067. Keep-set materialize
-        // (0066) validates extract + attachment *metadata* for promotion honesty.
-        // Large attach payloads are never loaded into Vecs; `stream_available` marks
-        // that open_attachment_data can be used by downstream exporters (0067).
-        let parents_only = self.parents_only;
-        let load_payloads = self.load_attach_payloads;
-        let pst = self.open_pst(&locus.source_path)?;
-        let nid = NodeId(locus.nid);
-
-        let mut soft_reasons: Vec<dedup_engine::IntegrityReason> = Vec::new();
-
-        // Prefer full extract; on soft body/property errors fall back to properties
-        // so sole degraded winners are not ghost-dropped (§3.7 rule 3 / D-0065-soft-body).
-        let (
-            message_id,
-            subject,
-            sender,
-            display_to,
-            display_cc,
-            display_bcc,
-            submit_time,
-            size,
-            message_class,
-            body_plain,
-            body_html,
-            body_incomplete,
-            body_unavailable,
-        ) = match pst.read_message_extract(nid) {
-            Ok(extracted) => {
-                let body_unavailable =
-                    extracted.body_text.is_none() && extracted.body_html.is_none();
-                if body_unavailable {
-                    soft_reasons.push(dedup_engine::IntegrityReason::BodyUnavailable);
-                }
-                (
-                    extracted.message_id,
-                    extracted.subject,
-                    extracted.sender_email,
-                    extracted.display_to,
-                    extracted.display_cc,
-                    extracted.display_bcc,
-                    extracted.submit_time,
-                    extracted.message_size.map(|s| s as u32),
-                    extracted.message_class,
-                    extracted.body_text,
-                    extracted.body_html,
-                    false,
-                    body_unavailable,
-                )
-            }
-            Err(e) => {
-                let reason = reason_from_pst_error(&e);
-                // Hard-structural only: node/block missing, open fail, etc.
-                // Invalid HID / structure on body props is recoverable via properties
-                // (scan already surfaces BODY_UNAVAILABLE for these aspose fixtures).
-                if is_hard_structural_reason(reason) {
-                    return Err(MaterializeError::Hard(format!(
-                        "extract nid={:#x} {}: {e}",
-                        locus.nid,
-                        reason.as_str()
-                    )));
-                }
-                match pst.read_message_properties(nid) {
-                    Ok(props) => {
-                        let body_incomplete = props.body_incomplete;
-                        // Extract failed → full body not exportable; never use 4KB preview.
-                        soft_reasons.push(dedup_engine::IntegrityReason::BodyUnavailable);
-                        if body_incomplete
-                            && !soft_reasons.contains(&dedup_engine::IntegrityReason::BodyTruncated)
-                        {
-                            soft_reasons.push(dedup_engine::IntegrityReason::BodyTruncated);
-                        }
-                        if !soft_reasons.contains(&reason) {
-                            soft_reasons.push(reason);
-                        }
-                        (
-                            props.message_id,
-                            props.subject,
-                            props.sender_email,
-                            props.display_to,
-                            None,
-                            None,
-                            props.submit_time,
-                            props.message_size.map(|s| s as u32),
-                            None,
-                            None,
-                            None,
-                            body_incomplete,
-                            true,
-                        )
-                    }
-                    Err(e2) => {
-                        let r2 = reason_from_pst_error(&e2);
-                        if is_hard_structural_reason(r2) {
-                            return Err(MaterializeError::Hard(format!(
-                                "extract+props nid={:#x} {}: {e2}",
-                                locus.nid,
-                                r2.as_str()
-                            )));
-                        }
-                        soft_reasons.push(dedup_engine::IntegrityReason::BodyUnavailable);
-                        if !soft_reasons.contains(&r2) {
-                            soft_reasons.push(r2);
-                        }
-                        (
-                            None, None, None, None, None, None, None, None, None, None, None,
-                            false, true,
-                        )
-                    }
-                }
-            }
-        };
-
-        let mut attachments = Vec::new();
-        // parents_only: empty attachments list (family policy).
-        // KeepAttachmentsWithParent: always list metadata; payloads optional / size-capped.
-        if !parents_only {
-            match pst.list_attachments(nid) {
-                Ok(list) => {
-                    // Cap optional small-payload probe so we never materialize multi-GB Vecs.
-                    // Metadata + stream_available is always recorded for 0067 consumers.
-                    const SMALL_ATTACH_CAP: u32 = 64 * 1024;
-                    for att in list {
-                        let mut data = None;
-                        // stream_available: list succeeded and size known — open_attachment_data
-                        // is the streaming handle for downstream (0067). Not a lost attach.
-                        let stream_available = att.size > 0 || !att.filename.is_empty();
-                        if load_payloads && att.size > 0 && att.size <= SMALL_ATTACH_CAP {
-                            match pst.open_attachment_data(nid, att.nid) {
-                                Ok(mut reader) => {
-                                    let mut buf = Vec::new();
-                                    match reader.read_to_end(&mut buf) {
-                                        Ok(_) => data = Some(buf),
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                nid = locus.nid,
-                                                attach_nid = att.nid.0,
-                                                err = %e,
-                                                "open/read attachment payload failed (soft ATTACH_META_FAILED)"
-                                            );
-                                            if !soft_reasons.contains(
-                                                &dedup_engine::IntegrityReason::AttachMetaFailed,
-                                            ) {
-                                                soft_reasons.push(
-                                                    dedup_engine::IntegrityReason::AttachMetaFailed,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        nid = locus.nid,
-                                        attach_nid = att.nid.0,
-                                        err = %e,
-                                        "open_attachment_data failed (soft ATTACH_META_FAILED)"
-                                    );
-                                    if !soft_reasons
-                                        .contains(&dedup_engine::IntegrityReason::AttachMetaFailed)
-                                    {
-                                        soft_reasons
-                                            .push(dedup_engine::IntegrityReason::AttachMetaFailed);
-                                    }
-                                }
-                            }
-                        }
-                        attachments.push(CanonicalAttachment {
-                            filename: att.filename,
-                            size: att.size,
-                            mime: att.mime_tag,
-                            data,
-                            stream_available,
-                            attach_nid: Some(att.nid.0),
-                        });
-                    }
-                }
-                Err(e) => {
-                    // Soft attach list failure — do not hard-fail materialize.
-                    tracing::warn!(
-                        nid = locus.nid,
-                        err = %e,
-                        "list_attachments failed during materialize (soft ATTACH_META_FAILED)"
-                    );
-                    soft_reasons.push(dedup_engine::IntegrityReason::AttachMetaFailed);
-                }
-            }
-        }
-
-        let fidelity = if soft_reasons.is_empty() {
-            dedup_engine::integrity::RecoverableIntegrity::clean()
-        } else {
-            dedup_engine::integrity::RecoverableIntegrity::with_degraded(
-                soft_reasons,
-                locus.is_orphaned,
-            )
-        };
-
-        Ok(CanonicalMessage {
-            locus: locus.clone(),
-            message_id,
-            subject,
-            sender,
-            display_to,
-            display_cc,
-            display_bcc,
-            submit_time,
-            size,
-            message_class,
-            body_plain,
-            body_html,
-            attachments,
-            fidelity,
-            message_id_norm: None,
-            content_hash: [0; 32],
-            edrm_mih_hex: None,
-            body_incomplete,
-            body_unavailable,
-        })
-    }
 }
 
 /// Run keep-set orchestration end-to-end.
@@ -370,20 +91,16 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
         Some(provenance),
     );
 
-    // Phase 2b: materialize + promote when requested (or when producing export-ready set).
-    // Default: materialize when family needs attach decisions OR always when materialize flag.
-    // Spec: pure keep-set JSON may list provisional winners without materialize.
+    // Phase 2b: materialize + promote when requested.
     let mut materialized_count = 0u64;
     if args.materialize {
         let mut mat = PstMaterializer::new(args.family_policy);
         // O(1) body memory: callback receives one winner at a time and drops it.
-        // Full EML pack is 0067; here we only finalize roles + fidelity honesty.
         materialized_count = finalize_with_materialize(&mut resolved, &mut mat, &mut |_msg| Ok(()))
             .map_err(|e| CliError::Msg(format!("materialize: {e}")))?;
     }
 
     // Phase 3: stream decision CSV + keep-set JSON from finalized roles.
-    // Decisions stream O(1) row buffer (no all-rows Vec). Keep-set winners are O(unique).
     let keep_set = resolved.to_keep_set();
 
     let mut decision_csv_out: Option<String> = None;
