@@ -8,11 +8,12 @@ license-file = "../../LICENSE"
 
 [dependencies]
 sha2 = { workspace = true }
+md-5 = { workspace = true }
 csv = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 pst-reader = { path = "../pst-reader" }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 tempfile = { workspace = true }

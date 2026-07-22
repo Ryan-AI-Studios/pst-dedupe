@@ -13,6 +13,7 @@ use dedup_engine::{
         IntegrityThresholds, MessageClassification, PreflightInputs, PreflightReport,
         RecoverableIntegrity, ScanMode, SkipRecord, SCAN_INTEGRITY_SCHEMA,
     },
+    keepset::{MessageLocus, RecoverableScanItem},
     report::{write_summary_report, ReportRow, StreamingCsvReportWriter},
     DedupIndex, DedupResult, MessageRef,
 };
@@ -37,6 +38,8 @@ pub struct ScanOptions {
     pub skip_limit: usize,
     /// Retain `ReportRow`s in memory (needed for dups listing).
     pub retain_rows: bool,
+    /// Retain keep-set candidates (mid + content_hash + integrity) for Phase 2 resolve.
+    pub retain_candidates: bool,
 }
 
 impl Default for ScanOptions {
@@ -51,6 +54,7 @@ impl Default for ScanOptions {
             csv: None,
             skip_limit: 10_000,
             retain_rows: true,
+            retain_candidates: false,
         }
     }
 }
@@ -122,6 +126,8 @@ pub struct DupRow {
 pub struct ScanOutcome {
     pub summary: ScanSummary,
     pub rows: Vec<ReportRow>,
+    /// Keep-set candidates (populated when [`ScanOptions::retain_candidates`]).
+    pub candidates: Vec<RecoverableScanItem>,
     /// True when dedup CSV was already streamed during the scan.
     pub csv_streamed: bool,
 }
@@ -170,6 +176,8 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     let force_skip = std::env::var_os("PST_DEDUPE_TEST_FORCE_SKIP").is_some_and(|v| v == "1");
     let mut index = DedupIndex::with_capacity_and_tier2(100_000, opts.enable_tier2);
     let mut all_rows: Vec<ReportRow> = Vec::new();
+    let mut candidates: Vec<RecoverableScanItem> = Vec::new();
+    let mut scan_order: u64 = 0;
     let mut file_stats: Vec<FileScanStats> = Vec::new();
     let mut total_savings: u64 = 0;
     let mut total_skipped: u64 = 0;
@@ -515,6 +523,24 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                             total_savings += msg_ref.size as u64;
                         }
 
+                        if opts.retain_candidates {
+                            candidates.push(RecoverableScanItem {
+                                locus: MessageLocus {
+                                    source_path: path_str.clone(),
+                                    source_pst: name.clone(),
+                                    folder_path: folder_path.clone(),
+                                    nid: msg_nid.0,
+                                    is_orphaned: integrity.is_orphaned,
+                                },
+                                message_id_norm: keys.message_id.clone(),
+                                content_hash: keys.content_hash,
+                                size: msg_ref.size,
+                                integrity: integrity.clone(),
+                                scan_order,
+                            });
+                            scan_order += 1;
+                        }
+
                         let report_row = ReportRow {
                             message: msg_ref,
                             result,
@@ -635,6 +661,7 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     Ok(ScanOutcome {
         summary,
         rows: all_rows,
+        candidates,
         csv_streamed,
     })
 }

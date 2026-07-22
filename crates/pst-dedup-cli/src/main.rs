@@ -8,6 +8,7 @@ mod error;
 mod inspect;
 mod job_cmd;
 mod json_io;
+mod keep_set_cmd;
 mod matter_cmd;
 mod paths;
 mod platform_cmd;
@@ -25,6 +26,7 @@ use clap::{Parser, Subcommand};
 use dedup_engine::format_bytes;
 
 use dedup_engine::integrity::{IntegrityThresholds, ScanMode};
+use dedup_engine::keepset::{FamilyPolicy, KeepPolicy};
 
 use crate::error::{CliError, CliExit, Result};
 use crate::json_io::emit_error;
@@ -118,6 +120,58 @@ enum Commands {
         #[arg(long)]
         json: bool,
         /// Recoverability mode: `best-effort` (default) or `strict`.
+        #[arg(long, default_value = "best-effort", value_parser = parse_scan_mode)]
+        mode: ScanMode,
+        #[arg(long, default_value_t = 0.05, value_parser = parse_rate_threshold)]
+        max_skip_rate: f64,
+        #[arg(long, default_value_t = 0.01, value_parser = parse_rate_threshold)]
+        max_crc_skip_rate: f64,
+        #[arg(long, default_value_t = 0.0, value_parser = parse_rate_threshold)]
+        max_failed_file_rate: f64,
+        #[arg(long)]
+        allow_failed_files: bool,
+        #[arg(long)]
+        integrity_csv: Option<PathBuf>,
+        #[arg(long, default_value_t = 10_000)]
+        skip_limit: usize,
+    },
+
+    /// Build export keep-set (`keep_set_v1`): policy resolve, decision CSV, winners JSON.
+    ///
+    /// Phase 1 scan → Phase 2 fidelity/policy resolve → optional materialize+promote →
+    /// Phase 3 decision stream. Source PSTs are read-only.
+    #[command(name = "keep-set")]
+    KeepSet {
+        /// PST path(s) as positional arguments (same style as `scan`).
+        #[arg(required = false)]
+        paths: Vec<PathBuf>,
+        /// PST path(s) via repeated `--input` (spec-style; merge with positionals).
+        #[arg(long = "input", action = clap::ArgAction::Append)]
+        input: Vec<PathBuf>,
+        /// Winner policy after fidelity: first_seen (default), keep_largest, prefer_path.
+        #[arg(long, default_value = "first_seen", value_parser = parse_keep_policy)]
+        policy: KeepPolicy,
+        /// Parent+attach family: keep_attachments_with_parent (default) or parents_only.
+        #[arg(long, default_value = "keep_attachments_with_parent", value_parser = parse_family_policy)]
+        family_policy: FamilyPolicy,
+        /// Path/folder substring preferred under prefer_path (repeatable).
+        #[arg(long = "prefer-path-contains")]
+        prefer_path_contains: Vec<String>,
+        /// Streaming decision CSV (emitted only after resolve; every recoverable row).
+        #[arg(long)]
+        decision_csv: Option<PathBuf>,
+        /// Keep-set JSON (winners + stats; no bodies).
+        #[arg(long)]
+        keep_set_json: Option<PathBuf>,
+        /// Materialize winners (full extract); hard fail promotes next peer.
+        #[arg(long)]
+        materialize: bool,
+        #[arg(long)]
+        no_tier2: bool,
+        #[arg(long)]
+        no_attachments: bool,
+        #[arg(long)]
+        json: bool,
         #[arg(long, default_value = "best-effort", value_parser = parse_scan_mode)]
         mode: ScanMode,
         #[arg(long, default_value_t = 0.05, value_parser = parse_rate_threshold)]
@@ -532,6 +586,7 @@ fn command_wants_json(cmd: &Commands) -> bool {
         Commands::Scan { json, .. }
         | Commands::Inspect { json, .. }
         | Commands::Dups { json, .. }
+        | Commands::KeepSet { json, .. }
         | Commands::Ingest { json, .. } => *json,
         Commands::Matter { cmd } => match cmd {
             MatterCmd::Create { json, .. }
@@ -681,6 +736,53 @@ fn run(cli: Cli) -> Result<()> {
             integrity_csv,
             skip_limit,
         }),
+        Commands::KeepSet {
+            paths,
+            input,
+            policy,
+            family_policy,
+            prefer_path_contains,
+            decision_csv,
+            keep_set_json,
+            materialize,
+            no_tier2,
+            no_attachments,
+            json,
+            mode,
+            max_skip_rate,
+            max_crc_skip_rate,
+            max_failed_file_rate,
+            allow_failed_files,
+            integrity_csv,
+            skip_limit,
+        } => {
+            let mut all = paths;
+            all.extend(input);
+            if all.is_empty() {
+                return Err(CliError::Usage(
+                    "keep-set requires at least one PST path (positional or --input)".into(),
+                ));
+            }
+            keep_set_cmd::run_keep_set(keep_set_cmd::KeepSetCliArgs {
+                paths: all,
+                policy,
+                family_policy,
+                prefer_path_contains,
+                decision_csv,
+                keep_set_json,
+                materialize,
+                no_tier2,
+                no_attachments,
+                json,
+                mode,
+                max_skip_rate,
+                max_crc_skip_rate,
+                max_failed_file_rate,
+                allow_failed_files,
+                integrity_csv,
+                skip_limit,
+            })
+        }
         Commands::Matter { cmd } => match cmd {
             MatterCmd::Create {
                 path,
@@ -847,6 +949,20 @@ fn parse_scan_mode(s: &str) -> std::result::Result<ScanMode, String> {
     ScanMode::parse(s).ok_or_else(|| format!("invalid mode '{s}': expected best-effort or strict"))
 }
 
+fn parse_keep_policy(s: &str) -> std::result::Result<KeepPolicy, String> {
+    KeepPolicy::parse(s).ok_or_else(|| {
+        format!("invalid policy '{s}': expected first_seen, keep_largest, or prefer_path")
+    })
+}
+
+fn parse_family_policy(s: &str) -> std::result::Result<FamilyPolicy, String> {
+    FamilyPolicy::parse(s).ok_or_else(|| {
+        format!(
+            "invalid family-policy '{s}': expected keep_attachments_with_parent or parents_only"
+        )
+    })
+}
+
 /// Packed CLI args for `scan` / `dups` (avoids too-many-arguments).
 struct ScanCliArgs {
     paths: Vec<PathBuf>,
@@ -881,6 +997,7 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
         csv: args.csv.clone(),
         skip_limit: args.skip_limit,
         retain_rows: args.list_dups,
+        retain_candidates: false,
     };
     // Artifacts (CSV/integrity) are streamed and flushed inside run_scan before return.
     let outcome = run_scan(&paths, &opts)?;
@@ -996,6 +1113,7 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
         csv: None,
         skip_limit: args.skip_limit,
         retain_rows: true,
+        retain_candidates: false,
     };
     let outcome = run_scan(&paths, &opts)?;
     let dup_limit = if args.limit == 0 {
