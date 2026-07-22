@@ -10,6 +10,7 @@
 //! **Tier 2 — Content Hash:** For emails missing a Message-ID, we compute a SHA-256
 //! hash of: normalized subject + submit time + sender + body preview + attachment metadata.
 
+pub mod eml_pack;
 pub mod exporter;
 pub mod hasher;
 pub mod index;
@@ -18,6 +19,15 @@ pub mod keepset;
 pub mod report;
 pub mod util;
 
+pub use eml_pack::{
+    clamp_files_per_volume, format_date_utc_filetime, format_date_utc_unix, make_eml_pack_filename,
+    merge_pack_degraded, normalize_body_crlf_bytes, normalize_text_body_crlf,
+    sanitize_header_value, validate_volume_prefix, volume_dirname, write_canonical_eml,
+    write_crlf_line, write_eml_pack_manifest, AttachStreamSource, EmlPackManifest,
+    EmlPackMessageRow, EmlPackStats, EmlWriteError, EmlWriteOpts, EmlWriteResult,
+    NullAttachStreamSource, VolumePackWriter, ABS_PATH_BUDGET, ATTACH_EMBEDDED_MSG,
+    DEFAULT_FILES_PER_VOLUME, EML_PACK_SCHEMA, REASON_ATTACH_PART_FAILED,
+};
 pub use exporter::export_eml;
 pub use hasher::{compute_dedup_keys, normalize_message_id};
 pub use index::{DedupIndex, DedupResult, DedupTier, MessageRef};

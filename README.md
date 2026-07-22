@@ -112,6 +112,31 @@ orphan; use `is_orphaned`. Intentional Tier-2 4KB body preview is **not** `BODY_
 | **EDRM MIH** | Optional MD5 of normalized Message-ID (interop id only — **not** a suppress tier) |
 | **Outputs** | Decision CSV only **after** resolve; keep-set JSON = winners + stats (no bodies) |
 
+**Unique EML pack (track 0067, schema `eml_pack_v1`):** keep-set winners only (no re-dedupe) →
+volume-batched `.eml` directory for Outlook/Thunderbird import.
+
+```powershell
+.\target\release\pst-dedup.exe unique-eml a.pst b.pst `
+  --out output\unique_eml_pack `
+  --policy first_seen `
+  --decision-csv output\decisions.csv `
+  --keep-set-json output\keepset.json `
+  --json
+# Refuse non-empty --out unless --overwrite
+.\target\release\pst-dedup.exe unique-eml archive.pst --out output\pack --overwrite --json
+```
+
+| Concern | Behavior |
+|---|---|
+| **No re-dedupe** | Same pipeline as `keep-set` (fidelity → policy → promote); always materializes |
+| **Volumes** | Always `VOL001`… under `--out` (default **10 000** files/dir; `--files-per-volume`) |
+| **Date** | RFC 5322 **UTC +0000 only** (host local TZ ignored) |
+| **MIME** | plain / `multipart/alternative` / `multipart/mixed` + base64 attaches; embedded → `message/rfc822` |
+| **MAX_PATH** | Abs path budget ≤250; subject truncated first; counter + hash kept |
+| **Manifest** | `{out}/manifest.json` (`eml_pack_v1`); `eml_written == unique` on success |
+| **Family** | `parents_only` omits attach/embedded MIME parts |
+| **Import** | See `docs/unique-eml-import.md` — manual Outlook/Thunderbird import per volume folder |
+
 ### Headless matter automation (track 0045)
 
 Same engine as Dedupe Desk: create a matter, import profiles/workflows, run jobs, export reports — no GUI.
