@@ -1,0 +1,30 @@
+[package]
+name = "matter-storage"
+version = "0.1.0"
+edition = "2021"
+description = "Opt-in BlobStore backends for matter CAS: local FS (default), S3-compatible (feature cloud-s3), disk LRU cache"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
+
+[features]
+default = []
+# S3-compatible object storage via object_store (AWS/MinIO/R2). Credentials from env only.
+cloud-s3 = ["dep:object_store", "object_store/aws", "dep:tokio", "dep:bytes", "dep:futures"]
+# Residual: Azure Blob via object_store (not wired in P0 open path; trait-ready).
+cloud-azure = ["dep:object_store", "object_store/azure", "dep:tokio", "dep:bytes", "dep:futures"]
+
+[dependencies]
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+camino = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+bytes = { workspace = true, optional = true }
+futures = { version = "0.3", optional = true }
+tokio = { version = "1", optional = true, default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync"] }
+object_store = { workspace = true, optional = true, default-features = false }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros"] }

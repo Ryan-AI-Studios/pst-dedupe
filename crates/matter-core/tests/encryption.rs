@@ -23,6 +23,10 @@ fn create_encrypted_open_cas_roundtrip() {
         let m = Matter::create_encrypted(&root, "EncCase", pass).expect("create");
         assert!(m.encryption_enabled());
         assert_eq!(m.schema_version().expect("ver"), SCHEMA_VERSION);
+        // Storage config defaults local (0061); encryption still uses local Cas for CAS bytes.
+        let cfg = m.get_storage_backend_config().expect("storage cfg");
+        assert_eq!(cfg.kind.as_str(), "local");
+        assert_eq!(m.get_job_backend_kind().expect("job").as_str(), "local");
         // Multi-chunk CAS payload (chunk default 1 MiB — use small override path via put size).
         let mut payload = vec![0u8; 2_000];
         for (i, b) in payload.iter_mut().enumerate() {
@@ -31,6 +35,8 @@ fn create_encrypted_open_cas_roundtrip() {
         let digest = m.put_bytes(&payload).expect("put");
         let got = m.get_bytes(&digest).expect("get");
         assert_eq!(got, payload);
+        // Plaintext digest identity; on-disk object is ciphertext when encryption on.
+        assert!(m.blob_exists(&digest).expect("exists"));
         assert!(m
             .workspace_temp_dir()
             .as_str()
@@ -175,7 +181,7 @@ fn open_read_implements_read() {
     let m = Matter::create_encrypted(&root, "R", "p").expect("create");
     let data = b"reader-payload";
     let d = m.put_bytes(data).expect("put");
-    let mut r = m.cas().open_read(&d).expect("open");
+    let mut r = m.open_read(&d).expect("open");
     let mut buf = Vec::new();
     r.read_to_end(&mut buf).expect("read");
     assert_eq!(buf, data);

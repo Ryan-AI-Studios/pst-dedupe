@@ -10,6 +10,12 @@ license-file = "../../LICENSE"
 name = "pst-dedup"
 path = "src/main.rs"
 
+[features]
+default = []
+# Opt-in S3 BlobStore activation on matter open (pass-through to matter-core).
+# Build with `cargo build -p pst-dedup-cli --features cloud-s3` for hosted pilots.
+cloud-s3 = ["matter-core/cloud-s3", "matter-service/cloud-s3"]
+
 [dependencies]
 pst-reader = { path = "../pst-reader" }
 dedup-engine = { path = "../dedup-engine" }

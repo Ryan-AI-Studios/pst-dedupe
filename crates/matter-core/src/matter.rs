@@ -1063,6 +1063,9 @@ pub struct Matter {
     write_lock: Option<File>,
     /// When true, mutating APIs require a validated `matter_users.id` as actor.
     strict_actor: AtomicBool,
+    /// Remote cloud CAS when `storage_backend_json` is S3/Azure and open succeeded.
+    /// `None` for local default (uses [`Self::cas`] only). Activated on open — fail closed.
+    remote_blobs: Option<std::sync::Arc<dyn matter_storage::BlobStore>>,
 }
 
 impl Matter {
@@ -1119,6 +1122,7 @@ impl Matter {
             enc_session: None,
             write_lock,
             strict_actor: AtomicBool::new(false),
+            remote_blobs: None, // create always starts local
         };
         matter.cleanup_workspace_temp()?;
         // Seed default coding catalog (idempotent).
@@ -1208,6 +1212,7 @@ impl Matter {
             enc_session: Some(enc_session),
             write_lock,
             strict_actor: AtomicBool::new(false),
+            remote_blobs: None, // create always starts local
         };
         // Seed only — do not wipe .enc-db session.
         matter.seed_default_codes()?;
@@ -1343,6 +1348,9 @@ impl Matter {
         cas.ensure_layout()?;
         cas.cleanup_crypto_temps()?;
 
+        // Cloud storage: open after migrate; fail closed (no silent local CAS).
+        let remote_blobs = activate_remote_blobs(&root, &conn, &matter_id)?;
+
         let matter = Self {
             root,
             cas,
@@ -1353,6 +1361,7 @@ impl Matter {
             enc_session: Some(enc_session),
             write_lock,
             strict_actor: AtomicBool::new(false),
+            remote_blobs,
         };
         if cleanup_temp {
             matter.seed_default_codes()?;
@@ -1435,6 +1444,9 @@ impl Matter {
         let cas = Cas::new(&root);
         cas.ensure_layout()?;
 
+        // Cloud storage: open after migrate; fail closed (no silent local CAS).
+        let remote_blobs = activate_remote_blobs(&root, &conn, &matter_id)?;
+
         let matter = Self {
             root,
             cas,
@@ -1445,6 +1457,7 @@ impl Matter {
             enc_session: None,
             write_lock,
             strict_actor: AtomicBool::new(false),
+            remote_blobs,
         };
         if cleanup_temp {
             matter.cleanup_workspace_temp()?;
@@ -1601,36 +1614,96 @@ impl Matter {
         &self.conn
     }
 
-    /// Content-addressable blob store handle.
-    pub fn cas(&self) -> &Cas {
-        &self.cas
+    /// Local filesystem CAS handle.
+    ///
+    /// **When cloud storage is active** (`uses_remote_blobs()`), returns
+    /// `Err` — callers must use [`Self::put_bytes`], [`Self::put_reader`],
+    /// [`Self::get_bytes`], [`Self::open_read`], [`Self::cas_len`], [`Self::blob_exists`].
+    pub fn cas(&self) -> Result<&Cas> {
+        if self.remote_blobs.is_some() {
+            return Err(Error::Other(
+                "local Cas unavailable while remote BlobStore is active; use Matter CAS methods"
+                    .into(),
+            ));
+        }
+        Ok(&self.cas)
     }
 
     // --- CAS convenience ---
 
+    /// Open a Read+Seek handle over CAS **plaintext** (local or remote).
+    ///
+    /// Routes to remote [`matter_storage::BlobStore`] when cloud storage is active;
+    /// otherwise local [`Cas::open_read`]. Prefer this over [`Self::cas`] for reads.
+    pub fn open_read(&self, digest_hex: &str) -> Result<crate::cas::CasReader> {
+        if let Some(remote) = &self.remote_blobs {
+            crate::cas_backend::open_read_remote(remote.as_ref(), self.dek.as_ref(), digest_hex)
+        } else {
+            self.cas.open_read(digest_hex)
+        }
+    }
+
     /// Put raw physical bytes into CAS; returns lowercase SHA-256 hex.
+    ///
+    /// Routes to remote [`matter_storage::BlobStore`] when cloud storage is active
+    /// for this open handle; otherwise local [`Cas`].
     pub fn put_bytes(&self, data: &[u8]) -> Result<String> {
-        self.cas.put_bytes(data)
+        if let Some(remote) = &self.remote_blobs {
+            crate::cas_backend::put_bytes_remote(
+                remote.as_ref(),
+                self.dek.as_ref(),
+                self.chunk_bytes,
+                data,
+            )
+        } else {
+            self.cas.put_bytes(data)
+        }
     }
 
     /// Stream raw physical bytes into CAS (bounded buffer; no full `Vec` required).
     pub fn put_reader<R: std::io::Read>(&self, reader: &mut R) -> Result<String> {
-        self.cas.put_reader(reader)
+        if let Some(remote) = &self.remote_blobs {
+            crate::cas_backend::put_reader_remote(
+                remote.as_ref(),
+                self.dek.as_ref(),
+                self.chunk_bytes,
+                reader,
+            )
+        } else {
+            self.cas.put_reader(reader)
+        }
     }
 
     /// Get raw bytes by SHA-256 hex digest.
     pub fn get_bytes(&self, digest_hex: &str) -> Result<Vec<u8>> {
-        self.cas.get_bytes(digest_hex)
+        if let Some(remote) = &self.remote_blobs {
+            crate::cas_backend::get_bytes_remote(remote.as_ref(), self.dek.as_ref(), digest_hex)
+        } else {
+            self.cas.get_bytes(digest_hex)
+        }
     }
 
-    /// On-disk byte length of a CAS blob (metadata only; no full read).
+    /// On-disk / remote plaintext byte length of a CAS blob.
     pub fn cas_len(&self, digest_hex: &str) -> Result<u64> {
-        self.cas.blob_len(digest_hex)
+        if let Some(remote) = &self.remote_blobs {
+            crate::cas_backend::blob_len_remote(remote.as_ref(), self.dek.as_ref(), digest_hex)
+        } else {
+            self.cas.blob_len(digest_hex)
+        }
     }
 
     /// Get raw bytes only when the on-disk length is `<= max_bytes`.
     pub fn get_bytes_capped(&self, digest_hex: &str, max_bytes: u64) -> Result<Vec<u8>> {
-        self.cas.get_bytes_capped(digest_hex, max_bytes)
+        if let Some(remote) = &self.remote_blobs {
+            crate::cas_backend::get_bytes_capped_remote(
+                remote.as_ref(),
+                self.dek.as_ref(),
+                digest_hex,
+                max_bytes,
+            )
+        } else {
+            self.cas.get_bytes_capped(digest_hex, max_bytes)
+        }
     }
 
     /// Read at most `max_bytes` from the start of a CAS blob (prefix / magic head).
@@ -1638,6 +1711,14 @@ impl Matter {
     /// Unlike [`Self::get_bytes_capped`], this never loads the full object when it
     /// is larger than `max_bytes` — suitable for file-type sniffing.
     pub fn read_cas_prefix(&self, digest_hex: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        if let Some(remote) = &self.remote_blobs {
+            return crate::cas_backend::read_prefix_remote(
+                remote.as_ref(),
+                self.dek.as_ref(),
+                digest_hex,
+                max_bytes,
+            );
+        }
         use std::io::Read;
         let mut file = self.cas.open_read(digest_hex)?;
         let mut buf = vec![0u8; max_bytes];
@@ -1648,7 +1729,147 @@ impl Matter {
 
     /// Whether a blob with this digest exists.
     pub fn blob_exists(&self, digest_hex: &str) -> Result<bool> {
-        self.cas.exists(digest_hex)
+        if let Some(remote) = &self.remote_blobs {
+            crate::cas_backend::exists_remote(remote.as_ref(), digest_hex)
+        } else {
+            self.cas.exists(digest_hex)
+        }
+    }
+
+    /// Whether this open handle uses a remote cloud BlobStore for CAS IO.
+    pub fn uses_remote_blobs(&self) -> bool {
+        self.remote_blobs.is_some()
+    }
+
+    // --- Storage / job backend config (schema v39 / track 0061) ---
+
+    /// Load storage backend config. Null/absent JSON → local filesystem default.
+    ///
+    /// Config never contains credentials (env/keyring/IAM only).
+    pub fn get_storage_backend_config(&self) -> Result<matter_storage::StorageBackendConfig> {
+        let raw: Option<String> = self.conn.query_row(
+            "SELECT storage_backend_json FROM matters WHERE id = ?1",
+            params![self.matter_id],
+            |row| row.get(0),
+        )?;
+        match raw {
+            None => Ok(matter_storage::StorageBackendConfig::local()),
+            Some(s) if s.trim().is_empty() => Ok(matter_storage::StorageBackendConfig::local()),
+            Some(s) => matter_storage::StorageBackendConfig::from_json(&s)
+                .map_err(|e| Error::Other(format!("storage_backend_json: {e}"))),
+        }
+    }
+
+    /// Persist non-secret storage backend config. Rejects secret-looking keys.
+    ///
+    /// Binds `matter_id` to this matter and aligns `tenant_id` with
+    /// `matters.tenant_id` when set (rejects conflicts). Audits redacted fields only.
+    ///
+    /// Storing config is always allowed. **Activating** cloud storage happens on
+    /// the next [`Matter::open`] via `open_blob_store` and **fails closed** without
+    /// feature `cloud-s3` / on open errors (no silent local fallback).
+    pub fn set_storage_backend_config(
+        &self,
+        config: &matter_storage::StorageBackendConfig,
+    ) -> Result<()> {
+        let mut config = config.clone();
+        // F6: always bind matter_id to this matter (overwrite mismatch).
+        if let Some(existing) = config
+            .matter_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if existing != self.matter_id {
+                return Err(Error::Other(format!(
+                    "storage config matter_id '{existing}' does not match this matter '{}'",
+                    self.matter_id
+                )));
+            }
+        }
+        config.matter_id = Some(self.matter_id.clone());
+
+        // Tenant isolation: matter tenant wins; reject conflicts.
+        let matter_tenant = self.get_matter_tenant_id()?;
+        if let Some(mt) = matter_tenant {
+            match config
+                .tenant_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                None => {
+                    config.tenant_id = Some(mt);
+                }
+                Some(ct) if ct == mt => {}
+                Some(ct) => {
+                    return Err(Error::Other(format!(
+                        "storage config tenant_id '{ct}' conflicts with matter tenant_id '{mt}'"
+                    )));
+                }
+            }
+        }
+
+        config
+            .validate()
+            .map_err(|e| Error::Other(format!("storage config: {e}")))?;
+        if config.kind.is_cloud() {
+            let mid = config
+                .matter_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if mid.is_none() {
+                return Err(Error::Other(
+                    "cloud storage config requires matter_id for object key isolation".into(),
+                ));
+            }
+        }
+        let json = config
+            .to_json()
+            .map_err(|e| Error::Other(format!("storage config json: {e}")))?;
+        // Defense in depth: reject secret-looking keys in the serialized form.
+        matter_storage::config::reject_secret_keys_in_json(&json)
+            .map_err(|e| Error::Other(format!("storage config secrets: {e}")))?;
+        self.conn.execute(
+            "UPDATE matters SET storage_backend_json = ?1 WHERE id = ?2",
+            params![json, self.matter_id],
+        )?;
+        let _ = self.append_audit(AuditEventInput {
+            actor: "system".into(),
+            action: "matter.storage_backend.set".into(),
+            entity: format!("matter:{}", self.matter_id),
+            params_json: config.redacted_for_audit().to_string(),
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+        })?;
+        Ok(())
+    }
+
+    /// Job backend kind (`local` default). Remote residual not settable in P0.
+    pub fn get_job_backend_kind(&self) -> Result<matter_storage::JobBackendKind> {
+        let raw: String = self.conn.query_row(
+            "SELECT job_backend_kind FROM matters WHERE id = ?1",
+            params![self.matter_id],
+            |row| row.get(0),
+        )?;
+        matter_storage::JobBackendKind::parse(&raw)
+            .map_err(|e| Error::Other(format!("job_backend_kind: {e}")))
+    }
+
+    /// Set job backend kind. P0 accepts `local` only.
+    pub fn set_job_backend_kind(&self, kind: matter_storage::JobBackendKind) -> Result<()> {
+        self.conn.execute(
+            "UPDATE matters SET job_backend_kind = ?1 WHERE id = ?2",
+            params![kind.as_str(), self.matter_id],
+        )?;
+        let _ = self.append_audit(AuditEventInput {
+            actor: "system".into(),
+            action: "matter.job_backend.set".into(),
+            entity: format!("matter:{}", self.matter_id),
+            params_json: serde_json::json!({ "kind": kind.as_str() }).to_string(),
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+        })?;
+        Ok(())
     }
 
     // --- Jobs / checkpoints ---
@@ -5358,6 +5579,72 @@ impl Matter {
     pub fn verify_audit_chain(&self) -> Result<()> {
         audit::verify_audit_chain(&self.conn)
     }
+}
+
+/// Load storage config after migrate and open remote BlobStore when kind is cloud.
+///
+/// - Local / null → `None` (use host-local [`Cas`] only).
+/// - S3 / Azure → `open_blob_store` with cache; **fail closed** on error (no local fallback).
+fn activate_remote_blobs(
+    root: &Utf8Path,
+    conn: &Connection,
+    matter_id: &str,
+) -> Result<Option<std::sync::Arc<dyn matter_storage::BlobStore>>> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT storage_backend_json FROM matters WHERE id = ?1",
+            params![matter_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let mut cfg = matter_storage::StorageBackendConfig::from_json(&raw)
+        .map_err(|e| Error::Other(format!("storage_backend_json: {e}")))?;
+    if !cfg.kind.is_cloud() {
+        return Ok(None);
+    }
+
+    // Key isolation: always bind this matter's id.
+    cfg.matter_id = Some(matter_id.to_string());
+
+    let matter_tenant: Option<String> = conn
+        .query_row(
+            "SELECT tenant_id FROM matters WHERE id = ?1",
+            params![matter_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .filter(|s| !s.trim().is_empty());
+    if let Some(mt) = matter_tenant {
+        match cfg
+            .tenant_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            None => cfg.tenant_id = Some(mt),
+            Some(ct) if ct == mt => {}
+            Some(ct) => {
+                return Err(Error::Other(format!(
+                    "storage config tenant_id '{ct}' conflicts with matter tenant_id '{mt}'"
+                )));
+            }
+        }
+    }
+
+    cfg.validate()
+        .map_err(|e| Error::Other(format!("storage config: {e}")))?;
+
+    let store = matter_storage::open_blob_store(&cfg, root, true).map_err(|e| {
+        Error::Other(format!(
+            "cloud storage open failed (fail closed — no local CAS fallback): {e}"
+        ))
+    })?;
+    Ok(Some(std::sync::Arc::from(store)))
 }
 
 fn create_layout_dirs(root: &Utf8Path) -> Result<()> {

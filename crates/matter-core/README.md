@@ -7,7 +7,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 3. Append-only audit log with integrity hash chain
 4. Jobs + checkpoints for resumable work
 5. Item-level error accumulator (`item_errors`)
-6. **Normalized Item** model (fields introduced across schema v2–v38; current [`SCHEMA_VERSION`] is **38**) + family graph
+6. **Normalized Item** model (fields introduced across schema v2–v39; current [`SCHEMA_VERSION`] is **39**) + family graph
 7. Pure **logical_hash v1** helpers (length-prefixed preimage; BCC-aware)
 8. Matter-level **dedupe** result columns + transactional batch helpers (0021)
 9. Email **threading** header storage + result columns + batch helpers (0022)
@@ -21,7 +21,7 @@ Library crate that owns the on-disk **matter** store for Dedupe Desk:
 17. **Redaction** regions + true redacted text CAS artifact (0032)
 18. **Office extract** bookkeeping (`office_*`) for OOXML text fill (0033)
 
-Schema version: **38** (`SCHEMA_VERSION`) — prior features through optional encryption (v35 / 0057) plus **multi-user concurrent review** tables (`matter_users`, locks, batches, QC samples, `items.review_version`, `matters.multi_user_enabled`) for track **0058**, plus optional `tenant_id` / OIDC link columns (v37 / **0059**). Production profiles (v38 / **0060**). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`.
+Schema version: **39** (`SCHEMA_VERSION`) — prior features through optional encryption (v35 / 0057) plus **multi-user concurrent review** tables (`matter_users`, locks, batches, QC samples, `items.review_version`, `matters.multi_user_enabled`) for track **0058**, plus optional `tenant_id` / OIDC link columns (v37 / **0059**). Production profiles (v38 / **0060**). Opt-in cloud CAS config (v39 / **0061**): `storage_backend_json` + `job_backend_kind` (default local; no secrets in DB). SQLite is **metadata-only** (no FTS5 primary); Tantivy segments live under `index/` via `matter-search`. See also `matter-storage` for `BlobStore` / S3 feature `cloud-s3`.
 
 ### Multi-user / matter service (0058)
 
@@ -99,6 +99,7 @@ Under a caller-chosen root:
   matter.db                 # SQLite (WAL) or AEAD container when encrypted
   matter.crypto.json        # optional encryption header (0057)
   blobs/sha256/<aa>/<hex>   # CAS — two-hex shard prefix (ciphertext when encrypted)
+  .cache/blobs/             # optional LRU for cloud CAS gets (0061)
   index/                    # Tantivy FTS segments (encrypted Directory when encrypted)
   exports/                  # productions/ (0040), reports/, privilege logs, …
   logs/                     # optional file logs
@@ -141,6 +142,21 @@ Crash residue cannot accumulate across sessions.
 
 Use `put_reader` for multi-GB attachments so callers never hold a full payload
 `Vec<u8>`. Same digest path ⇒ success (idempotent).
+
+### Cloud BlobStore (0061) + encryption
+
+- Desk default continues to use local `Cas` only.
+- Opt-in cloud backends live in `matter-storage` (`BlobStore` trait). Config is
+  stored on `matters.storage_backend_json` (no credentials). **Config alone does not
+  activate cloud** — on `Matter::open`, kind S3/Azure calls `open_blob_store` and
+  routes CAS convenience APIs through the remote store. Open **fails closed** without
+  feature `cloud-s3` / on open errors (no silent local fallback).
+- When `encryption_enabled`: **plaintext** is hashed for the CAS digest; **ciphertext**
+  is stored via **`put_at_digest(plaintext_digest, ciphertext)`**. Plaintext puts use
+  **`put_stream`**. Do not put plaintext case content to S3 without client-side AEAD when encryption is on.
+- Cloud gets use `CachedBlobStore` under matter `.cache/` (when wrap_cache is on) to cut egress.
+- `set_storage_backend_config` binds `matter_id` to this matter and aligns `tenant_id`
+  with `matters.tenant_id` (rejects conflicts).
 
 ## Schema v2 — Normalized Item (P0)
 

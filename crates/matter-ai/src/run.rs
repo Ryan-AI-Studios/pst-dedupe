@@ -746,7 +746,7 @@ fn load_text_head_tail(
         return Ok(String::new());
     }
 
-    let mut file = matter.cas().open_read(digest)?;
+    let mut file = matter.open_read(digest)?;
 
     let mut head_buf = vec![0u8; half];
     let n_head = file.read(&mut head_buf).map_err(matter_core::Error::from)?;
@@ -859,7 +859,7 @@ mod load_text_tests {
         let body = format!("{head}{mid}{tail}");
         assert!(body.len() as u64 > CAP, "fixture must exceed load cap");
 
-        let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+        let digest = matter.put_bytes(body.as_bytes()).expect("cas");
         let loaded = load_text_continuous(&matter, &digest, CAP).expect("load");
         assert!(
             loaded.contains("HEAD_ONLY_PREFIX"),
@@ -893,7 +893,7 @@ mod load_text_tests {
         let mid = "MID_FILL_XXXX ".repeat(20_000);
         let tail = " TAIL_UNIQUE_ZZZ9 hot confidential ending";
         let body = format!("{head}{mid}{tail}");
-        let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+        let digest = matter.put_bytes(body.as_bytes()).expect("cas");
         let loaded = load_text_capped(&matter, &digest, CAP).expect("load");
         assert!(loaded.contains("TAIL_UNIQUE_ZZZ9"));
         assert!(loaded.contains("[TRUNCATED]"));
@@ -915,7 +915,7 @@ mod load_text_tests {
         let body = format!("{prefix}{quote}{after}");
         assert!(body.len() > 200_000);
 
-        let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+        let digest = matter.put_bytes(body.as_bytes()).expect("cas");
         let continuous =
             load_text_continuous(&matter, &digest, MAX_VERIFY_TEXT_BYTES).expect("load");
         assert!(
@@ -953,7 +953,7 @@ mod load_text_tests {
         let mid = "MID_FILL_XXXX ".repeat(20_000);
         let tail = " TAIL_UNIQUE_ZZZ9 hot confidential ending";
         let body = format!("{head}{mid}{tail}");
-        let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+        let digest = matter.put_bytes(body.as_bytes()).expect("cas");
 
         matter
             .update_ai_config(matter_core::UpdateAiMatterConfigInput {

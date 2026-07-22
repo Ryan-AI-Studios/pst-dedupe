@@ -645,7 +645,7 @@ fn load_text_capped(matter: &Matter, digest: &str, max_bytes: u64) -> Result<Str
     match matter.get_bytes_capped(digest, max_bytes) {
         Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
         Err(matter_core::Error::Other(msg)) if msg.contains("exceeds cap") => {
-            let mut file = matter.cas().open_read(digest)?;
+            let mut file = matter.open_read(digest)?;
             let mut buf = vec![0u8; max_bytes as usize];
             let n = file.read(&mut buf).map_err(matter_core::Error::from)?;
             buf.truncate(n);

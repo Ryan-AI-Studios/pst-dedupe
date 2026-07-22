@@ -2840,7 +2840,7 @@ fn ai_suggest_codes_handler_via_process_runner() {
             })
             .expect("enable ai mock");
         let body = b"this is a hot document for the review team";
-        let dig = matter.cas().put_bytes(body).expect("cas");
+        let dig = matter.put_bytes(body).expect("cas");
         matter
             .insert_item(ItemInput {
                 status: item_status::EXTRACTED.into(),

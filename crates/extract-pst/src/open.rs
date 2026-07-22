@@ -81,7 +81,7 @@ pub fn open_pst(matter: &Matter, job_id: &str, spec: &PstOpenSpec) -> Result<Ope
     // Stream CAS → temp (bounded buffer via copy).
     // Create the RAII guard immediately after File::create so every subsequent
     // error path (copy/flush/sync/open) deletes the partial temp file.
-    let mut src = matter.cas().open_read(digest)?;
+    let mut src = matter.open_read(digest)?;
     let mut dst = File::create(temp_path.as_std_path())?;
     let guard = TempFileGuard {
         path: temp_path.as_std_path().to_path_buf(),

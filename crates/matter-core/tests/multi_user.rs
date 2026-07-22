@@ -41,7 +41,7 @@ fn first_code_id(matter: &Matter) -> String {
 
 #[test]
 fn schema_version_is_current() {
-    assert_eq!(SCHEMA_VERSION, 38);
+    assert_eq!(SCHEMA_VERSION, 39);
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("m");
     let matter = Matter::create(&root, "MU").expect("create");

@@ -16,19 +16,20 @@ Target scale: 1M+ emails across multi-gigabyte PSTs.
 
 ---
 
-## Product modes (tracks 0058 / 0059)
+## Product modes (tracks 0058 / 0059 / 0061)
 
-| Mode | How | Auth | Tenancy |
-|---|---|---|---|
-| **Desk solo (default)** | Local `Matter::open` | Free-string actor | None (`tenant_id` null) |
-| **Local multi-user (0058)** | `pst-dedup service serve --matter …` | Matter password users + bearer | None / single matter |
-| **Platform / SSO (0059, opt-in)** | `serve --platform platform.db --matter …` | OIDC Auth Code + PKCE (+ optional local) | `platform.db` control plane + matter `tenant_id` |
+| Mode | How | Auth | Tenancy | Blobs | Jobs |
+|---|---|---|---|---|---|
+| **Desk solo (default)** | Local `Matter::open` | Free-string actor | None (`tenant_id` null) | Local CAS | Local process-runner |
+| **Local multi-user (0058)** | `pst-dedup service serve --matter …` | Matter password users + bearer | None / single matter | Local CAS | Local runner in service |
+| **Platform / SSO (0059, opt-in)** | `serve --platform platform.db --matter …` | OIDC Auth Code + PKCE (+ optional local) | `platform.db` control plane + matter `tenant_id` | Local CAS default | Local runner |
+| **Hosted / cloud (0061, opt-in)** | Explicit storage config + feature-gated binary | Same as multi-user/platform | Optional tenant prefix on object keys | S3-compatible CAS (+ local `.cache/`) | Local runner P0; remote residual via HTTP |
 
 Architecture locks:
 
 - Exclusive OS `.matter.lock` on write-open; OCC `review_version`; item locks + batch checkout; strict actor in service host
-- Matter path must be **local disk** of the host
-- Schema **v38** additive — solo Desk and local password multi-user stay default; platform SSO is opt-in; production profiles (0060) are config packs, not legal compliance
+- Matter **SQLite** path must be **local disk** of the host (never network FS for `matter.db`)
+- Schema **v39** additive — solo Desk and local password multi-user stay default; platform SSO is opt-in; production profiles (0060) are config packs; cloud CAS is opt-in (0061)
 - Isolation = **platform registry + matter boundary** (not a shared multi-tenant `items` table)
 - IdP secrets: env-ref **or** AEAD under Platform Master Key (`PST_DEDUPE_PLATFORM_MASTER_KEY`); never plaintext in DB
 - Registered matter paths must sit under `PLATFORM_STORAGE_ROOT`
@@ -36,7 +37,32 @@ Architecture locks:
 - Explicit logout invalidates session **and** releases that user’s locks/checkouts
 - `TenantKeyProvider` is a stub only (no cloud CMK in 0059; residual D-0057-03)
 
-See `crates/matter-service/README.md` and `crates/matter-platform/README.md`.
+### Dual storage (track 0061)
+
+Desk default is **local filesystem CAS** (`Matter.cas`). Cloud is opt-in via non-secret
+`storage_backend_json` (schema v39). **Storing config alone does not activate cloud.**
+On `Matter::open` / create-reopen, if kind is S3/Azure, matter-core calls
+`matter_storage::open_blob_store` and routes CAS convenience APIs through that
+`BlobStore`. Open **fails closed** if the feature is missing, config is bad, or the
+client cannot open — **no silent local fallback**. Rebuild with
+`--features cloud-s3` (on `matter-storage` / `matter-core`) for hosted pilots.
+
+| Concern | Default | Opt-in hosted |
+|---|---|---|
+| **CAS blobs** | Local `blobs/sha256/<aa>/<hex>` (`matter-core::Cas`) | `matter-storage::BlobStore` (S3 via feature `cloud-s3`) |
+| **SQLite metadata** | Host-local `matter.db` | Still host-local (P0) |
+| **Get cache** | N/A (already local) | Matter-local `.cache/blobs/` LRU (`CachedBlobStore`) |
+| **Put integrity** | Hash while write (CAS) | **`put_stream`** + HashingReader — mismatch aborts/deletes; never trust S3 ETag |
+| **Encrypted put** | Ciphertext under plaintext digest | **`put_at_digest(plaintext_digest, ciphertext)`** (stream hash ≠ key) |
+| **Multipart RAM** | N/A | ≤10 MiB part, ≤2 concurrent (≲~20 MiB peak); abort on all failure paths |
+| **Secrets** | N/A | Env / IAM / keyring only — **not** in matter.db; endpoint userinfo rejected |
+| **Encryption (0057)** | Client-side chunked AEAD on CAS | Unchanged: hash plaintext, put ciphertext via `put_at_digest` |
+| **Remote workers** | N/A | **HTTP to matter-service only** — never remote SQL/NFS SQLite; `JobBackend::complete` residual uses host-local `set_job_terminal_local` |
+| **Feature flags** | (none) | `cloud-s3` on `matter-storage` and optional `matter-core` |
+
+CLI: `pst-dedup matter storage show|set --path … --kind local|s3 …`
+
+See `crates/matter-service/README.md`, `crates/matter-platform/README.md`, and `crates/matter-storage/README.md`.
 
 ## Crate Architecture
 

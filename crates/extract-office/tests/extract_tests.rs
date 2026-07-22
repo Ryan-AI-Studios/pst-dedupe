@@ -815,7 +815,11 @@ fn job_oversized_cas_blob_limit_without_full_load_path() {
     // Plant a real digest path, then extend the file past the cap via set_len
     // (sparse-friendly; avoids allocating 100MiB+ in the test process).
     let digest = matter.put_bytes(b"small-placeholder").unwrap();
-    let path = matter.cas().object_path(&digest).unwrap();
+    let path = matter
+        .cas()
+        .expect("local cas")
+        .object_path(&digest)
+        .unwrap();
     {
         let f = File::options()
             .write(true)

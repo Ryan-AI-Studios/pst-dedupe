@@ -6,6 +6,11 @@ description = "Local multi-user matter HTTP service (track 0058) + optional plat
 license = "LicenseRef-Proprietary"
 license-file = "../../LICENSE"
 
+[features]
+default = []
+# Opt-in S3 BlobStore activation on matter open (pass-through to matter-core).
+cloud-s3 = ["matter-core/cloud-s3"]
+
 [dependencies]
 matter-core = { path = "../matter-core" }
 matter-platform = { path = "../matter-platform" }

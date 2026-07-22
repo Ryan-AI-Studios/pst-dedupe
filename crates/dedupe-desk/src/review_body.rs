@@ -17,7 +17,7 @@ use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use eframe::egui;
-use matter_core::{Cas, Matter};
+use matter_core::Matter;
 
 use crate::html_strip;
 
@@ -180,24 +180,24 @@ pub fn load_body_from_cas(
         return Err("No extracted text".into());
     };
 
-    // Prefer opening through Matter so encrypted CAS decrypts correctly.
-    // Falls back to plain Cas when the matter cannot be opened (e.g. missing
-    // passphrase env for encrypted matters).
-    let mut file = if let Ok(matter) = Matter::open_for_read(matter_root) {
-        matter
-            .cas()
-            .open_read(digest)
-            .map_err(|e| format!("CAS open failed: {e}"))?
-    } else if Matter::is_encrypted_on_disk(matter_root) {
-        return Err(
-            "Matter is encrypted; set PST_DEDUPE_MATTER_PASSPHRASE or open via Desk with passphrase."
-                .into(),
-        );
-    } else {
-        Cas::new(matter_root)
-            .open_read(digest)
-            .map_err(|e| format!("CAS open failed: {e}"))?
+    // Always open through Matter so remote BlobStore (0061) and encryption (0057)
+    // are honoured. Never fall back to bare local Cas — that would silently read
+    // stale local blobs when cloud storage is configured (fail-closed).
+    let matter = match Matter::open_for_read(matter_root) {
+        Ok(m) => m,
+        Err(e) => {
+            if Matter::is_encrypted_on_disk(matter_root) {
+                return Err(
+                    "Matter is encrypted; set PST_DEDUPE_MATTER_PASSPHRASE or open via Desk with passphrase."
+                        .into(),
+                );
+            }
+            return Err(format!("Cannot open matter for CAS read: {e}"));
+        }
     };
+    let mut file = matter
+        .open_read(digest)
+        .map_err(|e| format!("CAS open failed: {e}"))?;
 
     // Read up to cap + 1 to detect truncation without loading multi-GB blobs fully
     // when we only display 2 MiB. We still stop at cap+1.
@@ -250,7 +250,7 @@ mod tests {
         let (_tmp, base) = utf8_temp();
         let root = base.join("matter-body");
         let matter = Matter::create(&root, "Body").expect("create");
-        let digest = matter.cas().put_bytes(b"Hello review body").expect("put");
+        let digest = matter.put_bytes(b"Hello review body").expect("put");
         let item = matter
             .insert_item(ItemInput {
                 status: item_status::EXTRACTED.into(),
@@ -274,10 +274,7 @@ mod tests {
         let (_tmp, base) = utf8_temp();
         let root = base.join("matter-html");
         let matter = Matter::create(&root, "Html").expect("create");
-        let digest = matter
-            .cas()
-            .put_bytes(b"<p>Hello</p><p>World</p>")
-            .expect("put");
+        let digest = matter.put_bytes(b"<p>Hello</p><p>World</p>").expect("put");
         drop(matter);
 
         let (text, _) = load_body_from_cas(&root, None, Some(digest.as_str())).expect("load");

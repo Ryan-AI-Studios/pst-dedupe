@@ -98,7 +98,7 @@ fn sha256_file(path: &std::path::Path) -> String {
 #[test]
 fn schema_v20_production_tables() {
     let (_tmp, matter) = temp_matter("schema-v20");
-    assert_eq!(SCHEMA_VERSION, 38);
+    assert_eq!(SCHEMA_VERSION, 39);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     for table in ["production_sets", "production_items"] {
         let has: bool = matter
@@ -2101,7 +2101,7 @@ fn qc_expand_false_produce_expand_true_is_stale() {
 #[test]
 fn schema_v38_production_profiles_table() {
     let (_tmp, matter) = temp_matter("schema-v38");
-    assert_eq!(SCHEMA_VERSION, 38);
+    assert_eq!(SCHEMA_VERSION, 39);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     let has: bool = matter
         .connection()

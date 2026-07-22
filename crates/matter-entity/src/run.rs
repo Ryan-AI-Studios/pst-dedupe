@@ -562,7 +562,7 @@ fn load_text_capped(matter: &Matter, digest: &str, max_bytes: u64) -> Result<(St
         Ok(bytes) => Ok((String::from_utf8_lossy(&bytes).into_owned(), false)),
         Err(matter_core::Error::Other(msg)) if msg.contains("exceeds cap") => {
             // Truncate: open and read only max_bytes.
-            let mut file = matter.cas().open_read(digest)?;
+            let mut file = matter.open_read(digest)?;
             let mut buf = vec![0u8; max_bytes as usize];
             use std::io::Read;
             let n = file.read(&mut buf).map_err(matter_core::Error::from)?;

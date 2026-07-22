@@ -18,7 +18,7 @@ fn utf8_tempdir() -> (TempDir, camino::Utf8PathBuf) {
 fn schema_version_is_31() {
     let (_tmp, base) = utf8_tempdir();
     let matter = Matter::create(base.join("m"), "AI").expect("create");
-    assert_eq!(SCHEMA_VERSION, 38);
+    assert_eq!(SCHEMA_VERSION, 39);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
 }
 
@@ -309,7 +309,7 @@ fn accept_audit_has_pointers_no_quote_cleartext() {
     let matter = Matter::create(base.join("m"), "AI audit").expect("create");
     let secret_quote = "TOP_SECRET_QUOTE_MUST_NOT_APPEAR_IN_AUDIT_XYZ99";
     let body = format!("prefix {secret_quote} suffix unique_only_here");
-    let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+    let digest = matter.put_bytes(body.as_bytes()).expect("cas");
     let item = matter
         .insert_item(ItemInput {
             status: item_status::EXTRACTED.into(),
@@ -478,7 +478,7 @@ fn accept_reverify_against_cas_sets_unverified_when_quote_missing() {
     let (_tmp, base) = utf8_tempdir();
     let matter = Matter::create(base.join("m"), "AI reverify").expect("create");
     let body = "document body with unique_token_aaa present once";
-    let digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+    let digest = matter.put_bytes(body.as_bytes()).expect("cas");
     let item = matter
         .insert_item(ItemInput {
             status: item_status::EXTRACTED.into(),
@@ -563,7 +563,7 @@ fn accept_stale_text_sha256_flags_unverified_when_quotes_gone() {
     // Current body no longer contains the original quote (re-extract).
     let old_digest = "a".repeat(64);
     let body = "brand new extracted body without prior evidence";
-    let new_digest = matter.cas().put_bytes(body.as_bytes()).expect("cas");
+    let new_digest = matter.put_bytes(body.as_bytes()).expect("cas");
     let item = matter
         .insert_item(ItemInput {
             status: item_status::EXTRACTED.into(),
