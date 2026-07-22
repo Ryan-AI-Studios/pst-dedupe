@@ -23,6 +23,10 @@ struct IngestLimitsJson {
     max_uncompressed_bytes: Option<u64>,
     max_entries: Option<u64>,
     checkpoint_every_n_entries: Option<u64>,
+    /// Max single leaf size (streamed; multi-GB PSTs).
+    max_entry_bytes: Option<u64>,
+    /// Max full-buffer nested ZIP materialize size only.
+    max_entry_buffer_bytes: Option<u64>,
 }
 
 /// Handler for package ingest (`ingest-purview`).
@@ -97,6 +101,12 @@ fn limits_from(params: &IngestParams) -> ExpandLimits {
         }
         if let Some(v) = j.checkpoint_every_n_entries {
             limits.checkpoint_every_n_entries = v;
+        }
+        if let Some(v) = j.max_entry_bytes {
+            limits.max_entry_bytes = v;
+        }
+        if let Some(v) = j.max_entry_buffer_bytes {
+            limits.max_entry_buffer_bytes = v;
         }
     }
     limits

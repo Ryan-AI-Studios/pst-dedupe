@@ -74,7 +74,8 @@ let summary = resume_ingest(&matter, &source_id, &job_id, &limits, Some(&|| canc
 | `max_zip_depth` | 8 |
 | `checkpoint_every_n_entries` | 50 |
 | `checkpoint_every_bytes` | 64 MiB |
-| `max_entry_buffer_bytes` | 256 MiB |
+| `max_entry_bytes` | **20 GiB** (single leaf e.g. multi-GB PST; streamed to CAS) |
+| `max_entry_buffer_bytes` | 512 MiB (full-buffer nested ZIP materialize only) |
 
 Tests use `ExpandLimits::for_tests()` (tiny N, 1-entry checkpoints).
 

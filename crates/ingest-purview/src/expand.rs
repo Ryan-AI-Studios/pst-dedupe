@@ -127,7 +127,25 @@ impl<'a> ExpandSession<'a> {
     }
 
     /// Commit leaf bytes to CAS + inventory; update cursor.
+    ///
+    /// Prefer [`Self::commit_leaf_reader`] for multi-GB leaves (PSTs) so RAM stays
+    /// bounded. This path still enforces [`ExpandLimits::max_entry_bytes`].
     pub fn commit_leaf(&mut self, logical_path: &str, data: &[u8], status: &str) -> Result<()> {
+        let mut cursor = std::io::Cursor::new(data);
+        self.commit_leaf_reader(logical_path, &mut cursor, data.len() as u64, status)
+    }
+
+    /// Stream a leaf into CAS (SHA-256 while writing) + inventory.
+    ///
+    /// Used for loose multi-GB PSTs and large ZIP members so ingest does not
+    /// require `O(file_size)` RAM. `size` is the uncompressed leaf length.
+    pub fn commit_leaf_reader<R: Read>(
+        &mut self,
+        logical_path: &str,
+        reader: &mut R,
+        size: u64,
+        status: &str,
+    ) -> Result<()> {
         if self.cancelled() {
             return Err(Error::Cancelled);
         }
@@ -137,7 +155,6 @@ impl<'a> ExpandSession<'a> {
             return Ok(());
         }
 
-        let size = data.len() as u64;
         if self.cursor.completed_count.saturating_add(1) > self.limits.max_entries {
             return Err(Error::ZipBomb {
                 code: codes::ZIP_BOMB_ENTRIES,
@@ -157,17 +174,18 @@ impl<'a> ExpandSession<'a> {
                 ),
             });
         }
-        if size > self.limits.max_entry_buffer_bytes {
+        if size > self.limits.max_entry_bytes {
             return Err(Error::ZipBomb {
                 code: codes::ZIP_BOMB_SIZE,
                 message: format!(
-                    "entry size {size} exceeds max_entry_buffer_bytes {}",
-                    self.limits.max_entry_buffer_bytes
+                    "entry size {size} exceeds max_entry_bytes {}",
+                    self.limits.max_entry_bytes
                 ),
             });
         }
 
-        let digest = self.matter.put_bytes(data)?;
+        // Stream to CAS — no full multi-GB Vec.
+        let digest = self.matter.put_reader(reader)?;
         self.cas_puts += 1;
 
         // Path-only classify at insert so inventory is immediately filterable (0037).
@@ -187,7 +205,7 @@ impl<'a> ExpandSession<'a> {
             path: Some(logical_path.to_string()),
             native_sha256: Some(digest),
             status: status.into(),
-            size_bytes: Some(data.len() as i64),
+            size_bytes: Some(size as i64),
             file_category: category,
             // Inventory-only row (0016); Normalized Item fields filled by 0018+.
             ..Default::default()
@@ -337,17 +355,25 @@ fn expand_top_level_file(
         return Ok(());
     }
 
-    // Loose file (including .pst): read + CAS.
-    let data = read_file_capped(
-        file_path.as_std_path(),
-        session.limits.max_entry_buffer_bytes,
-    )?;
+    // Loose file (including multi-GB .pst): stream to CAS (no full-file RAM buffer).
+    let meta = std::fs::metadata(file_path.as_std_path()).map_err(Error::Io)?;
+    let size = meta.len();
+    if size > session.limits.max_entry_bytes {
+        return Err(Error::ZipBomb {
+            code: codes::ZIP_BOMB_SIZE,
+            message: format!(
+                "file size {size} exceeds max_entry_bytes {}",
+                session.limits.max_entry_bytes
+            ),
+        });
+    }
+    let mut file = File::open(file_path.as_std_path()).map_err(Error::Io)?;
     let status = if lower.ends_with(".pst") {
         "discovered"
     } else {
         "expanded"
     };
-    session.commit_leaf(logical_name, &data, status)?;
+    session.commit_leaf_reader(logical_name, &mut file, size, status)?;
     if !session
         .cursor
         .completed_top_level
@@ -462,8 +488,18 @@ fn expand_zip_file(
         // Bomb limits are fatal for the job (fail closed).
         check_entry_bomb(session, compressed, uncompressed)?;
 
-        // Nested zip: materialize to temp, recurse; inventory the zip blob too.
+        // Nested zip: still needs a seekable archive — stream container to temp
+        // (bounded by max_entry_buffer_bytes), inventory, then recurse.
         if is_nested_zip {
+            if uncompressed > session.limits.max_entry_buffer_bytes {
+                return Err(Error::ZipBomb {
+                    code: codes::ZIP_BOMB_SIZE,
+                    message: format!(
+                        "nested zip size {uncompressed} exceeds max_entry_buffer_bytes {}",
+                        session.limits.max_entry_buffer_bytes
+                    ),
+                });
+            }
             let data = read_zip_entry(&mut entry, session.limits.max_entry_buffer_bytes)?;
             check_ratio(session, compressed, data.len() as u64)?;
             session.commit_leaf(&logical, &data, "expanded")?;
@@ -480,15 +516,27 @@ fn expand_zip_file(
             continue;
         }
 
-        let data = read_zip_entry(&mut entry, session.limits.max_entry_buffer_bytes)?;
-        check_ratio(session, compressed, data.len() as u64)?;
-
+        // Leaf (including multi-GB PST inside ZIP): stream inflate → CAS.
+        if uncompressed > session.limits.max_entry_bytes {
+            return Err(Error::ZipBomb {
+                code: codes::ZIP_BOMB_SIZE,
+                message: format!(
+                    "entry size {uncompressed} exceeds max_entry_bytes {}",
+                    session.limits.max_entry_bytes
+                ),
+            });
+        }
+        check_ratio(session, compressed, uncompressed)?;
         let status = if lower.ends_with(".pst") {
             "discovered"
         } else {
             "expanded"
         };
-        session.commit_leaf(&logical, &data, status)?;
+        // ZipFile implements Read; stream decompressed bytes into CAS.
+        let mut limited = entry.take(uncompressed.saturating_add(1));
+        session.commit_leaf_reader(&logical, &mut limited, uncompressed, status)?;
+        // Ensure we don't leave residual bytes; take() already bounds read.
+        let _ = limited;
     }
     Ok(())
 }
@@ -601,21 +649,6 @@ fn read_zip_entry<R: Read>(entry: &mut ZipFile<'_, R>, max_bytes: u64) -> Result
             message: "entry read exceeded buffer cap".into(),
         });
     }
-    Ok(buf)
-}
-
-fn read_file_capped(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
-    let meta = std::fs::metadata(path)?;
-    let len = meta.len();
-    if len > max_bytes {
-        return Err(Error::ZipBomb {
-            code: codes::ZIP_BOMB_SIZE,
-            message: format!("file size {len} exceeds buffer cap {max_bytes}"),
-        });
-    }
-    let mut f = File::open(path)?;
-    let mut buf = Vec::with_capacity(len as usize);
-    f.read_to_end(&mut buf)?;
     Ok(buf)
 }
 
