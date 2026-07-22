@@ -24,9 +24,13 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use dedup_engine::format_bytes;
 
+use dedup_engine::integrity::{IntegrityThresholds, ScanMode};
+
 use crate::error::{CliError, CliExit, Result};
 use crate::json_io::emit_error;
-use crate::scan::{collect_dups, resolve_pst_paths, run_scan, write_report, ScanOptions};
+use crate::scan::{
+    collect_dups, evaluate_exit_policy, resolve_pst_paths, run_scan, write_report, ScanOptions,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -71,6 +75,27 @@ enum Commands {
         dups: bool,
         #[arg(long, default_value_t = 50)]
         limit: usize,
+        /// Recoverability mode: `best-effort` (default) or `strict`.
+        #[arg(long, default_value = "best-effort", value_parser = parse_scan_mode)]
+        mode: ScanMode,
+        /// Max skip rate before preflight recommends re-export (default 0.05).
+        #[arg(long, default_value_t = 0.05, value_parser = parse_rate_threshold)]
+        max_skip_rate: f64,
+        /// Max CRC skip rate before re-export recommended (default 0.01).
+        #[arg(long, default_value_t = 0.01, value_parser = parse_rate_threshold)]
+        max_crc_skip_rate: f64,
+        /// Max failed-file rate (default 0.0 = any failed file exceeds).
+        #[arg(long, default_value_t = 0.0, value_parser = parse_rate_threshold)]
+        max_failed_file_rate: f64,
+        /// Allow exit 0 when some inputs failed but recoverable messages exist.
+        #[arg(long)]
+        allow_failed_files: bool,
+        /// Integrity skip/degraded ledger CSV (default: sidecar `*.integrity.csv` when `--csv` set).
+        #[arg(long)]
+        integrity_csv: Option<PathBuf>,
+        /// Cap on JSON skip sample rows (default 10000). Full ledger = integrity CSV.
+        #[arg(long, default_value_t = 10_000)]
+        skip_limit: usize,
     },
 
     /// Inspect PST structure: encryption, folder tree, message counts.
@@ -92,6 +117,21 @@ enum Commands {
         limit: usize,
         #[arg(long)]
         json: bool,
+        /// Recoverability mode: `best-effort` (default) or `strict`.
+        #[arg(long, default_value = "best-effort", value_parser = parse_scan_mode)]
+        mode: ScanMode,
+        #[arg(long, default_value_t = 0.05, value_parser = parse_rate_threshold)]
+        max_skip_rate: f64,
+        #[arg(long, default_value_t = 0.01, value_parser = parse_rate_threshold)]
+        max_crc_skip_rate: f64,
+        #[arg(long, default_value_t = 0.0, value_parser = parse_rate_threshold)]
+        max_failed_file_rate: f64,
+        #[arg(long)]
+        allow_failed_files: bool,
+        #[arg(long)]
+        integrity_csv: Option<PathBuf>,
+        #[arg(long, default_value_t = 10_000)]
+        skip_limit: usize,
     },
 
     /// Matter lifecycle.
@@ -589,14 +629,58 @@ fn run(cli: Cli) -> Result<()> {
             json,
             dups,
             limit,
-        } => cmd_scan(paths, no_tier2, no_attachments, csv, json, dups, limit),
+            mode,
+            max_skip_rate,
+            max_crc_skip_rate,
+            max_failed_file_rate,
+            allow_failed_files,
+            integrity_csv,
+            skip_limit,
+        } => cmd_scan(ScanCliArgs {
+            paths,
+            no_tier2,
+            no_attachments,
+            csv,
+            json,
+            list_dups: dups,
+            limit,
+            mode,
+            max_skip_rate,
+            max_crc_skip_rate,
+            max_failed_file_rate,
+            allow_failed_files,
+            integrity_csv,
+            skip_limit,
+        }),
         Commands::Inspect { path, top, json } => cmd_inspect(path, top, json),
         Commands::Dups {
             paths,
             no_tier2,
             limit,
             json,
-        } => cmd_dups(paths, no_tier2, limit, json),
+            mode,
+            max_skip_rate,
+            max_crc_skip_rate,
+            max_failed_file_rate,
+            allow_failed_files,
+            integrity_csv,
+            skip_limit,
+        } => cmd_dups(ScanCliArgs {
+            paths,
+            no_tier2,
+            no_attachments: false,
+            csv: None,
+            json,
+            list_dups: true,
+            limit,
+            mode,
+            max_skip_rate,
+            max_crc_skip_rate,
+            max_failed_file_rate,
+            allow_failed_files,
+            integrity_csv,
+            skip_limit,
+        }),
         Commands::Matter { cmd } => match cmd {
             MatterCmd::Create {
                 path,
@@ -745,7 +829,26 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
-fn cmd_scan(
+/// Validate preflight rate knobs: finite and in [0.0, 1.0].
+fn parse_rate_threshold(s: &str) -> std::result::Result<f64, String> {
+    let v: f64 = s
+        .parse()
+        .map_err(|_| format!("invalid rate '{s}': expected a number"))?;
+    if !v.is_finite() {
+        return Err(format!("invalid rate '{s}': must be finite (not NaN/Inf)"));
+    }
+    if !(0.0..=1.0).contains(&v) {
+        return Err(format!("invalid rate '{s}': must be in [0.0, 1.0]"));
+    }
+    Ok(v)
+}
+
+fn parse_scan_mode(s: &str) -> std::result::Result<ScanMode, String> {
+    ScanMode::parse(s).ok_or_else(|| format!("invalid mode '{s}': expected best-effort or strict"))
+}
+
+/// Packed CLI args for `scan` / `dups` (avoids too-many-arguments).
+struct ScanCliArgs {
     paths: Vec<PathBuf>,
     no_tier2: bool,
     no_attachments: bool,
@@ -753,67 +856,90 @@ fn cmd_scan(
     json: bool,
     list_dups: bool,
     limit: usize,
-) -> Result<()> {
-    let paths = resolve_pst_paths(&paths)?;
+    mode: ScanMode,
+    max_skip_rate: f64,
+    max_crc_skip_rate: f64,
+    max_failed_file_rate: f64,
+    allow_failed_files: bool,
+    integrity_csv: Option<PathBuf>,
+    skip_limit: usize,
+}
+
+fn cmd_scan(args: ScanCliArgs) -> Result<()> {
+    let paths = resolve_pst_paths(&args.paths)?;
     let opts = ScanOptions {
-        enable_tier2: !no_tier2,
-        include_attachments: !no_attachments,
+        enable_tier2: !args.no_tier2,
+        include_attachments: !args.no_attachments,
+        mode: args.mode,
+        thresholds: IntegrityThresholds {
+            max_skip_rate: args.max_skip_rate,
+            max_crc_skip_rate: args.max_crc_skip_rate,
+            max_failed_file_rate: args.max_failed_file_rate,
+        },
+        allow_failed_files: args.allow_failed_files,
+        integrity_csv: args.integrity_csv,
+        csv: args.csv.clone(),
+        skip_limit: args.skip_limit,
+        retain_rows: args.list_dups,
     };
+    // Artifacts (CSV/integrity) are streamed and flushed inside run_scan before return.
     let outcome = run_scan(&paths, &opts)?;
 
-    if let Some(csv_path) = &csv {
-        if let Some(parent) = csv_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
+    if let Some(csv_path) = &args.csv {
+        // Append summary footer (rows already streamed when csv was set).
         write_report(csv_path, &outcome)?;
     }
 
-    let dup_limit = if limit == 0 { None } else { Some(limit) };
-    let dups = if list_dups || json {
+    let dup_limit = if args.limit == 0 {
+        None
+    } else {
+        Some(args.limit)
+    };
+    let dups = if args.list_dups || args.json {
         collect_dups(&outcome, dup_limit)
     } else {
         Vec::new()
     };
 
-    if outcome.summary.failed_files > 0 {
-        let msg = format!("{} file(s) failed to scan", outcome.summary.failed_files);
-        if json {
-            let payload = serde_json::json!({
-                "ok": false,
-                "error": { "code": "scan_failed", "message": msg },
-                "summary": outcome.summary,
-                "csv": csv.as_ref().map(|p| p.display().to_string()),
-                "duplicates": if list_dups { serde_json::to_value(&dups)? } else { serde_json::Value::Null },
+    let exit_err = evaluate_exit_policy(&outcome.summary, &opts).err();
+
+    if args.json {
+        let ok = exit_err.is_none();
+        let mut payload = serde_json::json!({
+            "ok": ok,
+            "summary": outcome.summary,
+            "csv": args.csv.as_ref().map(|p| p.display().to_string()),
+            "duplicates": if args.list_dups { serde_json::to_value(&dups)? } else { serde_json::Value::Null },
+        });
+        if let Some(msg) = &exit_err {
+            payload["error"] = serde_json::json!({
+                "code": "scan_integrity",
+                "message": msg,
             });
-            println!("{}", serde_json::to_string_pretty(&payload)?);
+        }
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        if let Some(msg) = exit_err {
             return Err(CliError::AlreadyEmitted {
                 message: msg,
                 exit: crate::error::CliExit::Generic,
             });
         }
-        print_summary_text(&outcome.summary);
-        return Err(CliError::Msg(msg));
-    }
-
-    if json {
-        let payload = serde_json::json!({
-            "summary": outcome.summary,
-            "csv": csv.as_ref().map(|p| p.display().to_string()),
-            "duplicates": if list_dups { serde_json::to_value(&dups)? } else { serde_json::Value::Null },
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
 
     print_summary_text(&outcome.summary);
-    if let Some(csv_path) = &csv {
+    if let Some(csv_path) = &args.csv {
         println!("  csv:           {}", csv_path.display());
     }
-    if list_dups {
+    if let Some(ic) = &outcome.summary.integrity_csv {
+        println!("  integrity_csv: {ic}");
+    }
+    if args.list_dups {
         println!();
         print_dups_text(&dups);
+    }
+    if let Some(msg) = exit_err {
+        return Err(CliError::Msg(msg));
     }
     Ok(())
 }
@@ -854,60 +980,83 @@ fn cmd_inspect(path: PathBuf, top: usize, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_dups(paths: Vec<PathBuf>, no_tier2: bool, limit: usize, json: bool) -> Result<()> {
-    let paths = resolve_pst_paths(&paths)?;
+fn cmd_dups(args: ScanCliArgs) -> Result<()> {
+    let paths = resolve_pst_paths(&args.paths)?;
     let opts = ScanOptions {
-        enable_tier2: !no_tier2,
+        enable_tier2: !args.no_tier2,
         include_attachments: true,
+        mode: args.mode,
+        thresholds: IntegrityThresholds {
+            max_skip_rate: args.max_skip_rate,
+            max_crc_skip_rate: args.max_crc_skip_rate,
+            max_failed_file_rate: args.max_failed_file_rate,
+        },
+        allow_failed_files: args.allow_failed_files,
+        integrity_csv: args.integrity_csv,
+        csv: None,
+        skip_limit: args.skip_limit,
+        retain_rows: true,
     };
     let outcome = run_scan(&paths, &opts)?;
-    let dup_limit = if limit == 0 { None } else { Some(limit) };
+    let dup_limit = if args.limit == 0 {
+        None
+    } else {
+        Some(args.limit)
+    };
     let dups = collect_dups(&outcome, dup_limit);
+    let exit_err = evaluate_exit_policy(&outcome.summary, &opts).err();
 
-    if outcome.summary.failed_files > 0 {
-        let msg = format!("{} file(s) failed to scan", outcome.summary.failed_files);
-        if json {
-            let payload = serde_json::json!({
-                "ok": false,
-                "error": { "code": "scan_failed", "message": msg },
-                "summary": outcome.summary,
-                "duplicates": dups,
+    if args.json {
+        let ok = exit_err.is_none();
+        let mut payload = serde_json::json!({
+            "ok": ok,
+            "summary": outcome.summary,
+            "duplicates": dups,
+        });
+        if let Some(msg) = &exit_err {
+            payload["error"] = serde_json::json!({
+                "code": "scan_integrity",
+                "message": msg,
             });
-            println!("{}", serde_json::to_string_pretty(&payload)?);
+        }
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        if let Some(msg) = exit_err {
             return Err(CliError::AlreadyEmitted {
                 message: msg,
                 exit: crate::error::CliExit::Generic,
             });
         }
-        print_summary_text(&outcome.summary);
-        println!();
-        print_dups_text(&dups);
-        return Err(CliError::Msg(msg));
+        return Ok(());
     }
 
-    if json {
-        let payload = serde_json::json!({
-            "summary": outcome.summary,
-            "duplicates": dups,
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else {
-        print_summary_text(&outcome.summary);
-        println!();
-        print_dups_text(&dups);
+    print_summary_text(&outcome.summary);
+    println!();
+    print_dups_text(&dups);
+    if let Some(msg) = exit_err {
+        return Err(CliError::Msg(msg));
     }
     Ok(())
 }
 
 fn print_summary_text(s: &scan::ScanSummary) {
-    println!("=== Dedup summary ({:.2}s) ===", s.duration_secs);
+    println!(
+        "=== Dedup summary ({:.2}s) mode={} schema={} ===",
+        s.duration_secs, s.mode, s.schema
+    );
     for f in &s.files {
         if let Some(err) = &f.error {
-            println!("  FAIL {}: {err}", f.name);
+            let code = f.error_code.map(|c| c.as_str()).unwrap_or("OPEN_FAILED");
+            println!("  FAIL [{}] {}: {err}", code, f.name);
         } else {
             println!(
-                "  {}: {} folders, {} msgs, {} dups, {} skipped",
-                f.name, f.folders, f.messages, f.duplicates, f.skipped
+                "  [{}] {}: {} folders, {} msgs, {} dups, {} skipped, {} degraded",
+                f.status.as_str(),
+                f.name,
+                f.folders,
+                f.messages,
+                f.duplicates,
+                f.skipped,
+                f.degraded_messages
             );
         }
     }
@@ -917,6 +1066,23 @@ fn print_summary_text(s: &scan::ScanSummary) {
     println!("  tier1 hits:    {}", s.tier1_hits);
     println!("  tier2 hits:    {}", s.tier2_hits);
     println!("  skipped:       {}", s.skipped);
+    if !s.skipped_by_reason.is_empty() {
+        println!("  skipped_by_reason: {:?}", s.skipped_by_reason);
+    }
+    println!("  degraded:      {}", s.degraded_messages);
+    if !s.degraded_by_reason.is_empty() {
+        println!("  degraded_by_reason: {:?}", s.degraded_by_reason);
+    }
+    println!("  orphaned:      {}", s.orphaned_messages);
+    println!(
+        "  files:         opened={} partial={} failed={}",
+        s.opened_files, s.partial_files, s.failed_files
+    );
+    println!(
+        "  preflight:     {} {:?}",
+        s.preflight.recommendation.as_str(),
+        s.preflight.reasons
+    );
     println!(
         "  savings:       {} ({})",
         s.savings_bytes,

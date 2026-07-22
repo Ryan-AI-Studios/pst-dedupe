@@ -10,6 +10,9 @@ license-file = "../../LICENSE"
 sha2 = { workspace = true }
 csv = { workspace = true }
 chrono = { workspace = true }
+serde = { workspace = true }
+pst-reader = { path = "../pst-reader" }
 
 [dev-dependencies]
-pst-reader = { path = "../pst-reader" }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
