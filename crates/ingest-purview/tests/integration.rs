@@ -759,3 +759,34 @@ fn ingest_path_wrapper_creates_exactly_one_job() {
     assert_eq!(jobs[0].id, sum.job_id);
     assert_eq!(jobs[0].state, JobState::Succeeded);
 }
+
+/// Multi-MB loose PST must stream to CAS even when full-buffer cap is tiny
+/// (regression: 256 MiB buffer used to reject multi-GB mailboxes).
+#[test]
+fn loose_pst_streams_past_buffer_cap() {
+    let (_tmp, base) = utf8_tempdir();
+    let pst_path = base.join("mailbox.pst");
+    // 1 MiB payload — above max_entry_buffer_bytes=64 KiB, under max_entry_bytes.
+    let payload = vec![0xABu8; 1024 * 1024];
+    fs::write(pst_path.as_std_path(), &payload).expect("write pst");
+
+    let matter = Matter::create(base.join("matter"), "BigPst").expect("matter");
+    let mut limits = ExpandLimits::for_tests();
+    limits.max_entry_buffer_bytes = 64 * 1024;
+    limits.max_entry_bytes = 8 * 1024 * 1024;
+    limits.max_uncompressed_bytes = 16 * 1024 * 1024;
+
+    let sum = ingest_path(&matter, &pst_path, &limits, None).expect("ingest multi-mb pst");
+    assert!(sum.completed);
+    assert_eq!(sum.psts_found, 1);
+    assert_eq!(sum.entries_ok, 1);
+
+    let items = matter.list_items_for_source(&sum.source_id).expect("items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].size_bytes, Some(payload.len() as i64));
+    assert_eq!(items[0].status, "discovered");
+    let dig = items[0].native_sha256.as_deref().expect("digest");
+    let got = matter.get_bytes(dig).expect("cas get");
+    assert_eq!(got.len(), payload.len());
+    assert_eq!(got, payload);
+}

@@ -118,6 +118,8 @@ pub fn ingest_path_on_job(
                 "max_zip_depth": limits.max_zip_depth,
                 "checkpoint_every_n_entries": limits.checkpoint_every_n_entries,
                 "checkpoint_every_bytes": limits.checkpoint_every_bytes,
+                "max_entry_bytes": limits.max_entry_bytes,
+                "max_entry_buffer_bytes": limits.max_entry_buffer_bytes,
             },
             "notes": detected.notes,
         })
