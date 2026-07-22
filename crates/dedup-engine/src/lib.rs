@@ -13,11 +13,17 @@
 pub mod exporter;
 pub mod hasher;
 pub mod index;
+pub mod integrity;
 pub mod report;
 pub mod util;
 
 pub use exporter::export_eml;
 pub use hasher::compute_dedup_keys;
 pub use index::{DedupIndex, DedupResult, DedupTier, MessageRef};
-pub use report::write_csv_report;
+pub use integrity::{
+    compute_preflight, reason_from_pst_error, FileScanStatus, IntegrityCsvWriter, IntegrityReason,
+    IntegrityThresholds, PreflightRecommendation, PreflightReport, ScanMode, SkipRecord,
+    SCAN_INTEGRITY_SCHEMA,
+};
+pub use report::{write_csv_report, StreamingCsvReportWriter};
 pub use util::{filetime_to_unix, format_bytes, truncate_utf8};

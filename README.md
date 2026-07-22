@@ -55,21 +55,35 @@ cargo build --release -p pst-dedup-gui
 # Structure + folder counts
 .\target\release\pst-dedup.exe inspect archive.pst --top 20
 
-# Full dedup summary (machine-readable)
+# Full dedup summary (machine-readable; includes scan_integrity_v1)
 .\target\release\pst-dedup.exe scan archive.pst --json
 
 # Duplicates only
 .\target\release\pst-dedup.exe dups archive.pst --limit 25 --json
 
-# CSV report (+ summary footer)
+# CSV report (+ summary footer) and auto sidecar integrity ledger
 .\target\release\pst-dedup.exe scan archive.pst --csv output\report.csv
+# → also writes output\report.integrity.csv (skips + degraded rows)
 
-# Multiple PSTs
+# Multiple PSTs, best-effort (default) or strict
 .\target\release\pst-dedup.exe scan a.pst b.pst --json --dups --limit 50
+.\target\release\pst-dedup.exe scan a.pst b.pst --mode strict --json
+.\target\release\pst-dedup.exe scan good.pst bad.pst --allow-failed-files --json
 ```
 
-Useful flags: `--no-tier2`, `--no-attachments`, `-v` / `-vv` (logs on stderr).
+Useful flags: `--no-tier2`, `--no-attachments`, `--mode best-effort|strict`,
+`--allow-failed-files`, `--integrity-csv`, `--max-skip-rate`, `--max-crc-skip-rate`,
+`--max-failed-file-rate`, `--skip-limit`, `-v` / `-vv` (logs on stderr).
 For quiet agent runs: `$env:RUST_LOG = 'error'`.
+
+**Scan integrity (track 0065):** classifies recoverable vs skipped messages with stable
+reason codes (`CRC_MISMATCH`, `BODY_TRUNCATED`, `ATTACH_META_FAILED`, …). Default
+`--mode best-effort` keeps degraded attach/body/orphan messages with reasons; `--mode strict`
+skips them and exits non-zero. Preflight recommendation (`ok` / `re_export_recommended` /
+`not_export_ready`) is **guidance only** — this tool never repairs source PSTs.
+**Non-zero exit still flushes** CSV/integrity/JSON artifacts first (safe for automation
+and 0066 force-consume of partial recoverable sets). Empty `folder_path` alone is not
+orphan; use `is_orphaned`. Intentional Tier-2 4KB body preview is **not** `BODY_TRUNCATED`.
 
 ### Headless matter automation (track 0045)
 

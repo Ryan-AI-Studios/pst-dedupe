@@ -1,9 +1,11 @@
 //! CSV report generation for dedup results.
 
-use std::io::Write;
-use std::path::Path;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 
 use crate::index::{DedupResult, MessageRef};
+use crate::integrity::RecoverableIntegrity;
 use crate::util::{filetime_to_unix, format_bytes};
 
 /// A single row in the dedup report.
@@ -13,35 +15,85 @@ pub struct ReportRow {
     pub message: MessageRef,
     /// Dedup result for this message.
     pub result: DedupResult,
+    /// Integrity of this recoverable message (always present; clean if not degraded).
+    pub integrity: RecoverableIntegrity,
 }
 
-/// Write a CSV dedup report to a file.
-///
-/// Columns: Status, Tier, PST File, Folder, Subject, Date, Sender, Size,
-/// Original PST, Original Folder, Original Subject
-pub fn write_csv_report(path: &Path, rows: &[ReportRow]) -> Result<(), Box<dyn std::error::Error>> {
-    let file = std::fs::File::create(path)?;
-    let mut wtr = csv::Writer::from_writer(file);
+const DEDUP_CSV_HEADER: [&str; 14] = [
+    "Status",
+    "Match Tier",
+    "PST File",
+    "Folder",
+    "Subject",
+    "Date (FILETIME)",
+    "Sender",
+    "Size (bytes)",
+    "Original PST",
+    "Original Folder",
+    "Original Subject",
+    // Appended for 0065 integrity (backward-compatible: new columns at end).
+    "IsOrphaned",
+    "Degraded",
+    "DegradedReasons",
+];
 
-    // Header
-    wtr.write_record([
-        "Status",
-        "Match Tier",
-        "PST File",
-        "Folder",
-        "Subject",
-        "Date (FILETIME)",
-        "Sender",
-        "Size (bytes)",
-        "Original PST",
-        "Original Folder",
-        "Original Subject",
-    ])?;
+/// Streaming dedup CSV writer — header once, rows incrementally (O(1) memory).
+pub struct StreamingCsvReportWriter {
+    wtr: csv::Writer<BufWriter<File>>,
+    path: PathBuf,
+    rows_written: u64,
+}
 
-    for row in rows {
+impl StreamingCsvReportWriter {
+    /// Create/truncate dedup CSV and write header.
+    pub fn create(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let file = File::create(&path)?;
+        let mut wtr = csv::Writer::from_writer(BufWriter::new(file));
+        wtr.write_record(DEDUP_CSV_HEADER)?;
+        wtr.flush()?;
+        Ok(Self {
+            wtr,
+            path,
+            rows_written: 0,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn rows_written(&self) -> u64 {
+        self.rows_written
+    }
+
+    /// Write one recoverable report row immediately.
+    pub fn write_row(&mut self, row: &ReportRow) -> Result<(), Box<dyn std::error::Error>> {
+        let is_orphaned = if row.integrity.is_orphaned {
+            "true"
+        } else {
+            "false"
+        };
+        let degraded = if row.integrity.degraded {
+            "true"
+        } else {
+            "false"
+        };
+        let degraded_reasons = row
+            .integrity
+            .degraded_reasons
+            .iter()
+            .map(|r| r.as_str())
+            .collect::<Vec<_>>()
+            .join(";");
         match &row.result {
             DedupResult::Unique => {
-                wtr.write_record([
+                self.wtr.write_record([
                     "Unique",
                     "",
                     &row.message.pst_name,
@@ -53,10 +105,13 @@ pub fn write_csv_report(path: &Path, rows: &[ReportRow]) -> Result<(), Box<dyn s
                     "",
                     "",
                     "",
+                    is_orphaned,
+                    degraded,
+                    &degraded_reasons,
                 ])?;
             }
             DedupResult::DuplicateOf { original, tier } => {
-                wtr.write_record([
+                self.wtr.write_record([
                     "Duplicate",
                     &tier.to_string(),
                     &row.message.pst_name,
@@ -68,11 +123,32 @@ pub fn write_csv_report(path: &Path, rows: &[ReportRow]) -> Result<(), Box<dyn s
                     &original.pst_name,
                     &original.folder_path,
                     &original.subject,
+                    is_orphaned,
+                    degraded,
+                    &degraded_reasons,
                 ])?;
             }
         }
+        self.rows_written += 1;
+        self.wtr.flush()?;
+        Ok(())
     }
 
+    pub fn flush(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.wtr.flush()?;
+        Ok(())
+    }
+}
+
+/// Write a CSV dedup report to a file (batch — retained for compatibility).
+///
+/// Columns: Status, Tier, PST File, Folder, Subject, Date, Sender, Size,
+/// Original PST, Original Folder, Original Subject
+pub fn write_csv_report(path: &Path, rows: &[ReportRow]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut wtr = StreamingCsvReportWriter::create(path)?;
+    for row in rows {
+        wtr.write_row(row)?;
+    }
     wtr.flush()?;
     Ok(())
 }

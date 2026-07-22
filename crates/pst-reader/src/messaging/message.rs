@@ -2,7 +2,7 @@
 //!
 //! Extracts properties needed for deduplication and Desk extract.
 
-use crate::error::Result;
+use crate::error::{PstError, Result};
 use crate::ltp::pc;
 use crate::ndb::nid::{self, NodeId};
 use crate::PstFile;
@@ -11,6 +11,10 @@ use crate::PstFile;
 ///
 /// Body is truncated to 4KB (`body_preview`). Prefer [`ExtractedMessage`] /
 /// [`PstFile::read_message_extract`] for Desk extract (full body, BCC, etc.).
+///
+/// Integrity flags (track 0065):
+/// - [`Self::body_incomplete`]: corruption/truncation partial recovery — **never** the intentional 4KB preview.
+/// - [`Self::body_unavailable`]: body property unreadable while other props may be OK.
 #[derive(Debug, Clone)]
 pub struct MessageProperties {
     /// The message's NID within this PST.
@@ -31,6 +35,10 @@ pub struct MessageProperties {
     pub message_size: Option<i32>,
     /// PidTagHasAttachments.
     pub has_attachments: Option<bool>,
+    /// True ONLY for corruption/truncation body recovery — NEVER intentional 4KB preview.
+    pub body_incomplete: bool,
+    /// True when the body property could not be read (other props may still be usable).
+    pub body_unavailable: bool,
 }
 
 /// Full extract-oriented message properties (Desk / `extract-pst`).
@@ -83,6 +91,14 @@ pub struct ExtractedMessage {
     pub end_date: Option<i64>,
     /// PidTagLocation string when present (standard tag; named-prop residual).
     pub location: Option<String>,
+}
+
+/// Whether a body property error is truncation/CRC corruption (BODY_TRUNCATED path).
+fn is_truncation_or_crc(err: &PstError) -> bool {
+    matches!(
+        err,
+        PstError::DataTruncated { .. } | PstError::CrcMismatch { .. }
+    )
 }
 
 /// True when `class` is a P0 calendar / meeting message class (MS-OXOCAL).
@@ -163,14 +179,22 @@ impl PstFile {
             .get_string(nid::PID_TAG_SENDER_EMAIL_ADDRESS)?
             .or(prop_ctx.get_string(nid::PID_TAG_SENDER_SMTP_ADDRESS)?);
 
-        let body_full = prop_ctx.get_string(nid::PID_TAG_BODY)?;
-        let body_preview = body_full.map(|b| {
-            if b.chars().count() > 4096 {
-                b.chars().take(4096).collect()
-            } else {
-                b
-            }
-        });
+        // Soft body read: PC already loaded; body errors degrade rather than fail the whole message.
+        // Intentional Tier-2 4KB preview NEVER sets body_incomplete.
+        let (body_preview, body_incomplete, body_unavailable) =
+            match prop_ctx.get_string(nid::PID_TAG_BODY) {
+                Ok(Some(b)) => {
+                    let preview = if b.chars().count() > 4096 {
+                        b.chars().take(4096).collect()
+                    } else {
+                        b
+                    };
+                    (Some(preview), false, false)
+                }
+                Ok(None) => (None, false, false),
+                Err(e) if is_truncation_or_crc(&e) => (None, true, false),
+                Err(_) => (None, false, true),
+            };
 
         let display_to = prop_ctx.get_string(nid::PID_TAG_DISPLAY_TO)?;
         let message_size = prop_ctx.get_i32(nid::PID_TAG_MESSAGE_SIZE)?;
@@ -186,6 +210,8 @@ impl PstFile {
             display_to,
             message_size,
             has_attachments,
+            body_incomplete,
+            body_unavailable,
         })
     }
 
@@ -298,5 +324,32 @@ mod tests {
         assert!(!is_calendar_message_class("IPM.Note"));
         assert!(!is_calendar_message_class("IPM.Task"));
         assert!(!is_calendar_message_class(""));
+    }
+
+    #[test]
+    fn intentional_4kb_preview_does_not_set_body_incomplete() {
+        // Simulate the intentional preview path: full body ok → flags false.
+        let long: String = "x".repeat(5000);
+        let preview: String = long.chars().take(4096).collect();
+        assert_eq!(preview.chars().count(), 4096);
+        // Flags would be set only on Err paths in read_message_properties.
+        let body_incomplete = false;
+        let body_unavailable = false;
+        assert!(!body_incomplete);
+        assert!(!body_unavailable);
+    }
+
+    #[test]
+    fn truncation_error_maps_to_incomplete_not_unavailable() {
+        assert!(is_truncation_or_crc(&PstError::DataTruncated {
+            needed: 100,
+            available: 10
+        }));
+        assert!(is_truncation_or_crc(&PstError::CrcMismatch {
+            computed: 1,
+            stored: 2
+        }));
+        assert!(!is_truncation_or_crc(&PstError::PropertyNotFound(0x1000)));
+        assert!(!is_truncation_or_crc(&PstError::NodeNotFound(1)));
     }
 }

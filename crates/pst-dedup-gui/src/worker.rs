@@ -244,6 +244,7 @@ pub fn run_scan(
                 all_rows.push(ReportRow {
                     message: msg_ref,
                     result,
+                    integrity: dedup_engine::integrity::RecoverableIntegrity::clean(),
                 });
 
                 file_messages += 1;
