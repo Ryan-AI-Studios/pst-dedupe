@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 mod heap_test;
@@ -14,52 +14,69 @@ mod heap_test;
 use byteorder::{LittleEndian, WriteBytesExt};
 
 pub mod eml;
+pub mod production;
+
+pub use production::{
+    build_bth_checked, build_pc_v2, build_tc_inline_checked, from_canonical_message,
+    temp_sibling_path, write_unicode_pst, PcValue, WriteMessage, WritePstOpts, WritePstReport,
+};
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-const PST_MAGIC: u32 = 0x4E444221; // "!BDN" LE
-const CLIENT_MAGIC: u16 = 0x4D53; // "SM"
-const UNICODE_VERSION: u16 = 23;
+pub(crate) const PST_MAGIC: u32 = 0x4E444221; // "!BDN" LE
+pub(crate) const CLIENT_MAGIC: u16 = 0x4D53; // "SM"
+pub(crate) const UNICODE_VERSION: u16 = 23;
 
 /// Header size: 564 bytes padded to 4096.
-const HEADER_SIZE: u64 = 4096;
+pub(crate) const HEADER_SIZE: u64 = 4096;
 /// Page size: always 512 bytes.
-const PAGE_SIZE: u64 = 512;
+pub(crate) const PAGE_SIZE: u64 = 512;
 /// Max payload in a data block (8192 - 16 trailer).
-const MAX_BLOCK_DATA: usize = 8176;
+pub(crate) const MAX_BLOCK_DATA: usize = 8176;
 /// Block alignment: 64 bytes.
-const BLOCK_ALIGN: u64 = 64;
+pub(crate) const BLOCK_ALIGN: u64 = 64;
 
 // ── NID Constants ────────────────────────────────────────────────────────────
 
-const NID_MESSAGE_STORE: u64 = 0x21;
-const NID_NAME_TO_ID_MAP: u64 = 0x61;
-const NID_ROOT_FOLDER: u64 = 0x122;
+pub(crate) const NID_MESSAGE_STORE: u64 = 0x21;
+pub(crate) const NID_NAME_TO_ID_MAP: u64 = 0x61;
+pub(crate) const NID_ROOT_FOLDER: u64 = 0x122;
+
+// Fixed MS-PST "template object" NIDs (track 0068 round 9 — verified against
+// learn.microsoft.com MS-PST pages; see `production::write_unicode_pst`
+// doc comments for the exact sources). These are absolute, fixed NIDs — NOT
+// derived via `Layout::alloc_nid` — one top-level node per template, each
+// containing a TCINFO column schema with zero data rows.
+pub(crate) const NID_HIERARCHY_TABLE_TEMPLATE: u64 = 0x60D;
+pub(crate) const NID_CONTENTS_TABLE_TEMPLATE: u64 = 0x60E;
+pub(crate) const NID_ASSOC_CONTENTS_TABLE_TEMPLATE: u64 = 0x60F;
+pub(crate) const NID_SEARCH_CONTENTS_TABLE_TEMPLATE: u64 = 0x610;
 
 // NID types
-const NID_TYPE_NORMAL_FOLDER: u8 = 0x02;
-const NID_TYPE_NORMAL_MESSAGE: u8 = 0x04;
+pub(crate) const NID_TYPE_NORMAL_FOLDER: u8 = 0x02;
+pub(crate) const NID_TYPE_SEARCH_FOLDER: u8 = 0x03;
+pub(crate) const NID_TYPE_NORMAL_MESSAGE: u8 = 0x04;
 
 // ── Property Tags ──────────────────────────────────────────────────────────
 
-const PID_TAG_DISPLAY_NAME: u16 = 0x3001;
-const PID_TAG_SUBJECT: u16 = 0x0037;
-const PID_TAG_CLIENT_SUBMIT_TIME: u16 = 0x0039;
-const PID_TAG_SENDER_EMAIL_ADDRESS: u16 = 0x0C1F;
-const PID_TAG_INTERNET_MESSAGE_ID: u16 = 0x1035;
-const PID_TAG_BODY: u16 = 0x1000;
-const PID_TAG_MESSAGE_SIZE: u16 = 0x0E08;
-const PID_TAG_HAS_ATTACHMENTS: u16 = 0x0E1B;
-const PID_TAG_CONTENT_COUNT: u16 = 0x3602;
-const PID_TAG_LTP_ROW_ID: u16 = 0x67F2;
+pub(crate) const PID_TAG_DISPLAY_NAME: u16 = 0x3001;
+pub(crate) const PID_TAG_SUBJECT: u16 = 0x0037;
+pub(crate) const PID_TAG_CLIENT_SUBMIT_TIME: u16 = 0x0039;
+pub(crate) const PID_TAG_SENDER_EMAIL_ADDRESS: u16 = 0x0C1F;
+pub(crate) const PID_TAG_INTERNET_MESSAGE_ID: u16 = 0x1035;
+pub(crate) const PID_TAG_BODY: u16 = 0x1000;
+pub(crate) const PID_TAG_MESSAGE_SIZE: u16 = 0x0E08;
+pub(crate) const PID_TAG_HAS_ATTACHMENTS: u16 = 0x0E1B;
+pub(crate) const PID_TAG_CONTENT_COUNT: u16 = 0x3602;
+pub(crate) const PID_TAG_LTP_ROW_ID: u16 = 0x67F2;
 
 // ── Property Types ─────────────────────────────────────────────────────────
 
-const PTYP_INTEGER_32: u16 = 0x0003;
-const PTYP_BOOLEAN: u16 = 0x000B;
-const PTYP_INTEGER_64: u16 = 0x0014;
-const PTYP_STRING: u16 = 0x001F;
-const PTYP_TIME: u16 = 0x0040;
+pub(crate) const PTYP_INTEGER_32: u16 = 0x0003;
+pub(crate) const PTYP_BOOLEAN: u16 = 0x000B;
+pub(crate) const PTYP_INTEGER_64: u16 = 0x0014;
+pub(crate) const PTYP_STRING: u16 = 0x001F;
+pub(crate) const PTYP_TIME: u16 = 0x0040;
 
 // ── Error Type ───────────────────────────────────────────────────────────────
 
@@ -71,6 +88,29 @@ pub enum WriterError {
     EmlParse(String),
     #[error("Layout error: {0}")]
     Layout(String),
+    /// A single node/subnode value could not be represented within documented
+    /// XBLOCK/XXBLOCK capacity limits (see `production` module docs).
+    #[error("body/value too large to represent: {0}")]
+    BodyTooLarge(String),
+    /// XBLOCK/XXBLOCK chain allocation exceeded documented capacity limits.
+    #[error("allocation failed: {0}")]
+    AllocationFailed(String),
+    /// Output safety refusal (e.g. destination exists without opt-in overwrite).
+    #[error("refused: {0}")]
+    Refused(String),
+    /// Hard, non-overridable refusal: a path this writer is about to write
+    /// bytes to — either the final destination, or its computed temp-staging
+    /// sibling (see `production::temp_sibling_path`) — matches a
+    /// caller-declared protected *source* input PST (the mandatory
+    /// `protected_source_paths` parameter of `write_unicode_pst`). Checked
+    /// for both paths, independently, before either is ever passed to
+    /// `File::create`.
+    /// Unlike [`WriterError::Refused`], `WritePstOpts::overwrite = true` never
+    /// bypasses this — this project is read-only against PST inputs (see
+    /// spec §3.7 rule 1 / Core Mandate #3) and there is no legitimate reason to
+    /// ever write onto a known input path.
+    #[error("refused: {0} is a protected source input PST; refusing to write onto it (this check cannot be bypassed by `overwrite`)")]
+    RefusedSourceOverwrite(PathBuf),
 }
 
 pub type Result<T> = std::result::Result<T, WriterError>;
@@ -128,7 +168,7 @@ impl Layout {
         }
     }
 
-    fn alloc_bid(&mut self, internal: bool) -> u64 {
+    pub(crate) fn alloc_bid(&mut self, internal: bool) -> u64 {
         loop {
             let bid = self.next_bid_counter;
             self.next_bid_counter += 1;
@@ -212,7 +252,7 @@ impl Layout {
     }
 }
 
-fn align_up(value: u64, alignment: u64) -> u64 {
+pub(crate) fn align_up(value: u64, alignment: u64) -> u64 {
     value.div_ceil(alignment) * alignment
 }
 
@@ -432,14 +472,75 @@ impl HeapBuilder {
         index << 5 // Full HID: hid_type=0, hid_block_index=0, hid_index=index
     }
 
+    /// Allocate a chunk, but refuse (typed error) rather than silently produce an
+    /// oversized/corrupt single-page heap when the projected page (header +
+    /// content so far + this allocation + the not-yet-written HN page map) would
+    /// exceed one physical data block (`MAX_BLOCK_DATA`).
+    ///
+    /// Used by the production write path (`production` module) — callers that hit
+    /// this error should divert the value to a subnode instead of inlining it.
+    pub fn try_alloc(&mut self, bytes: &[u8]) -> Result<u32> {
+        // HNPAGEMAP = cAlloc(2) + cFree(2) + rgibAlloc[(cAlloc+1) * 2].
+        // Bound conservatively for the allocation being added.
+        let projected_alloc_count = self.allocations.len() + 1;
+        let projected_pagemap = 4 + (projected_alloc_count + 1) * 2;
+        let projected = self.data.len() + bytes.len() + projected_pagemap;
+        if projected > MAX_BLOCK_DATA {
+            return Err(WriterError::Layout(format!(
+                "heap page overflow: {projected} bytes would exceed single-block capacity {MAX_BLOCK_DATA} \
+                 (value should be diverted to a subnode instead of inlined)"
+            )));
+        }
+        Ok(self.alloc(bytes))
+    }
+
+    /// Overwrite the 4-byte little-endian value at `field_offset` within the
+    /// allocation identified by `hid` (as returned by `alloc`/`try_alloc`).
+    /// Used to back-patch forward references (e.g. BTH `hidRoot`, TCINFO
+    /// `hnidRows`) once the referenced allocation's HID is known, without
+    /// exposing the private `allocations` bookkeeping to other modules.
+    ///
+    /// Returns a typed [`WriterError::Layout`] (never silently no-ops) if `hid`
+    /// does not identify a known allocation, or if `field_offset..field_offset+4`
+    /// does not fit within that allocation's byte range. Not reachable today
+    /// (every caller patches a HID it allocated moments earlier in the same
+    /// heap), but production-path discipline is `Result` everywhere, not a
+    /// silent no-op on an out-of-range index.
+    pub fn patch_u32(&mut self, hid: u32, field_offset: usize, value: u32) -> Result<()> {
+        let index = ((hid >> 5).saturating_sub(1)) as usize;
+        let (start, end) = *self.allocations.get(index).ok_or_else(|| {
+            WriterError::Layout(format!(
+                "patch_u32: hid 0x{hid:X} does not identify a known heap allocation \
+                 (index {index} out of range)"
+            ))
+        })?;
+        let at = start + field_offset;
+        if at + 4 > end {
+            return Err(WriterError::Layout(format!(
+                "patch_u32: field_offset {field_offset} (byte range {at}..{}) does not fit \
+                 within allocation hid 0x{hid:X}'s bytes ({start}..{end})",
+                at + 4
+            )));
+        }
+        self.data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
     /// Finalize the heap: write page map and patch HNHDR.
     pub fn finalize(&mut self, hid_user_root: u32) -> Vec<u8> {
         let hnpm_offset = self.data.len();
 
-        // HNPAGEMAP: cAlloc(2) + rgibAlloc[(cAlloc+1) × 2]
+        // HNPAGEMAP (MS-PST §2.3.1.5): cAlloc(2) + cFree(2) + rgibAlloc[(cAlloc+1) × 2].
+        // NOTE: this previously omitted `cFree`, which shifted every `rgibAlloc`
+        // read by one slot (the reader — `pst_reader::ltp::hn::Heap::get` —
+        // always reads cAlloc(2)+cFree(2) before rgibAlloc) and silently
+        // resolved every HID to the *next* allocation's bytes instead of its
+        // own. Fixed as part of track 0068 (found while building the
+        // production write path's round-trip tests).
         let c_alloc = self.allocations.len() as u16;
         self.data.extend_from_slice(&c_alloc.to_le_bytes());
-        // rgibAlloc[0] = start of allocatable space = 12 (after HNHDR)
+        self.data.extend_from_slice(&0u16.to_le_bytes()); // cFree — unused by the reader
+                                                          // rgibAlloc[0] = start of allocatable space = 12 (after HNHDR)
         self.data.extend_from_slice(&12u16.to_le_bytes());
         // rgibAlloc[i] = end of allocation i
         for (_, end) in &self.allocations {

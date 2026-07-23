@@ -139,6 +139,15 @@ impl NbtIndex {
     pub fn iter(&self) -> impl Iterator<Item = (&u64, &NbtEntry)> {
         self.entries.iter()
     }
+
+    /// Test-only constructor: build an index directly from entries, bypassing
+    /// real on-disk B-tree page parsing. Used by unit tests elsewhere in this
+    /// crate (e.g. `ltp::pc`) that need a minimal synthetic NBT without
+    /// constructing full MS-PST page/trailer bytes.
+    #[cfg(test)]
+    pub(crate) fn from_entries_for_test(entries: HashMap<u64, NbtEntry>) -> Self {
+        Self { entries }
+    }
 }
 
 impl BbtIndex {
@@ -222,5 +231,14 @@ impl BbtIndex {
     /// Check if the index is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Test-only constructor: build an index directly from entries, bypassing
+    /// real on-disk B-tree page parsing. Used by unit tests elsewhere in this
+    /// crate (e.g. `ltp::pc`) that need a minimal synthetic BBT without
+    /// constructing full MS-PST page/trailer bytes.
+    #[cfg(test)]
+    pub(crate) fn from_entries_for_test(entries: HashMap<u64, BbtEntry>) -> Self {
+        Self { entries }
     }
 }

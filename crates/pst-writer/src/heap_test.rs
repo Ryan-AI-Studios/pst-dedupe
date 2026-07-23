@@ -28,7 +28,8 @@ mod tests {
 
         assert!(c_alloc > 0 && c_alloc < 100, "cAlloc should be reasonable");
 
-        let rgib_start = ib_hnpm as usize + 2;
+        // HNPAGEMAP = cAlloc(2) + cFree(2) + rgibAlloc[...] — skip both fields.
+        let rgib_start = ib_hnpm as usize + 4;
         let expected_c_alloc = 7; // 4 strings + time + BTH header + BTH leaf records
         assert_eq!(c_alloc, expected_c_alloc, "wrong number of allocations");
 

@@ -12,6 +12,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 base64 = "0.22"
+dedup-engine = { path = "../dedup-engine" }
 
 [dev-dependencies]
 pst-reader = { path = "../pst-reader" }
