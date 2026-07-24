@@ -44,6 +44,10 @@ pub fn resolve_cli_path(path: impl AsRef<Path>) -> Result<Utf8PathBuf> {
 /// Resolve a CLI path that may not exist yet (create parent may be needed later).
 ///
 /// Uses CWD join + `dunce`-style absolute without requiring the path to exist.
+/// When the leaf is missing but a parent directory exists, the nearest existing
+/// ancestor is canonicalized (resolves junctions/symlinks) and the relative
+/// remainder is rejoined — so source-immutability guards compare filesystem
+/// identity rather than only textual paths.
 pub fn resolve_cli_path_maybe_missing(path: impl AsRef<Path>) -> Result<Utf8PathBuf> {
     let p = path.as_ref();
     let abs = if p.is_absolute() {
@@ -53,13 +57,40 @@ pub fn resolve_cli_path_maybe_missing(path: impl AsRef<Path>) -> Result<Utf8Path
             .map_err(|e| CliError::Usage(format!("cannot resolve path relative to CWD: {e}")))?;
         cwd.join(p)
     };
-    // Prefer canonicalize when path exists; else absolutize components.
-    let resolved = if abs.exists() {
-        std::fs::canonicalize(&abs).unwrap_or_else(|_| normalize_abs(&abs))
-    } else {
-        normalize_abs(&abs)
-    };
+    let resolved = resolve_existing_or_parent_canon(&abs);
     path_buf_to_utf8(resolved)
+}
+
+/// Prefer full canonicalize when `path` exists; otherwise canonicalize the
+/// nearest existing ancestor and rejoin the missing suffix (junction-safe).
+fn resolve_existing_or_parent_canon(path: &Path) -> PathBuf {
+    if path.exists() {
+        return std::fs::canonicalize(path).unwrap_or_else(|_| normalize_abs(path));
+    }
+    // Walk up to nearest existing ancestor; rejoin missing components.
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path.to_path_buf();
+    while let Some(name) = cur.file_name() {
+        missing.push(name.to_os_string());
+        let Some(parent) = cur.parent() else {
+            break;
+        };
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        if parent.exists() {
+            let mut base = std::fs::canonicalize(parent).unwrap_or_else(|_| normalize_abs(parent));
+            for component in missing.iter().rev() {
+                base.push(component);
+            }
+            return base;
+        }
+        if parent == cur {
+            break;
+        }
+        cur = parent.to_path_buf();
+    }
+    normalize_abs(path)
 }
 
 fn normalize_abs(path: &Path) -> PathBuf {
@@ -118,11 +149,33 @@ pub fn paths_equal(a: &Path, b: &Path) -> bool {
     normalize_for_compare(a) == normalize_for_compare(b)
 }
 
+/// Path equality that also resolves existing parents (junction/symlink-aware).
+///
+/// When a leaf does not exist, compares `(canonicalized_parent, file_name)` so
+/// an output under a directory junction that targets a source directory is still
+/// detected as equal to the source file. Falls back to [`paths_equal`] when
+/// parent canonicalization is unavailable.
+pub fn paths_equal_resolved(a: &Path, b: &Path) -> bool {
+    if paths_equal(a, b) {
+        return true;
+    }
+    let ra = resolve_existing_or_parent_canon(a);
+    let rb = resolve_existing_or_parent_canon(b);
+    paths_equal(&ra, &rb)
+}
+
 /// True when `path` is equal to `root`, or is a descendant of `root` (component-wise).
 pub fn is_same_or_under(path: &Path, root: &Path) -> bool {
     let path = normalize_for_compare(path);
     let root = normalize_for_compare(root);
     path == root || path.starts_with(&root)
+}
+
+/// Like [`is_same_or_under`] but parent-canonicalizes both sides first.
+pub fn is_same_or_under_resolved(path: &Path, root: &Path) -> bool {
+    let path = resolve_existing_or_parent_canon(path);
+    let root = resolve_existing_or_parent_canon(root);
+    is_same_or_under(&path, &root)
 }
 
 fn path_buf_to_utf8(p: PathBuf) -> Result<Utf8PathBuf> {
@@ -269,5 +322,52 @@ mod tests {
             "got {}",
             n.display()
         );
+    }
+
+    #[test]
+    fn paths_equal_resolved_matches_parent_canon_plus_name() {
+        // Textual equality still works without filesystem.
+        assert!(paths_equal_resolved(
+            Path::new(r"C:\export\unique.pst"),
+            Path::new(r"C:\export\unique.pst")
+        ));
+        if cfg!(windows) {
+            assert!(paths_equal_resolved(
+                Path::new(r"C:\export\Unique.pst"),
+                Path::new(r"c:\export\unique.pst")
+            ));
+        }
+        // (parent, name) form: same logical leaf under different normalization.
+        let a = Path::new(r"C:\data\out\mail.pst");
+        let b = Path::new(r"C:\data\out\.\mail.pst");
+        assert!(paths_equal_resolved(a, b) || paths_equal(a, b));
+    }
+
+    #[test]
+    fn resolve_missing_leaf_rejoins_filename() {
+        let dir = std::env::temp_dir().join(format!("pst_dedupe_path_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let missing = dir.join("does_not_exist_yet.pst");
+        let resolved = resolve_existing_or_parent_canon(&missing);
+        // Parent should be real; leaf name preserved.
+        assert_eq!(
+            resolved
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned()),
+            Some("does_not_exist_yet.pst".to_string())
+        );
+        // Canonical parent should match canonicalize(dir) when possible.
+        if let (Ok(canon_dir), Some(parent)) = (std::fs::canonicalize(&dir), resolved.parent()) {
+            let parent_norm = strip_verbatim_prefix(parent);
+            let canon_norm = strip_verbatim_prefix(&canon_dir);
+            assert!(
+                paths_equal(&parent_norm, &canon_norm),
+                "parent={} expected={}",
+                parent_norm.display(),
+                canon_norm.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

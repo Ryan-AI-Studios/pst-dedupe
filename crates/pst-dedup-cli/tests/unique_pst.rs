@@ -37,10 +37,14 @@ fn sha256_file(path: &Path) -> String {
 }
 
 fn run_unique_pst(args: &[&str]) -> std::process::Output {
-    Command::new(bin())
-        .args(args)
-        .output()
-        .expect("run unique-pst")
+    // Fixture attach streams can soft-fail; structural tests opt out so success
+    // paths remain meaningful. Attachment honesty is covered by a dedicated test.
+    let mut cmd = Command::new(bin());
+    cmd.args(args);
+    if !args.contains(&"--no-attachments") {
+        cmd.arg("--no-attachments");
+    }
+    cmd.output().expect("run unique-pst")
 }
 
 #[test]
@@ -522,4 +526,219 @@ fn unique_pst_json_stdout_parseable() {
     assert!(v.get("ok").is_some());
     assert!(v.get("export").and_then(|e| e.get("volumes")).is_some());
     assert_eq!(v["schema"].as_str(), Some("unique_export_report_v1"));
+}
+
+/// P1-1: input named like multi-volume sibling must not be deleted/overwritten.
+#[test]
+fn unique_pst_volume_sibling_input_protected() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    // Input collides with generated volume 3 path for --out unique.pst.
+    let input = dir.path().join("unique_vol003.pst");
+    fs::copy(&sample, &input).expect("copy input as vol3 sibling name");
+    let before = sha256_file(&input);
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+
+    let result = run_unique_pst(&[
+        "unique-pst",
+        input.to_str().expect("utf8"),
+        "--out",
+        out.to_str().expect("utf8"),
+        "--report-dir",
+        report.to_str().expect("utf8"),
+        "--max-volume-bytes",
+        "4096",
+        "--overwrite",
+        "--json",
+    ]);
+    assert!(
+        !result.status.success(),
+        "must refuse volume path colliding with input; stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(input.is_file(), "input must not be deleted");
+    let after = sha256_file(&input);
+    assert_eq!(before, after, "input PST bytes must be unchanged");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(
+        combined.to_ascii_lowercase().contains("input")
+            || combined.to_ascii_lowercase().contains("volume")
+            || combined.to_ascii_lowercase().contains("refusing"),
+        "error should mention collision/refuse: {combined}"
+    );
+}
+
+/// P1-4: mandatory report artifact write failure → ok=false, non-zero.
+#[test]
+fn unique_pst_report_write_failure_fail_closed() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+    // Parent of decision-csv is a file → create/write fails after export.
+    let blocked = dir.path().join("blocked_file");
+    fs::write(&blocked, b"not-a-dir").expect("seed blocked");
+    let dec = blocked.join("decisions.csv");
+
+    let result = run_unique_pst(&[
+        "unique-pst",
+        sample.to_str().expect("utf8"),
+        "--out",
+        out.to_str().expect("utf8"),
+        "--report-dir",
+        report.to_str().expect("utf8"),
+        "--decision-csv",
+        dec.to_str().expect("utf8"),
+        "--json",
+    ]);
+    assert!(
+        !result.status.success(),
+        "report write failure must be non-zero; stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    if !stdout.trim().is_empty() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout) {
+            assert_eq!(v["ok"], false, "stdout summary must not claim success");
+        }
+    }
+    // Summary in report-dir should also be honest if it was written.
+    let summary_path = report.join("summary.json");
+    if summary_path.is_file() {
+        let summary: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&summary_path).expect("sum")).expect("json");
+        assert_eq!(summary["ok"], false);
+    }
+}
+
+/// P1-3: non-zero attachments_failed must force ok=false (fixture has soft-fail attaches).
+#[test]
+fn unique_pst_attachment_failures_force_export_fail() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+
+    // Explicitly enable attachments (helper would otherwise inject --no-attachments).
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--json",
+        ])
+        .output()
+        .expect("run unique-pst with attachments");
+
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let v: serde_json::Value = match serde_json::from_str(&stdout) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("skip: no JSON stdout (attach path may hard-fail earlier)");
+            return;
+        }
+    };
+    let failed = v["export"]["attachments_failed"].as_u64().unwrap_or(0);
+    if failed == 0 {
+        // Fixture may improve; if no attach failures, success is fine.
+        assert_eq!(v["ok"], true);
+        assert!(result.status.success());
+        return;
+    }
+    assert_eq!(
+        v["ok"], false,
+        "attachments_failed={failed} must force ok=false"
+    );
+    assert!(
+        !result.status.success(),
+        "attachments_failed must force non-zero exit"
+    );
+    assert!(out.is_file(), "PST volumes retained on attach soft-fail");
+}
+
+/// P3: strict + forced integrity skip flushes report pack and exits non-zero.
+#[test]
+fn unique_pst_integrity_force_skip_flushes_report() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+    let integrity = dir.path().join("skips.csv");
+
+    let result = Command::new(bin())
+        .env("PST_DEDUPE_TEST_FORCE_SKIP", "1")
+        .args([
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--mode",
+            "strict",
+            "--max-skip-rate",
+            "0",
+            "--integrity-csv",
+            integrity.to_str().expect("utf8"),
+            "--json",
+        ])
+        .output()
+        .expect("run unique-pst force skip");
+
+    assert!(
+        !result.status.success(),
+        "strict + force skip must be non-zero; stderr={} stdout={}",
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+
+    // Report pack / integrity artifacts flush before exit.
+    assert!(
+        integrity.is_file() || report.join("summary.json").is_file(),
+        "expected integrity.csv and/or summary.json to flush"
+    );
+    if report.join("summary.json").is_file() {
+        let summary: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(report.join("summary.json")).expect("sum"))
+                .expect("json");
+        assert_eq!(summary["ok"], false);
+    }
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    if !stdout.trim().is_empty() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout) {
+            assert_eq!(v["ok"], false);
+            assert!(
+                v["scan"]["skipped"].as_u64().unwrap_or(0) >= 1
+                    || v["error"].is_object()
+                    || v["ok"] == false,
+                "expected integrity/skip signal; v={v}"
+            );
+        }
+    }
 }

@@ -28,7 +28,10 @@ use pst_writer::{
 use sha2::{Digest, Sha256};
 
 use crate::error::{CliError, Result};
-use crate::paths::{is_same_or_under, paths_equal, resolve_cli_path_maybe_missing};
+use crate::paths::{
+    is_same_or_under, is_same_or_under_resolved, paths_equal, paths_equal_resolved,
+    resolve_cli_path_maybe_missing,
+};
 use crate::pst_materializer::{PstAttachStreamSource, PstMaterializer};
 use crate::scan::{evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions};
 use crate::unique_export_report::{
@@ -36,6 +39,9 @@ use crate::unique_export_report::{
     write_volumes_csv, ExportMessageRow, ExportSection, SummaryError, UniqueExportSummary,
     VerificationReport, VolumeReportRow, VolumeVerification, UNIQUE_EXPORT_REPORT_SCHEMA,
 };
+
+/// Max volume index considered for stale-sibling cleanup and collision guards.
+const MAX_VOLUME_SIBLING_INDEX: u32 = 999;
 
 /// Clap surface for `unique-pst` (tuple-variant keeps `Commands` smaller on stack).
 #[derive(Debug, Args)]
@@ -233,6 +239,7 @@ struct PreparedWinner {
     message_id_norm: String,
     edrm_mih: String,
     content_hash_hex: String,
+    subject: String,
     write_msg: WriteMessage,
 }
 
@@ -411,6 +418,13 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
 
     // Remove stale primary out if overwrite.
     if out.exists() && args.overwrite {
+        // Re-check collision after report-dir prep (inputs must never be deleted).
+        if path_collides_with_inputs(&out, &paths) {
+            return Err(CliError::Usage(format!(
+                "refusing to overwrite --out that equals an input PST: {}",
+                out.display()
+            )));
+        }
         if out.is_file() {
             fs::remove_file(&out).map_err(|e| {
                 CliError::Msg(format!("remove existing --out {}: {e}", out.display()))
@@ -423,8 +437,9 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
         }
     }
     // Clear stale multi-volume siblings on overwrite so prior runs don't linger.
+    // Never deletes paths that equal/contain inputs; refuses if any sibling collides.
     if args.overwrite {
-        clear_stale_volume_siblings(&out)?;
+        clear_stale_volume_siblings(&out, &paths)?;
     }
 
     let eprint = |msg: &str| {
@@ -470,7 +485,14 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
     );
 
     eprint("stage=materialize");
-    let mut mat = PstMaterializer::new(args.family_policy);
+    // `--no-attachments` forces parents-only materialize/write so attach streams
+    // are not opened (scan already omitted attach metadata when the flag is set).
+    let effective_family = if args.no_attachments {
+        FamilyPolicy::ParentsOnly
+    } else {
+        args.family_policy
+    };
+    let mut mat = PstMaterializer::new(effective_family);
     let mut attach_src = PstAttachStreamSource::new();
     let _materialized_count =
         finalize_with_materialize(&mut resolved, &mut mat, &mut |_msg| Ok(()))
@@ -497,7 +519,7 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
             folder_display_name: "Unique Mail".to_string(),
         },
     };
-    let parents_only = args.family_policy == FamilyPolicy::ParentsOnly;
+    let parents_only = effective_family == FamilyPolicy::ParentsOnly || args.no_attachments;
 
     let write_opts_base = WritePstOpts {
         folder_display_name: "Unique Mail".to_string(),
@@ -526,6 +548,17 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
         volume_index += 1;
         let vol_path = volume_path_for(&out, volume_index);
 
+        // Source protection: never write/delete a volume path that collides with input.
+        if path_collides_with_inputs(&vol_path, &paths) {
+            export_partial = true;
+            export_error = Some(format!(
+                "refusing volume path equal to an input PST: {}",
+                vol_path.display()
+            ));
+            failed_volume_index = Some(volume_index);
+            break;
+        }
+
         // Refuse existing secondary volumes without overwrite.
         if vol_path.exists() && !args.overwrite {
             export_partial = true;
@@ -537,6 +570,15 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
             break;
         }
         if vol_path.exists() && args.overwrite {
+            if path_collides_with_inputs(&vol_path, &paths) {
+                export_partial = true;
+                export_error = Some(format!(
+                    "refusing to overwrite volume path equal to an input PST: {}",
+                    vol_path.display()
+                ));
+                failed_volume_index = Some(volume_index);
+                break;
+            }
             if vol_path.is_file() {
                 if let Err(e) = fs::remove_file(&vol_path) {
                     export_partial = true;
@@ -620,6 +662,7 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
                         volume_path: vol_path.display().to_string(),
                         volume_index,
                         export_message_index,
+                        subject: p.subject.clone(),
                     });
                 }
 
@@ -674,6 +717,13 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
         ));
     }
 
+    // Attachment stream failures: PST retained (not corrupt) but export is honesty-fail.
+    if attach_failed_total > 0 && export_error.is_none() {
+        export_error = Some(format!(
+            "attachment write failures: {attach_failed_total} (export incomplete fidelity)"
+        ));
+    }
+
     let messages_written_total: u64 = volumes.iter().map(|v| v.messages_written).sum();
     let count_mismatch = messages_written_total != keep_set.stats.unique && !export_partial;
     if count_mismatch {
@@ -686,19 +736,28 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
 
     // ── Phase 4: report pack (always flush before exit) ─────────────────────
     eprint("stage=report");
+    let mut report_write_errors: Vec<String> = Vec::new();
     let mut decision_csv_out: Option<String> = None;
     if let Some(path) = &decision_csv {
         match DecisionCsvWriter::create(path) {
             Ok(mut wtr) => {
                 if let Err(e) = resolved.write_decisions_csv(&mut wtr) {
-                    tracing::warn!(error = %e, "decision csv write failed");
+                    let msg = format!("decision csv write failed: {e}");
+                    tracing::warn!("{msg}");
+                    report_write_errors.push(msg);
                 } else if let Err(e) = wtr.flush() {
-                    tracing::warn!(error = %e, "decision csv flush failed");
+                    let msg = format!("decision csv flush failed: {e}");
+                    tracing::warn!("{msg}");
+                    report_write_errors.push(msg);
                 } else {
                     decision_csv_out = Some(path.display().to_string());
                 }
             }
-            Err(e) => tracing::warn!(error = %e, "decision csv create failed"),
+            Err(e) => {
+                let msg = format!("decision csv create failed: {e}");
+                tracing::warn!("{msg}");
+                report_write_errors.push(msg);
+            }
         }
     }
 
@@ -706,26 +765,33 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
     if let Some(path) = &keep_set_json {
         match write_keep_set_json(path, &keep_set) {
             Ok(()) => keep_set_json_out = Some(path.display().to_string()),
-            Err(e) => tracing::warn!(error = %e, "keepset.json write failed"),
+            Err(e) => {
+                let msg = format!("keepset.json write failed: {e}");
+                tracing::warn!("{msg}");
+                report_write_errors.push(msg);
+            }
         }
     }
 
     let volumes_csv_path = report_dir.join("volumes.csv");
     if let Err(e) = write_volumes_csv(&volumes_csv_path, &volumes) {
-        tracing::warn!(error = %e, "volumes.csv write failed");
+        let msg = format!("volumes.csv write failed: {e}");
+        tracing::warn!("{msg}");
+        report_write_errors.push(msg);
     }
 
-    // export_messages.csv mandatory when ≥1 message written.
+    // export_messages.csv mandatory (always attempt; empty header when zero winners).
     let export_messages_path = report_dir.join("export_messages.csv");
     if messages_written_total > 0 || !export_rows.is_empty() {
         if let Err(e) = write_export_messages_csv(&export_messages_path, &export_rows) {
-            tracing::warn!(error = %e, "export_messages.csv write failed");
+            let msg = format!("export_messages.csv write failed: {e}");
+            tracing::warn!("{msg}");
+            report_write_errors.push(msg);
         }
-    } else {
-        // Still write empty file with header for pack completeness when zero winners.
-        if let Err(e) = write_export_messages_csv(&export_messages_path, &[]) {
-            tracing::warn!(error = %e, "export_messages.csv write failed");
-        }
+    } else if let Err(e) = write_export_messages_csv(&export_messages_path, &[]) {
+        let msg = format!("export_messages.csv write failed: {e}");
+        tracing::warn!("{msg}");
+        report_write_errors.push(msg);
     }
 
     // ── Phase 5: verify completed volumes ───────────────────────────────────
@@ -747,16 +813,32 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
         Some("verification failed".to_string())
     };
     let export_err = export_error.clone();
+    let report_err_msg = if report_write_errors.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "mandatory report artifact write failed ({}): {}",
+            report_write_errors.len(),
+            report_write_errors.join("; ")
+        ))
+    };
 
-    let ok = exit_err.is_none()
-        && verify_err.is_none()
-        && export_err.is_none()
-        && !export_partial
-        && messages_written_total == keep_set.stats.unique;
+    let ok = compute_export_ok(ExportOkInput {
+        scan_ok: exit_err.is_none(),
+        verify_ok: verify_err.is_none(),
+        export_err_absent: export_err.is_none(),
+        export_partial,
+        messages_written_total,
+        unique: keep_set.stats.unique,
+        attach_failed_total,
+        report_ok: report_write_errors.is_empty(),
+    });
 
     let summary_error = if !ok {
         let (code, message) = if let Some(msg) = export_err.as_ref() {
             ("export", msg.clone())
+        } else if let Some(msg) = report_err_msg.as_ref() {
+            ("report", msg.clone())
         } else if let Some(msg) = verify_err.as_ref() {
             ("verification", msg.clone())
         } else if let Some(msg) = exit_err.as_ref() {
@@ -802,13 +884,35 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
     };
 
     let summary_path = report_dir.join("summary.json");
+    // Fail-closed: if summary.json itself fails, force non-success exit even if
+    // summary.ok was true (re-emit corrected summary is impossible; exit non-zero).
+    let mut summary_write_failed: Option<String> = None;
     if let Err(e) = write_summary_json(&summary_path, &summary) {
-        tracing::warn!(error = %e, "summary.json write failed");
+        let msg = format!("summary.json write failed: {e}");
+        tracing::warn!("{msg}");
+        summary_write_failed = Some(msg);
     }
+    let ok = ok && summary_write_failed.is_none();
+    let summary_error = match (ok, summary_write_failed, summary_error) {
+        (false, Some(msg), None) => Some(SummaryError {
+            code: "report".to_string(),
+            message: msg,
+        }),
+        (_, _, existing) => existing,
+    };
 
     // ── Phase 6: exit ───────────────────────────────────────────────────────
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&summary)?);
+        // If summary.json failed after we already built a true-ok summary, patch
+        // ok in the stdout JSON so operators never see a false success signal.
+        let mut stdout_summary = summary;
+        if !ok {
+            stdout_summary.ok = false;
+            if stdout_summary.error.is_none() {
+                stdout_summary.error = summary_error.clone();
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&stdout_summary)?);
         if !ok {
             let msg = summary_error
                 .map(|e| e.message)
@@ -881,6 +985,7 @@ fn prepare_winner(
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
 
+    let subject = write_msg.subject.clone();
     Ok(PreparedWinner {
         source_path: entry.locus.source_path.clone(),
         folder_path: entry.locus.folder_path.clone(),
@@ -888,6 +993,7 @@ fn prepare_winner(
         message_id_norm: entry.message_id_norm.clone().unwrap_or_default(),
         edrm_mih: entry.edrm_mih_hex.clone().unwrap_or_default(),
         content_hash_hex,
+        subject,
         write_msg,
     })
 }
@@ -904,12 +1010,29 @@ fn delete_incomplete_volume(vol_path: &Path) {
     // If vol_path is a directory (fail-injection), leave it — we didn't create a PST there.
 }
 
-fn clear_stale_volume_siblings(out: &Path) -> Result<()> {
-    // Remove out_vol002.pst, out_vol003.pst, ... that exist as files.
-    for i in 2u32..=999 {
+/// Remove stale multi-volume siblings (`out_vol002.pst` …) when overwriting.
+///
+/// Never deletes a path that equals or resolves to an input PST. If any planned
+/// volume path collides with an input, refuses the export (source protection).
+fn clear_stale_volume_siblings(out: &Path, inputs: &[PathBuf]) -> Result<()> {
+    for i in 2u32..=MAX_VOLUME_SIBLING_INDEX {
         let p = volume_path_for(out, i);
+        if path_collides_with_inputs(&p, inputs) {
+            return Err(CliError::Usage(format!(
+                "refusing multi-volume path equal to an input PST: {}",
+                p.display()
+            )));
+        }
         if !p.exists() {
-            break;
+            // Contiguous siblings from prior runs; stop at first missing so we
+            // do not scan all 998, but still guarded every existing candidate
+            // we would touch. Collision check above also covers non-existing
+            // planned names (e.g. input named unique_vol003.pst).
+            // Continue checking non-existing planned paths for collisions only:
+            // already done via path_collides; break existence scan.
+            // Keep scanning for collisions against all planned indices even if
+            // intermediate siblings are missing (inputs may sit at vol003+).
+            continue;
         }
         if p.is_file() {
             fs::remove_file(&p)
@@ -917,6 +1040,40 @@ fn clear_stale_volume_siblings(out: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// True when `candidate` equals (resolved) any protected input PST path.
+fn path_collides_with_inputs(candidate: &Path, inputs: &[PathBuf]) -> bool {
+    inputs
+        .iter()
+        .any(|input| paths_equal_resolved(candidate, input) || paths_equal(candidate, input))
+}
+
+/// Inputs to the pure export-success gate (honesty).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExportOkInput {
+    pub scan_ok: bool,
+    pub verify_ok: bool,
+    pub export_err_absent: bool,
+    pub export_partial: bool,
+    pub messages_written_total: u64,
+    pub unique: u64,
+    pub attach_failed_total: u64,
+    pub report_ok: bool,
+}
+
+/// Pure gate for export success (honesty). Extracted for unit tests.
+///
+/// `scan_ok` / `verify_ok` / `export_err_absent` / `report_ok` are positive flags
+/// (true = no failure in that dimension).
+pub(crate) fn compute_export_ok(i: ExportOkInput) -> bool {
+    i.scan_ok
+        && i.verify_ok
+        && i.export_err_absent
+        && !i.export_partial
+        && i.messages_written_total == i.unique
+        && i.attach_failed_total == 0
+        && i.report_ok
 }
 
 fn prepare_report_dir(report_dir: &Path, overwrite: bool) -> Result<()> {
@@ -961,6 +1118,10 @@ fn prepare_report_dir(report_dir: &Path, overwrite: bool) -> Result<()> {
 }
 
 /// Path guards: refuse layouts that would overwrite or nest under source PSTs.
+///
+/// Checks primary `--out`, `--report-dir`, report artifacts, **and every**
+/// generated multi-volume sibling path (`_vol002` … `_vol999`) against inputs
+/// using resolved (parent-canonicalized) equality so junction aliases are caught.
 fn guard_unique_pst_paths(
     inputs: &[PathBuf],
     out: &Path,
@@ -970,60 +1131,53 @@ fn guard_unique_pst_paths(
     integrity_csv: Option<&Path>,
 ) -> Result<()> {
     for input in inputs {
-        if paths_equal(out, input) {
+        if paths_equal_resolved(out, input) || paths_equal(out, input) {
             return Err(CliError::Usage(format!(
                 "refusing --out equal to an input PST: {}",
                 out.display()
             )));
         }
-        if is_same_or_under(out, input) {
+        if is_same_or_under_resolved(out, input) || is_same_or_under(out, input) {
             return Err(CliError::Usage(format!(
                 "refusing --out nested under an input PST: out={} input={}",
                 out.display(),
                 input.display()
             )));
         }
-        // Multi-volume siblings next to out — check primary parent vs inputs.
-        if is_same_or_under(report_dir, input) && paths_equal(report_dir, input) {
-            return Err(CliError::Usage(format!(
-                "refusing --report-dir equal to an input PST: {}",
-                report_dir.display()
-            )));
-        }
-        if paths_equal(report_dir, input) {
+        if paths_equal_resolved(report_dir, input) || paths_equal(report_dir, input) {
             return Err(CliError::Usage(format!(
                 "refusing --report-dir equal to an input PST: {}",
                 report_dir.display()
             )));
         }
         // Report-dir must not contain an input (recursive clear on overwrite).
-        if is_same_or_under(input, report_dir) {
+        if is_same_or_under_resolved(input, report_dir) || is_same_or_under(input, report_dir) {
             return Err(CliError::Usage(format!(
                 "refusing --report-dir that contains an input PST: report_dir={} input={}",
                 report_dir.display(),
                 input.display()
             )));
         }
-        // Out must not land inside report-dir clear? out is a file; if out is under report-dir
-        // and we clear report-dir first we're fine (out not yet written). Still refuse out==input.
         for art in [decision_csv, keep_set_json, integrity_csv]
             .into_iter()
             .flatten()
         {
-            if paths_equal(art, input) {
+            if paths_equal_resolved(art, input) || paths_equal(art, input) {
                 return Err(CliError::Usage(format!(
                     "refusing report artifact that equals an input PST: {}",
                     art.display()
                 )));
             }
         }
-        // Volume 2+ paths next to out: if out's directory is an input file path nonsense — already covered.
-        let vol2 = volume_path_for(out, 2);
-        if paths_equal(&vol2, input) {
-            return Err(CliError::Usage(format!(
-                "refusing multi-volume path equal to an input PST: {}",
-                vol2.display()
-            )));
+        // Every planned multi-volume path (vol 1 already checked as `out`).
+        for vol_idx in 2u32..=MAX_VOLUME_SIBLING_INDEX {
+            let vol = volume_path_for(out, vol_idx);
+            if paths_equal_resolved(&vol, input) || paths_equal(&vol, input) {
+                return Err(CliError::Usage(format!(
+                    "refusing multi-volume path equal to an input PST: {}",
+                    vol.display()
+                )));
+            }
         }
     }
     Ok(())
@@ -1061,17 +1215,17 @@ fn verify_volumes(
                             .collect();
                         let sample_n = (vol_exports.len()).min(5);
                         if sample_n > 0 {
-                            // Collect message NIDs from written PST with properties.
+                            // Collect message IDs/subjects from written PST with properties.
                             let mut written_mids: Vec<String> = Vec::new();
                             let mut written_subjects: Vec<String> = Vec::new();
                             for folder in &folders {
                                 for &nid in &folder.message_nids {
                                     if let Ok(props) = pst.read_message_properties(nid) {
                                         if let Some(mid) = props.message_id {
-                                            written_mids.push(normalize_mid_loose(&mid));
+                                            written_mids.push(normalize_mid_exact(&mid));
                                         }
                                         if let Some(sub) = props.subject {
-                                            written_subjects.push(sub);
+                                            written_subjects.push(normalize_subject(&sub));
                                         }
                                     }
                                     if written_mids.len() + written_subjects.len() >= 64 {
@@ -1080,23 +1234,13 @@ fn verify_volumes(
                                 }
                             }
                             for r in vol_exports.iter().take(sample_n) {
-                                let ok_one = if !r.message_id_norm.is_empty() {
-                                    let want = normalize_mid_loose(&r.message_id_norm);
-                                    written_mids.iter().any(|m| m == &want)
-                                        || written_mids.iter().any(|m| {
-                                            m.contains(want.trim_matches(|c| c == '<' || c == '>'))
-                                        })
-                                } else {
-                                    // No MID on export row — structural count is enough for this sample.
-                                    true
-                                };
-                                if !ok_one {
-                                    sample_mid_ok = false;
-                                    error = Some(format!(
-                                        "sample MID not found in volume: {}",
-                                        r.message_id_norm
-                                    ));
-                                    break;
+                                match sample_row_matches(r, &written_mids, &written_subjects) {
+                                    SampleMatch::Ok => {}
+                                    SampleMatch::Fail(reason) => {
+                                        sample_mid_ok = false;
+                                        error = Some(reason);
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -1162,10 +1306,74 @@ fn verify_volumes(
     }
 }
 
-fn normalize_mid_loose(s: &str) -> String {
+/// Exact normalized Message-ID for sample verification (no substring match).
+fn normalize_mid_exact(s: &str) -> String {
     s.trim()
         .trim_matches(|c| c == '<' || c == '>')
         .to_ascii_lowercase()
+}
+
+/// Subject normalize: trim + case-insensitive compare basis.
+fn normalize_subject(s: &str) -> String {
+    s.trim().to_ascii_lowercase()
+}
+
+/// Result of matching one export_messages sample row against written identities.
+#[derive(Debug, PartialEq, Eq)]
+enum SampleMatch {
+    Ok,
+    Fail(String),
+}
+
+/// Exact MID equality when MID present; else exact normalized subject; fail if
+/// neither identity is available on the export row.
+fn sample_row_matches(
+    row: &ExportMessageRow,
+    written_mids: &[String],
+    written_subjects: &[String],
+) -> SampleMatch {
+    sample_identity_matches(
+        &row.message_id_norm,
+        if row.subject.is_empty() {
+            None
+        } else {
+            Some(row.subject.as_str())
+        },
+        written_mids,
+        written_subjects,
+    )
+}
+
+/// Subject-aware sample match: exact normalized MID only (no substring); for
+/// empty MID compare normalized subjects; fail when neither identity exists.
+fn sample_identity_matches(
+    expected_mid: &str,
+    expected_subject: Option<&str>,
+    written_mids: &[String],
+    written_subjects: &[String],
+) -> SampleMatch {
+    if !expected_mid.is_empty() {
+        let want = normalize_mid_exact(expected_mid);
+        if written_mids.iter().any(|m| m == &want) {
+            return SampleMatch::Ok;
+        }
+        return SampleMatch::Fail(format!(
+            "sample MID not found in volume (exact match): {expected_mid}"
+        ));
+    }
+    if let Some(sub) = expected_subject {
+        let want = normalize_subject(sub);
+        if want.is_empty() {
+            return SampleMatch::Fail("sample row has empty Message-ID and empty subject".into());
+        }
+        if written_subjects.iter().any(|s| s == &want) {
+            return SampleMatch::Ok;
+        }
+        return SampleMatch::Fail(format!("sample subject not found in volume: {sub}"));
+    }
+    SampleMatch::Fail(
+        "sample row has empty Message-ID and no subject identity for verification".into(),
+    )
 }
 
 fn sha256_file(path: &Path) -> std::result::Result<String, String> {
@@ -1213,5 +1421,94 @@ mod tests {
         let report = PathBuf::from(r"C:\export\unique_report");
         let dec = PathBuf::from(r"C:\export\unique_report\decisions.csv");
         guard_unique_pst_paths(&inputs, &out, &report, Some(&dec), None, None).expect("ok");
+    }
+
+    #[test]
+    fn guard_rejects_volume_3_sibling_equal_input() {
+        // Input named like multi-volume sibling of --out unique.pst.
+        let inputs = vec![PathBuf::from(r"C:\export\unique_vol003.pst")];
+        let out = PathBuf::from(r"C:\export\unique.pst");
+        let report = PathBuf::from(r"C:\export\unique_report");
+        let err = guard_unique_pst_paths(&inputs, &out, &report, None, None, None).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("multi-volume") || msg.contains("vol003") || msg.contains("input"),
+            "expected volume collision error, got: {msg}"
+        );
+    }
+
+    fn ok_base() -> ExportOkInput {
+        ExportOkInput {
+            scan_ok: true,
+            verify_ok: true,
+            export_err_absent: true,
+            export_partial: false,
+            messages_written_total: 5,
+            unique: 5,
+            attach_failed_total: 0,
+            report_ok: true,
+        }
+    }
+
+    #[test]
+    fn compute_export_ok_requires_zero_attach_failures() {
+        assert!(compute_export_ok(ok_base()));
+        let mut bad = ok_base();
+        bad.attach_failed_total = 1;
+        assert!(!compute_export_ok(bad));
+    }
+
+    #[test]
+    fn compute_export_ok_requires_report_ok() {
+        let mut bad = ok_base();
+        bad.report_ok = false;
+        assert!(!compute_export_ok(bad));
+    }
+
+    #[test]
+    fn compute_export_ok_count_and_partial() {
+        let mut partial = ok_base();
+        partial.export_partial = true;
+        assert!(!compute_export_ok(partial));
+        let mut count = ok_base();
+        count.messages_written_total = 4;
+        assert!(!compute_export_ok(count));
+    }
+
+    #[test]
+    fn sample_mid_exact_not_substring() {
+        let written = vec!["abc@example.com".to_string()];
+        // Substring-only match must fail.
+        assert!(matches!(
+            sample_identity_matches("bc@example", None, &written, &[]),
+            SampleMatch::Fail(_)
+        ));
+        // Exact normalized match (angle brackets stripped).
+        assert_eq!(
+            sample_identity_matches("<ABC@example.com>", None, &written, &[]),
+            SampleMatch::Ok
+        );
+    }
+
+    #[test]
+    fn sample_empty_mid_uses_subject() {
+        let subjects = vec!["hello world".to_string()];
+        assert_eq!(
+            sample_identity_matches("", Some("Hello World"), &[], &subjects),
+            SampleMatch::Ok
+        );
+        assert!(matches!(
+            sample_identity_matches("", Some("other"), &[], &subjects),
+            SampleMatch::Fail(_)
+        ));
+        assert!(matches!(
+            sample_identity_matches("", None, &[], &subjects),
+            SampleMatch::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn normalize_mid_exact_strips_brackets_lowercase() {
+        assert_eq!(normalize_mid_exact(" <Id@X.com> "), "id@x.com");
     }
 }

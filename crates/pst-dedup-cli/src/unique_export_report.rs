@@ -49,6 +49,10 @@ pub struct ExportMessageRow {
     pub volume_path: String,
     pub volume_index: u32,
     pub export_message_index: u64,
+    /// In-memory only: used for sample verification when MID is empty.
+    /// Not written to `export_messages.csv` (header locked).
+    #[serde(skip)]
+    pub subject: String,
 }
 
 /// Per-volume verification result.
