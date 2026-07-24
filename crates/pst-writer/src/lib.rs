@@ -18,7 +18,9 @@ pub mod production;
 
 pub use production::{
     build_bth_checked, build_pc_v2, build_tc_inline_checked, from_canonical_message,
-    temp_sibling_path, write_unicode_pst, PcValue, WriteMessage, WritePstOpts, WritePstReport,
+    temp_sibling_path, write_unicode_pst, write_unicode_pst_with_streams, AttachStreamSource,
+    AttachmentFidelityEvent, AttachmentFidelityKind, FolderLayoutPolicy, PcValue, WriteAttachment,
+    WriteMessage, WritePstOpts, WritePstReport,
 };
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -51,6 +53,10 @@ pub(crate) const NID_HIERARCHY_TABLE_TEMPLATE: u64 = 0x60D;
 pub(crate) const NID_CONTENTS_TABLE_TEMPLATE: u64 = 0x60E;
 pub(crate) const NID_ASSOC_CONTENTS_TABLE_TEMPLATE: u64 = 0x60F;
 pub(crate) const NID_SEARCH_CONTENTS_TABLE_TEMPLATE: u64 = 0x610;
+/// Attachment Table Template (MS-PST fixed NID). Zero-row TC with the
+/// attachment-table column schema; per-message attachment tables also use
+/// this NID as their subnode key under the message's subnode BTree.
+pub(crate) const NID_ATTACHMENT_TABLE_TEMPLATE: u64 = 0x671;
 
 // NID types
 pub(crate) const NID_TYPE_NORMAL_FOLDER: u8 = 0x02;
