@@ -137,6 +137,30 @@ volume-batched `.eml` directory for Outlook/Thunderbird import.
 | **Family** | `parents_only` omits attach/embedded MIME parts |
 | **Import** | See `docs/unique-eml-import.md` — manual Outlook/Thunderbird import per volume folder |
 
+**Unique PST export (track 0071, schema `unique_export_report_v1`):** keep-set winners → streaming unique PST (+ optional multi-volume) + report pack.
+
+```powershell
+.\target\release\pst-dedup.exe unique-pst a.pst b.pst `
+  --out output\unique.pst `
+  --report-dir output\unique_report `
+  --policy first_seen `
+  --json
+# Soft multi-volume (~10 GiB physical); oversize family may exceed:
+.\target\release\pst-dedup.exe unique-pst archive.pst `
+  --out output\unique.pst --max-volume-bytes 10737418240 --overwrite --json
+```
+
+| Concern | Behavior |
+|---|---|
+| **No re-dedupe** | Same pipeline as `keep-set` / `unique-eml` (resolve + promote only) |
+| **Writer** | `write_unicode_pst_streaming` only; attach streams; progress on **stderr** |
+| **Volumes** | Volume 1 = `--out`; then `{stem}_vol002.pst`, …; split **between messages** |
+| **Oversized family** | Soft max may be exceeded; family never severed |
+| **Report pack** | `summary.json` + decisions + keepset + volumes + **mandatory `export_messages.csv`** |
+| **Verify** | Open + count + sample MID; full rehash only with `--verify-hash` |
+| **Partial fail** | Keep completed volumes; delete incomplete current; flush pack `ok=false` |
+| **How-to** | See [`docs/unique-pst-export.md`](docs/unique-pst-export.md) |
+
 ### Headless matter automation (track 0045)
 
 Same engine as Dedupe Desk: create a matter, import profiles/workflows, run jobs, export reports — no GUI.

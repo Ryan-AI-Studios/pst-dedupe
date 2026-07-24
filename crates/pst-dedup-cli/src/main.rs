@@ -19,6 +19,8 @@ mod runner_util;
 mod scan;
 mod service_cmd;
 mod unique_eml_cmd;
+mod unique_export_report;
+mod unique_pst_cmd;
 mod workflow_cmd;
 
 use std::path::PathBuf;
@@ -253,6 +255,13 @@ enum Commands {
         #[arg(long, default_value_t = 10_000)]
         skip_limit: usize,
     },
+
+    /// Export unique messages as streaming PST volume(s) + report pack (`unique_export_report_v1`).
+    ///
+    /// Driven only by keep-set (no re-dedupe): integrity → resolve → materialize+promote →
+    /// `write_unicode_pst_streaming` → report pack + verification. Source PSTs are read-only.
+    #[command(name = "unique-pst")]
+    UniquePst(unique_pst_cmd::UniquePstClapArgs),
 
     /// Matter lifecycle.
     Matter {
@@ -655,6 +664,7 @@ fn command_wants_json(cmd: &Commands) -> bool {
         | Commands::KeepSet { json, .. }
         | Commands::UniqueEml { json, .. }
         | Commands::Ingest { json, .. } => *json,
+        Commands::UniquePst(a) => a.json,
         Commands::Matter { cmd } => match cmd {
             MatterCmd::Create { json, .. }
             | MatterCmd::Info { json, .. }
@@ -725,18 +735,36 @@ fn command_wants_json(cmd: &Commands) -> bool {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    init_tracing(cli.verbose);
-    let json = command_wants_json(&cli.command);
+    // Windows default stack (~1 MiB) overflows in debug when clap builds help /
+    // parses this large Commands tree (matter + unique-eml + unique-pst, …).
+    const MAIN_STACK: usize = 8 * 1024 * 1024;
+    let worker = std::thread::Builder::new()
+        .name("pst-dedup-main".into())
+        .stack_size(MAIN_STACK)
+        .spawn(|| {
+            let cli = Cli::parse();
+            init_tracing(cli.verbose);
+            let json = command_wants_json(&cli.command);
 
-    match run(cli) {
-        Ok(()) => CliExit::Success.into(),
-        Err(e) => {
-            // JobFailed / AlreadyEmitted already wrote the operator payload.
-            if !e.already_emitted() {
-                emit_error(json, &e);
+            match run(cli) {
+                Ok(()) => CliExit::Success.into(),
+                Err(e) => {
+                    // JobFailed / AlreadyEmitted already wrote the operator payload.
+                    if !e.already_emitted() {
+                        emit_error(json, &e);
+                    }
+                    e.exit_code().into()
+                }
             }
-            e.exit_code().into()
+        });
+    match worker {
+        Ok(handle) => match handle.join() {
+            Ok(code) => code,
+            Err(_) => ExitCode::from(CliExit::Generic as u8),
+        },
+        Err(e) => {
+            eprintln!("failed to spawn main thread: {e}");
+            ExitCode::from(CliExit::Generic as u8)
         }
     }
 }
@@ -904,6 +932,10 @@ fn run(cli: Cli) -> Result<()> {
                 integrity_csv,
                 skip_limit,
             })
+        }
+        Commands::UniquePst(clap_args) => {
+            let args = clap_args.into_cli_args()?;
+            unique_pst_cmd::run_unique_pst(args)
         }
         Commands::Matter { cmd } => match cmd {
             MatterCmd::Create {

@@ -5083,6 +5083,7 @@ dependencies = [
  "predicates",
  "process-runner",
  "pst-reader",
+ "pst-writer",
  "serde",
  "serde_json",
  "sha2 0.11.0",
