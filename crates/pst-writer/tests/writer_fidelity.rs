@@ -322,14 +322,18 @@ fn empty_path_goes_to_residual() {
     cleanup(&path);
 }
 
-// ── 8: two sources different basenames ───────────────────────────────────────
+// ── 8: two sources different basenames (streaming multi-source residual) ─────
+//
+// Incremental folder plan (0070): prefixes apply only once ≥2 sources have been
+// *seen*. The first message (single source so far) may lack a prefix; later
+// messages from each source get unique stem labels. D-0070-multi-source-stream-prefix.
 
 #[test]
 fn multi_source_distinct_basenames() {
     let path = scratch_path("multi_src_diff");
     cleanup(&path);
 
-    let mut m1 = base_msg("<s8a@ex.com>", "From A");
+    let mut m1 = base_msg("<s8a@ex.com>", "From A early");
     m1.source_path = Some(r"C:\data\alice.pst".into());
     m1.source_folder_path = Some("Inbox".into());
 
@@ -337,14 +341,31 @@ fn multi_source_distinct_basenames() {
     m2.source_path = Some(r"C:\data\bob.pst".into());
     m2.source_folder_path = Some("Inbox".into());
 
+    // After both sources are known, a later alice message gets the "alice" prefix.
+    let mut m3 = base_msg("<s8c@ex.com>", "From A late");
+    m3.source_path = Some(r"C:\data\alice.pst".into());
+    m3.source_folder_path = Some("Sent".into());
+
     let report =
-        write_unicode_pst(&path, vec![m1, m2], &[], &WritePstOpts::default()).expect("write");
-    assert!(report.folders_created >= 4); // alice, bob, Inbox×2
+        write_unicode_pst(&path, vec![m1, m2, m3], &[], &WritePstOpts::default()).expect("write");
+    assert!(report.folders_created >= 4);
 
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
     let folders = pst.folders().expect("folders");
-    assert!(folders.iter().any(|f| f.name == "alice"));
+    assert!(
+        folders.iter().any(|f| f.name == "alice"),
+        "later alice msgs must get source prefix once multi-source active"
+    );
     assert!(folders.iter().any(|f| f.name == "bob"));
+    // First message may sit under unprefixed Inbox (streaming residual).
+    let top_inboxes: Vec<_> = folders
+        .iter()
+        .filter(|f| f.name == "Inbox" && f.path.matches('/').count() == 2)
+        .collect();
+    assert!(
+        !top_inboxes.is_empty(),
+        "expected at least one top-level or nested Inbox; folders={folders:?}"
+    );
 
     cleanup(&path);
 }
@@ -356,7 +377,7 @@ fn multi_source_same_basename_unique_prefixes() {
     let path = scratch_path("multi_src_same");
     cleanup(&path);
 
-    let mut m1 = base_msg("<s9a@ex.com>", "Archive 1");
+    let mut m1 = base_msg("<s9a@ex.com>", "Archive 1 early");
     m1.source_path = Some(r"C:\custodian1\archive.pst".into());
     m1.source_folder_path = Some("Inbox".into());
 
@@ -364,7 +385,12 @@ fn multi_source_same_basename_unique_prefixes() {
     m2.source_path = Some(r"C:\custodian2\archive.pst".into());
     m2.source_folder_path = Some("Inbox".into());
 
-    write_unicode_pst(&path, vec![m1, m2], &[], &WritePstOpts::default()).expect("write");
+    // Second pass from custodian1 after multi-source is active → "archive" prefix.
+    let mut m3 = base_msg("<s9c@ex.com>", "Archive 1 late");
+    m3.source_path = Some(r"C:\custodian1\archive.pst".into());
+    m3.source_folder_path = Some("Sent".into());
+
+    write_unicode_pst(&path, vec![m1, m2, m3], &[], &WritePstOpts::default()).expect("write");
 
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
     let folders = pst.folders().expect("folders");
@@ -373,25 +399,32 @@ fn multi_source_same_basename_unique_prefixes() {
         .filter(|f| f.path.matches('/').count() == 2 && f.name.starts_with("archive"))
         .map(|f| f.name.as_str())
         .collect();
-    // Expect "archive" and "archive (2)"
+    // Expect "archive" and "archive (2)" once both sources have been seen.
     assert!(tops.contains(&"archive"), "tops={tops:?}");
     assert!(tops.iter().any(|n| n.contains("(2)")), "tops={tops:?}");
-    // Messages must not share a single Inbox under one prefix only
-    let inboxes: Vec<_> = folders.iter().filter(|f| f.name == "Inbox").collect();
-    assert_eq!(inboxes.len(), 2);
-    assert_eq!(inboxes[0].message_nids.len(), 1);
-    assert_eq!(inboxes[1].message_nids.len(), 1);
+    // Prefixed Inboxes/Sent hold the post-threshold messages.
+    let archive_children: usize = folders
+        .iter()
+        .filter(|f| f.path.contains("archive") && (f.name == "Inbox" || f.name == "Sent"))
+        .map(|f| f.message_nids.len())
+        .sum();
+    assert!(
+        archive_children >= 2,
+        "expected ≥2 msgs under source-prefixed folders; folders={folders:?}"
+    );
 
     cleanup(&path);
 }
 
 /// Case-differing basenames must not merge under case-insensitive folder keys.
+/// Streaming residual: first source's earliest message may lack a prefix; after
+/// all sources are seen, subsequent messages get distinct case-folded labels.
 #[test]
 fn multi_source_case_differing_stems_unique_prefixes() {
     let path = scratch_path("multi_src_case");
     cleanup(&path);
 
-    let mut m1 = base_msg("<sc1@ex.com>", "A");
+    let mut m1 = base_msg("<sc1@ex.com>", "A early");
     m1.source_path = Some(r"C:\c1\Archive.pst".into());
     m1.source_folder_path = Some("Inbox".into());
 
@@ -404,7 +437,24 @@ fn multi_source_case_differing_stems_unique_prefixes() {
     m3.source_path = Some(r"C:\c3\archive (2).pst".into());
     m3.source_folder_path = Some("Inbox".into());
 
-    write_unicode_pst(&path, vec![m1, m2, m3], &[], &WritePstOpts::default()).expect("write");
+    // Late messages from each source after the full source set is known.
+    let mut m4 = base_msg("<sc1b@ex.com>", "A late");
+    m4.source_path = Some(r"C:\c1\Archive.pst".into());
+    m4.source_folder_path = Some("Sent".into());
+    let mut m5 = base_msg("<sc2b@ex.com>", "B late");
+    m5.source_path = Some(r"C:\c2\archive.pst".into());
+    m5.source_folder_path = Some("Sent".into());
+    let mut m6 = base_msg("<sc3b@ex.com>", "C late");
+    m6.source_path = Some(r"C:\c3\archive (2).pst".into());
+    m6.source_folder_path = Some("Sent".into());
+
+    write_unicode_pst(
+        &path,
+        vec![m1, m2, m3, m4, m5, m6],
+        &[],
+        &WritePstOpts::default(),
+    )
+    .expect("write");
 
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
     let folders = pst.folders().expect("folders");
@@ -418,11 +468,12 @@ fn multi_source_case_differing_stems_unique_prefixes() {
         3,
         "three distinct case-insensitive prefixes expected; tops={tops:?}"
     );
-    let inboxes: Vec<_> = folders.iter().filter(|f| f.name == "Inbox").collect();
-    assert_eq!(inboxes.len(), 3);
-    for ib in &inboxes {
-        assert_eq!(ib.message_nids.len(), 1);
-    }
+    // Late Sent folders under each prefix.
+    let sents: Vec<_> = folders.iter().filter(|f| f.name == "Sent").collect();
+    assert!(
+        sents.len() >= 3,
+        "expected Sent under each source prefix; sents={sents:?}"
+    );
 
     cleanup(&path);
 }

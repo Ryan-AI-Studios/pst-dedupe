@@ -13,6 +13,10 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 base64 = "0.22"
 dedup-engine = { path = "../dedup-engine" }
+sha2 = { workspace = true }
+md-5 = { workspace = true }
 
 [dev-dependencies]
 pst-reader = { path = "../pst-reader" }
+sha2 = { workspace = true }
+md-5 = { workspace = true }

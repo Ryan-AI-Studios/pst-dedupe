@@ -27,7 +27,7 @@ single-block only; keep using it only for existing fixture callers.
 | Attachments | **Yes (v1.1 / 0069)** | By-value file attaches + attachment table + XBLOCK; see **v1.1** section below. |
 | Folder path preservation | **Yes (v1.1 / 0069)** | Default `PreservePaths` under IPM_SUBTREE; residual `Unique Mail`. |
 | Multi-source prefixes | **Yes (v1.1 / 0069)** | Unique stem labels (`archive` / `archive (2)`). |
-| Multi-GB streaming write | **No** — v1 collects `WriteMessage`s and builds the whole layout in memory (two-pass), suitable for synthetic/thousands-of-messages scale | Owned by **0070**. |
+| Multi-GB streaming write | **Yes (v1.2 / 0070)** | `write_unicode_pst_streaming`: AMap-aware layout, chunked attach stream, progress + `stop_and_finalize`, SHA-256/MD5 report; see **Scale** section. |
 | Encrypted / Permute output | **No** | Residual; unencrypted only. |
 | ANSI PST | **No** | Never. |
 | Recipient table / named-prop set beyond the store stub | **No** | Minimal named-property map stub only, sufficient for the properties this writer emits (none of which require named props). |
@@ -51,7 +51,7 @@ shape above without regressing XBLOCK bodies, IPM special folders, or safety.
 | **MessageFlags** | Always `MSGFLAG_READ` (0x1). OR `MSGFLAG_HASATTACH` (0x10) when attaches written. |
 | **MessageSize** | Computed from bytes written (never source size). **Inline** attach binary is inside the attach PC → count only attach PC length; **subnode** diversion adds PC + raw bytes (same rule as body inline vs diversion). |
 | **Soft fail** | Missing data (`data: None` and no stream) / unsupported method → skip that attach, `attachments_failed++`; message still written. **`data: Some(vec![])` is a valid zero-byte by-value attach** (not a soft fail). |
-| **Stream source** | Optional [`AttachStreamSource`] via `write_unicode_pst_with_streams`. Stream is consulted **only if** `data: None`. If `data: Some(...)` (incl. empty), stream is never called. If streaming: `Ok(Some(_))` incl. empty is valid; `Ok(None)`/`Err` soft-fails. `write_unicode_pst` = streams `None`. **v1 buffers one attach at a time into a `Vec`** (intentional 0069 scope); true multi-GB chunked streaming without holding one full attach is **D-0069-stream-buffer → 0070**. |
+| **Stream source** | Optional [`AttachStreamSource`] via `write_unicode_pst_with_streams` / `write_unicode_pst_streaming`. Stream is consulted **only if** `data: None`. Prefer **`open_attach_stream`** → chunked `MAX_BLOCK_DATA` (8176) leaf chain without a full multi-GB attach `Vec` (**D-0069-stream-buffer closed in 0070**). Default stream impl wraps `open_attach` in `AttachRead::from_vec` for compat. Mid-stream I/O error soft-fails the attach. |
 | **parents_only** | `WritePstOpts::parents_only` empties attach list; `attachments_omitted_by_policy++`. |
 | **Embedded (`ATTACH_EMBEDDED_MSG` = 5)** | Nested message PC under attach **subnode** when `WriteAttachment.embedded_message` present; method=5; size reflects nested; **never** invent by-value file bytes. `open_attachment_data` binary path does **not** apply (no `PidTagAttachDataBinary`). Missing nested → `embedded_unparsed++` + `attachments_failed++` + fidelity event. |
 | **Depth cap** | `max_embedded_depth` default **3**, clamp `[1, 8]`. Deeper branches halt; `embedded_depth_limit_hits++` + fidelity event (DoD-8 surface — not a MAPI property on the item). |
@@ -110,14 +110,81 @@ nested content (alongside the matching aggregate counter).
 
 | Item | Owner |
 |---|---|
-| Multi-GB whole-file streaming | **0070** |
-| One-attach full buffer (`AttachStreamSource` → `Vec`) without true chunked multi-GB | **D-0069-stream-buffer → 0070** (v1 OK to buffer one attach at a time) |
-| `unique-pst` CLI | **0071** |
-| scanpst / Outlook operator proof | D-0068-02 (carry) |
+| Multi-GB whole-file streaming | **Closed in 0070** (engine path; operator multi-GB residual) |
+| One-attach full buffer without chunked stream | **Closed in 0070** (`open_attach_stream` + `write_data_chain_from_reader`) |
+| `unique-pst` CLI + multi-volume product UX | **0071** (uses 0070 physical size / stop / hashes) |
+| scanpst / Outlook operator proof | D-0068-02 (carry) — recommend on multi-GB operator run |
 | Cloud attach download | D-0067-cloud |
 | Recipient table / full named props | residual |
 | `PidTagAttachDataObject` (PtypObject) on embeds | residual — nested message is linked as an attach subnode leaf entry with method=5; PC builder has no PtypObject; reader binary open path correctly fails |
 | Per-folder contents-table RowIndex BTH | not required this track (attach table only) |
+| Eager spill of all leaf block `Vec`s from `Layout` | **Closed in 0070 P1** — `EagerWriteCtx` spills leaves (`on_disk=true`); residual RAM is small internal blocks (XBLOCK/PC heaps) only |
+| Full DTO pre-collect on streaming path | **Closed in 0070** — `IncrementalFolderPlan` one-pass consume; no `Vec<WriteMessage>` materialization by the writer |
+| Multi-source prefix streaming residual | **D-0070-multi-source-stream-prefix** — prefixes from sources seen so far; early messages before a second source may lack a prefix (collect-all fidelity differs). Fat in-memory bodies on caller DTOs remain the caller's responsibility |
+
+## Scale — multi-GB streaming (Track 0070)
+
+Architecture: **Hybrid / Approach C** — thin metadata + folder plan in RAM; bodies/attaches stream (or drop after write); AMap-aware offset placement; same-dir temp + rename-only finalize.
+
+### AMap-aware allocation (MS-PST)
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `AMAP_FIRST_OFFSET` | `0x4400` (17408) | Absolute file offset of the first Allocation Map page |
+| `AMAP_INTERVAL` | `253952` (`0x3E000`) | Subsequent AMap pages every this many bytes |
+
+Data blocks and B-Tree pages **never land on** AMap page slots. When sequential placement would cross/land on a slot, the allocator reserves the AMap page at that absolute offset and resumes after it. AMap content is 496 bytes of `0xFF` free bits (v1 free accounting approximate). Header `ibAMapLast` is the last AMap offset.
+
+### Memory model (documented peak bounds)
+
+```text
+O(N × thin folder plan + message NIDs)   // incremental plan; no full DTO collect
++ O(1) × current WriteMessage in flight (caller may still pass fat bodies)
++ O(1) × STREAM_CHUNK_SIZE (= MAX_BLOCK_DATA = 8176) for attach stream reads
++ O(1) leaf spill buffer (eager on_disk; Layout holds bid/offset/len only)
++ O(BBT/NBT page set + small XBLOCK/PC heaps at finalize)
+```
+
+**Forbidden on multi-GB path:** one full multi-GB attach `Vec`; writer pre-collect of all `WriteMessage` DTOs; holding all message bodies after they have been written; retaining all leaf block payloads in `Layout` until finalize.
+
+**Honesty:** if the **caller** already holds a `Vec<WriteMessage>` with fat bodies, that RAM is the caller's. The streaming writer does not force lazy iterators to materialize. Multi-source path prefixes may differ from collect-all when a second source appears mid-stream (D-0070-multi-source-stream-prefix).
+
+**`WriteProgress.current_physical_size` during `WritingMessages`:** true cumulative size of the same-dir temp (eager write cursor / file metadata), not a layout estimate before offsets exist.
+
+### Progress + volume split hooks (for 0071)
+
+| API | Role |
+|---|---|
+| `WriteProgress.current_physical_size` | True cumulative temp size during WritingMessages (eager spill) and after finalize flush — not payload sum or pre-offset layout estimate |
+| `WriteStage` | `Planning` / `WritingMessages` / `FinalizingNdb` / `Renaming` |
+| `WriteProgressSink::should_stop_and_finalize` | After each fully written message only |
+| `WritePstReport.finalized_early` | Partial volume; exact `messages_written` |
+
+### Inline export hash
+
+After all seeks complete and before rename, the complete temp file is hashed:
+
+- `WritePstReport.sha256_hex` — SHA-256 lowercase hex
+- `WritePstReport.md5_hex` — MD5 lowercase hex (legacy load-file)
+
+Strategy: full-file hash of finalized temp (header/BBT/NBT/AMaps already written). Matches on-disk bytes after rename.
+
+### Same-directory temp
+
+Temp is always a sibling of the output path (`temp_sibling_path`). **Rename only** — no multi-GB cross-volume copy fallback. Fail early if same-dir create fails.
+
+### Outlook size guidance (product honesty)
+
+| Guidance | Detail |
+|---|---|
+| Interactive Outlook comfort | Industry often cites **~10 GB** per PST as painful (slow open/search); not a hard engine limit |
+| Engine export max | Multi-GB without OOM is the goal; wall-clock/disk bound |
+| Multi-volume CLI | **0071** — use physical size + stop_and_finalize + hashes |
+
+### Tests
+
+- Scale: `crates/pst-writer/tests/writer_streaming.rs` (AMap boundary, chunked attach, stop, hash, same-dir temp, CI ~16 MiB stream stress).
+- Regression: `writer_v1` + `writer_fidelity` remain green.
 
 ## Hierarchy (§3.2)
 

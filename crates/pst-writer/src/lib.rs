@@ -18,10 +18,13 @@ pub mod production;
 
 pub use production::{
     build_bth_checked, build_pc_v2, build_tc_inline_checked, from_canonical_message,
-    temp_sibling_path, write_unicode_pst, write_unicode_pst_with_streams, AttachStreamSource,
-    AttachmentFidelityEvent, AttachmentFidelityKind, FolderLayoutPolicy, PcValue, WriteAttachment,
-    WriteMessage, WritePstOpts, WritePstReport,
+    temp_sibling_path, write_unicode_pst, write_unicode_pst_streaming,
+    write_unicode_pst_with_streams, AttachRead, AttachStreamSource, AttachmentFidelityEvent,
+    AttachmentFidelityKind, FolderLayoutPolicy, PcValue, WriteAttachment, WriteMessage,
+    WriteProgress, WriteProgressSink, WritePstOpts, WritePstReport, WriteStage,
 };
+
+// EagerWriteCtx is defined above on Layout; re-exported for tests/integrations.
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -37,6 +40,41 @@ pub(crate) const PAGE_SIZE: u64 = 512;
 pub(crate) const MAX_BLOCK_DATA: usize = 8176;
 /// Block alignment: 64 bytes.
 pub(crate) const BLOCK_ALIGN: u64 = 64;
+
+/// MS-PST Allocation Map (AMap): first AMap page at absolute file offset
+/// `0x4400` (17408). See MS-PST “Allocation Map page” / Unicode NDB layout.
+///
+/// Public for production streaming scale (track 0070) and tests.
+pub const AMAP_FIRST_OFFSET: u64 = 0x4400;
+/// MS-PST: subsequent AMap pages every **253 952** (`0x3E000`) bytes.
+pub const AMAP_INTERVAL: u64 = 253_952; // 0x3E000
+
+/// Page type for Allocation Map pages.
+pub(crate) const PTYPE_AMAP: u8 = 0x84;
+
+/// Return true when `offset` is a mandated AMap page slot.
+#[inline]
+pub fn is_amap_page_offset(offset: u64) -> bool {
+    if offset < AMAP_FIRST_OFFSET {
+        return false;
+    }
+    (offset - AMAP_FIRST_OFFSET).is_multiple_of(AMAP_INTERVAL)
+}
+
+/// Next AMap page absolute offset at or after `offset`.
+#[inline]
+pub fn next_amap_at_or_after(offset: u64) -> u64 {
+    if offset <= AMAP_FIRST_OFFSET {
+        return AMAP_FIRST_OFFSET;
+    }
+    let rel = offset - AMAP_FIRST_OFFSET;
+    let rem = rel % AMAP_INTERVAL;
+    if rem == 0 {
+        offset
+    } else {
+        offset + (AMAP_INTERVAL - rem)
+    }
+}
 
 // ── NID Constants ────────────────────────────────────────────────────────────
 
@@ -123,8 +161,55 @@ pub type Result<T> = std::result::Result<T, WriterError>;
 
 // ── Layout Engine ──────────────────────────────────────────────────────────
 
+/// Eager same-directory temp writer for multi-GB streaming (track 0070).
+///
+/// Leaf data blocks are placed with AMap-aware allocation and written to the
+/// temp file immediately so [`Layout`] retains only thin BBT metadata
+/// (`bid` / `offset` / `len`, `on_disk = true`, empty `data`).
+#[derive(Debug)]
+pub struct EagerWriteCtx {
+    pub(crate) file: File,
+    /// Next free offset for placement (always ≥ [`HEADER_SIZE`]).
+    pub(crate) cursor: u64,
+    /// AMap pages registered while placing eager blocks (stubs written).
+    pub(crate) amap_pages: Vec<PageEntry>,
+    /// Absolute offsets of AMap stubs already written to `file`.
+    pub(crate) amap_stubs_written: HashSet<u64>,
+}
+
+impl EagerWriteCtx {
+    /// Create the same-dir temp file with a zeroed header placeholder.
+    pub fn create(path: &Path) -> Result<Self> {
+        let mut file = File::create(path).map_err(|e| {
+            WriterError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "failed to create same-directory temp {} (required for atomic rename; \
+                     no cross-volume multi-GB copy fallback): {e}",
+                    path.display()
+                ),
+            ))
+        })?;
+        let header = vec![0u8; HEADER_SIZE as usize];
+        file.write_all(&header)?;
+        file.flush()?;
+        Ok(Self {
+            file,
+            cursor: HEADER_SIZE,
+            amap_pages: Vec::new(),
+            amap_stubs_written: HashSet::new(),
+        })
+    }
+
+    /// Best-effort cumulative physical size (write cursor vs file metadata).
+    pub fn physical_size(&self) -> u64 {
+        let meta = self.file.metadata().map(|m| m.len()).unwrap_or(0);
+        meta.max(self.cursor)
+    }
+}
+
 /// Tracks file offsets, BIDs, and NIDs for a pre-calculated PST layout.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Layout {
     pub nodes: Vec<NodeEntry>,
     pub blocks: Vec<BlockEntry>,
@@ -132,6 +217,9 @@ pub struct Layout {
     pub next_bid_counter: u64,
     pub next_nid_index: u32,
     pub used_bids: HashSet<u64>,
+    /// When set, leaf data blocks from the production chain writers are spilled
+    /// immediately to the temp file (`on_disk = true`).
+    pub eager: Option<EagerWriteCtx>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -145,8 +233,49 @@ pub struct NodeEntry {
 #[derive(Debug, Clone)]
 pub struct BlockEntry {
     pub bid: u64,
+    /// Payload bytes. May be empty when the block was already written to the
+    /// temp file (`on_disk = true`) — multi-GB streaming path retains only thin
+    /// BBT metadata (`len` + `offset`).
     pub data: Vec<u8>,
     pub offset: u64,
+    /// Payload length in bytes (excluding the 16-byte block trailer). Always
+    /// authoritative for BBT `cb` and layout sizing — use this, not
+    /// `data.len()`, when `data` may be empty.
+    pub len: u32,
+    /// When true, payload+trailer already live at `offset` on the staging file;
+    /// finalize must not rewrite the block body.
+    pub on_disk: bool,
+}
+
+impl BlockEntry {
+    /// Create an in-memory block entry (offset filled by `calculate_offsets`).
+    pub fn in_memory(bid: u64, data: Vec<u8>) -> Self {
+        let len = data.len() as u32;
+        Self {
+            bid,
+            data,
+            offset: 0,
+            len,
+            on_disk: false,
+        }
+    }
+
+    /// Thin BBT entry for a leaf already written to the staging temp file.
+    pub fn on_disk(bid: u64, offset: u64, len: u32) -> Self {
+        Self {
+            bid,
+            data: Vec::new(),
+            offset,
+            len,
+            on_disk: true,
+        }
+    }
+
+    /// Authoritative payload length.
+    #[inline]
+    pub fn payload_len(&self) -> usize {
+        self.len as usize
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -171,7 +300,79 @@ impl Layout {
             next_bid_counter: 0x10,
             next_nid_index: 11, // reserve 1-10 for store, named map, root folder, etc.
             used_bids: HashSet::new(),
+            eager: None,
         }
+    }
+
+    /// Attach an eager temp writer (multi-GB streaming path).
+    pub fn attach_eager(&mut self, ctx: EagerWriteCtx) {
+        self.eager = Some(ctx);
+    }
+
+    /// Detach the eager writer (e.g. for finalize seeks / rename).
+    pub fn take_eager(&mut self) -> Option<EagerWriteCtx> {
+        self.eager.take()
+    }
+
+    /// Current physical size when eager is active, else 0.
+    pub fn current_physical_size(&self) -> u64 {
+        self.eager
+            .as_ref()
+            .map(EagerWriteCtx::physical_size)
+            .unwrap_or(0)
+    }
+
+    /// Place a leaf block with AMap awareness and write it to the eager temp.
+    /// Returns the absolute file offset. Caller should push
+    /// [`BlockEntry::on_disk`] and drop the payload.
+    pub fn place_and_write_block(
+        &mut self,
+        eager: &mut EagerWriteCtx,
+        bid: u64,
+        payload: &[u8],
+    ) -> Result<u64> {
+        let block_size = align_up(payload.len() as u64, BLOCK_ALIGN) + 16;
+        let offset = amap_place_region(
+            &mut eager.cursor,
+            block_size,
+            BLOCK_ALIGN,
+            &mut eager.amap_pages,
+            &mut self.used_bids,
+            &mut self.next_bid_counter,
+        );
+        // Write AMap page stubs for any newly registered slots so physical size
+        // and file holes stay consistent with MS-PST layout.
+        let stubs_to_write: Vec<(u64, u64)> = eager
+            .amap_pages
+            .iter()
+            .filter(|p| !eager.amap_stubs_written.contains(&p.offset))
+            .map(|p| (p.offset, p.bid))
+            .collect();
+        for (amap_off, amap_bid) in stubs_to_write {
+            write_amap_stub_page(&mut eager.file, amap_off, amap_bid)?;
+            eager.amap_stubs_written.insert(amap_off);
+        }
+        eager.file.seek(SeekFrom::Start(offset))?;
+        write_data_block(&mut eager.file, bid, payload)?;
+        Ok(offset)
+    }
+
+    /// Store a leaf data block: spill to eager temp when present, else hold in RAM.
+    pub(crate) fn push_leaf_block(&mut self, bid: u64, data: Vec<u8>) -> Result<()> {
+        let len = data.len() as u32;
+        if self.eager.is_none() {
+            self.blocks.push(BlockEntry::in_memory(bid, data));
+            return Ok(());
+        }
+        // Take eager out so we can mutably borrow used_bids / next_bid_counter.
+        let mut eager = self.eager.take().ok_or_else(|| {
+            WriterError::Layout("eager writer missing after is_some check".into())
+        })?;
+        let offset = self.place_and_write_block(&mut eager, bid, &data)?;
+        self.blocks.push(BlockEntry::on_disk(bid, offset, len));
+        self.eager = Some(eager);
+        // `data` dropped here — not retained in Layout.
+        Ok(())
     }
 
     pub(crate) fn alloc_bid(&mut self, internal: bool) -> u64 {
@@ -207,15 +408,12 @@ impl Layout {
             bid_sub: 0,
             nid_parent,
         });
-        self.blocks.push(BlockEntry {
-            bid: bid_data,
-            data,
-            offset: 0, // filled in later
-        });
+        self.blocks.push(BlockEntry::in_memory(bid_data, data));
         bid_data
     }
 
-    /// Reserve a page.
+    /// Reserve a page (non-AMap). AMap pages are placed only at fixed MS-PST
+    /// offsets by [`Self::calculate_offsets`] — do not reserve floating AMaps.
     pub fn reserve_page(&mut self, ptype: u8) -> u64 {
         let bid = self.alloc_bid(true);
         self.pages.push(PageEntry {
@@ -227,22 +425,110 @@ impl Layout {
     }
 
     /// Calculate final file offsets for all blocks and pages.
+    ///
+    /// **AMap-aware (track 0070 / MS-PST):** data blocks and B-Tree pages never
+    /// land on fixed AMap slots (`AMAP_FIRST_OFFSET`, then every
+    /// `AMAP_INTERVAL`). When sequential placement would cross or land on an
+    /// AMap page, the allocator reserves the map page at that absolute offset
+    /// and resumes after it. Valid AMap page content is written later; free-bit
+    /// accounting may be approximate (all-free `0xFF` is acceptable for v1).
+    ///
+    /// **Eager on_disk ordering:** when leaf blocks were already placed/written
+    /// to the temp file, the cursor starts at the end of that region. NBT/BBT
+    /// pages and remaining in-memory blocks are placed *after* those blocks so
+    /// they never collide with pre-written data. AMap pages at mandated slots
+    /// (including those skipped during eager) are ensured through `file_end`.
     pub fn calculate_offsets(&mut self) {
-        let mut offset = HEADER_SIZE;
+        // Non-AMap pages (NBT/BBT). Eager AMap stubs are re-registered below
+        // (or rewritten at finalize with consistent BIDs).
+        let mut other_pages: Vec<PageEntry> = self
+            .pages
+            .drain(..)
+            .filter(|p| p.ptype != PTYPE_AMAP)
+            .collect();
 
-        // Pages first (AMap, NBT, BBT)
-        for page in &mut self.pages {
-            page.offset = offset;
-            offset += PAGE_SIZE;
+        // Reuse AMap PageEntries already allocated during eager placement so
+        // stub BIDs stay consistent if we re-write the same pages.
+        let mut amap_pages: Vec<PageEntry> = if let Some(eager) = self.eager.as_mut() {
+            std::mem::take(&mut eager.amap_pages)
+        } else {
+            Vec::new()
+        };
+
+        // 1) Start after all eagerly written on_disk blocks (and header).
+        let mut cursor = HEADER_SIZE;
+        if let Some(eager) = self.eager.as_ref() {
+            cursor = cursor.max(eager.cursor);
+        }
+        for block in &self.blocks {
+            if block.on_disk && block.offset != 0 {
+                let block_size = align_up(block.payload_len() as u64, BLOCK_ALIGN) + 16;
+                cursor = cursor.max(block.offset + block_size);
+            }
         }
 
-        // Then data blocks (aligned to BLOCK_ALIGN)
+        // 2) Place remaining non-AMap pages after the on_disk region.
+        for page in &mut other_pages {
+            if page.offset != 0 {
+                cursor = cursor.max(page.offset + PAGE_SIZE);
+                continue;
+            }
+            page.offset = amap_place_region(
+                &mut cursor,
+                PAGE_SIZE,
+                1,
+                &mut amap_pages,
+                &mut self.used_bids,
+                &mut self.next_bid_counter,
+            );
+        }
+
+        // 3) Place remaining in-memory blocks after pages.
         for block in &mut self.blocks {
-            offset = align_up(offset, BLOCK_ALIGN);
-            block.offset = offset;
-            let block_size = align_up(block.data.len() as u64, BLOCK_ALIGN) + 16;
-            offset += block_size;
+            if block.on_disk && block.offset != 0 {
+                continue;
+            }
+            let block_size = align_up(block.payload_len() as u64, BLOCK_ALIGN) + 16;
+            block.offset = amap_place_region(
+                &mut cursor,
+                block_size,
+                BLOCK_ALIGN,
+                &mut amap_pages,
+                &mut self.used_bids,
+                &mut self.next_bid_counter,
+            );
         }
+
+        // 4) Ensure every mandated AMap slot below the provisional file end exists.
+        let mut file_end = cursor;
+        if file_end <= AMAP_FIRST_OFFSET {
+            file_end = AMAP_FIRST_OFFSET + PAGE_SIZE;
+        }
+        loop {
+            let mut changed = false;
+            let mut amap = AMAP_FIRST_OFFSET;
+            while amap < file_end {
+                let before = amap_pages.len();
+                amap_ensure_page(
+                    amap,
+                    &mut amap_pages,
+                    &mut self.used_bids,
+                    &mut self.next_bid_counter,
+                );
+                if amap_pages.len() > before {
+                    changed = true;
+                }
+                file_end = file_end.max(amap + PAGE_SIZE);
+                amap += AMAP_INTERVAL;
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        amap_pages.sort_by_key(|p| p.offset);
+        self.pages = amap_pages;
+        self.pages.extend(other_pages);
     }
 
     pub fn file_size(&self) -> u64 {
@@ -251,15 +537,108 @@ impl Layout {
             max = max.max(page.offset + PAGE_SIZE);
         }
         for block in &self.blocks {
-            let block_size = align_up(block.data.len() as u64, BLOCK_ALIGN) + 16;
+            let block_size = align_up(block.payload_len() as u64, BLOCK_ALIGN) + 16;
             max = max.max(block.offset + block_size);
         }
         max
+    }
+
+    /// Highest AMap page offset, if any.
+    pub fn ib_amap_last(&self) -> Option<u64> {
+        self.pages
+            .iter()
+            .filter(|p| p.ptype == PTYPE_AMAP)
+            .map(|p| p.offset)
+            .max()
     }
 }
 
 pub(crate) fn align_up(value: u64, alignment: u64) -> u64 {
     value.div_ceil(alignment) * alignment
+}
+
+/// Register an AMap page at a fixed absolute offset if not already present.
+pub(crate) fn amap_ensure_page(
+    amap_off: u64,
+    amap_pages: &mut Vec<PageEntry>,
+    used_bids: &mut HashSet<u64>,
+    next_bid: &mut u64,
+) {
+    if amap_pages.iter().any(|p| p.offset == amap_off) {
+        return;
+    }
+    let bid = loop {
+        let b = *next_bid;
+        *next_bid += 1;
+        let result = b | 0x02;
+        if used_bids.insert(result) {
+            break result;
+        }
+    };
+    amap_pages.push(PageEntry {
+        bid,
+        ptype: PTYPE_AMAP,
+        offset: amap_off,
+    });
+}
+
+/// Place a region of `size` bytes with `align` alignment, never overlapping
+/// mandated AMap page slots. Registers AMap pages when the cursor must skip
+/// past them.
+pub(crate) fn amap_place_region(
+    cursor: &mut u64,
+    size: u64,
+    align: u64,
+    amap_pages: &mut Vec<PageEntry>,
+    used_bids: &mut HashSet<u64>,
+    next_bid: &mut u64,
+) -> u64 {
+    *cursor = align_up(*cursor, align);
+    loop {
+        if is_amap_page_offset(*cursor) {
+            amap_ensure_page(*cursor, amap_pages, used_bids, next_bid);
+            *cursor = align_up(*cursor + PAGE_SIZE, align);
+            continue;
+        }
+        let amap = next_amap_at_or_after(*cursor);
+        let region_end = *cursor + size;
+        let amap_end = amap + PAGE_SIZE;
+        if *cursor < amap_end && region_end > amap {
+            if *cursor < amap && region_end <= amap {
+                break;
+            }
+            amap_ensure_page(amap, amap_pages, used_bids, next_bid);
+            *cursor = align_up(amap_end, align);
+            continue;
+        }
+        break;
+    }
+    let offset = *cursor;
+    *cursor += size;
+    offset
+}
+
+/// Write a provisional AMap page (all-free `0xFF` bits) at a fixed offset.
+/// Finalized AMap content may be rewritten at finalize with the same layout.
+fn write_amap_stub_page(file: &mut File, offset: u64, bid: u64) -> Result<()> {
+    let mut page = vec![0u8; PAGE_SIZE as usize];
+    page[..496].fill(0xFF);
+    let trailer_offset = PAGE_SIZE as usize - 16;
+    page[trailer_offset] = PTYPE_AMAP;
+    page[trailer_offset + 1] = PTYPE_AMAP;
+    // Best-effort wSig (same fold as production finalize).
+    let ib32 = offset as u32;
+    let bid_lo = (bid & 0xFFFF_FFFF) as u32;
+    let bid_hi = (bid >> 32) as u32;
+    let value = ib32 ^ bid_lo ^ bid_hi;
+    let sig = ((value >> 16) ^ (value & 0xFFFF)) as u16;
+    page[trailer_offset + 2..trailer_offset + 4].copy_from_slice(&sig.to_le_bytes());
+    let crc = crc32fast::hash(&page[..trailer_offset]);
+    page[trailer_offset + 4..trailer_offset + 8].copy_from_slice(&crc.to_le_bytes());
+    page[trailer_offset + 8..trailer_offset + 16].copy_from_slice(&bid.to_le_bytes());
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(&page)?;
+    Ok(())
 }
 
 // ── Builders ───────────────────────────────────────────────────────────────
@@ -269,7 +648,16 @@ pub fn write_header<W: Write>(writer: &mut W, layout: &Layout) -> Result<()> {
     let file_size = layout.file_size();
     let nbt_root = layout.pages.iter().find(|p| p.ptype == 0x81).unwrap(); // NBT intermediate
     let bbt_root = layout.pages.iter().find(|p| p.ptype == 0x80).unwrap(); // BBT intermediate
-    let amap_page = layout.pages.iter().find(|p| p.ptype == 0x84).unwrap();
+    let amap_last = layout
+        .ib_amap_last()
+        .or_else(|| {
+            layout
+                .pages
+                .iter()
+                .find(|p| p.ptype == PTYPE_AMAP)
+                .map(|p| p.offset)
+        })
+        .unwrap_or(AMAP_FIRST_OFFSET);
 
     let mut buf = Vec::new();
 
@@ -306,7 +694,7 @@ pub fn write_header<W: Write>(writer: &mut W, layout: &Layout) -> Result<()> {
     // ibFileEof (8)
     buf.write_u64::<LittleEndian>(file_size)?;
     // ibAMapLast (8)
-    buf.write_u64::<LittleEndian>(amap_page.offset)?;
+    buf.write_u64::<LittleEndian>(amap_last)?;
     // cbAMapFree (8)
     buf.write_u64::<LittleEndian>(0)?; // no free space
                                        // cbPMapFree (8)

@@ -15,6 +15,17 @@
 //! - `Result`-only allocation: nothing in this module's call graph reaches the
 //!   fixture path's `assert!`-based `Layout::add_node`.
 //!
+//! ## Multi-GB streaming scale (track 0070)
+//!
+//! Production path supports [`write_unicode_pst_streaming`]: messages are
+//! consumed one at a time (no all-bodies pre-collect), attachments can stream
+//! via [`AttachStreamSource::open_attach_stream`] into a chunked data chain
+//! (`MAX_BLOCK_DATA` = 8176) without assembling a full multi-GB `Vec`, layout
+//! offsets are **AMap-aware** (MS-PST first AMap at `0x4400`, interval
+//! `253952`), progress exposes **physical** temp size, cooperative
+//! `stop_and_finalize` finalizes a clean partial volume, and the report carries
+//! SHA-256 + MD5 of the final file. See `docs/pst-writer-fidelity-v1.md`.
+//!
 //! ## Large single-property values: subnode storage (not silent truncation)
 //!
 //! A single HN heap allocation cannot span more than one heap page (the
@@ -34,15 +45,17 @@
 //!
 //! File attachments (by-value + attachment table + XBLOCK), folder-path
 //! preservation under IPM_SUBTREE, MessageFlags READ|HASATTACH, and embedded
-//! message depth cap. Multi-GB streaming remains **0070**. See
+//! message depth cap. Multi-GB streaming: track **0070**. See
 //! `docs/pst-writer-fidelity-v1.md`.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use byteorder::{LittleEndian, WriteBytesExt};
+use md5::{Digest as Md5Digest, Md5};
+use sha2::{Digest as Sha2Digest, Sha256};
 
 use crate::{
     write_data_block, BlockEntry, HeapBuilder, Layout, NodeEntry, Result, WriterError,
@@ -55,6 +68,12 @@ use crate::{
     PID_TAG_SENDER_EMAIL_ADDRESS, PID_TAG_SUBJECT, PST_MAGIC, PTYP_BOOLEAN, PTYP_INTEGER_32,
     PTYP_INTEGER_64, PTYP_STRING, PTYP_TIME, UNICODE_VERSION,
 };
+
+/// Peak stream chunk for multi-GB attach/body leaf writes (= one data block).
+/// Documented memory model: never allocate a single buffer ≥ attach size on the
+/// chunked path; with eager spill (`Layout::eager`), leaf payloads are written
+/// to the same-dir temp immediately and cleared from `Layout` (`on_disk = true`).
+pub const STREAM_CHUNK_SIZE: usize = MAX_BLOCK_DATA;
 
 // ── New property tags needed for the production path ────────────────────────
 
@@ -175,29 +194,60 @@ pub struct WriteAttachment {
     pub embedded_message: Option<Box<WriteMessage>>,
 }
 
+/// Owned [`Read`] for chunked attachment payload (track 0070).
+///
+/// Prefer constructing via [`AttachRead::from_reader`] for true multi-GB
+/// streams. [`AttachRead::from_vec`] exists only for the default
+/// [`AttachStreamSource::open_attach_stream`] compatibility shim.
+pub struct AttachRead {
+    inner: AttachReadInner,
+}
+
+enum AttachReadInner {
+    Cursor(Cursor<Vec<u8>>),
+    Dyn(Box<dyn Read>),
+}
+
+impl AttachRead {
+    /// Wrap an already-buffered payload (compat / small attaches).
+    pub fn from_vec(data: Vec<u8>) -> Self {
+        Self {
+            inner: AttachReadInner::Cursor(Cursor::new(data)),
+        }
+    }
+
+    /// Wrap any owned [`Read`] (preferred multi-GB path).
+    pub fn from_reader(reader: Box<dyn Read>) -> Self {
+        Self {
+            inner: AttachReadInner::Dyn(reader),
+        }
+    }
+}
+
+impl Read for AttachRead {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match &mut self.inner {
+            AttachReadInner::Cursor(c) => c.read(buf),
+            AttachReadInner::Dyn(r) => r.read(buf),
+        }
+    }
+}
+
 /// Optional source for attachment bytes when [`WriteAttachment::data`] is
 /// `None`. Soft-fail: `Err` or `Ok(None)` skips that attach and
-/// increments [`WritePstReport::attachments_failed`]. `Ok(Some(vec![]))` is a
-/// valid zero-byte payload.
+/// increments [`WritePstReport::attachments_failed`]. `Ok(Some(vec![]))` /
+/// empty stream is a valid zero-byte payload.
 ///
-/// ## Streaming scope (0069 vs 0070)
+/// ## Streaming (track 0070)
 ///
-/// **v1 (0069) intentionally returns a full `Vec<u8>` for one attach at a
-/// time.** Callers should open/stream from the source PST into this single
-/// buffer for the current attach only — not hold every attach of every
-/// message in memory simultaneously. Once resolved, the writer may further
-/// chunk that buffer into XBLOCK leaf blocks when writing.
-///
-/// **True multi-GB chunked streaming without holding one full attach in
-/// memory is out of scope for 0069** and is residual
-/// `D-0069-stream-buffer` → track **0070**. Do not treat a one-attach
-/// buffer as a fidelity failure for this track.
+/// Prefer [`Self::open_attach_stream`] so the writer can chunk into
+/// `MAX_BLOCK_DATA` leaf blocks **without** assembling a full multi-GB
+/// `Vec`. The default implementation wraps [`Self::open_attach`] in
+/// [`AttachRead::from_vec`] for backward compatibility only.
 pub trait AttachStreamSource {
-    /// Open attach bytes for a [`WriteAttachment`] key.
+    /// Open attach bytes for a [`WriteAttachment`] key as a full `Vec`.
     ///
-    /// Returns the full payload for **one** attach (v1 OK). Prefer streaming
-    /// from the source into this buffer rather than pre-buffering all attaches.
-    /// Residual true zero-copy multi-GB streaming is **0070**.
+    /// Prefer overriding [`Self::open_attach_stream`] for multi-GB attaches.
     fn open_attach(
         &mut self,
         source_path: Option<&str>,
@@ -205,6 +255,56 @@ pub trait AttachStreamSource {
         attach_nid: Option<u64>,
         filename: &str,
     ) -> std::result::Result<Option<Vec<u8>>, String>;
+
+    /// Preferred chunked path: return a [`Read`] for one attach.
+    ///
+    /// Default: call [`Self::open_attach`] and wrap in [`AttachRead::from_vec`].
+    fn open_attach_stream(
+        &mut self,
+        source_path: Option<&str>,
+        parent_nid: Option<u64>,
+        attach_nid: Option<u64>,
+        filename: &str,
+    ) -> std::result::Result<Option<AttachRead>, String> {
+        match self.open_attach(source_path, parent_nid, attach_nid, filename) {
+            Ok(Some(bytes)) => Ok(Some(AttachRead::from_vec(bytes))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Write pipeline stage for progress reporting (0070 / 0071 volume split).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteStage {
+    Planning,
+    WritingMessages,
+    FinalizingNdb,
+    Renaming,
+}
+
+/// Progress snapshot for [`WriteProgressSink`].
+#[derive(Debug, Clone)]
+pub struct WriteProgress {
+    pub messages_written: u64,
+    pub messages_total_hint: Option<u64>,
+    /// Logical payload bytes accounted (diagnostics; not physical size).
+    pub payload_bytes_accounted: u64,
+    /// Actual on-disk size of the in-progress temp file after flush.
+    pub current_physical_size: u64,
+    pub stage: WriteStage,
+}
+
+/// Cooperative progress + volume-split hook (0071 consumes this).
+///
+/// `should_stop_and_finalize` is checked only on **safe boundaries** (after
+/// each fully written message). Mid-attach stop is not supported.
+pub trait WriteProgressSink {
+    fn on_progress(&mut self, p: &WriteProgress);
+    fn should_stop_and_finalize(&self, p: &WriteProgress) -> bool {
+        let _ = p;
+        false
+    }
 }
 
 /// A plain message DTO the production writer consumes. Deliberately independent
@@ -376,6 +476,16 @@ pub struct WritePstReport {
     pub folder_paths_degraded: u64,
     /// Per-attachment fidelity events (DoD-8 surface for depth/unparsed embeds).
     pub attachment_fidelity_events: Vec<AttachmentFidelityEvent>,
+    /// SHA-256 (hex, lowercase) of the final PST file bytes after all seeks
+    /// and before rename. Strategy: hash the complete temp file after NDB
+    /// finalize (header/BBT/NBT/AMaps written); matches on-disk bytes after
+    /// rename.
+    pub sha256_hex: String,
+    /// MD5 (hex, lowercase) of the same final bytes (legacy load-file interop).
+    pub md5_hex: String,
+    /// True when [`WriteProgressSink::should_stop_and_finalize`] ended the
+    /// volume early (partial message batch).
+    pub finalized_early: bool,
 }
 
 /// Kind of per-attachment fidelity honesty event (DoD-8).
@@ -529,19 +639,44 @@ pub fn write_unicode_pst(
 /// Like [`write_unicode_pst`], with an optional [`AttachStreamSource`] used
 /// **only** when a by-value attach has `data: None`.
 ///
-/// Per-attach resolution (exclusive branches — not a sequential pipeline that
-/// always reaches the stream):
-/// - If `data` is `Some(v)` (including empty `v`), write `v` and **do not**
-///   call the stream source.
-/// - Else if a stream is provided: `Ok(Some(bytes))` (including empty) is a
-///   valid payload; `Ok(None)` / `Err` soft-fails (`attachments_failed++`).
-/// - Else soft-fail. Never invents bytes.
+/// Thin wrapper around [`write_unicode_pst_streaming`] with no progress sink.
 pub fn write_unicode_pst_with_streams(
     path: &Path,
     messages: impl IntoIterator<Item = WriteMessage>,
     protected_source_paths: &[PathBuf],
     opts: &WritePstOpts,
+    streams: Option<&mut dyn AttachStreamSource>,
+) -> Result<WritePstReport> {
+    write_unicode_pst_streaming(path, messages, protected_source_paths, opts, streams, None)
+}
+
+/// Streaming production write: messages are consumed **one at a time** from the
+/// iterator (no full `WriteMessage` pre-collect), bodies/attaches stripped after
+/// each write, AMap-aware layout, chunked attach streams with eager on-disk leaf
+/// spill, physical-size progress, cooperative `stop_and_finalize`, inline
+/// final-file hashes.
+///
+/// **Folder plan:** incremental ([`IncrementalFolderPlan`]) — residual folder at
+/// start; each message ensures folders and allocates NIDs for new folders only.
+/// Multi-source prefixes use sources **seen so far** (when `multi_source_prefix`
+/// and ≥2 distinct sources); messages written before a second source appears
+/// may lack a source prefix (documented residual D-0070-multi-source-stream-prefix).
+/// Callers that already hold a `Vec<WriteMessage>` own that RAM; this path does
+/// not force lazy iterators to materialize.
+///
+/// **Memory model (peak bound targets):**
+/// - `O(N × thin folder/message metadata)` after strip — not all bodies of all messages
+/// - `O(1) × STREAM_CHUNK_SIZE` (`MAX_BLOCK_DATA` = 8176) for attach stream reads
+/// - Leaf block payloads spilled eagerly to same-dir temp (`on_disk = true`);
+///   residual in-memory: small XBLOCK/XXBLOCK/SLBLOCK/PC heaps only
+/// - Same-directory temp only; rename-only finalize (no multi-GB copy fallback)
+pub fn write_unicode_pst_streaming(
+    path: &Path,
+    messages: impl IntoIterator<Item = WriteMessage>,
+    protected_source_paths: &[PathBuf],
+    opts: &WritePstOpts,
     mut streams: Option<&mut dyn AttachStreamSource>,
+    mut progress: Option<&mut dyn WriteProgressSink>,
 ) -> Result<WritePstReport> {
     check_not_protected_source(path, protected_source_paths)?;
 
@@ -553,8 +688,70 @@ pub fn write_unicode_pst_with_streams(
         )));
     }
 
-    let messages: Vec<WriteMessage> = messages.into_iter().collect();
+    // Same-dir temp early (fail before multi-GB work). Parent must match `path`.
+    let tmp_path = temp_sibling_path(path);
+    if let (Some(out_parent), Some(tmp_parent)) = (path.parent(), tmp_path.parent()) {
+        if out_parent != tmp_parent {
+            return Err(WriterError::Layout(format!(
+                "same-directory temp required: out parent {} != temp parent {}",
+                out_parent.display(),
+                tmp_parent.display()
+            )));
+        }
+    }
+    check_not_protected_source(&tmp_path, protected_source_paths)?;
+
+    // Remove incomplete temp on any error before rename succeeds.
+    struct TempGuard {
+        path: PathBuf,
+        keep: bool,
+    }
+    impl Drop for TempGuard {
+        fn drop(&mut self) {
+            if !self.keep {
+                let _ = fs::remove_file(&self.path);
+            }
+        }
+    }
+    let mut temp_guard = TempGuard {
+        path: tmp_path.clone(),
+        keep: false,
+    };
+
     let mut layout = Layout::new();
+    // Open same-dir temp + zeroed header immediately; leaf blocks spill here.
+    layout.attach_eager(crate::EagerWriteCtx::create(&tmp_path)?);
+
+    let mut payload_bytes_accounted: u64 = 0;
+    let mut finalized_early = false;
+
+    let emit_progress = |progress: &mut Option<&mut dyn WriteProgressSink>,
+                         stage: WriteStage,
+                         messages_written: u64,
+                         payload: u64,
+                         physical: u64| {
+        if let Some(sink) = progress.as_mut() {
+            let p = WriteProgress {
+                messages_written,
+                messages_total_hint: None,
+                payload_bytes_accounted: payload,
+                current_physical_size: physical,
+                stage,
+            };
+            sink.on_progress(&p);
+        }
+    };
+
+    emit_progress(
+        &mut progress,
+        WriteStage::Planning,
+        0,
+        0,
+        layout.current_physical_size(),
+    );
+
+    // One-pass consume: no full DTO collect. Multi-GB attach bytes never live as
+    // one full attach Vec (chunked stream + eager leaf spill).
 
     // ── Named property map (stub; minimal for open) ──────────────────────────
     let named_heap = {
@@ -611,10 +808,9 @@ pub fn write_unicode_pst_with_streams(
     };
     layout.add_node_data((NID_ROOT_FOLDER & !0x1F) | 0x0F, root_assoc_cont_heap, 0, 0)?;
 
-    // Plan user-folder tree under IPM (0069) before allocating NIDs so IPM
-    // hierarchy can list every top-level child + Deleted Items.
-    let mut folder_plan = plan_folder_tree(&messages, opts);
-    allocate_folder_nids(&mut layout, &mut folder_plan);
+    // Incremental folder plan: residual only at start; NIDs for new folders on
+    // each message. No full DTO collect (DoD-1 / D-0070-dto-collect closed).
+    let mut folder_plan = IncrementalFolderPlan::start(&mut layout, opts);
 
     // Deleted Items / Search Root (§2/§3/§4 of the round-9 verified MS-PST
     // data — supersedes the prior D-0068-05 decline, see
@@ -622,6 +818,8 @@ pub fn write_unicode_pst_with_streams(
     // before the IPM_SUBTREE hierarchy TC (which references Deleted Items) and
     // the message store PC (which references both via
     // `PidTagIpmWastebasketEntryId` / `PidTagFinderEntryId`) are built below.
+    // IPM hierarchy TC itself is deferred until after the message loop so
+    // incrementally discovered top-level user folders can be listed.
     let deleted_items_nid = layout.alloc_nid(NID_TYPE_NORMAL_FOLDER);
     // NID_TYPE_SEARCH_FOLDER (0x03) — verified from
     // https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-pst/2dfb3012-b81c-466b-831c-2d2f0c29e591:
@@ -669,22 +867,9 @@ pub fn write_unicode_pst_with_streams(
     };
     layout.add_node_data(ipm_subtree_nid, ipm_heap, NID_ROOT_FOLDER, 0)?;
 
-    // Hierarchy TC: all top-level user folders under IPM + Deleted Items
-    // (0068 residual "Unique Mail" is always one of the top-level roots when
-    // any message lacks a path / under Flat policy).
-    let ipm_hier_heap = {
-        let mut heap = HeapBuilder::new(0xBC);
-        let columns = [(PID_TAG_LTP_ROW_ID, PTYP_INTEGER_32, 0u16, 4u8, 0u8)];
-        let mut rows: Vec<Vec<u8>> = folder_plan
-            .roots
-            .iter()
-            .map(|f| (f.nid as u32).to_le_bytes().to_vec())
-            .collect();
-        rows.push((deleted_items_nid as u32).to_le_bytes().to_vec());
-        let hid = build_tc_inline_checked(&mut heap, &columns, &rows)?;
-        heap.finalize(hid)
-    };
-    layout.add_node_data((ipm_subtree_nid & !0x1F) | 0x0D, ipm_hier_heap, 0, 0)?;
+    // IPM hierarchy TC deferred until after message loop (incremental roots).
+    // Contents + associated-contents are empty at the IPM level (messages live
+    // under user folders).
 
     let ipm_cont_heap = {
         let mut heap = HeapBuilder::new(0xBC);
@@ -836,25 +1021,46 @@ pub fn write_unicode_pst_with_streams(
         0,
     )?;
 
-    // ── User folders + messages (0069 folder tree) ───────────────────────────
-    let mut counters = WriteCounters {
-        folders_created: folder_plan.folders_created,
-        folder_paths_residual: folder_plan.folder_paths_residual,
-        folder_paths_degraded: folder_plan.folder_paths_degraded,
-        ..WriteCounters::default()
+    // ── User folders + messages (0069 folder tree, incremental 0070) ─────────
+    let mut counters = WriteCounters::default();
+
+    let msg_iter = messages.into_iter();
+    let total_hint = match msg_iter.size_hint() {
+        (lo, Some(hi)) if lo == hi => Some(lo as u64),
+        _ => None,
     };
+    let mut message_nids: Vec<u64> = match total_hint {
+        Some(n) => Vec::with_capacity(n as usize),
+        None => Vec::new(),
+    };
+    emit_progress(
+        &mut progress,
+        WriteStage::WritingMessages,
+        0,
+        0,
+        layout.current_physical_size(),
+    );
 
-    // parent folder nid per message index
-    let msg_parent: Vec<u64> = (0..messages.len())
-        .map(|i| folder_plan.parent_nid_for_message(i))
-        .collect();
+    for (msg_index, mut msg) in msg_iter.enumerate() {
+        let parent = folder_plan.assign_message(&mut layout, &msg, opts, msg_index);
+        let body_incomplete = msg.body_incomplete;
+        let body_unavailable = msg.body_unavailable;
+        let approx_payload = msg.body_plain.as_ref().map(|s| s.len() as u64).unwrap_or(0)
+            + msg.body_html.as_ref().map(|b| b.len() as u64).unwrap_or(0)
+            + msg
+                .attachments
+                .iter()
+                .map(|a| {
+                    a.data
+                        .as_ref()
+                        .map(|d| d.len() as u64)
+                        .unwrap_or(a.size as u64)
+                })
+                .sum::<u64>();
 
-    let mut message_nids: Vec<u64> = Vec::with_capacity(messages.len());
-    for (i, msg) in messages.iter().enumerate() {
-        let parent = msg_parent[i];
         let nid = build_message_node(
             &mut layout,
-            msg,
+            &msg,
             parent,
             opts,
             &mut counters,
@@ -862,14 +1068,63 @@ pub fn write_unicode_pst_with_streams(
             &mut streams,
         )?;
         message_nids.push(nid);
-        if msg.body_incomplete {
+        if body_incomplete {
             counters.messages_with_incomplete_body += 1;
         }
-        if msg.body_unavailable {
+        if body_unavailable {
             counters.messages_with_unavailable_body += 1;
+        }
+        payload_bytes_accounted = payload_bytes_accounted.saturating_add(approx_payload);
+
+        // Free body/attach RAM before next message is pulled from the iterator.
+        msg.body_plain = None;
+        msg.body_html = None;
+        for att in &mut msg.attachments {
+            att.data = None;
+            att.embedded_message = None;
+        }
+        drop(msg);
+
+        let messages_written_so_far = message_nids.len() as u64;
+        if let Some(sink) = progress.as_mut() {
+            let p = WriteProgress {
+                messages_written: messages_written_so_far,
+                messages_total_hint: total_hint,
+                payload_bytes_accounted,
+                // True cumulative physical size of the same-dir temp (eager).
+                current_physical_size: layout.current_physical_size(),
+                stage: WriteStage::WritingMessages,
+            };
+            sink.on_progress(&p);
+            if sink.should_stop_and_finalize(&p) {
+                finalized_early = true;
+                break;
+            }
         }
     }
     let messages_written = message_nids.len() as u64;
+
+    // Folder counters come from the incremental plan (not pre-scanned).
+    counters.folders_created = folder_plan.folders_created;
+    counters.folder_paths_residual = folder_plan.folder_paths_residual;
+    counters.folder_paths_degraded = folder_plan.folder_paths_degraded;
+
+    // Hierarchy TC: all top-level user folders under IPM + Deleted Items.
+    // Written after the message loop so incrementally created roots are listed.
+    let folder_plan = folder_plan.into_folder_plan();
+    let ipm_hier_heap = {
+        let mut heap = HeapBuilder::new(0xBC);
+        let columns = [(PID_TAG_LTP_ROW_ID, PTYP_INTEGER_32, 0u16, 4u8, 0u8)];
+        let mut rows: Vec<Vec<u8>> = folder_plan
+            .roots
+            .iter()
+            .map(|f| (f.nid as u32).to_le_bytes().to_vec())
+            .collect();
+        rows.push((deleted_items_nid as u32).to_le_bytes().to_vec());
+        let hid = build_tc_inline_checked(&mut heap, &columns, &rows)?;
+        heap.finalize(hid)
+    };
+    layout.add_node_data((ipm_subtree_nid & !0x1F) | 0x0D, ipm_hier_heap, 0, 0)?;
 
     // Write every planned folder object (PC + hierarchy + contents + assoc).
     write_folder_tree_nodes(&mut layout, &folder_plan, ipm_subtree_nid, &message_nids)?;
@@ -885,7 +1140,7 @@ pub fn write_unicode_pst_with_streams(
     // an arbitrary placeholder, so every EntryID genuinely identifies this
     // specific store. Generated once per write and reused in all three
     // EntryIDs plus the record key property itself.
-    let record_key = generate_store_record_key(path, messages.len());
+    let record_key = generate_store_record_key(path, messages_written as usize);
     let ipm_subtree_entry_id = build_folder_entry_id(ipm_subtree_nid, &record_key);
     let wastebasket_entry_id = build_folder_entry_id(deleted_items_nid, &record_key);
     let finder_entry_id = build_folder_entry_id(search_root_nid, &record_key);
@@ -984,46 +1239,87 @@ pub fn write_unicode_pst_with_streams(
     )?;
 
     // ── AMap + BTree pages, then real file offsets ───────────────────────────
-    layout.reserve_page(PTYPE_AMAP);
+    // AMap pages are placed only at MS-PST fixed offsets by calculate_offsets
+    // (do not reserve a floating AMap).
+    emit_progress(
+        &mut progress,
+        WriteStage::FinalizingNdb,
+        messages_written,
+        payload_bytes_accounted,
+        layout.current_physical_size(),
+    );
 
     let nbt_plan = layout.plan_tree(PTYPE_NBT, NBT_LEAF_ENTRY_SIZE, layout.nodes.len());
     let bbt_plan = layout.plan_tree(PTYPE_BBT, BBT_LEAF_ENTRY_SIZE, layout.blocks.len());
 
     layout.calculate_offsets();
 
-    // ── Write to a temp sibling, then atomically rename over `path` ─────────
-    let tmp_path = temp_sibling_path(path);
-    // Same protected-source enforcement as `path` above (§3.7 rule 2 / Core
-    // Mandate #3), applied to the temp-staging path too — this is where
-    // `File::create` below actually writes bytes first, so it must be
-    // checked BEFORE that call, not just at the final rename target.
-    check_not_protected_source(&tmp_path, protected_source_paths)?;
+    // ── Finalize into the already-open same-dir temp, then rename-only ───────
     {
-        let mut file = File::create(&tmp_path)?;
-        write_header_v1(&mut file, &layout, &nbt_plan, &bbt_plan)?;
-        write_amap_page_v1(&mut file, &layout)?;
+        let mut eager = layout
+            .take_eager()
+            .ok_or_else(|| WriterError::Layout("eager temp writer missing at finalize".into()))?;
+        let file = &mut eager.file;
+        // File cursor is wherever the last eager block write left it — header
+        // must be rewritten at absolute offset 0.
+        file.seek(SeekFrom::Start(0))?;
+        write_header_v1(file, &layout, &nbt_plan, &bbt_plan)?;
+        // Rewrite all AMap pages (stubs + any newly placed at finalize).
+        write_all_amap_pages_v1(file, &layout)?;
 
         let page_offsets = page_offset_map(&layout);
-        write_nbt(&mut file, &layout, &nbt_plan, &page_offsets)?;
-        write_bbt(&mut file, &layout, &bbt_plan, &page_offsets)?;
+        write_nbt(file, &layout, &nbt_plan, &page_offsets)?;
+        write_bbt(file, &layout, &bbt_plan, &page_offsets)?;
 
         for block in &layout.blocks {
+            if block.on_disk {
+                // Already written during message/attach streaming.
+                continue;
+            }
             file.seek(SeekFrom::Start(block.offset))?;
-            write_data_block(&mut file, block.bid, &block.data)?;
+            write_data_block(file, block.bid, &block.data)?;
         }
         file.flush()?;
+
+        if let Some(sink) = progress.as_mut() {
+            let physical = file.metadata().map(|m| m.len()).unwrap_or(eager.cursor);
+            let p = WriteProgress {
+                messages_written,
+                messages_total_hint: total_hint,
+                payload_bytes_accounted,
+                current_physical_size: physical,
+                stage: WriteStage::FinalizingNdb,
+            };
+            sink.on_progress(&p);
+        }
+        // Drop closes the file handle before hash/rename.
+        drop(eager);
     }
 
+    // Hash complete finalized temp (all seeks done) before rename.
+    let (sha256_hex, md5_hex) = hash_file_hex(&tmp_path)?;
+    let bytes = fs::metadata(&tmp_path)
+        .map(|m| m.len())
+        .unwrap_or_else(|_| layout.file_size());
+
+    emit_progress(
+        &mut progress,
+        WriteStage::Renaming,
+        messages_written,
+        payload_bytes_accounted,
+        bytes,
+    );
+
     if let Err(e) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
         return Err(WriterError::Io(e));
     }
+    temp_guard.keep = true;
 
     Ok(WritePstReport {
         messages_written,
         messages_skipped: 0,
         path: path.to_path_buf(),
-        bytes: layout.file_size(),
+        bytes,
         messages_with_incomplete_body: counters.messages_with_incomplete_body,
         messages_with_unavailable_body: counters.messages_with_unavailable_body,
         attachments_written: counters.attachments_written,
@@ -1036,7 +1332,56 @@ pub fn write_unicode_pst_with_streams(
         folder_paths_residual: counters.folder_paths_residual,
         folder_paths_degraded: counters.folder_paths_degraded,
         attachment_fidelity_events: counters.attachment_fidelity_events,
+        sha256_hex,
+        md5_hex,
+        finalized_early,
     })
+}
+
+/// Lowercase hex of a raw digest (sha2 0.11 / md-5 hybrid-array output).
+fn digest_to_hex(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let b = bytes.as_ref();
+    let mut s = String::with_capacity(b.len() * 2);
+    for &byte in b {
+        s.push(HEX[(byte >> 4) as usize] as char);
+        s.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    s
+}
+
+/// SHA-256 + MD5 of the complete file on disk (lowercase hex).
+fn hash_file_hex(path: &Path) -> Result<(String, String)> {
+    let mut file = File::open(path)?;
+    let mut sha = Sha256::new();
+    let mut md5 = Md5::new();
+    let mut buf = [0u8; 256 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        sha.update(&buf[..n]);
+        md5.update(&buf[..n]);
+    }
+    Ok((digest_to_hex(sha.finalize()), digest_to_hex(md5.finalize())))
+}
+
+/// After early stop on a collect-based plan, drop message indices never written.
+#[cfg(test)]
+fn trim_folder_plan_to_written(plan: &mut FolderPlan, written: usize) {
+    fn trim_node(node: &mut PlannedFolder, written: usize) {
+        node.message_indices.retain(|&i| i < written);
+        for child in &mut node.children {
+            trim_node(child, written);
+        }
+    }
+    for root in &mut plan.roots {
+        trim_node(root, written);
+    }
+    if plan.message_folder.len() > written {
+        plan.message_folder.truncate(written);
+    }
 }
 
 /// Process-wide entropy suffix for temp-staging filenames (see
@@ -1126,23 +1471,172 @@ struct PlannedFolder {
     nid: u64,
 }
 
-/// Result of planning the user-folder layout for a write.
+/// Result of planning the user-folder layout for a write (collect or incremental).
 #[derive(Debug)]
 struct FolderPlan {
     roots: Vec<PlannedFolder>,
-    /// message index → leaf folder NID (filled after allocate).
+    /// message index → leaf folder NID (collect-path / tests; streaming uses assign return).
+    #[allow(dead_code)]
+    message_folder: Vec<u64>,
+    #[allow(dead_code)]
+    folders_created: u64,
+    #[allow(dead_code)]
+    folder_paths_residual: u64,
+    #[allow(dead_code)]
+    folder_paths_degraded: u64,
+}
+
+/// One-pass folder planner: residual folder at start; each message ensures path
+/// segments and allocates NIDs only for **new** folders.
+///
+/// Multi-source prefixes (`PreservePaths { multi_source_prefix: true }`) use
+/// sources **seen so far**. When a second distinct source appears, prefixes are
+/// assigned via the same case-fold uniqueness rules as [`unique_source_prefixes`].
+/// Messages written before that threshold may lack a source prefix — residual
+/// **D-0070-multi-source-stream-prefix** (collect-all fidelity is
+/// [`plan_folder_tree`] for tests/helpers only).
+#[derive(Debug)]
+struct IncrementalFolderPlan {
+    roots: Vec<PlannedFolder>,
     message_folder: Vec<u64>,
     folders_created: u64,
     folder_paths_residual: u64,
     folder_paths_degraded: u64,
+    residual_name: String,
+    multi_source: bool,
+    /// Distinct `source_path` values observed so far (unsorted; prefixes recompute).
+    sources_seen: Vec<String>,
+    prefix_map: HashMap<String, String>,
 }
 
-impl FolderPlan {
-    fn parent_nid_for_message(&self, index: usize) -> u64 {
-        self.message_folder
-            .get(index)
-            .copied()
-            .unwrap_or_else(|| self.roots.first().map(|r| r.nid).unwrap_or(0))
+impl IncrementalFolderPlan {
+    fn start(layout: &mut Layout, opts: &WritePstOpts) -> Self {
+        let residual_name = match &opts.folder_layout {
+            FolderLayoutPolicy::Flat {
+                folder_display_name,
+            } => {
+                if folder_display_name.is_empty() {
+                    opts.residual_folder_name()
+                } else {
+                    folder_display_name.clone()
+                }
+            }
+            FolderLayoutPolicy::PreservePaths { .. } => opts.residual_folder_name(),
+        };
+        let multi_source = matches!(
+            opts.folder_layout,
+            FolderLayoutPolicy::PreservePaths {
+                multi_source_prefix: true
+            }
+        );
+
+        let mut roots = Vec::new();
+        let residual_nid = layout.alloc_nid(NID_TYPE_NORMAL_FOLDER);
+        roots.push(PlannedFolder {
+            display_name: residual_name.clone(),
+            key: case_fold_key(&residual_name),
+            children: Vec::new(),
+            message_indices: Vec::new(),
+            nid: residual_nid,
+        });
+
+        Self {
+            roots,
+            message_folder: Vec::new(),
+            folders_created: 1,
+            folder_paths_residual: 0,
+            folder_paths_degraded: 0,
+            residual_name,
+            multi_source,
+            sources_seen: Vec::new(),
+            prefix_map: HashMap::new(),
+        }
+    }
+
+    /// Route `msg` into the folder tree; return parent folder NID.
+    fn assign_message(
+        &mut self,
+        layout: &mut Layout,
+        msg: &WriteMessage,
+        opts: &WritePstOpts,
+        msg_index: usize,
+    ) -> u64 {
+        // Track multi-source set and recompute prefixes once ≥2 sources seen.
+        if self.multi_source {
+            if let Some(sp) = msg.source_path.as_ref() {
+                if !self.sources_seen.iter().any(|s| s == sp) {
+                    self.sources_seen.push(sp.clone());
+                    if self.sources_seen.len() >= 2 {
+                        self.prefix_map = unique_source_prefixes(&self.sources_seen);
+                    }
+                }
+            }
+        }
+
+        let parent_nid = match &opts.folder_layout {
+            FolderLayoutPolicy::Flat { .. } => {
+                // Intentional single-folder layout — not path residual/degraded.
+                let residual = find_child_mut(&mut self.roots, &self.residual_name);
+                // Residual always exists with a NID from `start`.
+                residual.message_indices.push(msg_index);
+                residual.nid
+            }
+            FolderLayoutPolicy::PreservePaths { .. } => {
+                let outcome = match msg.source_folder_path.as_deref() {
+                    None => PathParseOutcome::Residual { degraded: false },
+                    Some(p) => parse_folder_path(p),
+                };
+
+                match outcome {
+                    PathParseOutcome::Segments { segs, degraded } => {
+                        if degraded {
+                            self.folder_paths_degraded += 1;
+                        }
+                        let mut full_segs: Vec<String> = Vec::new();
+                        if let Some(prefix) = msg
+                            .source_path
+                            .as_ref()
+                            .and_then(|p| self.prefix_map.get(p))
+                            .cloned()
+                        {
+                            full_segs.push(prefix);
+                        }
+                        full_segs.extend(segs);
+                        let leaf = ensure_path_alloc(
+                            &mut self.roots,
+                            &full_segs,
+                            layout,
+                            &mut self.folders_created,
+                        );
+                        leaf.message_indices.push(msg_index);
+                        leaf.nid
+                    }
+                    PathParseOutcome::Residual { degraded } => {
+                        self.folder_paths_residual += 1;
+                        if degraded {
+                            self.folder_paths_degraded += 1;
+                        }
+                        let residual = find_child_mut(&mut self.roots, &self.residual_name);
+                        residual.message_indices.push(msg_index);
+                        residual.nid
+                    }
+                }
+            }
+        };
+
+        debug_assert_eq!(self.message_folder.len(), msg_index);
+        self.message_folder.push(parent_nid);
+        parent_nid
+    }
+
+    fn into_folder_plan(self) -> FolderPlan {
+        FolderPlan {
+            roots: self.roots,
+            message_folder: self.message_folder,
+            folders_created: self.folders_created,
+            folder_paths_residual: self.folder_paths_residual,
+            folder_paths_degraded: self.folder_paths_degraded,
+        }
     }
 }
 
@@ -1321,13 +1815,51 @@ fn find_child_mut<'a>(
     &mut children[last]
 }
 
+#[cfg(test)]
 fn ensure_path<'a>(
     roots: &'a mut Vec<PlannedFolder>,
     segments: &[String],
 ) -> &'a mut PlannedFolder {
+    // Collect-based path: NIDs assigned later by `allocate_folder_nids`.
+    ensure_path_with_nid(roots, segments, None, None)
+}
+
+/// Ensure folder path; when `layout` is provided, allocate NIDs for new folders only.
+fn ensure_path_alloc<'a>(
+    roots: &'a mut Vec<PlannedFolder>,
+    segments: &[String],
+    layout: &mut Layout,
+    folders_created: &mut u64,
+) -> &'a mut PlannedFolder {
+    ensure_path_with_nid(roots, segments, Some(layout), Some(folders_created))
+}
+
+fn ensure_path_with_nid<'a>(
+    roots: &'a mut Vec<PlannedFolder>,
+    segments: &[String],
+    mut layout: Option<&mut Layout>,
+    mut folders_created: Option<&mut u64>,
+) -> &'a mut PlannedFolder {
     // Ensure first segment exists under roots.
     {
-        let _ = find_child_mut(roots, &segments[0]);
+        let key = case_fold_key(&segments[0]);
+        if !roots.iter().any(|c| c.key == key) {
+            let nid = if let Some(l) = layout.as_mut() {
+                if let Some(c) = folders_created.as_mut() {
+                    **c = c.saturating_add(1);
+                }
+                l.alloc_nid(NID_TYPE_NORMAL_FOLDER)
+            } else {
+                0
+            };
+            roots.push(PlannedFolder {
+                display_name: segments[0].clone(),
+                key,
+                children: Vec::new(),
+                message_indices: Vec::new(),
+                nid,
+            });
+        }
     }
     // Walk by indices so we can re-borrow at each level.
     let mut idxs: Vec<usize> = Vec::with_capacity(segments.len());
@@ -1348,12 +1880,20 @@ fn ensure_path<'a>(
         let child_idx = if let Some(i) = parent.children.iter().position(|c| c.key == key) {
             i
         } else {
+            let nid = if let Some(l) = layout.as_mut() {
+                if let Some(c) = folders_created.as_mut() {
+                    **c = c.saturating_add(1);
+                }
+                l.alloc_nid(NID_TYPE_NORMAL_FOLDER)
+            } else {
+                0
+            };
             parent.children.push(PlannedFolder {
                 display_name: seg.clone(),
                 key,
                 children: Vec::new(),
                 message_indices: Vec::new(),
-                nid: 0,
+                nid,
             });
             parent.children.len() - 1
         };
@@ -1366,6 +1906,9 @@ fn ensure_path<'a>(
     node
 }
 
+/// Collect-all folder planner (unit tests / multi-source fidelity comparison).
+/// Production streaming uses [`IncrementalFolderPlan`] instead.
+#[cfg(test)]
 fn plan_folder_tree(messages: &[WriteMessage], opts: &WritePstOpts) -> FolderPlan {
     let residual_name = match &opts.folder_layout {
         FolderLayoutPolicy::Flat {
@@ -1469,6 +2012,7 @@ fn plan_folder_tree(messages: &[WriteMessage], opts: &WritePstOpts) -> FolderPla
     }
 }
 
+#[cfg(test)]
 fn allocate_folder_nids(layout: &mut Layout, plan: &mut FolderPlan) {
     fn alloc(layout: &mut Layout, node: &mut PlannedFolder) {
         node.nid = layout.alloc_nid(NID_TYPE_NORMAL_FOLDER);
@@ -1621,27 +2165,32 @@ fn short_attach_filename(long: &str) -> String {
     format!("{stem_trunc}{ext}")
 }
 
-/// Resolve by-value attach bytes: present `data` (including **zero-length**
-/// `Some(vec![])` — a valid empty file attach), else optional stream source.
-/// Soft-fail returns `None` only when data is absent and the stream is missing
-/// or errors (caller increments `attachments_failed`). Empty `Ok(Some(vec![]))`
-/// from a stream is a valid zero-byte payload.
-fn resolve_attach_bytes(
+/// Resolved by-value attach payload: either a small in-memory buffer or a
+/// chunked [`AttachRead`] stream (multi-GB path).
+enum ResolvedAttach {
+    Bytes(Vec<u8>),
+    Stream(AttachRead),
+}
+
+/// Resolve by-value attach: present `data` (including **zero-length**
+/// `Some(vec![])`), else preferred [`AttachStreamSource::open_attach_stream`].
+/// Soft-fail returns `None` when data is absent and the stream is missing or
+/// errors.
+fn resolve_attach_payload(
     attach: &WriteAttachment,
     streams: &mut Option<&mut dyn AttachStreamSource>,
-) -> Option<Vec<u8>> {
+) -> Option<ResolvedAttach> {
     if let Some(data) = attach.data.as_ref() {
-        // Explicit Some — including empty Vec — is a real payload.
-        return Some(data.clone());
+        return Some(ResolvedAttach::Bytes(data.clone()));
     }
     let src = streams.as_mut()?;
-    match src.open_attach(
+    match src.open_attach_stream(
         attach.source_path.as_deref(),
         attach.parent_nid,
         attach.attach_nid,
         &attach.filename,
     ) {
-        Ok(Some(bytes)) => Some(bytes),
+        Ok(Some(reader)) => Some(ResolvedAttach::Stream(reader)),
         Ok(None) | Err(_) => None,
     }
 }
@@ -1774,17 +2323,13 @@ fn write_one_attachment(
         }));
     }
 
-    // ATTACH_BY_VALUE — resolve bytes without inventing.
-    let Some(data) = resolve_attach_bytes(attach, streams) else {
+    // ATTACH_BY_VALUE — resolve without inventing.
+    let Some(payload) = resolve_attach_payload(attach, streams) else {
         counters.attachments_failed += 1;
         return Ok(None);
     };
 
     let attach_nid = next_attach_nid(attach_nid_counter);
-    let actual_len = data.len() as u64;
-    let size_i32 = i32::try_from(actual_len.min(i32::MAX as u64)).unwrap_or(i32::MAX);
-    let attach_size = size_i32 as u32;
-
     let filename = if attach.filename.is_empty() {
         "attachment.bin".to_string()
     } else {
@@ -1794,6 +2339,50 @@ fn write_one_attachment(
 
     let mut attach_sub_entries: Vec<(u64, u64, u64)> = Vec::new();
     let mut body_counter = 0u32;
+
+    // Write binary: heap-inline when small `Bytes`; otherwise subnode data chain
+    // (chunked from `Stream` without a full multi-GB Vec).
+    let (actual_len, diverted, data_prop) = match payload {
+        ResolvedAttach::Bytes(data) => {
+            let actual_len = data.len() as u64;
+            if data.len() > MAX_HEAP_VALUE_SIZE {
+                let sub_nid = next_subnode_nid(&mut body_counter);
+                let bid = layout.write_data_chain(data)?;
+                attach_sub_entries.push((sub_nid, bid, 0));
+                (actual_len, true, PcValue::SubnodeBinary(sub_nid))
+            } else {
+                (actual_len, false, PcValue::Binary(data))
+            }
+        }
+        ResolvedAttach::Stream(mut reader) => {
+            // Chunked chain path (closes D-0069-stream-buffer): never assemble
+            // a full attach Vec. Soft-fail mid-stream skips the attach.
+            let sub_nid = next_subnode_nid(&mut body_counter);
+            let (bid, total_len) = match layout.write_data_chain_from_reader(&mut reader) {
+                Ok(v) => v,
+                Err(_) => {
+                    counters.attachments_failed += 1;
+                    return Ok(None);
+                }
+            };
+            if total_len == 0 {
+                // Valid zero-byte attach via stream.
+                (0, false, PcValue::Binary(Vec::new()))
+            } else if total_len as usize <= MAX_HEAP_VALUE_SIZE && bid != 0 {
+                // Small stream result still lives as a data chain (subnode).
+                // Prefer subnode for stream path to avoid re-buffering.
+                attach_sub_entries.push((sub_nid, bid, 0));
+                (total_len, true, PcValue::SubnodeBinary(sub_nid))
+            } else {
+                attach_sub_entries.push((sub_nid, bid, 0));
+                (total_len, true, PcValue::SubnodeBinary(sub_nid))
+            }
+        }
+    };
+
+    let size_i32 = i32::try_from(actual_len.min(i32::MAX as u64)).unwrap_or(i32::MAX);
+    let attach_size = size_i32 as u32;
+
     let mut props = vec![
         (
             PID_TAG_ATTACH_LONG_FILENAME,
@@ -1802,19 +2391,10 @@ fn write_one_attachment(
         (PID_TAG_ATTACH_FILENAME, PcValue::String(short)),
         (PID_TAG_ATTACH_METHOD, PcValue::I32(ATTACH_BY_VALUE)),
         (PID_TAG_ATTACH_SIZE, PcValue::I32(size_i32)),
+        (PID_TAG_ATTACH_DATA_BINARY, data_prop),
     ];
     if let Some(mime) = &attach.mime {
         props.push((PID_TAG_ATTACH_MIME_TAG, PcValue::String(mime.clone())));
-    }
-
-    let diverted = data.len() > MAX_HEAP_VALUE_SIZE;
-    if diverted {
-        let sub_nid = next_subnode_nid(&mut body_counter);
-        let bid = layout.write_data_chain(data)?;
-        attach_sub_entries.push((sub_nid, bid, 0));
-        props.push((PID_TAG_ATTACH_DATA_BINARY, PcValue::SubnodeBinary(sub_nid)));
-    } else {
-        props.push((PID_TAG_ATTACH_DATA_BINARY, PcValue::Binary(data)));
     }
 
     let mut heap = HeapBuilder::new(0x6C);
@@ -1829,8 +2409,6 @@ fn write_one_attachment(
     };
 
     counters.attachments_written += 1;
-    // Align with body MessageSize: inline binary is inside PC → only pc_len;
-    // subnode diversion adds raw bytes separately.
     let contrib = if diverted {
         pc_len + actual_len
     } else {
@@ -2709,28 +3287,18 @@ impl Layout {
         }
         if data.len() <= MAX_BLOCK_DATA {
             let bid = self.alloc_bid(false);
-            self.blocks.push(BlockEntry {
-                bid,
-                data,
-                offset: 0,
-            });
+            self.push_leaf_block(bid, data)?;
             return Ok(bid);
         }
 
         let total_len = data.len() as u32;
-        let data_chunks: Vec<(u64, u32)> = data
-            .chunks(MAX_BLOCK_DATA)
-            .map(|c| {
-                let bid = self.alloc_bid(false);
-                let len = c.len() as u32;
-                self.blocks.push(BlockEntry {
-                    bid,
-                    data: c.to_vec(),
-                    offset: 0,
-                });
-                (bid, len)
-            })
-            .collect();
+        let mut data_chunks: Vec<(u64, u32)> = Vec::new();
+        for c in data.chunks(MAX_BLOCK_DATA) {
+            let bid = self.alloc_bid(false);
+            let len = c.len() as u32;
+            self.push_leaf_block(bid, c.to_vec())?;
+            data_chunks.push((bid, len));
+        }
 
         if data_chunks.len() <= MAX_XBLOCK_ENTRIES {
             return self.build_xblock(&data_chunks);
@@ -2753,6 +3321,148 @@ impl Layout {
         self.build_xxblock(&xblock_bids, total_len)
     }
 
+    /// Chunked data-chain write from a [`Read`] without assembling a full
+    /// multi-GB payload `Vec`. Reads into a fixed `STREAM_CHUNK_SIZE`
+    /// (`MAX_BLOCK_DATA`) buffer only.
+    ///
+    /// When [`Layout::eager`] is set, each leaf chunk is place+written to the
+    /// same-dir temp immediately (`on_disk = true`, empty `data` in `Layout`).
+    ///
+    /// **Transactional soft-fail (0070):** on mid-stream I/O error or size
+    /// overflow, rolls back any leaf/XBLOCK entries created for this call
+    /// (and truncates the eager temp cursor) so failed attaches leave no
+    /// orphan BBT blocks in the finalized PST.
+    ///
+    /// Returns `(root_bid, total_bytes)`. Soft callers should map I/O errors
+    /// to attach soft-fail as needed.
+    pub fn write_data_chain_from_reader<R: Read>(&mut self, reader: &mut R) -> Result<(u64, u64)> {
+        let checkpoint = self.stream_chain_checkpoint();
+        match self.write_data_chain_from_reader_inner(reader) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                self.rollback_stream_chain(checkpoint);
+                Err(e)
+            }
+        }
+    }
+
+    /// Snapshot layout state so a failed stream chain can be rolled back.
+    fn stream_chain_checkpoint(&self) -> StreamChainCheckpoint {
+        StreamChainCheckpoint {
+            blocks_len: self.blocks.len(),
+            next_bid_counter: self.next_bid_counter,
+            eager_cursor: self.eager.as_ref().map(|e| e.cursor),
+            eager_amap_len: self.eager.as_ref().map(|e| e.amap_pages.len()),
+        }
+    }
+}
+
+/// Checkpoint for transactional `write_data_chain_from_reader` soft-fail rollback.
+struct StreamChainCheckpoint {
+    blocks_len: usize,
+    next_bid_counter: u64,
+    eager_cursor: Option<u64>,
+    eager_amap_len: Option<usize>,
+}
+
+impl Layout {
+    // (methods continue — rollback + inner live on Layout below)
+
+    /// Drop blocks/BIDs added after `cp` and restore eager placement cursor.
+    fn rollback_stream_chain(&mut self, cp: StreamChainCheckpoint) {
+        // Remove bids for blocks we are about to drop (and any XBLOCK we added).
+        if self.blocks.len() > cp.blocks_len {
+            for block in self.blocks.drain(cp.blocks_len..) {
+                self.used_bids.remove(&block.bid);
+            }
+        }
+        // Restore bid counter so subsequent allocs don't permanently burn the
+        // range (used_bids already cleaned for rolled-back bids).
+        self.next_bid_counter = cp.next_bid_counter;
+
+        if let Some(eager) = self.eager.as_mut() {
+            if let Some(cursor) = cp.eager_cursor {
+                eager.cursor = cursor;
+                // Truncate temp so physical size and free region match cursor.
+                // Ignore truncate errors — soft-fail still proceeds without orphans in BBT.
+                let _ = eager.file.set_len(cursor);
+                let _ = eager.file.seek(SeekFrom::Start(cursor));
+            }
+            if let Some(amap_len) = cp.eager_amap_len {
+                if eager.amap_pages.len() > amap_len {
+                    for page in eager.amap_pages.drain(amap_len..) {
+                        eager.amap_stubs_written.remove(&page.offset);
+                        self.used_bids.remove(&page.bid);
+                    }
+                }
+            }
+        }
+    }
+
+    fn write_data_chain_from_reader_inner<R: Read>(
+        &mut self,
+        reader: &mut R,
+    ) -> Result<(u64, u64)> {
+        let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
+        let mut chunks: Vec<(u64, u32)> = Vec::new();
+        let mut total: u64 = 0;
+
+        loop {
+            let mut filled = 0usize;
+            while filled < STREAM_CHUNK_SIZE {
+                match reader.read(&mut buf[filled..]) {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(WriterError::Io(e)),
+                }
+            }
+            if filled == 0 {
+                break;
+            }
+            total = total.saturating_add(filled as u64);
+            if total > i32::MAX as u64 {
+                return Err(WriterError::BodyTooLarge(format!(
+                    "{total} bytes exceeds i32::MAX ({} bytes) — PidTagMessageSize PT_LONG range",
+                    i32::MAX
+                )));
+            }
+            let bid = self.alloc_bid(false);
+            // Spill leaf when eager is attached; otherwise keep in RAM.
+            self.push_leaf_block(bid, buf[..filled].to_vec())?;
+            chunks.push((bid, filled as u32));
+            if filled < STREAM_CHUNK_SIZE {
+                break;
+            }
+        }
+
+        if chunks.is_empty() {
+            return Ok((0, 0));
+        }
+        if chunks.len() == 1 {
+            return Ok((chunks[0].0, total));
+        }
+        if chunks.len() <= MAX_XBLOCK_ENTRIES {
+            let bid = self.build_xblock(&chunks)?;
+            return Ok((bid, total));
+        }
+        let mut xblock_bids = Vec::new();
+        for group in chunks.chunks(MAX_XBLOCK_ENTRIES) {
+            xblock_bids.push(self.build_xblock(group)?);
+        }
+        if xblock_bids.len() > MAX_XBLOCK_ENTRIES {
+            let max_bytes =
+                (MAX_XBLOCK_ENTRIES as u64) * (MAX_XBLOCK_ENTRIES as u64) * (MAX_BLOCK_DATA as u64);
+            return Err(WriterError::AllocationFailed(format!(
+                "streamed data requires {} XBLOCKs, exceeding XXBLOCK capacity (max ~{max_bytes} bytes)",
+                xblock_bids.len()
+            )));
+        }
+        let total_u32 = total as u32;
+        let bid = self.build_xxblock(&xblock_bids, total_u32)?;
+        Ok((bid, total))
+    }
+
     fn build_xblock(&mut self, chunks: &[(u64, u32)]) -> Result<u64> {
         let c_entries = chunks.len() as u16;
         let lcb_total: u32 = chunks.iter().map(|(_, l)| *l).sum();
@@ -2765,11 +3475,7 @@ impl Layout {
             payload.extend_from_slice(&bid.to_le_bytes());
         }
         let bid = self.alloc_bid(true);
-        self.blocks.push(BlockEntry {
-            bid,
-            data: payload,
-            offset: 0,
-        });
+        self.blocks.push(BlockEntry::in_memory(bid, payload));
         Ok(bid)
     }
 
@@ -2783,11 +3489,7 @@ impl Layout {
             payload.extend_from_slice(&bid.to_le_bytes());
         }
         let bid = self.alloc_bid(true);
-        self.blocks.push(BlockEntry {
-            bid,
-            data: payload,
-            offset: 0,
-        });
+        self.blocks.push(BlockEntry::in_memory(bid, payload));
         Ok(bid)
     }
 
@@ -2838,11 +3540,7 @@ impl Layout {
             )));
         }
         let bid = self.alloc_bid(true);
-        self.blocks.push(BlockEntry {
-            bid,
-            data: payload,
-            offset: 0,
-        });
+        self.blocks.push(BlockEntry::in_memory(bid, payload));
         Ok(bid)
     }
 
@@ -2929,27 +3627,34 @@ fn write_bt_page<W: Write + Seek>(
     Ok(())
 }
 
-fn write_amap_page_v1<W: Write + Seek>(writer: &mut W, layout: &Layout) -> Result<()> {
-    let amap_page = layout
+/// Write every AMap page at its mandated absolute offset.
+/// Content: 496 bytes of `0xFF` free bits (v1 free accounting approximate).
+fn write_all_amap_pages_v1<W: Write + Seek>(writer: &mut W, layout: &Layout) -> Result<()> {
+    let amaps: Vec<_> = layout
         .pages
         .iter()
-        .find(|p| p.ptype == PTYPE_AMAP)
-        .ok_or_else(|| WriterError::Layout("missing AMap page".to_string()))?;
+        .filter(|p| p.ptype == PTYPE_AMAP)
+        .copied()
+        .collect();
+    if amaps.is_empty() {
+        return Err(WriterError::Layout("missing AMap page".to_string()));
+    }
+    for amap_page in amaps {
+        let mut page = vec![0u8; PAGE_SIZE as usize];
+        page[..496].fill(0xFF);
 
-    let mut page = vec![0u8; PAGE_SIZE as usize];
-    page[..496].fill(0xFF);
+        let trailer_offset = PAGE_SIZE as usize - 16;
+        page[trailer_offset] = PTYPE_AMAP;
+        page[trailer_offset + 1] = PTYPE_AMAP;
+        let sig = compute_page_sig(amap_page.offset, amap_page.bid);
+        page[trailer_offset + 2..trailer_offset + 4].copy_from_slice(&sig.to_le_bytes());
+        let crc = crc32fast::hash(&page[..trailer_offset]);
+        page[trailer_offset + 4..trailer_offset + 8].copy_from_slice(&crc.to_le_bytes());
+        page[trailer_offset + 8..trailer_offset + 16].copy_from_slice(&amap_page.bid.to_le_bytes());
 
-    let trailer_offset = PAGE_SIZE as usize - 16;
-    page[trailer_offset] = PTYPE_AMAP;
-    page[trailer_offset + 1] = PTYPE_AMAP;
-    let sig = compute_page_sig(amap_page.offset, amap_page.bid);
-    page[trailer_offset + 2..trailer_offset + 4].copy_from_slice(&sig.to_le_bytes());
-    let crc = crc32fast::hash(&page[..trailer_offset]);
-    page[trailer_offset + 4..trailer_offset + 8].copy_from_slice(&crc.to_le_bytes());
-    page[trailer_offset + 8..trailer_offset + 16].copy_from_slice(&amap_page.bid.to_le_bytes());
-
-    writer.seek(SeekFrom::Start(amap_page.offset))?;
-    writer.write_all(&page)?;
+        writer.seek(SeekFrom::Start(amap_page.offset))?;
+        writer.write_all(&page)?;
+    }
     Ok(())
 }
 
@@ -2966,7 +3671,7 @@ fn encode_bbt_leaf(b: &BlockEntry) -> [u8; 24] {
     let mut e = [0u8; 24];
     e[0..8].copy_from_slice(&b.bid.to_le_bytes());
     e[8..16].copy_from_slice(&b.offset.to_le_bytes());
-    e[16..18].copy_from_slice(&(b.data.len() as u16).to_le_bytes());
+    e[16..18].copy_from_slice(&(b.payload_len() as u16).to_le_bytes());
     e[18..20].copy_from_slice(&1u16.to_le_bytes()); // cRef
     e
 }
@@ -3124,11 +3829,9 @@ fn write_header_v1<W: Write>(
     let bbt_offset = *offsets
         .get(&root_bbt_bid)
         .ok_or_else(|| WriterError::Layout("missing BBT root offset".to_string()))?;
-    let amap_page = layout
-        .pages
-        .iter()
-        .find(|p| p.ptype == PTYPE_AMAP)
-        .ok_or_else(|| WriterError::Layout("missing AMap page".to_string()))?;
+    let amap_last = layout
+        .ib_amap_last()
+        .ok_or_else(|| WriterError::Layout("missing AMap page (ibAMapLast)".to_string()))?;
 
     let file_size = layout.file_size();
     let next_bid = layout.next_bid_counter;
@@ -3151,7 +3854,7 @@ fn write_header_v1<W: Write>(
     // ROOT (72 bytes)
     buf.write_u32::<LittleEndian>(0)?;
     buf.write_u64::<LittleEndian>(file_size)?;
-    buf.write_u64::<LittleEndian>(amap_page.offset)?;
+    buf.write_u64::<LittleEndian>(amap_last)?;
     buf.write_u64::<LittleEndian>(0)?; // cbAMapFree
     buf.write_u64::<LittleEndian>(0)?; // cbPMapFree
     buf.write_u64::<LittleEndian>(root_nbt_bid)?;
@@ -3258,5 +3961,206 @@ mod tests {
             0,
             "no blocks should be written when the size ceiling is exceeded"
         );
+    }
+
+    #[test]
+    fn eager_spill_leaves_on_disk_with_empty_data() {
+        let dir = std::env::temp_dir();
+        let tmp = dir.join(format!("pst_writer_eager_unit_{}.tmp", std::process::id()));
+        let _ = fs::remove_file(&tmp);
+        let mut layout = Layout::new();
+        layout.attach_eager(crate::EagerWriteCtx::create(&tmp).expect("eager create"));
+
+        // Multi-block payload so we get several leaf blocks + XBLOCK.
+        let data = vec![0xCDu8; MAX_BLOCK_DATA * 2 + 100];
+        let bid = layout.write_data_chain(data).expect("chain");
+        assert_ne!(bid, 0);
+
+        let leaf_on_disk: Vec<_> = layout.blocks.iter().filter(|b| b.on_disk).collect();
+        assert!(
+            leaf_on_disk.len() >= 2,
+            "expected ≥2 on_disk leaves, got {}",
+            leaf_on_disk.len()
+        );
+        for b in &leaf_on_disk {
+            assert!(b.data.is_empty(), "on_disk leaf must clear data");
+            assert!(b.offset >= HEADER_SIZE);
+            assert!(b.len > 0);
+        }
+        // XBLOCK internal block stays in memory (not on_disk).
+        let xblock = layout.blocks.iter().find(|b| b.bid == bid).expect("xblock");
+        assert!(!xblock.on_disk);
+        assert!(!xblock.data.is_empty());
+
+        // Physical size grew past header.
+        assert!(layout.current_physical_size() > HEADER_SIZE);
+
+        drop(layout.take_eager());
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn eager_stream_reader_spills_leaves_on_disk() {
+        let dir = std::env::temp_dir();
+        let tmp = dir.join(format!(
+            "pst_writer_eager_stream_{}.tmp",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&tmp);
+        let mut layout = Layout::new();
+        layout.attach_eager(crate::EagerWriteCtx::create(&tmp).expect("eager create"));
+
+        let payload = vec![0x11u8; MAX_BLOCK_DATA + 50];
+        let mut reader = Cursor::new(payload.clone());
+        let (bid, total) = layout
+            .write_data_chain_from_reader(&mut reader)
+            .expect("stream chain");
+        assert_eq!(total, payload.len() as u64);
+        assert_ne!(bid, 0);
+
+        let leaves: Vec<_> = layout.blocks.iter().filter(|b| b.on_disk).collect();
+        assert!(!leaves.is_empty());
+        for b in leaves {
+            assert!(b.data.is_empty());
+            assert!(b.on_disk);
+        }
+
+        drop(layout.take_eager());
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn incremental_folder_plan_matches_collect_single_source() {
+        let opts = WritePstOpts {
+            folder_layout: FolderLayoutPolicy::PreservePaths {
+                multi_source_prefix: true,
+            },
+            ..WritePstOpts::default()
+        };
+        let messages = vec![
+            WriteMessage {
+                source_path: Some(r"C:\data\mail.pst".into()),
+                source_folder_path: Some("Inbox".into()),
+                subject: "a".into(),
+                ..WriteMessage::default()
+            },
+            WriteMessage {
+                source_path: Some(r"C:\data\mail.pst".into()),
+                source_folder_path: Some("Inbox/Work".into()),
+                subject: "b".into(),
+                ..WriteMessage::default()
+            },
+            WriteMessage {
+                source_path: Some(r"C:\data\mail.pst".into()),
+                source_folder_path: None,
+                subject: "c".into(),
+                ..WriteMessage::default()
+            },
+        ];
+
+        let mut collect = plan_folder_tree(&messages, &opts);
+        let mut layout_c = Layout::new();
+        allocate_folder_nids(&mut layout_c, &mut collect);
+
+        let mut layout_i = Layout::new();
+        let mut inc = IncrementalFolderPlan::start(&mut layout_i, &opts);
+        for (i, m) in messages.iter().enumerate() {
+            let _ = inc.assign_message(&mut layout_i, m, &opts, i);
+        }
+        let inc = inc.into_folder_plan();
+
+        assert_eq!(inc.folders_created, collect.folders_created);
+        assert_eq!(inc.folder_paths_residual, collect.folder_paths_residual);
+        assert_eq!(inc.folder_paths_degraded, collect.folder_paths_degraded);
+        assert_eq!(inc.message_folder.len(), collect.message_folder.len());
+        // Same tree shape: residual + Inbox (+ Work under Inbox); single source → no prefix.
+        assert_eq!(inc.roots.len(), collect.roots.len());
+        trim_folder_plan_to_written(&mut collect, 3);
+        assert_eq!(collect.message_folder.len(), 3);
+    }
+
+    #[test]
+    fn incremental_multi_source_prefix_after_second_source() {
+        // Residual: first message (only one source seen) has no prefix; after
+        // second source appears, subsequent messages get unique_source_prefixes.
+        let opts = WritePstOpts {
+            folder_layout: FolderLayoutPolicy::PreservePaths {
+                multi_source_prefix: true,
+            },
+            ..WritePstOpts::default()
+        };
+        let m0 = WriteMessage {
+            source_path: Some(r"C:\a\one.pst".into()),
+            source_folder_path: Some("Inbox".into()),
+            subject: "first".into(),
+            ..WriteMessage::default()
+        };
+        let m1 = WriteMessage {
+            source_path: Some(r"C:\b\two.pst".into()),
+            source_folder_path: Some("Inbox".into()),
+            subject: "second".into(),
+            ..WriteMessage::default()
+        };
+        let m2 = WriteMessage {
+            source_path: Some(r"C:\a\one.pst".into()),
+            source_folder_path: Some("Sent".into()),
+            subject: "third".into(),
+            ..WriteMessage::default()
+        };
+
+        let mut layout = Layout::new();
+        let mut plan = IncrementalFolderPlan::start(&mut layout, &opts);
+        plan.assign_message(&mut layout, &m0, &opts, 0);
+        // Only one source so far → no multi-source prefixes yet.
+        assert!(plan.prefix_map.is_empty());
+        // m0 under top-level "Inbox" (no source prefix).
+        assert!(
+            plan.roots.iter().any(|r| r.display_name == "Inbox"),
+            "first message routes without source prefix"
+        );
+
+        plan.assign_message(&mut layout, &m1, &opts, 1);
+        assert_eq!(plan.prefix_map.len(), 2);
+        plan.assign_message(&mut layout, &m2, &opts, 2);
+        // m2 from one.pst should sit under source prefix + Sent.
+        let one_prefix = plan.prefix_map.get(r"C:\a\one.pst").cloned().unwrap();
+        fn find_path(nodes: &[PlannedFolder], segs: &[&str]) -> bool {
+            if segs.is_empty() {
+                return true;
+            }
+            nodes
+                .iter()
+                .any(|n| n.display_name == segs[0] && find_path(&n.children, &segs[1..]))
+        }
+        assert!(
+            find_path(&plan.roots, &[&one_prefix, "Sent"]),
+            "after second source, later msgs get prefix; roots={:?}",
+            plan.roots
+                .iter()
+                .map(|r| r.display_name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn flat_policy_routes_all_to_residual() {
+        let opts = WritePstOpts {
+            folder_layout: FolderLayoutPolicy::Flat {
+                folder_display_name: "All Mail".into(),
+            },
+            ..WritePstOpts::default()
+        };
+        let mut layout = Layout::new();
+        let mut plan = IncrementalFolderPlan::start(&mut layout, &opts);
+        let msg = WriteMessage {
+            source_folder_path: Some("Inbox/Deep".into()),
+            subject: "x".into(),
+            ..WriteMessage::default()
+        };
+        let nid = plan.assign_message(&mut layout, &msg, &opts, 0);
+        assert_eq!(plan.roots.len(), 1);
+        assert_eq!(plan.roots[0].display_name, "All Mail");
+        assert_eq!(nid, plan.roots[0].nid);
+        assert_eq!(plan.folders_created, 1);
     }
 }
