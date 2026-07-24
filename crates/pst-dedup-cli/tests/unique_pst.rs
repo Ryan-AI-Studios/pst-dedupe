@@ -294,14 +294,20 @@ fn unique_pst_fail_mid_volume_2_keeps_vol1() {
         .as_array()
         .cloned()
         .unwrap_or_default();
-    // If unique > 1 and max tiny, vol1 should be listed.
-    if !vols.is_empty() {
-        assert!(out.is_file(), "completed vol1 must remain");
-        let mut pst = pst_reader::PstFile::open(&out).expect("open vol1");
-        let _ = pst.folders().expect("vol1 folders");
-        // Incomplete vol2 must not be a PST file (dir is fine).
-        assert!(!vol2.is_file(), "incomplete vol2 must not be a PST file");
-    }
+    // Fixture has unique > 1 and max is tiny → vol1 must have completed before vol2 fail.
+    assert!(
+        !vols.is_empty(),
+        "expected at least one completed volume before vol2 fail; summary={summary}"
+    );
+    assert!(out.is_file(), "completed vol1 must remain");
+    let mut pst = pst_reader::PstFile::open(&out).expect("open vol1");
+    let _ = pst.folders().expect("vol1 folders");
+    // Incomplete vol2 must not be a PST file (dir is fine).
+    assert!(!vol2.is_file(), "incomplete vol2 must not be a PST file");
+    assert_eq!(
+        summary["verification"]["ok"], false,
+        "partial export must force verification.ok=false"
+    );
 }
 
 #[test]
@@ -355,13 +361,49 @@ fn unique_pst_default_verify_and_verify_hash() {
     let out = dir.path().join("unique.pst");
     let report = dir.path().join("report");
 
-    let result = run_unique_pst(&[
+    // Default path: open+count+sample only — no full-file rehash.
+    let result_default = run_unique_pst(&[
         "unique-pst",
         sample.to_str().expect("utf8"),
         "--out",
         out.to_str().expect("utf8"),
         "--report-dir",
         report.to_str().expect("utf8"),
+        "--json",
+    ]);
+    assert!(
+        result_default.status.success(),
+        "default verify: stderr={} stdout={}",
+        String::from_utf8_lossy(&result_default.stderr),
+        String::from_utf8_lossy(&result_default.stdout)
+    );
+    let v_def: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&result_default.stdout)).expect("json");
+    assert_eq!(v_def["ok"], true);
+    assert_eq!(v_def["verification"]["ok"], true);
+    assert_eq!(
+        v_def["verification"]["rehash_ran"], false,
+        "default path must not rehash (§3.6)"
+    );
+    for vol in v_def["verification"]["volumes"].as_array().expect("vvols") {
+        assert_eq!(vol["open_ok"], true);
+        assert_eq!(vol["message_count_match"], true);
+        assert!(
+            vol["hash_match"].is_null(),
+            "no hash_match without --verify-hash"
+        );
+    }
+
+    // Optional rehash path for CI/small fixtures.
+    let out2 = dir.path().join("unique2.pst");
+    let report2 = dir.path().join("report2");
+    let result = run_unique_pst(&[
+        "unique-pst",
+        sample.to_str().expect("utf8"),
+        "--out",
+        out2.to_str().expect("utf8"),
+        "--report-dir",
+        report2.to_str().expect("utf8"),
         "--verify-hash",
         "--json",
     ]);

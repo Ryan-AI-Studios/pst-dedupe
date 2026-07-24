@@ -730,11 +730,18 @@ pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
 
     // ── Phase 5: verify completed volumes ───────────────────────────────────
     eprint("stage=verify");
-    let verification = verify_volumes(&volumes, &export_rows, args.verify_hash);
+    let mut verification = verify_volumes(&volumes, &export_rows, args.verify_hash);
+    // Spec §3.3.1: partial export forces overall + verification honesty flags.
+    if export_partial {
+        verification.ok = false;
+    }
 
     let duration_ms = started.elapsed().as_millis() as u64;
     let exit_err = evaluate_exit_policy(&outcome.summary, &opts).err();
     let verify_err = if verification.ok {
+        None
+    } else if export_partial {
+        // Partial already counted via export_partial / export_err; avoid double noise.
         None
     } else {
         Some("verification failed".to_string())
@@ -1141,9 +1148,11 @@ fn verify_volumes(
         });
     }
 
-    // No volumes completed and we expected work → not ok (caller may still set ok=false).
+    // Empty volume list: structural verify of "nothing" is OK. Export partial /
+    // count mismatch / zero-winner policy is decided by the orchestrator, not here.
+    // (Previously failing empty lists made successful unique==0 exports always fail.)
     if volumes.is_empty() {
-        all_ok = false;
+        all_ok = true;
     }
 
     VerificationReport {
