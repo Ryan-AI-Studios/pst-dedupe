@@ -709,12 +709,24 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0069-stream-buffer | — | One-attach full `Vec` buffer via `AttachStreamSource` (no multi-GB zero-hold stream) | Spec §3.3.4 allows one-attach buffer; true chunked multi-GB is 0070 | **0070** |
+| D-0069-stream-buffer | — | One-attach full `Vec` buffer via `AttachStreamSource` (no multi-GB zero-hold stream) | **Closed in 0070**: `open_attach_stream` + `Layout::write_data_chain_from_reader` (chunk = `MAX_BLOCK_DATA`) | **closed / 0070** |
 | D-0069-embed-object | P3 | `PidTagAttachDataObject` (PtypObject) on embedded attaches | Nested message linked as attach subnode leaf + method=5; PC builder has no PtypObject | residual polish |
 | D-0069-casefold | P3 | Folder/prefix case key uses ASCII `to_uppercase`, not full Unicode casefold | Sufficient for Windows-oriented eDiscovery paths; residual if exotic Unicode folder names appear | residual polish |
-| D-0068-02 | — | scanpst / Outlook structural verification | Carry from 0068 — operator residual | operator |
+| D-0068-02 | — | scanpst / Outlook structural verification | Carry from 0068 — operator residual; **recommend on multi-GB operator run after 0070** | operator |
 | D-0067-cloud | — | Cloud/ref attach download | Skip + fail count in 0069 | residual |
 | D-0068-04 attach | — | Attachment table schema | **Closed in 0069** | — |
+
+## From track 0070-PstWriterStreamingScale
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0070-eager-spill | — | Eager write / spill of all leaf block payloads so `Layout` never holds multi-GB of leaf `Vec`s | **Closed**: `EagerWriteCtx` + `Layout::push_leaf_block` place+write leaves to same-dir temp (`on_disk=true`, empty `data`). Residual in RAM: small XBLOCK/XXBLOCK/SLBLOCK/PC heaps only | **closed / 0070 P1** |
+| D-0070-dto-collect | — | Full `WriteMessage` DTO list collected for multi-source folder planning | **Closed in 0070**: streaming path uses `IncrementalFolderPlan` (one-pass consume; no DTO pre-collect). Caller-owned `Vec` RAM is the caller's; fat in-memory bodies on DTOs remain the caller's responsibility | **closed / 0070** |
+| D-0070-multi-source-stream-prefix | P3 | Multi-source folder prefixes on streaming path use sources **seen so far** | When `multi_source_prefix` and ≥2 distinct sources, prefixes match `unique_source_prefixes` for the current source set. Messages written **before** a second source appears may lack a source prefix (collect-all fidelity differs). Flat policy unaffected. Collect-based `plan_folder_tree` remains for unit comparison | residual polish |
+| D-0070-operator-multigb | — | Operator/nightly multi-GB synthetic stress + optional scanpst | CI capped (~16 MiB attach stream); full multi-GB not committed | operator residual |
+| D-0070-inline-hash-io | P3 | Final hash is a full sequential read of the temp after seeks (not byte-at-a-time inline writer) | Correct vs final bytes; second sequential I/O on multi-GB | residual polish |
+| D-0068-02 | — | scanpst / Outlook structural verification | Carry — run on multi-GB operator artifact | operator |
+| D-0069-stream-buffer | — | Chunked attach stream | **Closed in 0070** | — |
 
 ## Hygiene
 
