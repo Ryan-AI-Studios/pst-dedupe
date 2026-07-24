@@ -1215,7 +1215,10 @@ fn verify_volumes(
                             .collect();
                         let sample_n = (vol_exports.len()).min(5);
                         if sample_n > 0 {
-                            // Collect message IDs/subjects from written PST with properties.
+                            // Collect *all* written message IDs/subjects so sample rows that
+                            // land late in folder traversal cannot falsely fail (Codex r2 P2).
+                            // Cost is O(messages_in_volume) property reads — acceptable for
+                            // Phase 5 structural verify; multi-GB full-file rehash remains opt-in.
                             let mut written_mids: Vec<String> = Vec::new();
                             let mut written_subjects: Vec<String> = Vec::new();
                             for folder in &folders {
@@ -1227,9 +1230,6 @@ fn verify_volumes(
                                         if let Some(sub) = props.subject {
                                             written_subjects.push(normalize_subject(&sub));
                                         }
-                                    }
-                                    if written_mids.len() + written_subjects.len() >= 64 {
-                                        break;
                                     }
                                 }
                             }
@@ -1510,5 +1510,24 @@ mod tests {
     #[test]
     fn normalize_mid_exact_strips_brackets_lowercase() {
         assert_eq!(normalize_mid_exact(" <Id@X.com> "), "id@x.com");
+    }
+
+    /// Sample matching must succeed against a late identity in a large set
+    /// (regression for former 64-identity cap false-negative).
+    #[test]
+    fn sample_identity_matches_late_entry_beyond_64() {
+        let mut mids: Vec<String> = (0..100).map(|i| format!("id{i}@example.com")).collect();
+        mids.push("late@example.com".into());
+        let mut subjects: Vec<String> = (0..100).map(|i| format!("subject {i}")).collect();
+        subjects.push("late subject".into());
+
+        assert_eq!(
+            sample_identity_matches("late@example.com", None, &mids, &subjects),
+            SampleMatch::Ok
+        );
+        assert_eq!(
+            sample_identity_matches("", Some("late subject"), &mids, &subjects),
+            SampleMatch::Ok
+        );
     }
 }
