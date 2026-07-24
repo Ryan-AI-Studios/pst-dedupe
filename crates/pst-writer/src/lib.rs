@@ -155,6 +155,9 @@ pub enum WriterError {
     /// ever write onto a known input path.
     #[error("refused: {0} is a protected source input PST; refusing to write onto it (this check cannot be bypassed by `overwrite`)")]
     RefusedSourceOverwrite(PathBuf),
+    /// Cooperative cancel from [`WriteProgressSink::should_cancel`] — temp not finalized.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, WriterError>;

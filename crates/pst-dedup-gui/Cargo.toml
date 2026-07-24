@@ -9,7 +9,12 @@ license-file = "../../LICENSE"
 [dependencies]
 pst-reader = { path = "../pst-reader" }
 dedup-engine = { path = "../dedup-engine" }
+# In-process unique-pst orchestration (0072) — same pipeline as CLI, no process spawn.
+pst-dedup-cli = { path = "../pst-dedup-cli" }
 eframe = { workspace = true }
 rfd = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

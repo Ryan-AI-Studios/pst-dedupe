@@ -1,6 +1,7 @@
 //! Track 0070 — streaming scale: AMap-aware layout, chunked attach, progress,
 //! stop_and_finalize, inline hashes, same-dir temp.
 
+use std::fs;
 use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
 
@@ -8,7 +9,8 @@ use md5::{Digest as Md5Digest, Md5};
 use pst_writer::{
     is_amap_page_offset, temp_sibling_path, write_unicode_pst, write_unicode_pst_streaming,
     write_unicode_pst_with_streams, AttachRead, AttachStreamSource, WriteAttachment, WriteMessage,
-    WriteProgress, WriteProgressSink, WritePstOpts, WriteStage, AMAP_FIRST_OFFSET, AMAP_INTERVAL,
+    WriteProgress, WriteProgressSink, WritePstOpts, WriteStage, WriterError, AMAP_FIRST_OFFSET,
+    AMAP_INTERVAL,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 
@@ -405,6 +407,50 @@ fn stop_and_finalize_exact_n_openable() {
     let total: usize = folders.iter().map(|f| f.message_nids.len()).sum();
     assert_eq!(total, 3);
     cleanup(&path);
+}
+
+// ── Cancel aborts without finalizing (0072) ──────────────────────────────────
+
+struct CancelAfter {
+    n: u64,
+}
+
+impl WriteProgressSink for CancelAfter {
+    fn on_progress(&mut self, _p: &WriteProgress) {}
+    fn should_cancel(&self, p: &WriteProgress) -> bool {
+        p.stage == WriteStage::WritingMessages && p.messages_written >= self.n
+    }
+}
+
+#[test]
+fn cancel_mid_write_no_final_pst_temp_cleaned() {
+    let path = scratch("cancel_mid");
+    cleanup(&path);
+    let tmp = temp_sibling_path(&path);
+    let _ = fs::remove_file(&tmp);
+    let msgs: Vec<_> = (0..20)
+        .map(|i| base_msg(&format!("<cx{i}@ex.com>"), &format!("Cancel{i}")))
+        .collect();
+    let mut sink = CancelAfter { n: 2 };
+    let err = write_unicode_pst_streaming(
+        &path,
+        msgs,
+        &[],
+        &WritePstOpts::default(),
+        None,
+        Some(&mut sink),
+    )
+    .expect_err("cancel should error");
+    assert!(
+        matches!(err, WriterError::Cancelled),
+        "expected Cancelled, got {err:?}"
+    );
+    assert!(!path.exists(), "final path must not be finalized on cancel");
+    assert!(
+        !tmp.exists(),
+        "incomplete temp must be cleaned (TempGuard): {}",
+        tmp.display()
+    );
 }
 
 // ── 7b: stop when physical size threshold crossed (0071 volume-cut hook) ─────

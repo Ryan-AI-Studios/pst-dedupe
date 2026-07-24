@@ -62,7 +62,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
                 app.set_state(AppState::Settings);
             }
         });
+        ui.add_space(16.0);
+        if ui.button("Unique PST Export…").clicked() {
+            app.enter_unique_wizard();
+        }
     });
+    ui.add_space(4.0);
+    ui.colored_label(
+        egui::Color32::GRAY,
+        "Unique PST Export uses the keep-set / unique-pst path (same as CLI).",
+    );
 }
 
 fn format_size(bytes: u64) -> String {

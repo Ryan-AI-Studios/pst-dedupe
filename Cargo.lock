@@ -5100,8 +5100,10 @@ version = "0.1.0"
 dependencies = [
  "dedup-engine",
  "eframe",
+ "pst-dedup-cli",
  "pst-reader",
  "rfd",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

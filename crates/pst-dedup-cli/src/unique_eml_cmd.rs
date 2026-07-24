@@ -134,6 +134,7 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
         skip_limit: args.skip_limit,
         retain_rows: false,
         retain_candidates: true,
+        cancel: None,
     };
 
     // Phase 1: integrity-aware scan collecting candidates.
