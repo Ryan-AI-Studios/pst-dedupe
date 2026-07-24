@@ -32,10 +32,7 @@ fn short_message(mid: &str, subject: &str) -> WriteMessage {
         display_to: Some("bob@example.com".to_string()),
         submit_time: Some(0x01D5B035EDA780_i64),
         body_plain: Some("Hello, world!".to_string()),
-        body_html: None,
-        message_class: None,
-        body_incomplete: false,
-        body_unavailable: false,
+        ..Default::default()
     }
 }
 
@@ -317,16 +314,18 @@ fn message_size_is_computed_not_copied_from_inflated_source() {
 
     let (write_msg, dropped) = pst_writer::from_canonical_message(&canonical);
     assert_eq!(dropped, 0);
+    // Adapter maps locus.folder_path → source_folder_path ("Inbox").
+    assert_eq!(write_msg.source_folder_path.as_deref(), Some("Inbox"));
 
     write_unicode_pst(&path, vec![write_msg], &[], &WritePstOpts::default()).expect("write");
 
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
     let folders = pst.folders().expect("folders");
-    let unique = folders
+    let inbox = folders
         .iter()
-        .find(|f| f.name == "Unique Mail")
-        .expect("folder");
-    let nid = unique.message_nids[0];
+        .find(|f| f.name == "Inbox")
+        .expect("Inbox folder from preserved path");
+    let nid = inbox.message_nids[0];
     let props = pst.read_message_properties(nid).expect("props");
     let stored_size = props.message_size.expect("message size present");
 
@@ -647,11 +646,12 @@ fn fixed_template_object_tables_are_present_and_empty() {
     // source data's column lists (§5a-5d), duplicate 0x0E07/0x0E17 in
     // Microsoft's own published Search Folder Contents Table Template page
     // collapsed to one column each, per that table's own documented note.
-    let templates: [(u64, usize); 4] = [
+    let templates: [(u64, usize); 5] = [
         (0x60D, 13), // Hierarchy Table Template
         (0x60E, 27), // Contents Table Template
         (0x60F, 14), // FAI Contents Table Template
         (0x610, 18), // Search Folder Contents Table Template
+        (0x671, 6),  // Attachment Table Template (MS-PST / 0069 review)
     ];
 
     for (nid, expected_cols) in templates {

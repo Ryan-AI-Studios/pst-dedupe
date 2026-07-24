@@ -30,10 +30,12 @@
 //! explicit allowance to fix a genuine reader bug blocking round-trip
 //! verification rather than working around it in the writer.
 //!
-//! ## Scope (v1)
+//! ## Scope (v1.1 / track 0069)
 //!
-//! No attachments, no folder-path preservation, no multi-GB streaming (all owned
-//! by 0069/0070). See `docs/pst-writer-fidelity-v1.md`.
+//! File attachments (by-value + attachment table + XBLOCK), folder-path
+//! preservation under IPM_SUBTREE, MessageFlags READ|HASATTACH, and embedded
+//! message depth cap. Multi-GB streaming remains **0070**. See
+//! `docs/pst-writer-fidelity-v1.md`.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -45,8 +47,8 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use crate::{
     write_data_block, BlockEntry, HeapBuilder, Layout, NodeEntry, Result, WriterError,
     CLIENT_MAGIC, HEADER_SIZE, MAX_BLOCK_DATA, NID_ASSOC_CONTENTS_TABLE_TEMPLATE,
-    NID_CONTENTS_TABLE_TEMPLATE, NID_HIERARCHY_TABLE_TEMPLATE, NID_MESSAGE_STORE,
-    NID_NAME_TO_ID_MAP, NID_ROOT_FOLDER, NID_SEARCH_CONTENTS_TABLE_TEMPLATE,
+    NID_ATTACHMENT_TABLE_TEMPLATE, NID_CONTENTS_TABLE_TEMPLATE, NID_HIERARCHY_TABLE_TEMPLATE,
+    NID_MESSAGE_STORE, NID_NAME_TO_ID_MAP, NID_ROOT_FOLDER, NID_SEARCH_CONTENTS_TABLE_TEMPLATE,
     NID_TYPE_NORMAL_FOLDER, NID_TYPE_NORMAL_MESSAGE, NID_TYPE_SEARCH_FOLDER, PAGE_SIZE,
     PID_TAG_CLIENT_SUBMIT_TIME, PID_TAG_CONTENT_COUNT, PID_TAG_DISPLAY_NAME,
     PID_TAG_HAS_ATTACHMENTS, PID_TAG_INTERNET_MESSAGE_ID, PID_TAG_LTP_ROW_ID,
@@ -81,6 +83,32 @@ const PID_TAG_CONTENT_UNREAD_COUNT: u16 = 0x3603;
 /// PidTagSubfolders — same source as above.
 const PID_TAG_SUBFOLDERS: u16 = 0x360A;
 const PTYP_BINARY: u16 = 0x0102;
+
+// Attachment property tags (MS-PST / MS-OXPROPS) — track 0069.
+const PID_TAG_ATTACH_DATA_BINARY: u16 = 0x3701;
+const PID_TAG_ATTACH_METHOD: u16 = 0x3705;
+const PID_TAG_ATTACH_MIME_TAG: u16 = 0x370E;
+const PID_TAG_ATTACH_FILENAME: u16 = 0x3704;
+const PID_TAG_ATTACH_LONG_FILENAME: u16 = 0x3707;
+const PID_TAG_ATTACH_SIZE: u16 = 0x0E20;
+
+/// Fixed subnode NID for a message's attachment table (same value as the
+/// PST-level template [`NID_ATTACHMENT_TABLE_TEMPLATE`]).
+const NID_ATTACHMENT_TABLE: u64 = NID_ATTACHMENT_TABLE_TEMPLATE;
+/// NID type for attachment objects (low 5 bits).
+const NID_TYPE_ATTACHMENT: u8 = 0x05;
+/// PidTagRenderingPosition — typical "not rendered in body" sentinel.
+const PID_TAG_RENDERING_POSITION: u16 = 0x370B;
+/// PidTagLtpRowVer — TC row version column.
+const PID_TAG_LTP_ROW_VER: u16 = 0x67F3;
+
+const MSGFLAG_READ: i32 = 0x0000_0001;
+const MSGFLAG_HASATTACH: i32 = 0x0000_0010;
+const ATTACH_BY_VALUE: i32 = 0x0000_0001;
+const ATTACH_EMBEDDED_MSG: i32 = 0x0000_0005;
+
+/// Max folder path segments before routing to residual (spec §3.2).
+const MAX_FOLDER_DEPTH: usize = 32;
 /// PtypMultipleInteger32 — used only by the FAI Contents Table Template's
 /// `PidTagFlatUrgency`-shaped column (0x6805). This repo's TC column model has
 /// no existing precedent for a genuine PtypMultiple* value; per the verified
@@ -112,11 +140,75 @@ const PTYPE_BBT: u8 = 0x80;
 const PTYPE_NBT: u8 = 0x81;
 const PTYPE_AMAP: u8 = 0x84;
 
-// ── Public API (spec §3.6) ───────────────────────────────────────────────────
+// ── Public API (spec §3.6 / 0069) ────────────────────────────────────────────
+
+/// One attachment on a [`WriteMessage`] (track 0069).
+///
+/// Prefer small payloads in [`Self::data`]. Resolution order:
+/// 1. **`data: Some(...)`** — used as the payload even when the `Vec` is
+///    **empty** (valid zero-byte file attach). Stream is **not** consulted.
+/// 2. **`data: None`** — try optional [`AttachStreamSource`] (see
+///    [`write_unicode_pst_with_streams`]); `Ok(Some(_))` including empty is
+///    valid; `Ok(None)` / `Err` soft-fails (`attachments_failed++`).
+/// 3. No data and no stream → soft-fail.
+///
+/// This writer never invents attachment bytes.
+#[derive(Debug, Clone, Default)]
+pub struct WriteAttachment {
+    pub filename: String,
+    pub mime: Option<String>,
+    /// Declared size; actual written length may differ if payload is shorter.
+    pub size: u32,
+    /// `ATTACH_BY_VALUE` (1) / `ATTACH_EMBEDDED_MSG` (5) / other.
+    pub attach_method: Option<i32>,
+    /// Inline / pre-buffered payload. `Some(vec![])` is a **valid zero-byte**
+    /// attach; only `None` falls through to [`AttachStreamSource`].
+    pub data: Option<Vec<u8>>,
+    /// When true, a stream *could* be opened by a higher-level materializer
+    /// (hint for callers; the writer consults [`AttachStreamSource`] only when
+    /// `data` is `None`).
+    pub stream_available: bool,
+    pub attach_nid: Option<u64>,
+    pub source_path: Option<String>,
+    pub parent_nid: Option<u64>,
+    /// Nested message for `ATTACH_EMBEDDED_MSG` when extractable.
+    pub embedded_message: Option<Box<WriteMessage>>,
+}
+
+/// Optional source for attachment bytes when [`WriteAttachment::data`] is
+/// `None`. Soft-fail: `Err` or `Ok(None)` skips that attach and
+/// increments [`WritePstReport::attachments_failed`]. `Ok(Some(vec![]))` is a
+/// valid zero-byte payload.
+///
+/// ## Streaming scope (0069 vs 0070)
+///
+/// **v1 (0069) intentionally returns a full `Vec<u8>` for one attach at a
+/// time.** Callers should open/stream from the source PST into this single
+/// buffer for the current attach only — not hold every attach of every
+/// message in memory simultaneously. Once resolved, the writer may further
+/// chunk that buffer into XBLOCK leaf blocks when writing.
+///
+/// **True multi-GB chunked streaming without holding one full attach in
+/// memory is out of scope for 0069** and is residual
+/// `D-0069-stream-buffer` → track **0070**. Do not treat a one-attach
+/// buffer as a fidelity failure for this track.
+pub trait AttachStreamSource {
+    /// Open attach bytes for a [`WriteAttachment`] key.
+    ///
+    /// Returns the full payload for **one** attach (v1 OK). Prefer streaming
+    /// from the source into this buffer rather than pre-buffering all attaches.
+    /// Residual true zero-copy multi-GB streaming is **0070**.
+    fn open_attach(
+        &mut self,
+        source_path: Option<&str>,
+        parent_nid: Option<u64>,
+        attach_nid: Option<u64>,
+        filename: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, String>;
+}
 
 /// A plain message DTO the production writer consumes. Deliberately independent
-/// of `dedup_engine::CanonicalMessage` — see [`from_canonical_message`] for the
-/// mapping adapter (attachments dropped; v1 owns no attachment fidelity).
+/// of `dedup_engine::CanonicalMessage` — see [`from_canonical_message`].
 #[derive(Debug, Clone, Default)]
 pub struct WriteMessage {
     pub message_id: Option<String>,
@@ -128,18 +220,45 @@ pub struct WriteMessage {
     pub body_plain: Option<String>,
     pub body_html: Option<Vec<u8>>,
     pub message_class: Option<String>,
-    /// Fidelity flag for reporting only — never written as a MAPI property in v1.
+    /// Fidelity flag for reporting only — never written as a MAPI property.
     pub body_incomplete: bool,
     /// Fidelity flag for reporting only — when true, no body is written at all
     /// (never invented) regardless of `body_plain`/`body_html` contents.
     pub body_unavailable: bool,
+    /// File / embedded attachments (written unless `WritePstOpts::parents_only`).
+    pub attachments: Vec<WriteAttachment>,
+    /// Relative folder path from the source PST (e.g. `Inbox/Projects`).
+    pub source_folder_path: Option<String>,
+    /// Absolute source PST path (multi-source prefix key).
+    pub source_path: Option<String>,
+}
+
+/// How user folders are laid out under IPM_SUBTREE (track 0069).
+#[derive(Debug, Clone)]
+pub enum FolderLayoutPolicy {
+    /// Preserve `source_folder_path` under IPM_SUBTREE; multi-source unique prefixes.
+    PreservePaths { multi_source_prefix: bool },
+    /// Escape hatch: all messages in one folder (0068 behavior).
+    Flat { folder_display_name: String },
+}
+
+impl Default for FolderLayoutPolicy {
+    fn default() -> Self {
+        Self::PreservePaths {
+            multi_source_prefix: true,
+        }
+    }
 }
 
 /// Options for [`write_unicode_pst`].
 #[derive(Debug, Clone)]
 pub struct WritePstOpts {
-    /// Display name of the single flat mail folder under IPM_SUBTREE.
+    /// Residual / flat folder display name (BC from 0068; default `"Unique Mail"`).
+    /// Used as the residual bucket under `PreservePaths`, and as the single
+    /// folder name when `folder_layout` is not set to a custom `Flat` name.
     pub folder_display_name: String,
+    /// Folder layout policy (default: preserve paths with multi-source prefixes).
+    pub folder_layout: FolderLayoutPolicy,
     /// Safety gate (§3.7 rule 3): by default `write_unicode_pst` refuses to
     /// write when `path` already exists. Set `true` to explicitly allow
     /// replacing it. This knob only ever governs **stale output** the caller
@@ -150,13 +269,36 @@ pub struct WritePstOpts {
     /// file and renames over the destination on success (Windows `rename`
     /// replaces the target).
     pub overwrite: bool,
+    /// Max nested `ATTACH_EMBEDDED_MSG` depth (default 3; clamped to [1, 8]).
+    /// Depth 0 = top-level message; each embedded attach increments depth.
+    pub max_embedded_depth: u32,
+    /// When true, omit all attaches (family policy `parents_only`).
+    pub parents_only: bool,
 }
 
 impl Default for WritePstOpts {
     fn default() -> Self {
         Self {
             folder_display_name: "Unique Mail".to_string(),
+            folder_layout: FolderLayoutPolicy::default(),
             overwrite: false,
+            max_embedded_depth: 3,
+            parents_only: false,
+        }
+    }
+}
+
+impl WritePstOpts {
+    /// Clamped embedded depth in `[1, 8]`.
+    fn embedded_depth_limit(&self) -> u32 {
+        self.max_embedded_depth.clamp(1, 8)
+    }
+
+    fn residual_folder_name(&self) -> String {
+        if self.folder_display_name.is_empty() {
+            "Unique Mail".to_string()
+        } else {
+            self.folder_display_name.clone()
         }
     }
 }
@@ -209,6 +351,67 @@ pub struct WritePstReport {
     /// was `true` (written with no body at all, never invented — this
     /// surfaces how many in the write report).
     pub messages_with_unavailable_body: u64,
+    /// Attachments successfully written (by-value or embedded within depth).
+    pub attachments_written: u64,
+    /// Attachments skipped due to soft open/method/data failure.
+    pub attachments_failed: u64,
+    /// Attachments omitted because `parents_only` was set.
+    pub attachments_omitted_by_policy: u64,
+    /// User folders created under IPM_SUBTREE (residual + path folders; excludes
+    /// Deleted Items / Search Root / IPM itself).
+    pub folders_created: u64,
+    /// Nested embedded messages written under `ATTACH_EMBEDDED_MSG`.
+    pub embedded_messages_written: u64,
+    /// Times an embedded attach was halted by `max_embedded_depth`.
+    /// Report-level DoD-8 surface (not a per-message stored property).
+    pub embedded_depth_limit_hits: u64,
+    /// Method-5 attaches skipped because no extractable nested message was
+    /// provided (never invented). Report-level DoD-8 surface.
+    pub embedded_unparsed: u64,
+    /// Messages whose empty/missing `source_folder_path` routed to the residual
+    /// folder (normal; empty path alone is not an error).
+    pub folder_paths_residual: u64,
+    /// Messages whose path was sanitized (forbidden chars), over-depth, or
+    /// contained `..` (routed to residual or altered segments).
+    pub folder_paths_degraded: u64,
+    /// Per-attachment fidelity events (DoD-8 surface for depth/unparsed embeds).
+    pub attachment_fidelity_events: Vec<AttachmentFidelityEvent>,
+}
+
+/// Kind of per-attachment fidelity honesty event (DoD-8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentFidelityKind {
+    /// Nested `ATTACH_EMBEDDED_MSG` halted by `max_embedded_depth`.
+    DepthLimitExceeded,
+    /// Method-5 attach had no extractable nested message (never invented).
+    EmbeddedUnparsed,
+}
+
+/// Per-attachment fidelity record identifying the affected message/attach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentFidelityEvent {
+    /// Source message subject (best-effort identifier for the batch item).
+    pub message_subject: String,
+    /// Attachment filename as supplied on the DTO.
+    pub attach_filename: String,
+    pub kind: AttachmentFidelityKind,
+}
+
+/// Mutable counters accumulated during a write (internal).
+#[derive(Debug, Default)]
+struct WriteCounters {
+    messages_with_incomplete_body: u64,
+    messages_with_unavailable_body: u64,
+    attachments_written: u64,
+    attachments_failed: u64,
+    attachments_omitted_by_policy: u64,
+    folders_created: u64,
+    embedded_messages_written: u64,
+    embedded_depth_limit_hits: u64,
+    embedded_unparsed: u64,
+    folder_paths_residual: u64,
+    folder_paths_degraded: u64,
+    attachment_fidelity_events: Vec<AttachmentFidelityEvent>,
 }
 
 /// Map a `CanonicalMessage` (0066 keep-set winner) to the plain `WriteMessage`
@@ -218,15 +421,31 @@ pub struct WritePstReport {
 /// or duplicating the mapping in every caller, `pst-writer` takes a normal
 /// dependency on `dedup-engine` for exactly this one free function — `pst-writer`
 /// never depends on `pst-dedup-cli`, and `dedup-engine` never depends back on
-/// `pst-writer`, so no cycle is introduced. Attachments are dropped (owned by
-/// 0069); the second return value is the number of attachments dropped for this
-/// message so a caller (e.g. a future 0071 CLI) can aggregate a report — this
-/// writer's own `WritePstReport` has no attachment concept since `WriteMessage`
-/// carries none.
+/// `pst-writer`, so no cycle is introduced.
+///
+/// Attachments are **mapped** (0069). The second return value is reserved for
+/// attachments the adapter could not represent (always 0 today — metadata and
+/// optional small `data` always map). Bytes for large attaches are filled by
+/// the caller (or left `None` for soft-fail at write time).
 pub fn from_canonical_message(
     msg: &dedup_engine::keepset::CanonicalMessage,
 ) -> (WriteMessage, u64) {
-    let dropped = msg.attachments.len() as u64;
+    let attachments: Vec<WriteAttachment> = msg
+        .attachments
+        .iter()
+        .map(|a| WriteAttachment {
+            filename: a.filename.clone(),
+            mime: a.mime.clone(),
+            size: a.size,
+            attach_method: a.attach_method,
+            data: a.data.clone(),
+            stream_available: a.stream_available,
+            attach_nid: a.attach_nid,
+            source_path: Some(msg.locus.source_path.clone()),
+            parent_nid: Some(msg.locus.nid),
+            embedded_message: None,
+        })
+        .collect();
     let write_msg = WriteMessage {
         message_id: msg.message_id.clone(),
         subject: msg.subject.clone().unwrap_or_default(),
@@ -238,8 +457,11 @@ pub fn from_canonical_message(
         message_class: msg.message_class.clone(),
         body_incomplete: msg.body_incomplete,
         body_unavailable: msg.body_unavailable,
+        attachments,
+        source_folder_path: Some(msg.locus.folder_path.clone()),
+        source_path: Some(msg.locus.source_path.clone()),
     };
-    (write_msg, dropped)
+    (write_msg, 0)
 }
 
 /// Write a production-scope Unicode, unencrypted PST containing `messages`.
@@ -291,11 +513,35 @@ pub fn from_canonical_message(
 ///    **output** the caller is allowed to clobber.
 ///
 /// It never mutates an existing file in place either way.
+///
+/// Equivalent to [`write_unicode_pst_with_streams`] with no stream source
+/// (`streams = None`). Prefer that entrypoint when attachment bytes live
+/// outside [`WriteAttachment::data`].
 pub fn write_unicode_pst(
     path: &Path,
     messages: impl IntoIterator<Item = WriteMessage>,
     protected_source_paths: &[PathBuf],
     opts: &WritePstOpts,
+) -> Result<WritePstReport> {
+    write_unicode_pst_with_streams(path, messages, protected_source_paths, opts, None)
+}
+
+/// Like [`write_unicode_pst`], with an optional [`AttachStreamSource`] used
+/// **only** when a by-value attach has `data: None`.
+///
+/// Per-attach resolution (exclusive branches — not a sequential pipeline that
+/// always reaches the stream):
+/// - If `data` is `Some(v)` (including empty `v`), write `v` and **do not**
+///   call the stream source.
+/// - Else if a stream is provided: `Ok(Some(bytes))` (including empty) is a
+///   valid payload; `Ok(None)` / `Err` soft-fails (`attachments_failed++`).
+/// - Else soft-fail. Never invents bytes.
+pub fn write_unicode_pst_with_streams(
+    path: &Path,
+    messages: impl IntoIterator<Item = WriteMessage>,
+    protected_source_paths: &[PathBuf],
+    opts: &WritePstOpts,
+    mut streams: Option<&mut dyn AttachStreamSource>,
 ) -> Result<WritePstReport> {
     check_not_protected_source(path, protected_source_paths)?;
 
@@ -365,14 +611,17 @@ pub fn write_unicode_pst(
     };
     layout.add_node_data((NID_ROOT_FOLDER & !0x1F) | 0x0F, root_assoc_cont_heap, 0, 0)?;
 
-    let unique_mail_nid = layout.alloc_nid(NID_TYPE_NORMAL_FOLDER);
+    // Plan user-folder tree under IPM (0069) before allocating NIDs so IPM
+    // hierarchy can list every top-level child + Deleted Items.
+    let mut folder_plan = plan_folder_tree(&messages, opts);
+    allocate_folder_nids(&mut layout, &mut folder_plan);
+
     // Deleted Items / Search Root (§2/§3/§4 of the round-9 verified MS-PST
     // data — supersedes the prior D-0068-05 decline, see
-    // `docs/pst-writer-fidelity-v1.md`). Allocated here, alongside
-    // `unique_mail_nid`, so both are available before the IPM_SUBTREE
-    // hierarchy TC (which references Deleted Items) and the message store PC
-    // (which references both via `PidTagIpmWastebasketEntryId` /
-    // `PidTagFinderEntryId`) are built below.
+    // `docs/pst-writer-fidelity-v1.md`). Allocated here so both are available
+    // before the IPM_SUBTREE hierarchy TC (which references Deleted Items) and
+    // the message store PC (which references both via
+    // `PidTagIpmWastebasketEntryId` / `PidTagFinderEntryId`) are built below.
     let deleted_items_nid = layout.alloc_nid(NID_TYPE_NORMAL_FOLDER);
     // NID_TYPE_SEARCH_FOLDER (0x03) — verified from
     // https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-pst/2dfb3012-b81c-466b-831c-2d2f0c29e591:
@@ -420,18 +669,18 @@ pub fn write_unicode_pst(
     };
     layout.add_node_data(ipm_subtree_nid, ipm_heap, NID_ROOT_FOLDER, 0)?;
 
-    // Hierarchy TC: verified (round 9) source data's "Hierarchy TC" row list
-    // for IPM_SUBTREE names "Deleted Items"; this track's own LOCKED v1 shape
-    // (spec.md §3.2) additionally puts "Unique Mail" here — both rows are
-    // kept, per the explicit instruction to add Deleted Items alongside the
-    // existing Unique Mail row rather than replace it.
+    // Hierarchy TC: all top-level user folders under IPM + Deleted Items
+    // (0068 residual "Unique Mail" is always one of the top-level roots when
+    // any message lacks a path / under Flat policy).
     let ipm_hier_heap = {
         let mut heap = HeapBuilder::new(0xBC);
         let columns = [(PID_TAG_LTP_ROW_ID, PTYP_INTEGER_32, 0u16, 4u8, 0u8)];
-        let rows = vec![
-            (unique_mail_nid as u32).to_le_bytes().to_vec(),
-            (deleted_items_nid as u32).to_le_bytes().to_vec(),
-        ];
+        let mut rows: Vec<Vec<u8>> = folder_plan
+            .roots
+            .iter()
+            .map(|f| (f.nid as u32).to_le_bytes().to_vec())
+            .collect();
+        rows.push((deleted_items_nid as u32).to_le_bytes().to_vec());
         let hid = build_tc_inline_checked(&mut heap, &columns, &rows)?;
         heap.finalize(hid)
     };
@@ -587,87 +836,43 @@ pub fn write_unicode_pst(
         0,
     )?;
 
-    let folder_name = if opts.folder_display_name.is_empty() {
-        "Unique Mail".to_string()
-    } else {
-        opts.folder_display_name.clone()
+    // ── User folders + messages (0069 folder tree) ───────────────────────────
+    let mut counters = WriteCounters {
+        folders_created: folder_plan.folders_created,
+        folder_paths_residual: folder_plan.folder_paths_residual,
+        folder_paths_degraded: folder_plan.folder_paths_degraded,
+        ..WriteCounters::default()
     };
 
-    // `PidTagContainerClass` = "IPF.Note" (§3.2, review round 3 P2 — spec.md
-    // §3.2's LOCKED table requires "standard display name / container class
-    // for IPM subtree per MS-PST messaging conventions"). "Unique Mail" is
-    // v1's single mail-containing folder under IPM_SUBTREE, holding
-    // `IPM.Note`-class messages, so this is the folder MS-PST/MAPI convention
-    // puts the container class on — not IPM_SUBTREE itself (see comment
-    // above the IPM_SUBTREE PC build). See
-    // `docs/pst-writer-fidelity-v1.md` for the full auditable reasoning.
-    let unique_heap = {
-        let mut heap = HeapBuilder::new(0x6C);
-        let hid = build_pc_v2(
-            &mut heap,
-            &[
-                (PID_TAG_DISPLAY_NAME, PcValue::String(folder_name)),
-                (PID_TAG_CONTENT_COUNT, PcValue::I32(messages.len() as i32)),
-                (
-                    PID_TAG_CONTAINER_CLASS,
-                    PcValue::String("IPF.Note".to_string()),
-                ),
-            ],
-        )?;
-        heap.finalize(hid)
-    };
-    layout.add_node_data(unique_mail_nid, unique_heap, ipm_subtree_nid, 0)?;
+    // parent folder nid per message index
+    let msg_parent: Vec<u64> = (0..messages.len())
+        .map(|i| folder_plan.parent_nid_for_message(i))
+        .collect();
 
-    let unique_hier_heap = {
-        let mut heap = HeapBuilder::new(0xBC);
-        let columns = [(PID_TAG_LTP_ROW_ID, PTYP_INTEGER_32, 0u16, 4u8, 0u8)];
-        let hid = build_tc_inline_checked(&mut heap, &columns, &[])?;
-        heap.finalize(hid)
-    };
-    layout.add_node_data((unique_mail_nid & !0x1F) | 0x0D, unique_hier_heap, 0, 0)?;
-
-    // Associated-contents (FAI) table, empty — see the Root folder's comment
-    // above for the MS-PST §2.4.2 rationale and NID-suffix cross-check.
-    let unique_assoc_cont_heap = {
-        let mut heap = HeapBuilder::new(0xBC);
-        let columns = [(PID_TAG_LTP_ROW_ID, PTYP_INTEGER_32, 0u16, 4u8, 0u8)];
-        let hid = build_tc_inline_checked(&mut heap, &columns, &[])?;
-        heap.finalize(hid)
-    };
-    layout.add_node_data(
-        (unique_mail_nid & !0x1F) | 0x0F,
-        unique_assoc_cont_heap,
-        0,
-        0,
-    )?;
-
-    // ── Messages ──────────────────────────────────────────────────────────────
     let mut message_nids: Vec<u64> = Vec::with_capacity(messages.len());
-    let mut messages_with_incomplete_body: u64 = 0;
-    let mut messages_with_unavailable_body: u64 = 0;
-    for msg in &messages {
-        let nid = build_message_node(&mut layout, msg, unique_mail_nid)?;
+    for (i, msg) in messages.iter().enumerate() {
+        let parent = msg_parent[i];
+        let nid = build_message_node(
+            &mut layout,
+            msg,
+            parent,
+            opts,
+            &mut counters,
+            0,
+            &mut streams,
+        )?;
         message_nids.push(nid);
         if msg.body_incomplete {
-            messages_with_incomplete_body += 1;
+            counters.messages_with_incomplete_body += 1;
         }
         if msg.body_unavailable {
-            messages_with_unavailable_body += 1;
+            counters.messages_with_unavailable_body += 1;
         }
     }
     let messages_written = message_nids.len() as u64;
 
-    let unique_cont_heap = {
-        let mut heap = HeapBuilder::new(0xBC);
-        let columns = [(PID_TAG_LTP_ROW_ID, PTYP_INTEGER_32, 0u16, 4u8, 0u8)];
-        let rows: Vec<Vec<u8>> = message_nids
-            .iter()
-            .map(|n| (*n as u32).to_le_bytes().to_vec())
-            .collect();
-        let hid = build_tc_inline_checked(&mut heap, &columns, &rows)?;
-        heap.finalize(hid)
-    };
-    layout.add_node_data((unique_mail_nid & !0x1F) | 0x0E, unique_cont_heap, 0, 0)?;
+    // Write every planned folder object (PC + hierarchy + contents + assoc).
+    write_folder_tree_nodes(&mut layout, &folder_plan, ipm_subtree_nid, &message_nids)?;
 
     // ── Message store (PidTagIpmSubtreeEntryId — §3.2, review fold #2;
     // PidTagRecordKey — round-5 cross-model review finding, Part A;
@@ -763,6 +968,21 @@ pub fn write_unicode_pst(
         0,
     )?;
 
+    // Attachment Table Template (NID 0x671) — zero rows, full column schema
+    // (MS-PST attachment-table template; same NID used as per-message subnode).
+    let attachment_template_heap = {
+        let mut heap = HeapBuilder::new(0xBC);
+        let (columns, total_row_width) = build_template_tc_columns(&ATTACHMENT_TABLE_COLUMNS);
+        let hid = build_tc_inline_checked_sized(&mut heap, &columns, &[], total_row_width)?;
+        heap.finalize(hid)
+    };
+    layout.add_node_data(
+        NID_ATTACHMENT_TABLE_TEMPLATE,
+        attachment_template_heap,
+        0,
+        0,
+    )?;
+
     // ── AMap + BTree pages, then real file offsets ───────────────────────────
     layout.reserve_page(PTYPE_AMAP);
 
@@ -804,8 +1024,18 @@ pub fn write_unicode_pst(
         messages_skipped: 0,
         path: path.to_path_buf(),
         bytes: layout.file_size(),
-        messages_with_incomplete_body,
-        messages_with_unavailable_body,
+        messages_with_incomplete_body: counters.messages_with_incomplete_body,
+        messages_with_unavailable_body: counters.messages_with_unavailable_body,
+        attachments_written: counters.attachments_written,
+        attachments_failed: counters.attachments_failed,
+        attachments_omitted_by_policy: counters.attachments_omitted_by_policy,
+        folders_created: counters.folders_created,
+        embedded_messages_written: counters.embedded_messages_written,
+        embedded_depth_limit_hits: counters.embedded_depth_limit_hits,
+        embedded_unparsed: counters.embedded_unparsed,
+        folder_paths_residual: counters.folder_paths_residual,
+        folder_paths_degraded: counters.folder_paths_degraded,
+        attachment_fidelity_events: counters.attachment_fidelity_events,
     })
 }
 
@@ -882,7 +1112,481 @@ pub fn temp_sibling_path(path: &Path) -> PathBuf {
     }
 }
 
-// ── Message node building (§3.3) ─────────────────────────────────────────────
+// ── Folder tree planning (0069 §3.2) ─────────────────────────────────────────
+
+/// One folder node in the planned tree under IPM_SUBTREE.
+#[derive(Debug, Clone)]
+struct PlannedFolder {
+    display_name: String,
+    /// Case-folded key for case-insensitive routing.
+    key: String,
+    children: Vec<PlannedFolder>,
+    /// Message indices assigned directly to this folder.
+    message_indices: Vec<usize>,
+    nid: u64,
+}
+
+/// Result of planning the user-folder layout for a write.
+#[derive(Debug)]
+struct FolderPlan {
+    roots: Vec<PlannedFolder>,
+    /// message index → leaf folder NID (filled after allocate).
+    message_folder: Vec<u64>,
+    folders_created: u64,
+    folder_paths_residual: u64,
+    folder_paths_degraded: u64,
+}
+
+impl FolderPlan {
+    fn parent_nid_for_message(&self, index: usize) -> u64 {
+        self.message_folder
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| self.roots.first().map(|r| r.nid).unwrap_or(0))
+    }
+}
+
+fn case_fold_key(s: &str) -> String {
+    s.to_uppercase()
+}
+
+fn sanitize_segment(s: &str) -> String {
+    let forbidden = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    let mut out: String = s
+        .chars()
+        .map(|c| {
+            if forbidden.contains(&c) || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    out = out.trim().to_string();
+    if out.is_empty() || out == "." || out == ".." {
+        out = "_".to_string();
+    }
+    // Trim trailing dots/spaces (Windows display-name safety).
+    while out.ends_with('.') || out.ends_with(' ') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out = "_".to_string();
+    }
+    out
+}
+
+/// Outcome of parsing a relative folder path for layout routing.
+#[derive(Debug)]
+enum PathParseOutcome {
+    /// Route to residual folder. `degraded` when forced by `..`, over-depth, or
+    /// empty-after-sanitize of a non-empty input — not for plain empty/missing.
+    Residual { degraded: bool },
+    /// Use these sanitized segments under IPM. `degraded` when any segment was
+    /// altered by sanitize (forbidden chars, trailing dots, etc.).
+    Segments { segs: Vec<String>, degraded: bool },
+}
+
+/// Parse a relative folder path into sanitized segments or residual.
+fn parse_folder_path(path: &str) -> PathParseOutcome {
+    let path = path.trim().trim_start_matches(['/', '\\']);
+    if path.is_empty() {
+        return PathParseOutcome::Residual { degraded: false };
+    }
+    let mut segs = Vec::new();
+    let mut degraded = false;
+    for part in path.split(['/', '\\']) {
+        let part = part.trim();
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            return PathParseOutcome::Residual { degraded: true };
+        }
+        let sanitized = sanitize_segment(part);
+        if sanitized != part {
+            degraded = true;
+        }
+        segs.push(sanitized);
+    }
+    if segs.is_empty() {
+        // Non-empty input collapsed to nothing (e.g. only `.` segments).
+        return PathParseOutcome::Residual { degraded: true };
+    }
+    if segs.len() > MAX_FOLDER_DEPTH {
+        return PathParseOutcome::Residual { degraded: true };
+    }
+    PathParseOutcome::Segments { segs, degraded }
+}
+
+fn file_stem_label(path: &str) -> String {
+    let p = Path::new(path);
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "source".to_string());
+    sanitize_segment(&stem)
+}
+
+/// Map absolute source path → unique prefix label (stable by sorted path).
+///
+/// Uniqueness is enforced on the **case-folded** label key (same comparison
+/// folder routing uses), so `Archive.pst` and `archive.pst` never merge under
+/// case-insensitive IPM children. Generated suffixes (`archive (2)`, …) are
+/// also reserved globally so a third source literally named `archive (2).pst`
+/// cannot collide with a disambiguated label.
+fn unique_source_prefixes(sources: &[String]) -> HashMap<String, String> {
+    let mut sorted: Vec<String> = sources.to_vec();
+    sorted.sort();
+    sorted.dedup();
+
+    // Group by case-folded stem so Archive/archive collide intentionally.
+    let mut by_stem_key: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for p in &sorted {
+        let stem = file_stem_label(p);
+        let key = case_fold_key(&stem);
+        by_stem_key.entry(key).or_default().push((p.clone(), stem));
+    }
+
+    // Stable order of groups by first path in each group.
+    let mut groups: Vec<Vec<(String, String)>> = by_stem_key.into_values().collect();
+    groups.sort_by(|a, b| a[0].0.cmp(&b[0].0));
+    for g in &mut groups {
+        g.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    let mut used_keys: HashMap<String, ()> = HashMap::new();
+    let mut map = HashMap::new();
+
+    // Pre-reserve exact stems that appear as sole members of their group so
+    // disambiguation for multi-member groups can see them? Actually we allocate
+    // in path-sorted order across all sources for global uniqueness.
+    // Flatten in sorted path order and assign first-available label per path.
+    let mut all: Vec<(String, String)> = Vec::new();
+    for g in groups {
+        for item in g {
+            all.push(item);
+        }
+    }
+    all.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (path, preferred_stem) in all {
+        // Spec §3.2.2: first free = stem; then stem (2), stem (3), …
+        // (not stem (1)). Case-folded keys reserve both preferred and suffixes.
+        let mut attempt = 0u32;
+        let label = loop {
+            let candidate = if attempt == 0 {
+                preferred_stem.clone()
+            } else {
+                format!("{preferred_stem} ({})", attempt + 1)
+            };
+            let key = case_fold_key(&candidate);
+            use std::collections::hash_map::Entry;
+            match used_keys.entry(key) {
+                Entry::Vacant(v) => {
+                    v.insert(());
+                    break candidate;
+                }
+                Entry::Occupied(_) => {
+                    attempt = attempt.saturating_add(1);
+                    if attempt > 10_000 {
+                        let forced = format!("{preferred_stem} [{}]", path.len());
+                        used_keys.insert(case_fold_key(&forced), ());
+                        break forced;
+                    }
+                }
+            }
+        };
+        map.insert(path, label);
+    }
+    map
+}
+
+fn find_child_mut<'a>(
+    children: &'a mut Vec<PlannedFolder>,
+    display: &str,
+) -> &'a mut PlannedFolder {
+    let key = case_fold_key(display);
+    if let Some(idx) = children.iter().position(|c| c.key == key) {
+        return &mut children[idx];
+    }
+    children.push(PlannedFolder {
+        display_name: display.to_string(),
+        key,
+        children: Vec::new(),
+        message_indices: Vec::new(),
+        nid: 0,
+    });
+    let last = children.len() - 1;
+    &mut children[last]
+}
+
+fn ensure_path<'a>(
+    roots: &'a mut Vec<PlannedFolder>,
+    segments: &[String],
+) -> &'a mut PlannedFolder {
+    // Ensure first segment exists under roots.
+    {
+        let _ = find_child_mut(roots, &segments[0]);
+    }
+    // Walk by indices so we can re-borrow at each level.
+    let mut idxs: Vec<usize> = Vec::with_capacity(segments.len());
+    {
+        let key0 = case_fold_key(&segments[0]);
+        let i0 = roots.iter().position(|c| c.key == key0).unwrap_or(0);
+        idxs.push(i0);
+    }
+    for seg in &segments[1..] {
+        let parent = {
+            let mut node = &mut roots[idxs[0]];
+            for &ix in &idxs[1..] {
+                node = &mut node.children[ix];
+            }
+            node
+        };
+        let key = case_fold_key(seg);
+        let child_idx = if let Some(i) = parent.children.iter().position(|c| c.key == key) {
+            i
+        } else {
+            parent.children.push(PlannedFolder {
+                display_name: seg.clone(),
+                key,
+                children: Vec::new(),
+                message_indices: Vec::new(),
+                nid: 0,
+            });
+            parent.children.len() - 1
+        };
+        idxs.push(child_idx);
+    }
+    let mut node = &mut roots[idxs[0]];
+    for &ix in &idxs[1..] {
+        node = &mut node.children[ix];
+    }
+    node
+}
+
+fn plan_folder_tree(messages: &[WriteMessage], opts: &WritePstOpts) -> FolderPlan {
+    let residual_name = match &opts.folder_layout {
+        FolderLayoutPolicy::Flat {
+            folder_display_name,
+        } => {
+            if folder_display_name.is_empty() {
+                opts.residual_folder_name()
+            } else {
+                folder_display_name.clone()
+            }
+        }
+        FolderLayoutPolicy::PreservePaths { .. } => opts.residual_folder_name(),
+    };
+
+    let multi_source = matches!(
+        opts.folder_layout,
+        FolderLayoutPolicy::PreservePaths {
+            multi_source_prefix: true
+        }
+    );
+
+    let sources: Vec<String> = messages
+        .iter()
+        .filter_map(|m| m.source_path.clone())
+        .collect();
+    let mut distinct_sources = sources.clone();
+    distinct_sources.sort();
+    distinct_sources.dedup();
+    let prefix_map = if multi_source && distinct_sources.len() >= 2 {
+        unique_source_prefixes(&distinct_sources)
+    } else {
+        HashMap::new()
+    };
+
+    let mut roots: Vec<PlannedFolder> = Vec::new();
+    let message_folder = vec![0u64; messages.len()];
+    let mut folder_paths_residual = 0u64;
+    let mut folder_paths_degraded = 0u64;
+
+    // Always ensure residual folder exists (0068 BC: Unique Mail under IPM).
+    {
+        let _ = find_child_mut(&mut roots, &residual_name);
+    }
+
+    for (i, msg) in messages.iter().enumerate() {
+        match &opts.folder_layout {
+            FolderLayoutPolicy::Flat { .. } => {
+                // Intentional single-folder layout — not path residual/degraded.
+                let residual = find_child_mut(&mut roots, &residual_name);
+                residual.message_indices.push(i);
+            }
+            FolderLayoutPolicy::PreservePaths { .. } => {
+                let outcome = match msg.source_folder_path.as_deref() {
+                    None => PathParseOutcome::Residual { degraded: false },
+                    Some(p) => parse_folder_path(p),
+                };
+
+                match outcome {
+                    PathParseOutcome::Segments { segs, degraded } => {
+                        if degraded {
+                            folder_paths_degraded += 1;
+                        }
+                        let mut full_segs: Vec<String> = Vec::new();
+                        if let Some(prefix) = msg
+                            .source_path
+                            .as_ref()
+                            .and_then(|p| prefix_map.get(p))
+                            .cloned()
+                        {
+                            full_segs.push(prefix);
+                        }
+                        full_segs.extend(segs);
+                        let leaf = ensure_path(&mut roots, &full_segs);
+                        leaf.message_indices.push(i);
+                    }
+                    PathParseOutcome::Residual { degraded } => {
+                        folder_paths_residual += 1;
+                        if degraded {
+                            folder_paths_degraded += 1;
+                        }
+                        let residual = find_child_mut(&mut roots, &residual_name);
+                        residual.message_indices.push(i);
+                    }
+                }
+            }
+        }
+    }
+
+    // Count folders
+    fn count_folders(nodes: &[PlannedFolder]) -> u64 {
+        nodes.iter().map(|n| 1 + count_folders(&n.children)).sum()
+    }
+    let folders_created = count_folders(&roots);
+
+    FolderPlan {
+        roots,
+        message_folder,
+        folders_created,
+        folder_paths_residual,
+        folder_paths_degraded,
+    }
+}
+
+fn allocate_folder_nids(layout: &mut Layout, plan: &mut FolderPlan) {
+    fn alloc(layout: &mut Layout, node: &mut PlannedFolder) {
+        node.nid = layout.alloc_nid(NID_TYPE_NORMAL_FOLDER);
+        for child in &mut node.children {
+            alloc(layout, child);
+        }
+    }
+    for root in &mut plan.roots {
+        alloc(layout, root);
+    }
+
+    // Fill message_folder from message_indices
+    fn fill(node: &PlannedFolder, message_folder: &mut [u64]) {
+        for &i in &node.message_indices {
+            if i < message_folder.len() {
+                message_folder[i] = node.nid;
+            }
+        }
+        for child in &node.children {
+            fill(child, message_folder);
+        }
+    }
+    for root in &plan.roots {
+        fill(root, &mut plan.message_folder);
+    }
+}
+
+fn write_one_folder(
+    layout: &mut Layout,
+    node: &PlannedFolder,
+    parent_nid: u64,
+    message_nids: &[u64],
+) -> Result<()> {
+    let content_count = node.message_indices.len() as i32;
+    let has_subfolders = !node.children.is_empty();
+
+    let folder_heap = {
+        let mut heap = HeapBuilder::new(0x6C);
+        let mut props = vec![
+            (
+                PID_TAG_DISPLAY_NAME,
+                PcValue::String(node.display_name.clone()),
+            ),
+            (PID_TAG_CONTENT_COUNT, PcValue::I32(content_count)),
+            (
+                PID_TAG_CONTAINER_CLASS,
+                PcValue::String("IPF.Note".to_string()),
+            ),
+        ];
+        if has_subfolders {
+            props.push((PID_TAG_SUBFOLDERS, PcValue::Bool(true)));
+            props.push((PID_TAG_CONTENT_UNREAD_COUNT, PcValue::I32(0)));
+        }
+        let hid = build_pc_v2(&mut heap, &props)?;
+        heap.finalize(hid)
+    };
+    layout.add_node_data(node.nid, folder_heap, parent_nid, 0)?;
+
+    // Hierarchy: child folder NIDs
+    let hier_heap = {
+        let mut heap = HeapBuilder::new(0xBC);
+        let columns = [(PID_TAG_LTP_ROW_ID, PTYP_INTEGER_32, 0u16, 4u8, 0u8)];
+        let rows: Vec<Vec<u8>> = node
+            .children
+            .iter()
+            .map(|c| (c.nid as u32).to_le_bytes().to_vec())
+            .collect();
+        let hid = build_tc_inline_checked(&mut heap, &columns, &rows)?;
+        heap.finalize(hid)
+    };
+    layout.add_node_data((node.nid & !0x1F) | 0x0D, hier_heap, 0, 0)?;
+
+    // Contents: message NIDs
+    let cont_heap = {
+        let mut heap = HeapBuilder::new(0xBC);
+        let columns = [(PID_TAG_LTP_ROW_ID, PTYP_INTEGER_32, 0u16, 4u8, 0u8)];
+        let rows: Vec<Vec<u8>> = node
+            .message_indices
+            .iter()
+            .filter_map(|&i| {
+                message_nids
+                    .get(i)
+                    .map(|n| (*n as u32).to_le_bytes().to_vec())
+            })
+            .collect();
+        let hid = build_tc_inline_checked(&mut heap, &columns, &rows)?;
+        heap.finalize(hid)
+    };
+    layout.add_node_data((node.nid & !0x1F) | 0x0E, cont_heap, 0, 0)?;
+
+    // Associated contents empty
+    let assoc_heap = {
+        let mut heap = HeapBuilder::new(0xBC);
+        let columns = [(PID_TAG_LTP_ROW_ID, PTYP_INTEGER_32, 0u16, 4u8, 0u8)];
+        let hid = build_tc_inline_checked(&mut heap, &columns, &[])?;
+        heap.finalize(hid)
+    };
+    layout.add_node_data((node.nid & !0x1F) | 0x0F, assoc_heap, 0, 0)?;
+
+    for child in &node.children {
+        write_one_folder(layout, child, node.nid, message_nids)?;
+    }
+    Ok(())
+}
+
+fn write_folder_tree_nodes(
+    layout: &mut Layout,
+    plan: &FolderPlan,
+    ipm_subtree_nid: u64,
+    message_nids: &[u64],
+) -> Result<()> {
+    for root in &plan.roots {
+        write_one_folder(layout, root, ipm_subtree_nid, message_nids)?;
+    }
+    Ok(())
+}
+
+// ── Message node building (§3.3 / 0069 attaches) ─────────────────────────────
 
 fn next_subnode_nid(counter: &mut u32) -> u64 {
     *counter += 1;
@@ -891,13 +1595,287 @@ fn next_subnode_nid(counter: &mut u32) -> u64 {
     ((*counter as u64) << 5) | 0x1F
 }
 
+fn next_attach_nid(counter: &mut u32) -> u64 {
+    *counter += 1;
+    ((*counter as u64) << 5) | (NID_TYPE_ATTACHMENT as u64)
+}
+
 fn utf16le_bytes(s: &str) -> Vec<u8> {
     s.encode_utf16().flat_map(|c| c.to_le_bytes()).collect()
 }
 
-fn build_message_node(layout: &mut Layout, msg: &WriteMessage, parent_nid: u64) -> Result<u64> {
+/// Short 8.3-ish attach filename fallback from a long name.
+fn short_attach_filename(long: &str) -> String {
+    let name = Path::new(long)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| long.to_string());
+    if name.len() <= 12 {
+        return name;
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) => (&name[..i], &name[i..]),
+        None => (name.as_str(), ""),
+    };
+    let stem_trunc: String = stem.chars().take(8).collect();
+    format!("{stem_trunc}{ext}")
+}
+
+/// Resolve by-value attach bytes: present `data` (including **zero-length**
+/// `Some(vec![])` — a valid empty file attach), else optional stream source.
+/// Soft-fail returns `None` only when data is absent and the stream is missing
+/// or errors (caller increments `attachments_failed`). Empty `Ok(Some(vec![]))`
+/// from a stream is a valid zero-byte payload.
+fn resolve_attach_bytes(
+    attach: &WriteAttachment,
+    streams: &mut Option<&mut dyn AttachStreamSource>,
+) -> Option<Vec<u8>> {
+    if let Some(data) = attach.data.as_ref() {
+        // Explicit Some — including empty Vec — is a real payload.
+        return Some(data.clone());
+    }
+    let src = streams.as_mut()?;
+    match src.open_attach(
+        attach.source_path.as_deref(),
+        attach.parent_nid,
+        attach.attach_nid,
+        &attach.filename,
+    ) {
+        Ok(Some(bytes)) => Some(bytes),
+        Ok(None) | Err(_) => None,
+    }
+}
+
+/// Successfully written attachment metadata used for the message attachment
+/// table TC and MessageSize accounting.
+struct WrittenAttach {
+    nid: u64,
+    bid_data: u64,
+    bid_sub: u64,
+    /// Bytes contributed to MessageSize (PC ± diverted binary / nested).
+    size_contrib: u64,
+    /// Actual attach size written into the attachment-table AttachSize column.
+    attach_size: u32,
+    method: i32,
+    filename: String,
+}
+
+/// Build attach PC + data; returns written metadata for the attachment table.
+///
+/// MessageSize contribution (aligned with body logic):
+/// - **Heap-inline** attach binary lives inside the attach PC → contribute
+///   only `pc_len` (binary already counted inside the PC).
+/// - **Subnode** attach binary is outside the PC → contribute
+///   `pc_len + actual_len`.
+/// - **Embedded** nested object is outside the attach PC →
+///   `pc_len + nested_size`.
+#[allow(clippy::too_many_arguments)] // streams/counters/subject needed for soft-fail fidelity
+fn write_one_attachment(
+    layout: &mut Layout,
+    attach: &WriteAttachment,
+    depth: u32,
+    max_depth: u32,
+    counters: &mut WriteCounters,
+    attach_nid_counter: &mut u32,
+    streams: &mut Option<&mut dyn AttachStreamSource>,
+    message_subject: &str,
+) -> Result<Option<WrittenAttach>> {
+    let method = attach.attach_method.unwrap_or(ATTACH_BY_VALUE);
+
+    // Cloud / reference / OLE — skip soft.
+    if method != ATTACH_BY_VALUE && method != ATTACH_EMBEDDED_MSG {
+        counters.attachments_failed += 1;
+        return Ok(None);
+    }
+
+    if method == ATTACH_EMBEDDED_MSG {
+        if depth >= max_depth {
+            counters.embedded_depth_limit_hits += 1;
+            counters.attachments_failed += 1;
+            counters
+                .attachment_fidelity_events
+                .push(AttachmentFidelityEvent {
+                    message_subject: message_subject.to_string(),
+                    attach_filename: attach.filename.clone(),
+                    kind: AttachmentFidelityKind::DepthLimitExceeded,
+                });
+            return Ok(None);
+        }
+        let Some(embedded) = attach.embedded_message.as_ref() else {
+            // Not extractable — never invent nested content.
+            counters.embedded_unparsed += 1;
+            counters.attachments_failed += 1;
+            counters
+                .attachment_fidelity_events
+                .push(AttachmentFidelityEvent {
+                    message_subject: message_subject.to_string(),
+                    attach_filename: attach.filename.clone(),
+                    kind: AttachmentFidelityKind::EmbeddedUnparsed,
+                });
+            return Ok(None);
+        };
+
+        let attach_nid = next_attach_nid(attach_nid_counter);
+        // Build nested message as a subnode object under the attach (not NBT).
+        // Reader-honest: method=5, size reflects nested PC; no by-value binary
+        // is written (`open_attachment_data` binary path does not apply).
+        // Nested object is linked via the attach's subnode leaf (not
+        // PidTagAttachDataObject / PtypObject — residual; see fidelity doc).
+        let (nested_nid, nested_bid, nested_sub, nested_size) = build_embedded_message_object(
+            layout,
+            embedded,
+            depth + 1,
+            max_depth,
+            counters,
+            streams,
+        )?;
+
+        let attach_sub_entries = vec![(nested_nid, nested_bid, nested_sub)];
+        let attach_sub_bid = layout.add_subnode_leaf(&attach_sub_entries)?;
+
+        let filename = if attach.filename.is_empty() {
+            "Embedded Message".to_string()
+        } else {
+            attach.filename.clone()
+        };
+        let short = short_attach_filename(&filename);
+        let size_i32 = i32::try_from(nested_size.min(i32::MAX as u64)).unwrap_or(i32::MAX);
+        let attach_size = size_i32 as u32;
+
+        let mut props = vec![
+            (
+                PID_TAG_ATTACH_LONG_FILENAME,
+                PcValue::String(filename.clone()),
+            ),
+            (PID_TAG_ATTACH_FILENAME, PcValue::String(short)),
+            (PID_TAG_ATTACH_METHOD, PcValue::I32(ATTACH_EMBEDDED_MSG)),
+            (PID_TAG_ATTACH_SIZE, PcValue::I32(size_i32)),
+        ];
+        if let Some(mime) = &attach.mime {
+            props.push((PID_TAG_ATTACH_MIME_TAG, PcValue::String(mime.clone())));
+        }
+
+        let mut heap = HeapBuilder::new(0x6C);
+        let hid = build_pc_v2(&mut heap, &props)?;
+        let pc_bytes = heap.finalize(hid);
+        let pc_len = pc_bytes.len() as u64;
+        let bid_data = layout.write_data_chain(pc_bytes)?;
+
+        counters.attachments_written += 1;
+        counters.embedded_messages_written += 1;
+        return Ok(Some(WrittenAttach {
+            nid: attach_nid,
+            bid_data,
+            bid_sub: attach_sub_bid,
+            size_contrib: pc_len + nested_size,
+            attach_size,
+            method: ATTACH_EMBEDDED_MSG,
+            filename,
+        }));
+    }
+
+    // ATTACH_BY_VALUE — resolve bytes without inventing.
+    let Some(data) = resolve_attach_bytes(attach, streams) else {
+        counters.attachments_failed += 1;
+        return Ok(None);
+    };
+
+    let attach_nid = next_attach_nid(attach_nid_counter);
+    let actual_len = data.len() as u64;
+    let size_i32 = i32::try_from(actual_len.min(i32::MAX as u64)).unwrap_or(i32::MAX);
+    let attach_size = size_i32 as u32;
+
+    let filename = if attach.filename.is_empty() {
+        "attachment.bin".to_string()
+    } else {
+        attach.filename.clone()
+    };
+    let short = short_attach_filename(&filename);
+
+    let mut attach_sub_entries: Vec<(u64, u64, u64)> = Vec::new();
+    let mut body_counter = 0u32;
+    let mut props = vec![
+        (
+            PID_TAG_ATTACH_LONG_FILENAME,
+            PcValue::String(filename.clone()),
+        ),
+        (PID_TAG_ATTACH_FILENAME, PcValue::String(short)),
+        (PID_TAG_ATTACH_METHOD, PcValue::I32(ATTACH_BY_VALUE)),
+        (PID_TAG_ATTACH_SIZE, PcValue::I32(size_i32)),
+    ];
+    if let Some(mime) = &attach.mime {
+        props.push((PID_TAG_ATTACH_MIME_TAG, PcValue::String(mime.clone())));
+    }
+
+    let diverted = data.len() > MAX_HEAP_VALUE_SIZE;
+    if diverted {
+        let sub_nid = next_subnode_nid(&mut body_counter);
+        let bid = layout.write_data_chain(data)?;
+        attach_sub_entries.push((sub_nid, bid, 0));
+        props.push((PID_TAG_ATTACH_DATA_BINARY, PcValue::SubnodeBinary(sub_nid)));
+    } else {
+        props.push((PID_TAG_ATTACH_DATA_BINARY, PcValue::Binary(data)));
+    }
+
+    let mut heap = HeapBuilder::new(0x6C);
+    let hid = build_pc_v2(&mut heap, &props)?;
+    let pc_bytes = heap.finalize(hid);
+    let pc_len = pc_bytes.len() as u64;
+    let bid_data = layout.write_data_chain(pc_bytes)?;
+    let bid_sub = if attach_sub_entries.is_empty() {
+        0
+    } else {
+        layout.add_subnode_leaf(&attach_sub_entries)?
+    };
+
+    counters.attachments_written += 1;
+    // Align with body MessageSize: inline binary is inside PC → only pc_len;
+    // subnode diversion adds raw bytes separately.
+    let contrib = if diverted {
+        pc_len + actual_len
+    } else {
+        pc_len
+    };
+    Ok(Some(WrittenAttach {
+        nid: attach_nid,
+        bid_data,
+        bid_sub,
+        size_contrib: contrib,
+        attach_size,
+        method: ATTACH_BY_VALUE,
+        filename,
+    }))
+}
+
+/// Nested message object stored only as a subnode (not a top-level NBT entry).
+/// Returns `(nid, bid_data, bid_sub, size_contrib)`.
+fn build_embedded_message_object(
+    layout: &mut Layout,
+    msg: &WriteMessage,
+    depth: u32,
+    max_depth: u32,
+    counters: &mut WriteCounters,
+    streams: &mut Option<&mut dyn AttachStreamSource>,
+) -> Result<(u64, u64, u64, u64)> {
+    // Allocate a message-type NID for use as a subnode key only (not an NBT entry).
     let msg_nid = layout.alloc_nid(NID_TYPE_NORMAL_MESSAGE);
 
+    let (heap_bytes, sub_bid, size_contrib) =
+        build_message_payload(layout, msg, max_depth, counters, depth, streams)?;
+    let bid_data = layout.write_data_chain(heap_bytes)?;
+    Ok((msg_nid, bid_data, sub_bid, size_contrib))
+}
+
+/// Shared body/attach property builder for top-level and embedded messages.
+/// Returns `(pc_heap_bytes, bid_sub, size_without_message_size_prop)`.
+fn build_message_payload(
+    layout: &mut Layout,
+    msg: &WriteMessage,
+    max_depth: u32,
+    counters: &mut WriteCounters,
+    depth: u32,
+    streams: &mut Option<&mut dyn AttachStreamSource>,
+) -> Result<(Vec<u8>, u64, u64)> {
     let plain_text: Option<&str> = if msg.body_unavailable {
         None
     } else {
@@ -912,6 +1890,8 @@ fn build_message_node(layout: &mut Layout, msg: &WriteMessage, parent_nid: u64) 
     let mut subnode_entries: Vec<(u64, u64, u64)> = Vec::new();
     let mut subnode_counter = 0u32;
     let mut written_content_bytes: u64 = 0;
+    let mut attach_nid_counter = 0u32;
+    let mut written_attaches: Vec<WrittenAttach> = Vec::new();
 
     let mut props: Vec<(u16, PcValue)> = Vec::new();
     if let Some(mid) = &msg.message_id {
@@ -930,16 +1910,6 @@ fn build_message_node(layout: &mut Layout, msg: &WriteMessage, parent_nid: u64) 
     if let Some(submit_time) = msg.submit_time {
         props.push((PID_TAG_CLIENT_SUBMIT_TIME, PcValue::Time(submit_time)));
     }
-    // PidTagMessageFlags (0x0E07): a sane constant default — MSGFLAG_READ
-    // (0x00000001) — reasonable for an exported "unique mail" archive item.
-    // Not an unread-tracking feature; just a fixed value every message gets.
-    props.push((PID_TAG_MESSAGE_FLAGS, PcValue::I32(0x0000_0001)));
-    // PidTagCreationTime / PidTagLastModificationTime: this is a
-    // synthetically-written export item, not a live mailbox object, so
-    // `submit_time` (when present) is a defensible stand-in for both when no
-    // better source exists. Never invented — omitted entirely when
-    // `submit_time` is `None` (consistent with this track's body_unavailable
-    // "never invent" principle).
     if let Some(submit_time) = msg.submit_time {
         props.push((PID_TAG_CREATION_TIME, PcValue::Time(submit_time)));
         props.push((PID_TAG_LAST_MODIFICATION_TIME, PcValue::Time(submit_time)));
@@ -949,58 +1919,90 @@ fn build_message_node(layout: &mut Layout, msg: &WriteMessage, parent_nid: u64) 
         .clone()
         .unwrap_or_else(|| "IPM.Note".to_string());
     props.push((PID_TAG_MESSAGE_CLASS, PcValue::String(message_class)));
-    // Attachments dropped in v1 (0069) — never claim attach fidelity.
-    props.push((PID_TAG_HAS_ATTACHMENTS, PcValue::Bool(false)));
 
     if let Some(plain) = plain_text {
         let bytes = utf16le_bytes(plain);
         if bytes.len() > MAX_HEAP_VALUE_SIZE {
-            // Diverted to a subnode: the PC only holds a small SubnodeString
-            // reference, so these raw bytes are NOT captured by `probe_bytes`
-            // below and must be added here.
             written_content_bytes += bytes.len() as u64;
             let sub_nid = next_subnode_nid(&mut subnode_counter);
             let bid_data = layout.write_data_chain(bytes)?;
             subnode_entries.push((sub_nid, bid_data, 0));
             props.push((PID_TAG_BODY, PcValue::SubnodeString(sub_nid)));
         } else {
-            // Written inline as a PC heap value: already counted by
-            // `probe_bytes` below, so must NOT be added here too (would
-            // double-count).
             props.push((PID_TAG_BODY, PcValue::String(plain.to_string())));
         }
     }
     if let Some(html) = html_bytes {
         if html.len() > MAX_HEAP_VALUE_SIZE {
-            // Diverted to a subnode — see plain-body comment above.
             written_content_bytes += html.len() as u64;
             let sub_nid = next_subnode_nid(&mut subnode_counter);
             let bid_data = layout.write_data_chain(html.to_vec())?;
             subnode_entries.push((sub_nid, bid_data, 0));
             props.push((PID_TAG_BODY_HTML, PcValue::SubnodeBinary(sub_nid)));
         } else {
-            // Written inline — already counted by `probe_bytes` below.
             props.push((PID_TAG_BODY_HTML, PcValue::Binary(html.to_vec())));
         }
     }
 
-    // Native body / editor format / codepage (§3.3.1) — match what was actually
-    // written; v1 never writes RTF, so there is nothing RTF-related to clear.
     if html_bytes.is_some() {
-        props.push((PID_TAG_NATIVE_BODY, PcValue::I32(3))); // HTML
+        props.push((PID_TAG_NATIVE_BODY, PcValue::I32(3)));
         props.push((PID_TAG_MESSAGE_EDITOR_FORMAT, PcValue::I32(2)));
         props.push((PID_TAG_INTERNET_CODEPAGE, PcValue::I32(65001)));
     } else if plain_text.is_some() {
-        props.push((PID_TAG_NATIVE_BODY, PcValue::I32(1))); // Plain
+        props.push((PID_TAG_NATIVE_BODY, PcValue::I32(1)));
         props.push((PID_TAG_MESSAGE_EDITOR_FORMAT, PcValue::I32(1)));
         props.push((PID_TAG_INTERNET_CODEPAGE, PcValue::I32(65001)));
     }
-    // No body written at all: omit NativeBody/EditorFormat/Codepage entirely.
 
-    // PidTagMessageSize (§3.3.2) — computed from bytes actually written, never
-    // copied from a source-declared size. Probe the PC heap size *without* the
-    // MessageSize property itself (self-referential), then add subnode-diverted
-    // body/html raw byte lengths.
+    // Attachments: embeds always write attaches (parents_only is only applied
+    // at top level in `build_message_node`).
+    for attach in &msg.attachments {
+        if let Some(written) = write_one_attachment(
+            layout,
+            attach,
+            depth,
+            max_depth,
+            counters,
+            &mut attach_nid_counter,
+            streams,
+            &msg.subject,
+        )? {
+            subnode_entries.push((written.nid, written.bid_data, written.bid_sub));
+            written_content_bytes += written.size_contrib;
+            written_attaches.push(written);
+        }
+    }
+
+    let has_attaches = !written_attaches.is_empty();
+    let mut flags = MSGFLAG_READ;
+    if has_attaches {
+        flags |= MSGFLAG_HASATTACH;
+        // Attachment table TC at fixed NID 0x671 — full MS-PST column schema
+        // + RowIndex BTH (key = attach NID, value = 0-based row index).
+        let table_rows: Vec<(u64, u32, i32, String)> = written_attaches
+            .iter()
+            .map(|a| (a.nid, a.attach_size, a.method, a.filename.clone()))
+            .collect();
+        let table_heap = {
+            let mut heap = HeapBuilder::new(0xBC);
+            let row_refs: Vec<(u64, u32, i32, &str)> = table_rows
+                .iter()
+                .map(|(nid, size, method, name)| (*nid, *size, *method, name.as_str()))
+                .collect();
+            let (hid, _heap_after) = build_attachment_table_tc(&mut heap, &row_refs)?;
+            heap.finalize(hid)
+        };
+        let table_len = table_heap.len() as u64;
+        let table_bid = layout.write_data_chain(table_heap)?;
+        subnode_entries.push((NID_ATTACHMENT_TABLE, table_bid, 0));
+        // Real attachment-table heap size (not a fabricated constant).
+        written_content_bytes += table_len;
+    }
+
+    props.push((PID_TAG_HAS_ATTACHMENTS, PcValue::Bool(has_attaches)));
+    props.push((PID_TAG_MESSAGE_FLAGS, PcValue::I32(flags)));
+
+    // MessageSize: probe PC without MessageSize, add subnode/attach bytes.
     let mut probe_heap = HeapBuilder::new(0x6C);
     let probe_hid = build_pc_v2(&mut probe_heap, &props)?;
     let probe_bytes = probe_heap.finalize(probe_hid);
@@ -1026,7 +2028,37 @@ fn build_message_node(layout: &mut Layout, msg: &WriteMessage, parent_nid: u64) 
         layout.add_subnode_leaf(&subnode_entries)?
     };
 
-    layout.add_node_data(msg_nid, msg_heap_bytes, parent_nid, sub_bid)?;
+    Ok((msg_heap_bytes, sub_bid, message_size_u64))
+}
+
+fn build_message_node(
+    layout: &mut Layout,
+    msg: &WriteMessage,
+    parent_nid: u64,
+    opts: &WritePstOpts,
+    counters: &mut WriteCounters,
+    depth: u32,
+    streams: &mut Option<&mut dyn AttachStreamSource>,
+) -> Result<u64> {
+    let msg_nid = layout.alloc_nid(NID_TYPE_NORMAL_MESSAGE);
+    let max_depth = opts.embedded_depth_limit();
+
+    // parents_only: count omitted attaches and write with empty attach list.
+    let owned: WriteMessage;
+    let msg_ref: &WriteMessage = if opts.parents_only && !msg.attachments.is_empty() {
+        counters.attachments_omitted_by_policy += msg.attachments.len() as u64;
+        owned = WriteMessage {
+            attachments: Vec::new(),
+            ..msg.clone()
+        };
+        &owned
+    } else {
+        msg
+    };
+
+    let (heap_bytes, sub_bid, _size) =
+        build_message_payload(layout, msg_ref, max_depth, counters, depth, streams)?;
+    layout.add_node_data(msg_nid, heap_bytes, parent_nid, sub_bid)?;
     Ok(msg_nid)
 }
 
@@ -1193,6 +2225,168 @@ pub fn build_bth_checked(
 
     heap.patch_u32(hid_root, 4, hid_leaf)?;
     Ok(hid_root)
+}
+
+/// BTH builder with **u32 keys** (e.g. TC RowIndex: `cbKey=4`, `cbEnt=4`).
+///
+/// [`build_bth_checked`] only supports u16 keys (PC property IDs). The TC
+/// RowIndex BTH maps `dwRowID` (4-byte attach/message NID) → `dwRowIndex`
+/// (4-byte 0-based matrix index). `pst_reader::ltp::tc` requires `cbKey >= 4`
+/// for row-id keys.
+pub fn build_bth_u32_checked(
+    heap: &mut HeapBuilder,
+    cb_key: u8,
+    cb_ent: u8,
+    records: &mut [(u32, Vec<u8>)],
+) -> Result<u32> {
+    if cb_key < 4 {
+        return Err(WriterError::Layout(format!(
+            "build_bth_u32_checked: cb_key={cb_key} must be >= 4 for u32 row-id keys"
+        )));
+    }
+    if cb_ent == 0 {
+        return Err(WriterError::Layout(
+            "build_bth_u32_checked: cb_ent must be non-zero".into(),
+        ));
+    }
+
+    records.sort_by_key(|r| r.0);
+
+    let mut bth_data = vec![0xB5, cb_key, cb_ent, 0];
+    bth_data.extend_from_slice(&0u32.to_le_bytes());
+    let hid_root = heap.try_alloc(&bth_data)?;
+
+    let mut leaf_data = Vec::new();
+    for (key, data) in records.iter() {
+        // Write key as little-endian u32 (cb_key bytes; pad/truncate to cb_key).
+        let key_bytes = key.to_le_bytes();
+        if cb_key as usize <= key_bytes.len() {
+            leaf_data.extend_from_slice(&key_bytes[..cb_key as usize]);
+        } else {
+            leaf_data.extend_from_slice(&key_bytes);
+            leaf_data.resize(leaf_data.len() + (cb_key as usize - 4), 0);
+        }
+        if data.len() != cb_ent as usize {
+            return Err(WriterError::Layout(format!(
+                "build_bth_u32_checked: record data len {} != cb_ent {cb_ent}",
+                data.len()
+            )));
+        }
+        leaf_data.extend_from_slice(data);
+    }
+    let hid_leaf = heap.try_alloc(&leaf_data)?;
+
+    heap.patch_u32(hid_root, 4, hid_leaf)?;
+    Ok(hid_root)
+}
+
+/// Build an MS-PST-conformant attachment table TC on `heap`.
+///
+/// Columns match [`ATTACHMENT_TABLE_COLUMNS`] / the NBT template at
+/// [`NID_ATTACHMENT_TABLE_TEMPLATE`]. Each row carries AttachSize, Filename
+/// (UTF-16LE heap string via HNID), AttachMethod, RenderingPosition
+/// (`0xFFFFFFFF`), LtpRowId (= attach NID), LtpRowVer (= 1-based row index),
+/// and a full existence bitmap.
+///
+/// **RowIndex BTH** (`hidRowIndex` at TCINFO offset 10): key = attach NID
+/// (u32), value = 0-based row index (u32). `hnidRows` is patched at offset 14.
+///
+/// Returns `(hid_user_root, heap_bytes_after_build)` where the second value is
+/// the heap data length after all allocations (pre-finalize). Callers that
+/// need MessageSize should prefer `heap.finalize(hid).len()` for the final
+/// on-disk heap size.
+fn build_attachment_table_tc(
+    heap: &mut HeapBuilder,
+    rows: &[(u64, u32, i32, &str)],
+) -> Result<(u32, usize)> {
+    let (columns, total_row_width) = build_template_tc_columns(&ATTACHMENT_TABLE_COLUMNS);
+    let ncols = columns.len();
+    let bitmap_bytes = ncols.div_ceil(8);
+    let row_width = total_row_width as usize;
+
+    let mut row_matrix: Vec<u8> = Vec::with_capacity(rows.len() * row_width);
+    let mut row_index_records: Vec<(u32, Vec<u8>)> = Vec::with_capacity(rows.len());
+
+    for (i, (attach_nid, size, method, filename)) in rows.iter().enumerate() {
+        let fname_hid = heap.try_alloc(&utf16le_bytes(filename))?;
+        let mut row = vec![0u8; row_width];
+
+        for col in &columns {
+            let prop_id = col.0;
+            let ib = col.2 as usize;
+            let cb = col.3 as usize;
+            let bytes: [u8; 4] = match prop_id {
+                PID_TAG_ATTACH_SIZE => size.to_le_bytes(),
+                PID_TAG_ATTACH_FILENAME => fname_hid.to_le_bytes(),
+                PID_TAG_ATTACH_METHOD => (*method as u32).to_le_bytes(),
+                PID_TAG_RENDERING_POSITION => 0xFFFF_FFFFu32.to_le_bytes(),
+                PID_TAG_LTP_ROW_ID => (*attach_nid as u32).to_le_bytes(),
+                PID_TAG_LTP_ROW_VER => ((i as u32) + 1).to_le_bytes(),
+                _ => {
+                    return Err(WriterError::Layout(format!(
+                        "build_attachment_table_tc: unexpected column prop 0x{prop_id:04X}"
+                    )));
+                }
+            };
+            if ib + cb > row_width || cb > 4 {
+                return Err(WriterError::Layout(format!(
+                    "build_attachment_table_tc: column 0x{prop_id:04X} out of row bounds \
+                     (ib={ib} cb={cb} row_width={row_width})"
+                )));
+            }
+            row[ib..ib + cb].copy_from_slice(&bytes[..cb]);
+        }
+
+        // Existence bitmap at end of row — all present columns set.
+        let bitmap_start = row_width - bitmap_bytes;
+        for col in &columns {
+            let bit = col.4 as usize;
+            row[bitmap_start + bit / 8] |= 1u8 << (bit % 8);
+        }
+
+        row_matrix.extend_from_slice(&row);
+        row_index_records.push((*attach_nid as u32, (i as u32).to_le_bytes().to_vec()));
+    }
+
+    // RowIndex BTH (required when there are rows so get_row_id works).
+    let hid_row_index = if rows.is_empty() {
+        0u32
+    } else {
+        build_bth_u32_checked(heap, 4, 4, &mut row_index_records)?
+    };
+
+    // TCINFO: bType + cCols + rgib[4*2] + hidRowIndex(4) + hnidRows(4) = 18
+    // then TCOLDESCs. Patch hidRowIndex @ field offset 10, hnidRows @ 14.
+    let mut tcinfo = Vec::new();
+    tcinfo.push(0x7C);
+    tcinfo.push(columns.len() as u8);
+    tcinfo.extend_from_slice(&0u16.to_le_bytes());
+    tcinfo.extend_from_slice(&0u16.to_le_bytes());
+    tcinfo.extend_from_slice(&0u16.to_le_bytes());
+    tcinfo.extend_from_slice(&total_row_width.to_le_bytes());
+    tcinfo.extend_from_slice(&0u32.to_le_bytes()); // hidRowIndex placeholder
+    tcinfo.extend_from_slice(&0u32.to_le_bytes()); // hnidRows placeholder
+
+    for col in &columns {
+        tcinfo.extend_from_slice(&col.0.to_le_bytes());
+        tcinfo.extend_from_slice(&col.1.to_le_bytes());
+        tcinfo.extend_from_slice(&col.2.to_le_bytes());
+        tcinfo.push(col.3);
+        tcinfo.push(col.4);
+    }
+
+    let hid_tcinfo = heap.try_alloc(&tcinfo)?;
+    let hid_rows = heap.try_alloc(&row_matrix)?;
+
+    heap.patch_u32(hid_tcinfo, 10, hid_row_index)?;
+    heap.patch_u32(hid_tcinfo, 14, hid_rows)?;
+
+    Ok((hid_tcinfo, heap_data_len(heap)))
+}
+
+/// Current allocated heap data length (pre-finalize), for sizing probes.
+fn heap_data_len(heap: &HeapBuilder) -> usize {
+    heap.data.len()
 }
 
 /// Result-based inline TC builder mirroring `crate::build_tc_inline`.
@@ -1446,6 +2640,17 @@ const ASSOC_CONTENTS_TABLE_TEMPLATE_COLUMNS: [(u16, TcColType); 14] = [
     (0x7007, TcColType::I32),
 ];
 
+/// Attachment Table (template NID `0x671` + per-message subnode) column schema.
+/// MS-PST attachment table minimum columns used by this writer.
+const ATTACHMENT_TABLE_COLUMNS: [(u16, TcColType); 6] = [
+    (PID_TAG_ATTACH_SIZE, TcColType::I32),           // 0x0E20
+    (PID_TAG_ATTACH_FILENAME, TcColType::StringRef), // 0x3704
+    (PID_TAG_ATTACH_METHOD, TcColType::I32),         // 0x3705
+    (PID_TAG_RENDERING_POSITION, TcColType::I32),    // 0x370B
+    (PID_TAG_LTP_ROW_ID, TcColType::I32),            // 0x67F2
+    (PID_TAG_LTP_ROW_VER, TcColType::I32),           // 0x67F3
+];
+
 /// 5d. Search Folder Contents Table Template (NID `0x610`) column schema —
 /// verified from https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-pst/cdcf9571-049f-47f5-b075-8374057134ec
 /// (`0x0E07`/`0x0E17` appear twice in Microsoft's own published table; kept
@@ -1607,9 +2812,14 @@ impl Layout {
     }
 
     /// Build a single-block SLBLOCK subnode leaf listing `entries` (nid,
-    /// bidData, bidSub). v1 scope: at most a couple of large-value diversions
-    /// per message (no attachments), so one SLBLOCK always suffices — returns a
-    /// typed error rather than silently dropping entries if that ever changes.
+    /// bidData, bidSub).
+    ///
+    /// Used for large body/HTML diversions, the attachment table
+    /// (`NID_ATTACHMENT_TABLE`), attach objects (type `0x05`), attach data
+    /// diversions, and nested embedded-message objects under attach subnodes
+    /// (track 0069). One SLBLOCK always suffices for current scale; returns a
+    /// typed error rather than silently dropping entries if capacity is
+    /// exceeded (multi-level SI hierarchy remains a future concern).
     pub fn add_subnode_leaf(&mut self, entries: &[(u64, u64, u64)]) -> Result<u64> {
         let mut payload = Vec::with_capacity(8 + entries.len() * 24);
         payload.push(0x02); // btype (subnode block)

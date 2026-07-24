@@ -24,16 +24,100 @@ single-block only; keep using it only for existing fixture callers.
 | Search Root folder | Yes, empty | Real folder object (`NID_TYPE_SEARCH_FOLDER`), not a hierarchy child; referenced by the store's `PidTagFinderEntryId`. v1 never implements search semantics. |
 | Fixed MS-PST template-object tables | Yes, always empty | Hierarchy/Contents/AssocContents/SearchContents Table Templates at fixed NIDs `0x60D`/`0x60E`/`0x60F`/`0x610`; zero data rows, correct column schema. |
 | Associated-contents (FAI) table | Yes, empty | Root, IPM_SUBTREE, `<folder>`, Deleted Items, and Search Root each get an empty associated-contents TC (NID suffix `0x0F`) alongside their PC/hierarchy/contents TCs — MS-PST §2.4.2 completeness; see below. No FAI items are ever written in v1. |
-| Attachments | **No** (dropped) | Owned by track **0069**. `HasAttachments` is always `false`. `from_canonical_message` reports a per-message dropped-attachment count. |
-| Folder path preservation | **No** (flat `<folder>` under IPM_SUBTREE) | Owned by **0069**. |
-| Multi-source prefixes | **No** | Owned by **0069**. |
+| Attachments | **Yes (v1.1 / 0069)** | By-value file attaches + attachment table + XBLOCK; see **v1.1** section below. |
+| Folder path preservation | **Yes (v1.1 / 0069)** | Default `PreservePaths` under IPM_SUBTREE; residual `Unique Mail`. |
+| Multi-source prefixes | **Yes (v1.1 / 0069)** | Unique stem labels (`archive` / `archive (2)`). |
 | Multi-GB streaming write | **No** — v1 collects `WriteMessage`s and builds the whole layout in memory (two-pass), suitable for synthetic/thousands-of-messages scale | Owned by **0070**. |
 | Encrypted / Permute output | **No** | Residual; unencrypted only. |
 | ANSI PST | **No** | Never. |
 | Recipient table / named-prop set beyond the store stub | **No** | Minimal named-property map stub only, sufficient for the properties this writer emits (none of which require named props). |
 | RTF | **No** | v1 never writes `PidTagRtfCompressed` or any RTF-native hint — there is nothing RTF-related to clear because nothing RTF-related is ever produced. |
-| `PidTagMessageFlags` | Always `0x00000001` (`MSGFLAG_READ`) | Cheap, low-risk fidelity addition beyond the §3.3 LOCKED table; a sane constant default, not a real read/unread feature. |
+| `PidTagMessageFlags` | `MSGFLAG_READ` (0x1); `\| MSGFLAG_HASATTACH` (0x10) when ≥1 attach written | Paperclip + read default (0069). |
 | `PidTagCreationTime` / `PidTagLastModificationTime` | Set to `submit_time` when present; omitted otherwise | This is a synthetically-written export item, not a live mailbox object, so `submit_time` is a defensible stand-in for both when no better source exists. Never invented — omitted entirely when `submit_time` is `None`. |
+
+## v1.1 — Attachments + folder fidelity (Track 0069)
+
+Closes **D-0068-04** (attachment table + attach objects). Builds on the v1 store
+shape above without regressing XBLOCK bodies, IPM special folders, or safety.
+
+### Attachments
+
+| Behavior | Detail |
+|---|---|
+| **By-value (`ATTACH_BY_VALUE` = 1)** | `PidTagAttachDataBinary` heap-inline when small; **subnode + XBLOCK** when larger than one heap page. |
+| **Attachment table** | PST-level **template** at NBT NID `0x671` (zero rows, full column schema). Per-message subnode NID `0x671` TC with one row per successfully written attach: AttachSize, AttachFilename (HNID), AttachMethod, RenderingPosition (`0xFFFFFFFF`), LtpRowId (= attach NID), LtpRowVer; **RowIndex BTH** (`hidRowIndex`, key=attach NID, value=0-based index). |
+| **Attach object NIDs** | Type `0x05` (`NID_TYPE_ATTACHMENT`) as **message subnodes only** (never top-level NBT). |
+| **HasAttachments** | `true` only when ≥1 attach was actually written. |
+| **MessageFlags** | Always `MSGFLAG_READ` (0x1). OR `MSGFLAG_HASATTACH` (0x10) when attaches written. |
+| **MessageSize** | Computed from bytes written (never source size). **Inline** attach binary is inside the attach PC → count only attach PC length; **subnode** diversion adds PC + raw bytes (same rule as body inline vs diversion). |
+| **Soft fail** | Missing data (`data: None` and no stream) / unsupported method → skip that attach, `attachments_failed++`; message still written. **`data: Some(vec![])` is a valid zero-byte by-value attach** (not a soft fail). |
+| **Stream source** | Optional [`AttachStreamSource`] via `write_unicode_pst_with_streams`. Stream is consulted **only if** `data: None`. If `data: Some(...)` (incl. empty), stream is never called. If streaming: `Ok(Some(_))` incl. empty is valid; `Ok(None)`/`Err` soft-fails. `write_unicode_pst` = streams `None`. **v1 buffers one attach at a time into a `Vec`** (intentional 0069 scope); true multi-GB chunked streaming without holding one full attach is **D-0069-stream-buffer → 0070**. |
+| **parents_only** | `WritePstOpts::parents_only` empties attach list; `attachments_omitted_by_policy++`. |
+| **Embedded (`ATTACH_EMBEDDED_MSG` = 5)** | Nested message PC under attach **subnode** when `WriteAttachment.embedded_message` present; method=5; size reflects nested; **never** invent by-value file bytes. `open_attachment_data` binary path does **not** apply (no `PidTagAttachDataBinary`). Missing nested → `embedded_unparsed++` + `attachments_failed++` + fidelity event. |
+| **Depth cap** | `max_embedded_depth` default **3**, clamp `[1, 8]`. Deeper branches halt; `embedded_depth_limit_hits++` + fidelity event (DoD-8 surface — not a MAPI property on the item). |
+| **Cloud/ref methods** | Skip + fail count (D-0067-cloud residual). |
+
+`from_canonical_message` **maps** `CanonicalAttachment` metadata (and small `data`
+when present) plus `locus.folder_path` / `locus.source_path`. The second return
+value is reserved for unmappable attaches (0 today).
+
+### Folder layout
+
+Default policy: `FolderLayoutPolicy::PreservePaths { multi_source_prefix: true }`.
+
+```text
+IPM_SUBTREE ("Top of Personal Folders")
+  ├── <source_prefix>/?     # only when ≥2 distinct sources and multi_source_prefix
+  │     └── path segments from source_folder_path
+  ├── Unique Mail/          # residual for empty/missing/invalid path (name from folder_display_name)
+  └── Deleted Items/        # still empty special folder (0068)
+```
+
+| Rule | Detail |
+|---|---|
+| Case routing | Case-insensitive segment match; **first-seen display name wins**. |
+| Multi-source prefixes | Sanitized file stem; **case-folded uniqueness** so `Archive.pst`/`archive.pst` never merge under case-insensitive folder routing; collisions → `archive`, `archive (2)`, … with globally reserved suffixes (stable by sorted absolute path). |
+| Single-source | No source prefix. |
+| Sanitize | Strip `<>:"/\|?*`, collapse `..`/empty, max 32 segments → residual. Sanitized segments or `..` / over-depth → `folder_paths_degraded++`; residual routing also increments `folder_paths_residual` when path missing/empty/invalid. |
+| Flat policy | `FolderLayoutPolicy::Flat { folder_display_name }` — all messages in one folder (0068 behavior). |
+| Folder object | Every folder still four-part: PC + hierarchy + contents + assoc-contents. |
+
+### Report counters + per-attachment fidelity events (0069)
+
+`WritePstReport` adds aggregate counters: `attachments_written`, `attachments_failed`,
+`attachments_omitted_by_policy`, `folders_created`, `embedded_messages_written`,
+`embedded_depth_limit_hits`, **`embedded_unparsed`**, **`folder_paths_residual`**,
+**`folder_paths_degraded`**.
+
+Plus **`attachment_fidelity_events: Vec<AttachmentFidelityEvent>`** — the DoD-8
+per-attachment honesty surface (not stored as MAPI properties on items):
+
+| Field | Meaning |
+|---|---|
+| `message_subject` | Best-effort identifier of the parent message in the batch |
+| `attach_filename` | Attachment filename as supplied on the DTO |
+| `kind` | `AttachmentFidelityKind::DepthLimitExceeded` or `::EmbeddedUnparsed` |
+
+Events are appended when an embedded attach is skipped for depth limit or missing
+nested content (alongside the matching aggregate counter).
+
+### Tests
+
+- Regression: `crates/pst-writer/tests/writer_v1.rs` (0068 matrix).
+- Fidelity: `crates/pst-writer/tests/writer_fidelity.rs` (0069 matrix §9 cases 1–15 + review fixes: attach template, per-message TC/RowIndex, degraded path, embedded_unparsed, case-differing multi-source prefixes, fidelity events).
+
+### Still out of scope / residual
+
+| Item | Owner |
+|---|---|
+| Multi-GB whole-file streaming | **0070** |
+| One-attach full buffer (`AttachStreamSource` → `Vec`) without true chunked multi-GB | **D-0069-stream-buffer → 0070** (v1 OK to buffer one attach at a time) |
+| `unique-pst` CLI | **0071** |
+| scanpst / Outlook operator proof | D-0068-02 (carry) |
+| Cloud attach download | D-0067-cloud |
+| Recipient table / full named props | residual |
+| `PidTagAttachDataObject` (PtypObject) on embeds | residual — nested message is linked as an attach subnode leaf entry with method=5; PC builder has no PtypObject; reader binary open path correctly fails |
+| Per-folder contents-table RowIndex BTH | not required this track (attach table only) |
 
 ## Hierarchy (§3.2)
 
@@ -55,7 +139,8 @@ Search Root                    (NID_TYPE_SEARCH_FOLDER; NOT a hierarchy child of
 
 Fixed template objects (NID_HIERARCHY_TABLE_TEMPLATE 0x60D,
   NID_CONTENTS_TABLE_TEMPLATE 0x60E, NID_ASSOC_CONTENTS_TABLE_TEMPLATE 0x60F,
-  NID_SEARCH_CONTENTS_TABLE_TEMPLATE 0x610) — always zero data rows
+  NID_SEARCH_CONTENTS_TABLE_TEMPLATE 0x610,
+  NID_ATTACHMENT_TABLE_TEMPLATE 0x671) — always zero data rows
 ```
 
 Root's own contents table is always empty — every message lives under
@@ -275,6 +360,10 @@ message_size = len(PC heap bytes, computed WITHOUT the MessageSize property
                     itself — it is self-referential)
              + len(UTF-16LE bytes of body_plain), if diverted to a subnode
              + len(bytes of body_html), if diverted to a subnode
+             + per written attach: attach PC len (+ raw bytes if subnode-diverted;
+               or + nested size for embeds)
+             + len(finalized attachment-table heap), when attaches present
+               (real table size — never a fabricated constant)
 ```
 
 The "without MessageSize itself" step avoids circularity: the PC is built once
@@ -488,8 +577,9 @@ written through.
 `pst-writer` takes a normal crate dependency on `dedup-engine` for exactly one
 function, `pst_writer::from_canonical_message(&CanonicalMessage) -> (WriteMessage, u64)`.
 No cycle is introduced (`dedup-engine` does not depend on `pst-writer`).
-Attachments are dropped; the `u64` is the number of attachments dropped for
-that message, for a caller (e.g. a future 0071 CLI) to aggregate into a report.
+Attachments are **mapped** (0069) along with `locus.folder_path` /
+`locus.source_path`. The `u64` is the count of attachments the adapter could
+not represent (0 today — reserved for a future 0071 CLI aggregate).
 
 ## wSig (page signature)
 
