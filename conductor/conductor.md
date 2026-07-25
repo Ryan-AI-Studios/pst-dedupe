@@ -147,7 +147,7 @@ Legacy folders keep `plan.md`/`spec.md`/`tdd.md` as written. **New work uses `##
 |---|---|---|
 | [0062-ReleaseHardeningRc](0062-ReleaseHardeningRc/spec.md) | **Completed** | RC freeze 0.2.0-rc.1: CHANGELOG, golden paths, audit/deny, SBOM+PDBs+ZIP; Codex luna PASS WITH DEFERRED P3; handoff blocked on D-0062-codesign |
 | [0063-SecurityRedTeamFixes](0063-SecurityRedTeamFixes/spec.md) | **Completed** | Series I red team + P0/P1 fixes (encrypt/service/SSO/produce/cloud) on RC freeze |
-| [0064-DeskPlatformConnectUx](0064-DeskPlatformConnectUx/spec.md) | **Proposed** | Desk Connect to service + produce profile UX (native egui) |
+| [0064-DeskPlatformConnectUx](0064-DeskPlatformConnectUx/spec.md) | **Completed** | Desk Connect + thin remote review (OCC) + Solo produce profile/Bates; SSO loopback; Codex luna PASS WITH DEFERRED P3 |
 
 ## Series K — Clean Unique export path (CLI-first)
 
@@ -169,7 +169,7 @@ Legacy folders keep `plan.md`/`spec.md`/`tdd.md` as written. **New work uses `##
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064** Proposed (Desk Connect UX).
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual).
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).

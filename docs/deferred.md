@@ -590,7 +590,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0058-01 | — | Desk “Connect to service” UX (URL + login + session actor) | API-only P0; solo Desk unchanged | residual polish |
+| D-0058-01 | — | Desk “Connect to service” UX (URL + login + session actor) | **Closed in 0064** — Home Connect dialog, Connected banner, thin remote review | **closed** |
 | D-0058-02 | — | TLS / mutual TLS for LAN bind | Loopback default; `--allow-lan` without TLS P0 | residual |
 | D-0058-03 | — | Lock heartbeat / renewal | TTL-only P0 (default 4h) | residual |
 | D-0058-04 | P3 | True dual-process exclusive-lock CI stress | Real `fs4` exclusive lock; same-process test may soft-pass | residual polish |
@@ -607,7 +607,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0059-01 | — | SAML 2.0 IdP | OIDC Auth Code + PKCE is P0 | residual |
-| D-0059-02 | — | Desk browser “Sign in with SSO” UX | Builds on D-0058-01 Connect | residual polish |
+| D-0059-02 | — | Desk browser “Sign in with SSO” UX | **Advanced in 0064** — loopback handoff + `POST /v1/oidc/exchange`; clipboard paste still not production DoD | residual polish (custom URI scheme, cross-process handoff) |
 | D-0059-03 | — | IdP RP-initiated / back-channel logout | Local logout + lock release is P0 | residual |
 | D-0059-04 | — | Multi-matter single process host | Still one matter per process; D-0058-08 | residual |
 | D-0059-05 | — | Per-tenant matter CMK / external KMS | Distinct from platform IdP secret PMK; `TenantKeyProvider` stub only | **D-0057-03** |
@@ -621,7 +621,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0060-01 | — | CP1252 / legacy encoding DAT path | UTF-8 BOM default; fail-closed CP1252 residual (D-0040-06) | residual |
-| D-0060-02 | — | Desk produce profile dropdown | CLI + headless DoD met; Desk uses default profile + pack-aware soft-gate | residual polish |
+| D-0060-02 | — | Desk produce profile dropdown | **Closed in 0064** — Solo produce dialog profile picker + required Bates start + pre-flight | **closed** |
 | D-0060-03 | — | Auto suggest next Bates (MAX prefix) | Start still explicit required | residual |
 | D-0060-04 | — | Image + OPT/LFP production profiles | D-0040-01; name_by_bates extends to images | residual |
 | D-0060-05 | — | Full Relativity load-file suite | Alias map only P0 | residual |
@@ -629,6 +629,19 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0060-07 | — | UK/EU/AU full protocol packs | Beyond template tags / jurisdiction_tag | residual |
 | D-0060-08 | P3 | Volume README.txt hardcodes DATA/NATIVES/TEXT + UTC wording | Profile layout/date may differ; DAT is authoritative | residual polish |
 | D-0041-05 | — | Multi-jurisdiction QC packs | **Partial close in 0060** (named packs + profile binding) | residual firm packs |
+
+## From track 0064-DeskPlatformConnectUx (implementation — closes D-0058-01 / D-0060-02)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0064-01 | — | Full Connected feature parity (notes/privilege/locks/batches/FTS/AI/jobs) | P0 thin list/body/codes only | residual matrix |
+| D-0064-02 | — | Remote produce / job start via HTTP | Service has no produce routes; Solo/host CLI | residual / future track |
+| D-0064-03 | — | Persist bearer in OS keyring across restarts | Process-memory session only for P0 | residual polish |
+| D-0064-04 | — | Custom URI scheme handoff (`dedupe-desk://`) | Loopback handoff is P0; scheme residual | residual polish |
+| D-0064-05 | — | Dev-only clipboard bearer paste | **Banned** as production SSO path | residual / never for DoD |
+| D-0064-06 | — | Handoff code durable across service multi-instance | In-memory handoff codes; single host P0 | residual |
+| D-0064-07 | P3 | Desk↔service in-process integration test (login + codes 409) | Unit/helpers cover builders + state; router round-trip residual (Codex) | residual polish |
+| D-0064-08 | P3 | Abortable body transport (async reqwest cancel) | Single-flight blocking worker + latest-wins meets DoD-7 fallback; true abort residual (Codex) | residual polish |
 
 ## From track 0061-CloudBlobJobBackends (Completed — Codex luna PASS)
 

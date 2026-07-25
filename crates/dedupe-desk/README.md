@@ -47,22 +47,38 @@ Workspace **Workflow** dropdown (`list_workflows` = built-ins ∪ user):
 
 Param binding is AST-only. Hard gates reject `soft_fail`. Nested profile stages parent to the `profile_run` child under the workflow parent.
 
-### Produce (0040)
+### Produce (0040 + 0064)
 
 Nav **Produce** (or the workspace produce entry) exports the review corpus as a
 production volume: **NATIVES/** + **TEXT/** + Concordance **DAT** (+ CSV twin) under
-`<matter>/exports/productions/<name>/` by default.
+`<matter>/exports/productions/<name>/` by default. **Solo only** (not available in Connected mode).
 
 | Control | Default / behavior |
 |---|---|
-| Dialog | Name, Bates prefix, fail-if-withheld, expand-family, output folder |
+| Dialog | Name, **production profile**, Bates prefix, **Bates start (≥ 1)**, fail-if-withheld, expand-family, output folder |
+| Production profile | Dropdown from `list_production_profiles()`; empty = engine default; body validated pre-flight |
+| Bates start | Required job-time integer ≥ 1 (never stored in profile) |
 | Withhold | Skipped by default (`item_is_withheld`); optional **fail if any withheld** aborts before assignment |
 | Family expand | **Off** by default — UI shows a broken-family warning when expand is unchecked (full QC in **0041**) |
+| Pre-flight | Resolve profile + validate body + Bates + QC soft-gate before job start |
 | Job kind | `produce` (alias `production_export`); resumable via process-runner |
 | Load file | UTF-8 BOM, þ/¶ delimiters, ® newlines, UTC dates; **no** privilege descriptions or notes |
 
 Redacted items use `redacted_text_sha256` only (never original extract text). See
 `crates/matter-produce/README.md` for engine contracts.
+
+### Solo vs Connected (0064)
+
+| Mode | How | Capabilities |
+|---|---|---|
+| **Solo** (default) | Open local matter | Full Desk: jobs, produce, full Review |
+| **Connected** (opt-in) | Home → Connect (URL + password or SSO) | Thin remote Review only (list / body / codes + OCC); no local matter dual-open |
+
+- **Fail closed:** cannot open a local matter while Connected; cannot Connect while a local matter is open.
+- **Banner:** `Connected to {base} as {name} ({role})` until Disconnect.
+- **409:** remote codes retain draft; conflict panel; re-apply or discard (no silent wipe).
+- **Networking:** body loads use generation tokens (latest-wins); UI thread never blocks on HTTP.
+- **SSO:** system browser → service OIDC → Desk loopback one-time code exchange (no production clipboard paste).
 
 ### Case Overview (0038)
 

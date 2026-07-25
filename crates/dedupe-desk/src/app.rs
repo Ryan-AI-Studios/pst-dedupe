@@ -13,6 +13,7 @@ use process_runner::{register_default_handlers, JobParams, ProcessRunner, Runner
 use tokio::sync::watch;
 
 use crate::cluster_ui::{self, ClusterState};
+use crate::connect::{self, ConnectAttemptResult, ConnectDialogState};
 use crate::conversation_ui::{self, ConversationState};
 use crate::dialogs::{DialogKind, DialogState};
 use crate::gap_ui::{self, GapState};
@@ -26,6 +27,10 @@ use crate::produce_qc::{
     QcFindingRow, FINDINGS_DISPLAY_CAP,
 };
 use crate::progress_ui;
+use crate::remote_client::{
+    force_clear_connected_session, ConnectedSession, RemoteClient, AUTH_FAIL_SOLO_STATUS,
+};
+use crate::remote_review_ui::{self, RemoteReviewState};
 use crate::review_ui::{self, ReviewState};
 use crate::settings::DeskSettings;
 use crate::workspace;
@@ -89,6 +94,12 @@ pub struct DeskApp {
     pub(crate) produce_dialog_open: bool,
     pub(crate) produce_name: String,
     pub(crate) produce_bates_prefix: String,
+    /// Job-time Bates start (required ≥ 1; never stored in production profile).
+    pub(crate) produce_bates_start: u64,
+    /// Selected production profile id/slug (empty = engine default).
+    pub(crate) selected_production_profile_id: String,
+    /// Labels for produce profile dropdown: (id, display label).
+    pub(crate) production_profile_options: Vec<(String, String)>,
     pub(crate) produce_fail_if_withheld: bool,
     pub(crate) produce_expand_family: bool,
     pub(crate) produce_require_qc_pass: bool,
@@ -130,6 +141,11 @@ pub struct DeskApp {
     pub(crate) workflow_pst_item_id: String,
     /// Draft buffer for AI API key entry (never persisted in DeskSettings JSON).
     ai_api_key_draft: String,
+    /// Connected session to matter-service (track 0064). Mutually exclusive with local matter.
+    connected_session: Option<ConnectedSession>,
+    connect_dialog: ConnectDialogState,
+    /// Thin remote review state when Connected.
+    remote_review: RemoteReviewState,
 }
 
 /// Resolve `conversation_id` for a Review item.
@@ -229,6 +245,9 @@ impl DeskApp {
             produce_dialog_open: false,
             produce_name: "Review Production".into(),
             produce_bates_prefix: "PROD".into(),
+            produce_bates_start: 1,
+            selected_production_profile_id: String::new(),
+            production_profile_options: Vec::new(),
             produce_fail_if_withheld: false,
             produce_expand_family: false,
             produce_require_qc_pass: true,
@@ -256,7 +275,15 @@ impl DeskApp {
             workflow_source_id: String::new(),
             workflow_pst_item_id: String::new(),
             ai_api_key_draft: String::new(),
+            connected_session: None,
+            connect_dialog: ConnectDialogState::default(),
+            remote_review: RemoteReviewState::default(),
         }
+    }
+
+    /// True when Connected to matter-service (no local Matter).
+    pub(crate) fn is_connected(&self) -> bool {
+        self.connected_session.is_some()
     }
 
     pub(crate) fn runner_busy(&self) -> bool {
@@ -376,9 +403,136 @@ impl DeskApp {
         self.hydrate_qc_from_matter();
         self.hydrate_ai_settings_from_matter();
         self.hydrate_lang_pack_from_matter();
+        self.hydrate_production_profiles();
         self.refresh_produce_qc_readiness();
         self.refresh_matter_lists();
         self.status_msg = Some(format!("Opened matter at {root}"));
+    }
+
+    /// Load production profile dropdown options from the open matter (built-ins + local).
+    fn hydrate_production_profiles(&mut self) {
+        self.production_profile_options.clear();
+        let Some(root) = self.matter_root.as_ref() else {
+            return;
+        };
+        match matter_core::Matter::open_for_read(root.as_path()) {
+            Ok(matter) => match matter.list_production_profiles() {
+                Ok(list) => {
+                    self.production_profile_options = list
+                        .into_iter()
+                        .map(|p| {
+                            let label = if p.is_builtin {
+                                format!("{} ({})", p.label, p.slug)
+                            } else {
+                                format!("{} [{}]", p.label, p.slug)
+                            };
+                            (p.id, label)
+                        })
+                        .collect();
+                    // Keep selection if still present; otherwise empty = engine default.
+                    if !self.selected_production_profile_id.is_empty()
+                        && !self
+                            .production_profile_options
+                            .iter()
+                            .any(|(id, _)| id == &self.selected_production_profile_id)
+                    {
+                        self.selected_production_profile_id.clear();
+                    }
+                }
+                Err(e) => {
+                    self.error_msg = Some(format!("Could not list production profiles: {e}"));
+                }
+            },
+            Err(e) => {
+                self.error_msg = Some(format!("Could not open matter for profiles: {e}"));
+            }
+        }
+    }
+
+    /// Resolve + validate selected production profile body (Solo produce pre-flight).
+    fn resolve_production_profile_preflight(&self) -> Result<(), String> {
+        let key = self.selected_production_profile_id.trim();
+        if key.is_empty() {
+            return Ok(());
+        }
+        let root = self
+            .matter_root
+            .as_ref()
+            .ok_or_else(|| "No matter open.".to_string())?;
+        let matter =
+            matter_core::Matter::open_for_read(root.as_path()).map_err(|e| e.to_string())?;
+        let profile = matter
+            .get_production_profile(key)
+            .map_err(|e| e.to_string())?;
+        matter_core::validate_production_profile_body(&profile.body).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn disconnect_session(&mut self) {
+        if let Some(session) = self.connected_session.take() {
+            // Best-effort logout off UI thread so we don't block; fire-and-forget.
+            let _ = thread::Builder::new()
+                .name("desk-disconnect".into())
+                .spawn(move || {
+                    if let Ok(client) = RemoteClient::new() {
+                        client.logout(&session);
+                    }
+                });
+        }
+        self.remote_review.clear();
+        self.connect_dialog.close();
+        self.status_msg = Some("Disconnected — Solo mode.".into());
+    }
+
+    /// Spec §3.3: mid-session 401/Unauthorized → Solo; clear token + remote review.
+    ///
+    /// Token zeroizes when `ConnectedSession` drops (`BearerToken` ZeroizeOnDrop).
+    /// Logout is skipped — the bearer is already rejected by the server.
+    fn force_disconnect_auth_fail(&mut self) {
+        let had_session = force_clear_connected_session(&mut self.connected_session);
+        self.remote_review.clear();
+        self.connect_dialog.close();
+        if had_session {
+            self.status_msg = Some(AUTH_FAIL_SOLO_STATUS.into());
+            self.error_msg = Some("Session expired (401). Reconnect when ready.".into());
+        }
+    }
+
+    fn apply_connect_result(&mut self, result: ConnectAttemptResult) {
+        match result {
+            ConnectAttemptResult::Ok(session) => {
+                // Fail closed: never hybrid Solo matter + Connected session.
+                if let Err(e) = connect::can_apply_connect_session(self.matter_root.is_some()) {
+                    self.connected_session = None;
+                    // `session` drops without being stored (token zeroizes).
+                    let _ = session;
+                    self.connect_dialog.busy = false;
+                    self.connect_dialog.error = Some(e.clone());
+                    self.error_msg = Some(e);
+                    return;
+                }
+                self.connected_session = Some(session);
+                self.connect_dialog.close();
+                self.remote_review.clear();
+                self.remote_review.request_reload();
+                self.screen = Screen::Review;
+                self.status_msg = Some("Connected to matter-service.".into());
+                self.error_msg = None;
+            }
+            ConnectAttemptResult::OidcRequired(msg) => {
+                // Stay Solo; hint SSO.
+                self.connected_session = None;
+                self.connect_dialog.error = Some(format!(
+                    "{msg} — use Sign in with SSO (password login disabled for this host)."
+                ));
+                self.connect_dialog.busy = false;
+            }
+            ConnectAttemptResult::Err(e) => {
+                self.connected_session = None;
+                self.connect_dialog.error = Some(e);
+                self.connect_dialog.busy = false;
+            }
+        }
     }
 
     /// Copy matter language pack into Desk settings (FTS pack select).
@@ -622,6 +776,12 @@ impl DeskApp {
     }
 
     fn create_matter_at(&mut self, parent: PathBuf) {
+        if let Err(e) =
+            connect::can_open_local_matter(self.is_connected(), self.connect_dialog.is_pending())
+        {
+            self.error_msg = Some(e);
+            return;
+        }
         if self.job_may_be_writing() {
             self.error_msg = Some(
                 "A job is still running. Cancel or wait before creating another matter.".into(),
@@ -663,6 +823,12 @@ impl DeskApp {
     }
 
     fn open_matter_at(&mut self, path: PathBuf) {
+        if let Err(e) =
+            connect::can_open_local_matter(self.is_connected(), self.connect_dialog.is_pending())
+        {
+            self.error_msg = Some(e);
+            return;
+        }
         if self.job_may_be_writing() {
             self.error_msg = Some(
                 "A job is still running. Cancel or wait before opening another matter \
@@ -701,10 +867,27 @@ impl DeskApp {
                     self.create_encrypt = false;
                     self.create_passphrase.clear();
                     self.create_passphrase_confirm.clear();
+                    // Fail closed: refuse applying local matter while Connected/Connect pending.
+                    if let Err(e) = connect::can_apply_local_matter(
+                        self.is_connected(),
+                        self.connect_dialog.is_pending(),
+                    ) {
+                        self.error_msg = Some(e);
+                        self.status_msg = None;
+                        return;
+                    }
                     self.error_msg = None;
                     self.set_matter(root, name);
                 }
                 MatterOpResult::Opened { root, name } => {
+                    if let Err(e) = connect::can_apply_local_matter(
+                        self.is_connected(),
+                        self.connect_dialog.is_pending(),
+                    ) {
+                        self.error_msg = Some(e);
+                        self.status_msg = None;
+                        return;
+                    }
                     self.error_msg = None;
                     self.set_matter(root, name);
                 }
@@ -862,6 +1045,12 @@ impl DeskApp {
 
     /// Open the Produce review set dialog (defaults under exports/productions).
     pub(crate) fn open_produce_dialog(&mut self) {
+        if self.is_connected() {
+            self.error_msg = Some(
+                "Produce requires Solo mode (local host jobs). Disconnect or use host CLI.".into(),
+            );
+            return;
+        }
         if self.matter_root.is_none() {
             self.error_msg = Some("No matter open.".into());
             return;
@@ -872,6 +1061,10 @@ impl DeskApp {
         if self.produce_bates_prefix.trim().is_empty() {
             self.produce_bates_prefix = "PROD".into();
         }
+        if self.produce_bates_start < 1 {
+            self.produce_bates_start = 1;
+        }
+        self.hydrate_production_profiles();
         // Default empty output → engine uses exports/productions/<name_or_stamp>/.
         self.refresh_produce_qc_readiness();
         self.produce_dialog_open = true;
@@ -1020,12 +1213,17 @@ impl DeskApp {
 
     /// Start produce job from dialog draft fields.
     ///
-    /// Always re-evaluates QC soft-gate immediately before start (fail closed).
+    /// Pre-flight (fail closed, keep dialog open): profile resolve/validate,
+    /// bates_start ≥ 1, QC soft-gate. Never starts when pre-flight fails.
     pub(crate) fn start_produce(&mut self) {
         let Some(root) = self.matter_root.clone() else {
             self.error_msg = Some("No matter open.".into());
             return;
         };
+        if self.is_connected() {
+            self.error_msg = Some("Produce requires Solo mode.".into());
+            return;
+        }
         // Fail closed: re-check readiness at click time (selection may have mutated).
         self.refresh_produce_qc_readiness();
         if self.produce_require_qc_pass && !self.produce_qc_readiness.allows_produce() {
@@ -1045,6 +1243,18 @@ impl DeskApp {
             self.error_msg = Some("Bates prefix is required.".into());
             return;
         }
+        let bates_start = self.produce_bates_start;
+        let profile_key = self.selected_production_profile_id.trim();
+        let profile_opt = if profile_key.is_empty() {
+            None
+        } else {
+            Some(profile_key)
+        };
+        let profile_ok = self.resolve_production_profile_preflight();
+        if let Err(e) = params::produce_preflight(bates_start, profile_opt, profile_ok) {
+            self.error_msg = Some(format!("Produce pre-flight failed: {e}"));
+            return;
+        }
         let output = self.produce_output_dir.trim();
         let output_opt = if output.is_empty() {
             None
@@ -1054,10 +1264,12 @@ impl DeskApp {
         let params_json = params::produce_params(
             name,
             prefix,
+            bates_start,
             self.produce_fail_if_withheld,
             self.produce_expand_family,
             self.produce_require_qc_pass,
             output_opt,
+            profile_opt,
         );
         let params = JobParams::new(params_json);
         match self
@@ -1066,8 +1278,9 @@ impl DeskApp {
         {
             Ok(job_id) => {
                 self.last_job_id = Some(job_id.clone());
+                let profile_note = profile_opt.unwrap_or("(engine default)");
                 self.status_msg = Some(format!(
-                    "Started produce job {job_id} (name={name}, prefix={prefix})"
+                    "Started produce job {job_id} (name={name}, prefix={prefix}, bates_start={bates_start}, profile={profile_note})"
                 ));
                 self.error_msg = None;
                 self.produce_dialog_open = false;
@@ -2094,7 +2307,43 @@ impl DeskApp {
 
     fn show_home(&mut self, ui: &mut egui::Ui) {
         ui.heading("Matters");
-        ui.label("Create or open a matter to begin.");
+        ui.label("Create or open a matter to begin (Solo), or Connect to a multi-user matter-service host.");
+        ui.add_space(8.0);
+
+        // Connect / Disconnect (track 0064)
+        ui.horizontal(|ui| {
+            if self.is_connected() {
+                if let Some(ref s) = self.connected_session {
+                    ui.colored_label(egui::Color32::from_rgb(40, 140, 70), s.banner_text());
+                }
+                if ui.button("Disconnect").clicked() {
+                    self.disconnect_session();
+                }
+            } else {
+                let can_connect = self.matter_root.is_none()
+                    && !self.matter_op.is_busy()
+                    && !self.connect_dialog.is_pending();
+                if ui
+                    .add_enabled(can_connect, egui::Button::new("Connect to matter-service…"))
+                    .on_disabled_hover_text(if self.matter_root.is_some() {
+                        "Close the local matter before connecting"
+                    } else if self.connect_dialog.is_pending() {
+                        "Connect already in progress"
+                    } else {
+                        "Busy"
+                    })
+                    .clicked()
+                {
+                    if let Err(e) =
+                        connect::can_connect_with_local_matter(self.matter_root.is_some())
+                    {
+                        self.error_msg = Some(e);
+                    } else {
+                        self.connect_dialog.open_dialog();
+                    }
+                }
+            }
+        });
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
@@ -2104,6 +2353,8 @@ impl DeskApp {
                 && !self.matter_op.is_busy()
                 && !self.create_name.trim().is_empty()
                 && !self.job_may_be_writing()
+                && !self.is_connected()
+                && !self.connect_dialog.is_pending()
                 && (!self.create_encrypt
                     || (!self.create_passphrase.is_empty()
                         && self.create_passphrase == self.create_passphrase_confirm));
@@ -2142,9 +2393,20 @@ impl DeskApp {
         ui.add_space(6.0);
         if ui
             .add_enabled(
-                !self.dialog.is_open() && !self.matter_op.is_busy() && !self.job_may_be_writing(),
+                !self.dialog.is_open()
+                    && !self.matter_op.is_busy()
+                    && !self.job_may_be_writing()
+                    && !self.is_connected()
+                    && !self.connect_dialog.is_pending(),
                 egui::Button::new("Open matter folder…"),
             )
+            .on_disabled_hover_text(if self.is_connected() {
+                "Disconnect first"
+            } else if self.connect_dialog.is_pending() {
+                "Finish or cancel Connect first"
+            } else {
+                "Busy"
+            })
             .clicked()
         {
             self.dialog.spawn(DialogKind::OpenMatterFolder, None);
@@ -2257,6 +2519,12 @@ impl DeskApp {
             ui.colored_label(
                 egui::Color32::from_rgb(180, 120, 40),
                 "Job running — finish or cancel before creating/opening another matter.",
+            );
+        }
+        if self.is_connected() {
+            ui.colored_label(
+                egui::Color32::from_rgb(40, 100, 160),
+                "Connected mode: local matter open is disabled. Disconnect to return to Solo.",
             );
         }
 
@@ -2650,8 +2918,11 @@ impl DeskApp {
             ui.label("No recent matters.");
         } else {
             let recent = self.settings.recent_matters.clone();
-            let can_open_recent =
-                !self.dialog.is_open() && !self.matter_op.is_busy() && !self.job_may_be_writing();
+            let can_open_recent = !self.dialog.is_open()
+                && !self.matter_op.is_busy()
+                && !self.job_may_be_writing()
+                && !self.is_connected()
+                && !self.connect_dialog.is_pending();
             for path in recent {
                 ui.horizontal(|ui| {
                     if ui
@@ -2663,6 +2934,78 @@ impl DeskApp {
                     ui.label(&path);
                 });
             }
+        }
+
+        // Connect dialog modal
+        if self.connect_dialog.open {
+            let ctx = ui.ctx().clone();
+            egui::Window::new("Connect to matter-service")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(&ctx, |ui| {
+                    ui.label("Opt-in multi-user review against a local or loopback host.");
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Base URL:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.connect_dialog.base_url)
+                                .desired_width(280.0)
+                                .hint_text("http://127.0.0.1:7749"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Username:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.connect_dialog.username)
+                                .desired_width(160.0),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Password:");
+                        ui.add(
+                            egui::TextEdit::singleline(self.connect_dialog.password.expose_mut())
+                                .password(true)
+                                .desired_width(160.0),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Tenant (SSO):");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.connect_dialog.tenant_slug)
+                                .desired_width(120.0)
+                                .hint_text("optional"),
+                        );
+                    });
+                    if let Some(err) = &self.connect_dialog.error {
+                        ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
+                    }
+                    if self.connect_dialog.busy {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Connecting…");
+                        });
+                    }
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let can = !self.connect_dialog.busy;
+                        if ui.add_enabled(can, egui::Button::new("Connect")).clicked() {
+                            self.connect_dialog.start_password_connect(&ctx);
+                        }
+                        if ui
+                            .add_enabled(can, egui::Button::new("Sign in with SSO"))
+                            .on_hover_text(
+                                "Opens system browser; loopback handoff (no clipboard paste).",
+                            )
+                            .clicked()
+                        {
+                            connect::start_sso_connect(&mut self.connect_dialog, &ctx);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.connect_dialog.close();
+                        }
+                    });
+                });
         }
     }
 
@@ -2681,6 +3024,9 @@ impl DeskApp {
 
     fn show_nav(&mut self, ui: &mut egui::Ui) {
         let has_matter = self.matter_root.is_some();
+        let connected = self.is_connected();
+        // Connected: Home + Review only (thin remote review); Solo features require local matter.
+        let nav_ok = has_matter || connected;
         ui.horizontal(|ui| {
             for target in [
                 Screen::Home,
@@ -2694,9 +3040,15 @@ impl DeskApp {
                 Screen::Clusters,
             ] {
                 let selected = self.screen == target;
-                let enabled = target == Screen::Home || has_matter;
+                let enabled = if connected {
+                    matches!(target, Screen::Home | Screen::Review)
+                } else {
+                    target == Screen::Home || has_matter
+                };
                 let label = if target.is_stub() {
                     format!("{} (soon)", target.label())
+                } else if connected && target == Screen::Review {
+                    "Review (remote)".to_string()
                 } else {
                     target.label().to_string()
                 };
@@ -2704,9 +3056,21 @@ impl DeskApp {
                     .add_enabled(enabled, egui::Button::selectable(selected, label))
                     .clicked()
                 {
-                    let next = nav::resolve_nav(self.screen, target, has_matter);
+                    let next = if connected {
+                        match target {
+                            Screen::Home => Screen::Home,
+                            Screen::Review => Screen::Review,
+                            _ => self.screen,
+                        }
+                    } else {
+                        nav::resolve_nav(self.screen, target, nav_ok)
+                    };
                     if next == Screen::Review && self.screen != Screen::Review {
-                        self.review.request_reload();
+                        if connected {
+                            self.remote_review.request_reload();
+                        } else {
+                            self.review.request_reload();
+                        }
                     }
                     if next == Screen::Conversations && self.screen != Screen::Conversations {
                         self.conversations.request_reload();
@@ -2732,6 +3096,10 @@ impl DeskApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("About").clicked() {
                     self.about_open = true;
+                }
+                if connected && ui.button("Disconnect").clicked() {
+                    self.disconnect_session();
+                    self.screen = Screen::Home;
                 }
                 if let Some(ref root) = self.matter_root {
                     if matter_core::Matter::is_encrypted_on_disk(root)
@@ -2761,6 +3129,9 @@ impl eframe::App for DeskApp {
         self.poll_report_export();
         self.gap.poll();
         self.on_progress_tick();
+        if let Some(result) = self.connect_dialog.poll() {
+            self.apply_connect_result(result);
+        }
 
         let snap = self.progress_rx.borrow().clone();
         progress_ui::request_job_repaint(&ctx, &snap);
@@ -2770,6 +3141,7 @@ impl eframe::App for DeskApp {
             || self.overview_load.is_busy()
             || self.report_export_busy
             || self.gap.busy
+            || self.connect_dialog.busy
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -2778,12 +3150,30 @@ impl eframe::App for DeskApp {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.heading("Dedupe Desk");
-                ui.label("— local-first eDiscovery workstation");
+                if self.is_connected() {
+                    ui.label("— Connected (multi-user review)");
+                } else {
+                    ui.label("— local-first eDiscovery workstation");
+                }
             });
             ui.add_space(2.0);
             self.show_nav(ui);
             ui.add_space(2.0);
         });
+
+        // Persistent Connected banner (DoD-1).
+        if let Some(ref session) = self.connected_session {
+            let banner = session.banner_text();
+            egui::Panel::top("connected_banner").show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::from_rgb(40, 140, 70), &banner);
+                    if ui.button("Disconnect").clicked() {
+                        self.disconnect_session();
+                        self.screen = Screen::Home;
+                    }
+                });
+            });
+        }
 
         if let Some(err) = self.error_msg.clone() {
             egui::Panel::top("error_banner").show_inside(ui, |ui| {
@@ -2811,10 +3201,24 @@ impl eframe::App for DeskApp {
 
         egui::CentralPanel::default().show_inside(ui, |ui| match self.screen {
             Screen::Home => self.show_home(ui),
-            Screen::Workspace => workspace::show(ui, self),
+            Screen::Workspace => {
+                if self.is_connected() {
+                    ui.heading("Workspace");
+                    ui.label("Workspace jobs require Solo mode with a local matter open.");
+                    ui.label("Disconnect to return to Solo, or stay on Review for remote coding.");
+                } else {
+                    workspace::show(ui, self);
+                }
+            }
             Screen::StubReduce => self.show_stub(ui, "Reduce"),
             Screen::Review => {
-                if let Some(root) = self.matter_root.clone() {
+                if let Some(session) = self.connected_session.clone() {
+                    remote_review_ui::show(ui, &mut self.remote_review, &session);
+                    // Spec §3.3: mid-session 401 → drop Connected → Solo (clear token).
+                    if self.remote_review.has_auth_failure() {
+                        self.force_disconnect_auth_fail();
+                    }
+                } else if let Some(root) = self.matter_root.clone() {
                     let actor = self.settings.actor().to_string();
                     let mut fts_req = None;
                     let mut semantic_req = None;
@@ -3159,9 +3563,16 @@ impl eframe::App for DeskApp {
             egui::Window::new("Produce review set")
                 .collapsible(false)
                 .resizable(true)
-                .default_width(420.0)
+                .default_width(460.0)
                 .show(&ctx, |ui| {
                     ui.label("Packages in_review items (or fails if the corpus is empty).");
+                    ui.label(
+                        egui::RichText::new(
+                            "Solo only — production profile + Bates start are job-time (not stored in profile).",
+                        )
+                        .weak()
+                        .small(),
+                    );
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label("Name:");
@@ -3171,11 +3582,70 @@ impl eframe::App for DeskApp {
                         );
                     });
                     ui.horizontal(|ui| {
+                        ui.label("Production profile:");
+                        let selected_label = if self.selected_production_profile_id.is_empty() {
+                            "Default (engine)".to_string()
+                        } else {
+                            self.production_profile_options
+                                .iter()
+                                .find(|(id, _)| id == &self.selected_production_profile_id)
+                                .map(|(_, l)| l.clone())
+                                .unwrap_or_else(|| self.selected_production_profile_id.clone())
+                        };
+                        egui::ComboBox::from_id_salt("produce_production_profile")
+                            .selected_text(selected_label)
+                            .width(280.0)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        self.selected_production_profile_id.is_empty(),
+                                        "Default (engine)",
+                                    )
+                                    .clicked()
+                                {
+                                    self.selected_production_profile_id.clear();
+                                }
+                                for (id, label) in self.production_profile_options.clone() {
+                                    if ui
+                                        .selectable_label(
+                                            self.selected_production_profile_id == id,
+                                            &label,
+                                        )
+                                        .clicked()
+                                    {
+                                        self.selected_production_profile_id = id;
+                                    }
+                                }
+                            });
+                    });
+                    ui.horizontal(|ui| {
                         ui.label("Bates prefix:");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.produce_bates_prefix)
                                 .desired_width(120.0),
                         );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Bates start:");
+                        let mut start_str = self.produce_bates_start.to_string();
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut start_str)
+                                .desired_width(80.0)
+                                .hint_text("≥ 1"),
+                        );
+                        if resp.changed() {
+                            if let Ok(n) = start_str.trim().parse::<u64>() {
+                                self.produce_bates_start = n;
+                            } else if start_str.trim().is_empty() {
+                                self.produce_bates_start = 0; // invalid until corrected
+                            }
+                        }
+                        if self.produce_bates_start < 1 {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(180, 50, 50),
+                                "required ≥ 1",
+                            );
+                        }
                     });
                     ui.checkbox(
                         &mut self.produce_fail_if_withheld,
@@ -3257,9 +3727,12 @@ impl eframe::App for DeskApp {
                         // Soft-gate: require fresh pass (not merely last_qc_passed session flag).
                         let gate_blocks = self.produce_require_qc_pass
                             && !self.produce_qc_readiness.allows_produce();
-                        let can_start = !busy && !gate_blocks;
+                        let bates_ok = self.produce_bates_start >= 1;
+                        let can_start = !busy && !gate_blocks && bates_ok;
                         let hover = if busy {
                             "A job is running.".to_string()
+                        } else if !bates_ok {
+                            "Bates start must be ≥ 1.".into()
                         } else if gate_blocks {
                             self.produce_qc_readiness.label()
                         } else {

@@ -26,8 +26,12 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
-# Only needed for `watch::Receiver` typing (process-runner progress bus).
-tokio = { version = "1", default-features = false, features = ["sync"] }
+# Progress bus watch + optional Connect network helpers (0064).
+tokio = { version = "1", default-features = false, features = ["sync", "rt-multi-thread", "macros", "time"] }
+# matter-service Connect client (track 0064) — workspace pin, rustls.
+reqwest = { workspace = true }
+zeroize = { workspace = true }
+url = "2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -13,11 +13,13 @@ This page is the **single stand-alone** day-1 runbook. Deep docs are linked at t
 
 | Ships in this RC | Does **not** ship (deferred / residual) |
 |---|---|
-| Offline Desk matter workflow (ingest → extract → reduce → review → produce) | Desk “Connect to service” multi-user UX (**0064**) |
-| Headless CLI matter automation (`pst-dedup matter` / `job` / …) | Security red-team fix campaign (**0063**) |
-| Clean unique-PST CLI (`unique-pst`) + optional GUI wizard | Bundled Tesseract / Whisper installers |
-| Opt-in matter service / platform SSO / cloud CAS (documented, off by default) | “Outlook production-ready” claim without operator scanpst |
-| CycloneDX SBOM (`bom.json`) in release ZIP | FedRAMP / multi-cloud fleet |
+| Offline Desk matter workflow (ingest → extract → reduce → review → produce) | Full remote feature parity (jobs/produce/FTS/AI over HTTP) |
+| Desk **Connect** to matter-service (password + SSO loopback handoff; thin remote review) | LAN mTLS (**D-0058-02**); multi-matter host |
+| Headless CLI matter automation (`pst-dedup matter` / `job` / …) | Bundled Tesseract / Whisper installers |
+| Clean unique-PST CLI (`unique-pst`) + optional GUI wizard | “Outlook production-ready” claim without operator scanpst |
+| Opt-in matter service / platform SSO / cloud CAS (documented, off by default) | FedRAMP / multi-cloud fleet |
+| Solo produce **production profile** dropdown + required Bates start | Service-side produce HTTP API |
+| CycloneDX SBOM (`bom.json`) in release ZIP | Clipboard bearer paste (banned; SSO uses loopback code) |
 
 Full residual inventory: [`docs/deferred.md`](deferred.md). Freeze notes: [`docs/rc-freeze-inventory.md`](rc-freeze-inventory.md).
 
@@ -30,8 +32,8 @@ Full residual inventory: [`docs/deferred.md`](deferred.md). Freeze notes: [`docs
 | Desk solo local matter | **Yes** | `dedupe-desk.exe` | Primary counsel UI |
 | CLI headless matter | Yes | `pst-dedup.exe matter …` / `job …` | Agent / script path |
 | Series K unique-pst | Yes (CLI) | `pst-dedup.exe unique-pst` | GUI wizard optional (`pst-dedup-gui.exe`) |
-| Matter service multi-user | **Opt-in** | `pst-dedup.exe service serve --matter <MATTER_DIR>` | Desk Connect UX residual **0064** |
-| Platform SSO | **Opt-in** | `service serve --matter <MATTER> --platform <platform.db>` + OIDC | Browser SSO UX residual **0064** |
+| Matter service multi-user | **Opt-in** | Host: `pst-dedup.exe service serve --matter <MATTER_DIR>`; clients: Desk **Connect** or HTTP API | Thin remote review (list/body/codes); jobs/produce remain host Solo/CLI |
+| Platform SSO | **Opt-in** | Host with `--platform`; Desk **Sign in with SSO** (loopback handoff) | IdP redirect stays on service callback; no clipboard paste |
 | Cloud CAS / job backend | **Opt-in** | storage / job config (0061) | Admin UI residual; never required |
 
 **Rule:** Offline Desk + CLI is the golden story. Service, SSO, and cloud backends are never required to complete a local matter.
@@ -51,6 +53,9 @@ Full residual inventory: [`docs/deferred.md`](deferred.md). Freeze notes: [`docs
 7. **Reduce:** dedupe → (optional) thread / near-dup / cull → **Promote to review**.
 8. **Review:** open Review list; code; notes/privilege/redaction as needed.
 9. **QC** (recommended) then **Produce** to a local output folder (Concordance DAT + natives + text).
+   - Choose a **production profile** (built-in or matter-local) or leave **Default (engine)**.
+   - Set **Bates start** (required integer ≥ 1; job-time only — never stored in the profile).
+   - Pre-flight blocks Start on unresolved/invalid profile, bad Bates start, or QC soft-gate.
 
 **CLI equivalent (headless):**
 
@@ -99,6 +104,40 @@ See also: crate READMEs under `crates/dedupe-desk`, `crates/matter-core`, `ARCHI
 - Opening volumes in **Outlook** or running **scanpst.exe** is an **operator residual** — this RC does **not** claim Outlook production-ready without that smoke.
 
 Deep docs: [`docs/unique-pst-export.md`](unique-pst-export.md), writer fidelity notes under `docs/`.
+
+---
+
+## Path C — Multi-user host + Desk Connect (opt-in)
+
+**Goal:** One host process owns the matter; operators review from Desk over loopback HTTP (track **0064**).
+
+### Host
+
+```powershell
+# Multi-user matter + bootstrap (once)
+.\pst-dedup.exe service bootstrap-admin --matter $Matter --name admin --password <pass>
+.\pst-dedup.exe service serve --matter $Matter
+# Default bind: http://127.0.0.1:7749
+# Platform SSO (optional): add --platform <platform.db> and IdP config (see matter-service README)
+```
+
+**Do not** open the same matter for write in Solo Desk while the service holds the exclusive lock.
+
+### Desk client
+
+1. Start **dedupe-desk** with **no local matter open**.
+2. Home → **Connect to matter-service…**
+3. Base URL (default `http://127.0.0.1:7749`), username/password → **Connect**
+   - Or **Sign in with SSO** when the host is in platform/OIDC mode (system browser + loopback one-time code; **no** clipboard bearer paste).
+4. Banner shows `Connected to {url} as {name} ({role})`.
+5. **Review (remote):** list items, load body, apply codes with OCC `expected_version`. On **409**, draft codes are retained — re-apply or discard (never silent wipe).
+6. **Disconnect** returns to Solo. Local matter open is refused while Connected (and Connect is refused while a local matter is open).
+
+| Connected supports (P0) | Solo / host only |
+|---|---|
+| List / body / codes (session actor + OCC) | Ingest, extract, reduce, produce, QC jobs |
+| Password login; SSO loopback handoff | FTS/semantic index, AI, notes/privilege UI parity |
+| `read_only` role disables mutates | Production profile produce dialog |
 
 ---
 

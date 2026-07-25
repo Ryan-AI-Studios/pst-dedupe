@@ -684,6 +684,8 @@ pub struct OidcRuntime {
     pub provider: Arc<dyn OidcProvider>,
     /// Optional in-memory pending store (also mirrored to platform.db when available).
     pub memory_pending: Mutex<HashMap<String, PendingLogin>>,
+    /// One-time Desk handoff codes (code → session material). Single-use, short TTL.
+    pub handoff_codes: Mutex<HashMap<String, HandoffCode>>,
     /// When using mock IdP, typed handle so tests can mint codes.
     pub mock: Option<Arc<MockOidcProvider>>,
 }
@@ -695,6 +697,19 @@ pub struct PendingLogin {
     pub nonce: String,
     pub redirect_uri: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Optional Desk loopback handoff URL (track 0064 SSO). Loopback-only.
+    pub handoff_url: Option<String>,
+}
+
+/// One-time SSO exchange code issued after OIDC success (Desk redeems → session).
+#[derive(Debug, Clone)]
+pub struct HandoffCode {
+    pub token: String,
+    pub user_id: String,
+    pub display_name: String,
+    pub role: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub session_expires_at: String,
 }
 
 impl OidcRuntime {
@@ -703,6 +718,7 @@ impl OidcRuntime {
         Self {
             provider: mock.clone(),
             memory_pending: Mutex::new(HashMap::new()),
+            handoff_codes: Mutex::new(HashMap::new()),
             mock: Some(mock),
         }
     }
@@ -711,6 +727,7 @@ impl OidcRuntime {
         Self {
             provider,
             memory_pending: Mutex::new(HashMap::new()),
+            handoff_codes: Mutex::new(HashMap::new()),
             mock: None,
         }
     }
@@ -726,6 +743,66 @@ impl OidcRuntime {
     pub fn is_mock(&self) -> bool {
         self.mock.is_some()
     }
+}
+
+/// Validate post-auth Desk handoff URL: loopback host only, http/https, path allowlist.
+pub fn assert_loopback_handoff_url(handoff_url: &str) -> ApiResult<()> {
+    let raw = handoff_url.trim();
+    if raw.is_empty() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "handoff_url",
+            "handoff_url is empty",
+        ));
+    }
+    let u = url::Url::parse(raw).map_err(|e| {
+        ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "handoff_url",
+            format!("invalid handoff_url: {e}"),
+        )
+    })?;
+    if u.scheme() != "http" && u.scheme() != "https" {
+        return Err(ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "handoff_url",
+            "handoff_url scheme must be http or https",
+        ));
+    }
+    let loopback = match u.host() {
+        Some(url::Host::Ipv4(v4)) => v4.is_loopback(),
+        Some(url::Host::Ipv6(v6)) => v6.is_loopback(),
+        Some(url::Host::Domain(d)) => {
+            let d = d.to_ascii_lowercase();
+            d == "localhost" || d == "localhost."
+        }
+        None => false,
+    };
+    if !loopback {
+        return Err(ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "handoff_url",
+            "handoff_url host must be loopback (127.0.0.1 / ::1 / localhost)",
+        ));
+    }
+    // Path allowlist: /connect/callback (with optional trailing slash).
+    let path = u.path().trim_end_matches('/');
+    if path != "/connect/callback" {
+        return Err(ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "handoff_url",
+            "handoff_url path must be /connect/callback",
+        ));
+    }
+    // Reject open-redirect style userinfo / credentials.
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "handoff_url",
+            "handoff_url must not include credentials",
+        ));
+    }
+    Ok(())
 }
 
 /// Canonical callback redirect for a public base URL (exact allowlist entry).
@@ -894,6 +971,17 @@ mod tests {
             enabled: true,
             updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn loopback_handoff_url_reject_non_loopback() {
+        assert!(assert_loopback_handoff_url("http://127.0.0.1:54321/connect/callback").is_ok());
+        assert!(assert_loopback_handoff_url("http://localhost:9/connect/callback").is_ok());
+        assert!(assert_loopback_handoff_url("http://[::1]:99/connect/callback").is_ok());
+        assert!(assert_loopback_handoff_url("http://192.168.1.10:80/connect/callback").is_err());
+        assert!(assert_loopback_handoff_url("https://evil.example/connect/callback").is_err());
+        assert!(assert_loopback_handoff_url("http://127.0.0.1:1/other").is_err());
+        assert!(assert_loopback_handoff_url("http://127.0.0.1/connect/callback?x=1").is_ok());
     }
 
     #[test]

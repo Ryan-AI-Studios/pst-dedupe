@@ -155,23 +155,39 @@ pub fn promote_params_for_policy(policy: &str) -> String {
 /// Default params for production export (`kind = "produce"`).
 #[allow(dead_code)]
 pub fn produce_default_params() -> String {
-    produce_params("Review Production", "PROD", false, false, true, None)
+    produce_params(
+        "Review Production",
+        "PROD",
+        1,
+        false,
+        false,
+        true,
+        None,
+        None,
+    )
 }
 
 /// Build produce job params JSON.
+///
+/// - `bates_start` is **job-time only** (never stored in a production profile); must be ≥ 1.
+/// - `production_profile` is an id (`builtin:…`) or slug; omit/`None`/empty → engine default.
+#[allow(clippy::too_many_arguments)]
 pub fn produce_params(
     name: &str,
     bates_prefix: &str,
+    bates_start: u64,
     fail_if_withheld: bool,
     expand_family: bool,
     require_qc_pass: bool,
     output_dir: Option<&str>,
+    production_profile: Option<&str>,
 ) -> String {
+    // Caller must pre-flight `validate_bates_start` (no silent clamp to 1).
     let mut v = serde_json::json!({
         "scope": "review_corpus",
         "name": name,
         "bates_prefix": bates_prefix,
-        "bates_start": 1,
+        "bates_start": bates_start,
         "fail_if_withheld": fail_if_withheld,
         "export_eml_if_missing_native": true,
         "include_csv_twin": true,
@@ -181,7 +197,35 @@ pub fn produce_params(
     if let Some(dir) = output_dir.map(str::trim).filter(|s| !s.is_empty()) {
         v["output_dir"] = serde_json::Value::String(dir.to_string());
     }
+    if let Some(profile) = production_profile.map(str::trim).filter(|s| !s.is_empty()) {
+        v["production_profile"] = serde_json::Value::String(profile.to_string());
+    }
     v.to_string()
+}
+
+/// Validate job-time Bates start (required ≥ 1; never silent hardcode without UI).
+pub fn validate_bates_start(bates_start: u64) -> Result<(), String> {
+    if bates_start < 1 {
+        Err("Bates start must be an integer ≥ 1.".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Pure pre-flight checks for Solo produce (profile resolve/validate results injected).
+///
+/// Returns `Err` with operator-facing text; does not start a job.
+pub fn produce_preflight(
+    bates_start: u64,
+    production_profile: Option<&str>,
+    profile_ok: Result<(), String>,
+) -> Result<(), String> {
+    validate_bates_start(bates_start)?;
+    let profile = production_profile.map(str::trim).filter(|s| !s.is_empty());
+    if profile.is_some() {
+        profile_ok?;
+    }
+    Ok(())
 }
 
 /// Default params for production QC (`kind = "qc"`).
@@ -744,13 +788,70 @@ mod tests {
 
     #[test]
     fn produce_params_with_output_dir() {
-        let j = produce_params("P1", "ABC", true, false, false, Some(r"C:\out\prod"));
+        let j = produce_params(
+            "P1",
+            "ABC",
+            1,
+            true,
+            false,
+            false,
+            Some(r"C:\out\prod"),
+            None,
+        );
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["name"], "P1");
         assert_eq!(v["bates_prefix"], "ABC");
+        assert_eq!(v["bates_start"], 1);
         assert_eq!(v["fail_if_withheld"], true);
         assert_eq!(v["require_qc_pass"], false);
         assert_eq!(v["output_dir"], r"C:\out\prod");
+        assert!(v.get("production_profile").is_none() || v["production_profile"].is_null());
+    }
+
+    #[test]
+    fn produce_params_includes_profile_and_operator_bates_start() {
+        let j = produce_params(
+            "Export",
+            "ABC",
+            5001,
+            false,
+            true,
+            true,
+            None,
+            Some("builtin:us_concordance_native_text_v1"),
+        );
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["bates_start"], 5001);
+        assert_eq!(
+            v["production_profile"],
+            "builtin:us_concordance_native_text_v1"
+        );
+        assert_eq!(v["expand_family"], true);
+    }
+
+    #[test]
+    fn produce_params_omits_empty_profile() {
+        let j = produce_params("P", "X", 2, false, false, false, None, Some("  "));
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["bates_start"], 2);
+        assert!(v.get("production_profile").is_none() || v["production_profile"].is_null());
+    }
+
+    #[test]
+    fn produce_preflight_blocks_invalid_bates_and_profile() {
+        assert!(validate_bates_start(0).is_err());
+        assert!(validate_bates_start(1).is_ok());
+        assert!(produce_preflight(0, None, Ok(())).is_err());
+        assert!(produce_preflight(1, None, Ok(())).is_ok());
+        assert!(produce_preflight(
+            1,
+            Some("missing"),
+            Err("production profile not found: missing".into())
+        )
+        .is_err());
+        assert!(produce_preflight(1, Some("builtin:x"), Ok(())).is_ok());
+        // Empty profile skips resolve error (engine default).
+        assert!(produce_preflight(1, Some(""), Err("should not see".into())).is_ok());
     }
 
     #[test]

@@ -92,7 +92,7 @@
 | 34 | P3 | **0061** CloudBlobJobBackends | 🔄 In Progress | Opt-in BlobStore + JobBackend; schema v39; offline default; Series I close |
 | 35 | P0 cons. | **0062** ReleaseHardeningRc | ✅ Completed | RC freeze 0.2.0-rc.1 |
 | 36 | P0 cons. | **0063** SecurityRedTeamFixes | 🔄 Completed | Series I red team + P0/P1 fixes on RC freeze |
-| 37 | P1 cons. | **0064** DeskPlatformConnectUx | 📦 Proposed | Desk Connect + produce profile UX (native egui) |
+| 37 | P1 cons. | **0064** DeskPlatformConnectUx | ✅ Completed | Desk Connect + Solo produce profile UX (native egui); researched 2026-07-25 |
 | 38 | P0 K | **0065** ScanIntegrityReport | ⬜ Ready | (A) Multi-PST integrity: skip reasons, recoverable vs skipped |
 | 39 | P0 K | **0066** DedupKeepSetExport | ⬜ Ready | (B) Keep-set v1 + decision log + materialize + EDRM MIH |
 | 40 | P0 K | **0067** UniqueEmlPackCli | ✅ Completed | (C) Unique EML pack from keep_set_v1 + MIME multipart |
