@@ -97,3 +97,23 @@ One row per **successfully written** unique winner. **No body text** columns.
 ## Exit honesty
 
 Integrity thresholds, export partials, and verification failures still **flush the report pack** before non-zero exit. With `--json`, the summary is printed on stdout even when `ok` is false.
+
+## GUI wizard (`pst-dedup-gui`, track 0072)
+
+Operators who prefer a desktop UI can run the **same** orchestration without CLI:
+
+1. **File select** → **Unique PST Export…**, or **Results** → **Export Unique PST…** (primary unique path after a scan).
+2. **Select** sources (main-thread multi-file picker).
+3. **Options** — Save File for `.pst` out, report dir, policy / family / mode / max-volume / overwrite.
+4. **Run** — stage, counters, physical size, **Cancel**, expandable **Log / Details** (stderr parity).
+5. **Done** — ok / partial / cancelled; open report or output folder.
+
+| Behavior | Notes |
+|---|---|
+| Pipeline | In-process `run_unique_pst_with_options` (not a second path; not `pst-dedup.exe` spawn) |
+| Cancel | Cooperative `AtomicBool`; incomplete volume temp deleted; completed multi-volumes retained; report pack flushed with `ok=false` when possible |
+| Progress | Worker calls `ctx.request_repaint()` on progress ticks so the bar updates without mouse motion |
+| Log | Non-fatal warnings and stage lines appear in Log / Details |
+| Legacy EML | Still available on Results as **Export Unique EML (legacy scan path)**; unique-PST is preferred (**D-0067-gui-keepset** soft-closed) |
+
+See also CLI flags above — wizard maps to the same `UniquePstCliArgs` fields.

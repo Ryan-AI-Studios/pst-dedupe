@@ -14,7 +14,7 @@ A pure Rust Windows tool for deduplicating emails across Outlook PST files.
 - Surfaces:
   - **`dedupe-desk`** — primary product shell: create/open matter, add sources, ingest/extract with live progress (track 0020)
   - **`pst-dedup` CLI** — agent- and script-friendly PST tools plus **headless matter automation** (`matter`, `job`, `profile`, `workflow`, `ingest`, `report`, `qc`, `produce`, `gap`), **opt-in multi-user matter service** (`service serve|bootstrap-admin|user`, track 0058), and **platform control plane** (`platform tenant|idp|matter`, track 0059)
-  - **`pst-dedup-gui`** — legacy egui scan/dedup wizard (still builds for regression)
+  - **`pst-dedup-gui`** — egui scan/dedup wizard + **Unique PST Export** wizard (same keep-set path as CLI `unique-pst`; track 0072)
 
 **Product modes:** **Desk solo** (default single-exe, local matter open) stays unchanged. **Matter service** is opt-in: one host process holds an exclusive OS lock on the matter, unlocks encrypted matters once, and exposes loopback HTTP (`127.0.0.1` by default; LAN needs `--allow-lan`) for concurrent reviewers with locks, OCC versions, batches, and sampling QC. **Platform SSO** is a further opt-in: `service serve --platform platform.db` plus `platform` CLI for tenants/IdP/matter registration (OIDC Auth Code + PKCE, PMK for IdP secrets, `PLATFORM_STORAGE_ROOT` sandbox). See `ARCHITECTURE.md`, `crates/matter-service/README.md`, and `crates/matter-platform/README.md`.
 
@@ -340,7 +340,8 @@ See [`crates/matter-core/README.md`](crates/matter-core/README.md), [`crates/ing
 | Tier 1 / Tier 2 dedup | Works, configurable |
 | CSV report export | Works (CLI + engine) |
 | CLI inspect / scan / dups | Works (`--json`, `--csv`) |
-| EML export | Wired end-to-end in GUI |
+| EML export | Legacy path still available; prefer Unique PST wizard |
+| Unique PST GUI | Wizard over `run_unique_pst` (cancel, log, repaint) — see `docs/unique-pst-export.md` |
 | GUI scan progress | Works |
 | Per-file error visibility | Works |
 | ANSI PST support | Detected and rejected |

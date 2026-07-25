@@ -2,26 +2,8 @@
 //!
 //! Designed for humans and agents: stable subcommands, `--json` stdout isolation,
 //! documented exit codes, and SIGINT → graceful cancel.
-
-mod convenience;
-mod error;
-mod inspect;
-mod job_cmd;
-mod json_io;
-mod keep_set_cmd;
-mod matter_cmd;
-mod paths;
-mod platform_cmd;
-mod production_profile_cmd;
-mod profile_cmd;
-mod pst_materializer;
-mod runner_util;
-mod scan;
-mod service_cmd;
-mod unique_eml_cmd;
-mod unique_export_report;
-mod unique_pst_cmd;
-mod workflow_cmd;
+//!
+//! Business logic lives in the `pst_dedup_cli` library; this binary is the clap surface.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -32,10 +14,15 @@ use dedup_engine::format_bytes;
 use dedup_engine::integrity::{IntegrityThresholds, ScanMode};
 use dedup_engine::keepset::{FamilyPolicy, KeepPolicy};
 
-use crate::error::{CliError, CliExit, Result};
-use crate::json_io::emit_error;
-use crate::scan::{
-    collect_dups, evaluate_exit_policy, resolve_pst_paths, run_scan, write_report, ScanOptions,
+use pst_dedup_cli::error::{CliError, CliExit, Result};
+use pst_dedup_cli::json_io::emit_error;
+use pst_dedup_cli::scan::{
+    collect_dups, evaluate_exit_policy, resolve_pst_paths, run_scan, write_report, DupRow,
+    ScanOptions, ScanSummary,
+};
+use pst_dedup_cli::{
+    convenience, inspect, job_cmd, keep_set_cmd, matter_cmd, platform_cmd, production_profile_cmd,
+    profile_cmd, service_cmd, unique_eml_cmd, unique_pst_cmd, workflow_cmd,
 };
 
 #[derive(Debug, Parser)]
@@ -1152,6 +1139,7 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
         skip_limit: args.skip_limit,
         retain_rows: args.list_dups,
         retain_candidates: false,
+        cancel: None,
     };
     // Artifacts (CSV/integrity) are streamed and flushed inside run_scan before return.
     let outcome = run_scan(&paths, &opts)?;
@@ -1192,7 +1180,7 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
         if let Some(msg) = exit_err {
             return Err(CliError::AlreadyEmitted {
                 message: msg,
-                exit: crate::error::CliExit::Generic,
+                exit: CliExit::Generic,
             });
         }
         return Ok(());
@@ -1268,6 +1256,7 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
         skip_limit: args.skip_limit,
         retain_rows: true,
         retain_candidates: false,
+        cancel: None,
     };
     let outcome = run_scan(&paths, &opts)?;
     let dup_limit = if args.limit == 0 {
@@ -1295,7 +1284,7 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
         if let Some(msg) = exit_err {
             return Err(CliError::AlreadyEmitted {
                 message: msg,
-                exit: crate::error::CliExit::Generic,
+                exit: CliExit::Generic,
             });
         }
         return Ok(());
@@ -1310,7 +1299,7 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_summary_text(s: &scan::ScanSummary) {
+fn print_summary_text(s: &ScanSummary) {
     println!(
         "=== Dedup summary ({:.2}s) mode={} schema={} ===",
         s.duration_secs, s.mode, s.schema
@@ -1362,7 +1351,7 @@ fn print_summary_text(s: &scan::ScanSummary) {
     );
 }
 
-fn print_dups_text(dups: &[scan::DupRow]) {
+fn print_dups_text(dups: &[DupRow]) {
     if dups.is_empty() {
         println!("No duplicates listed.");
         return;

@@ -297,11 +297,24 @@ pub struct WriteProgress {
 
 /// Cooperative progress + volume-split hook (0071 consumes this).
 ///
-/// `should_stop_and_finalize` is checked only on **safe boundaries** (after
-/// each fully written message). Mid-attach stop is not supported.
+/// `should_stop_and_finalize` and [`should_cancel`](WriteProgressSink::should_cancel)
+/// are checked only on **safe boundaries** (after each fully written message).
+/// Mid-attach stop is not supported.
+///
+/// **Cancel vs early-finalize:** `should_stop_and_finalize` keeps a partial PST
+/// as a completed volume (multi-volume split). `should_cancel` aborts without
+/// finalizing/renaming — the incomplete same-dir temp is deleted (TempGuard).
 pub trait WriteProgressSink {
     fn on_progress(&mut self, p: &WriteProgress);
     fn should_stop_and_finalize(&self, p: &WriteProgress) -> bool {
+        let _ = p;
+        false
+    }
+    /// Cooperative cancel (GUI). Default: never cancel.
+    ///
+    /// When true, [`write_unicode_pst_streaming`] returns [`WriterError::Cancelled`]
+    /// without renaming the temp file to the final path.
+    fn should_cancel(&self, p: &WriteProgress) -> bool {
         let _ = p;
         false
     }
@@ -1096,6 +1109,11 @@ pub fn write_unicode_pst_streaming(
                 stage: WriteStage::WritingMessages,
             };
             sink.on_progress(&p);
+            // Cancel takes precedence over multi-volume early-finalize: abort
+            // without renaming temp (TempGuard deletes incomplete staging).
+            if sink.should_cancel(&p) {
+                return Err(WriterError::Cancelled);
+            }
             if sink.should_stop_and_finalize(&p) {
                 finalized_early = true;
                 break;

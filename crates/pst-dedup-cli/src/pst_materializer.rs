@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use dedup_engine::reason_from_pst_error;
 use dedup_engine::{
@@ -13,6 +14,9 @@ use dedup_engine::{
     MaterializeError, MessageLocus, MessageMaterializer,
 };
 use pst_reader::{NodeId, PstFile};
+
+/// Optional soft-warning sink (GUI Log panel / CLI on_log bridge).
+pub type MaterializeWarnCb = Arc<Mutex<dyn FnMut(String) + Send>>;
 
 /// Materializer holding open PST handles (source PSTs remain read-only).
 pub struct PstMaterializer {
@@ -22,6 +26,8 @@ pub struct PstMaterializer {
     load_attach_payloads: bool,
     /// parents_only: do not list attaches at all for payload purposes.
     parents_only: bool,
+    /// Soft attach/open warnings (in addition to tracing).
+    on_warn: Option<MaterializeWarnCb>,
 }
 
 impl PstMaterializer {
@@ -30,7 +36,14 @@ impl PstMaterializer {
             psts: HashMap::new(),
             load_attach_payloads: family == FamilyPolicy::KeepAttachmentsWithParent,
             parents_only: family == FamilyPolicy::ParentsOnly,
+            on_warn: None,
         }
+    }
+
+    /// Bridge soft attach/open warnings to a structured log sink (unique-pst GUI).
+    pub fn with_warn_sink(mut self, on_warn: MaterializeWarnCb) -> Self {
+        self.on_warn = Some(on_warn);
+        self
     }
 
     fn open_pst(&mut self, path: &str) -> std::result::Result<&mut PstFile, MaterializeError> {
@@ -73,6 +86,16 @@ impl MessageMaterializer for PstMaterializer {
         // that open_attachment_data can be used by downstream exporters.
         let parents_only = self.parents_only;
         let load_payloads = self.load_attach_payloads;
+        // Clone warn sink before opening PST (pst holds &mut self.psts).
+        let warn_cb = self.on_warn.clone();
+        let emit_soft = |msg: String| {
+            tracing::warn!("{msg}");
+            if let Some(cb) = &warn_cb {
+                if let Ok(mut g) = cb.lock() {
+                    g(msg);
+                }
+            }
+        };
         let pst = self.open_pst(&locus.source_path)?;
         let nid = NodeId(locus.nid);
 
@@ -194,12 +217,10 @@ impl MessageMaterializer for PstMaterializer {
                                     match reader.read_to_end(&mut buf) {
                                         Ok(_) => data = Some(buf),
                                         Err(e) => {
-                                            tracing::warn!(
-                                                nid = locus.nid,
-                                                attach_nid = att.nid.0,
-                                                err = %e,
-                                                "open/read attachment payload failed (soft ATTACH_META_FAILED)"
-                                            );
+                                            emit_soft(format!(
+                                                "open/read attachment payload failed (soft ATTACH_META_FAILED) nid={:#x} attach_nid={:#x}: {e}",
+                                                locus.nid, att.nid.0
+                                            ));
                                             if !soft_reasons.contains(
                                                 &dedup_engine::IntegrityReason::AttachMetaFailed,
                                             ) {
@@ -211,12 +232,10 @@ impl MessageMaterializer for PstMaterializer {
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::warn!(
-                                        nid = locus.nid,
-                                        attach_nid = att.nid.0,
-                                        err = %e,
-                                        "open_attachment_data failed (soft ATTACH_META_FAILED)"
-                                    );
+                                    emit_soft(format!(
+                                        "open_attachment_data failed (soft ATTACH_META_FAILED) nid={:#x} attach_nid={:#x}: {e}",
+                                        locus.nid, att.nid.0
+                                    ));
                                     if !soft_reasons
                                         .contains(&dedup_engine::IntegrityReason::AttachMetaFailed)
                                     {
@@ -238,11 +257,10 @@ impl MessageMaterializer for PstMaterializer {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        nid = locus.nid,
-                        err = %e,
-                        "list_attachments failed during materialize (soft ATTACH_META_FAILED)"
-                    );
+                    emit_soft(format!(
+                        "list_attachments failed during materialize (soft ATTACH_META_FAILED) nid={:#x}: {e}",
+                        locus.nid
+                    ));
                     soft_reasons.push(dedup_engine::IntegrityReason::AttachMetaFailed);
                 }
             }

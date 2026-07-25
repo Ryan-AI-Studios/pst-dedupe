@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use dedup_engine::{
@@ -40,6 +42,10 @@ pub struct ScanOptions {
     pub retain_rows: bool,
     /// Retain keep-set candidates (mid + content_hash + integrity) for Phase 2 resolve.
     pub retain_candidates: bool,
+    /// Cooperative cancel (GUI / library). When set and true, `run_scan` stops at
+    /// safe boundaries and returns `Ok` with partial results so far. CLI leaves
+    /// this `None` so scan/dups behavior is unchanged.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for ScanOptions {
@@ -55,8 +61,16 @@ impl Default for ScanOptions {
             skip_limit: 10_000,
             retain_rows: true,
             retain_candidates: false,
+            cancel: None,
         }
     }
+}
+
+fn scan_cancel_requested(cancel: &Option<Arc<AtomicBool>>) -> bool {
+    cancel
+        .as_ref()
+        .map(|c| c.load(Ordering::SeqCst))
+        .unwrap_or(false)
 }
 
 /// Per-file outcome with integrity status.
@@ -215,6 +229,11 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     let csv_streamed = dedup_wtr.is_some();
 
     for (file_idx, path) in paths.iter().enumerate() {
+        // Safe boundary: before each file open.
+        if scan_cancel_requested(&opts.cancel) {
+            break;
+        }
+
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -300,7 +319,13 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         const PROGRESS_EVERY_MSGS: u64 = 500;
         let mut msgs_seen_file = 0u64;
 
-        for folder in &folders {
+        let mut cancelled_this_file = false;
+        'folders: for folder in &folders {
+            // Safe boundary: between folders.
+            if scan_cancel_requested(&opts.cancel) {
+                cancelled_this_file = true;
+                break 'folders;
+            }
             // Walker always gives folder paths today; is_orphaned residual D-0065-orphan-walk.
             let is_orphaned = false;
             let folder_path = folder.path.clone();
@@ -313,6 +338,11 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             );
 
             for &msg_nid in &folder.message_nids {
+                // Safe boundary: between messages in the main per-message loop.
+                if scan_cancel_requested(&opts.cancel) {
+                    cancelled_this_file = true;
+                    break 'folders;
+                }
                 msgs_seen_file += 1;
                 if msgs_seen_file.is_multiple_of(PROGRESS_EVERY_MSGS) {
                     tracing::info!(
@@ -567,7 +597,8 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             }
         }
 
-        let status = if file_skipped > 0 || file_degraded > 0 {
+        // Cancel mid-file still yields Partial so operators see incomplete coverage.
+        let status = if cancelled_this_file || file_skipped > 0 || file_degraded > 0 {
             FileScanStatus::Partial
         } else {
             FileScanStatus::Opened
@@ -588,6 +619,10 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             error_code: None,
             error: None,
         });
+
+        if cancelled_this_file || scan_cancel_requested(&opts.cancel) {
+            break;
+        }
     }
 
     // Always flush writers before return (including integrity failure paths).
@@ -958,5 +993,31 @@ mod tests {
             ..Default::default()
         };
         assert!(evaluate_exit_policy(&summary, &opts).is_err());
+    }
+
+    #[test]
+    fn run_scan_cancel_before_open_returns_empty_partial() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let sample =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/aspose_outlook.pst");
+        assert!(
+            sample.is_file(),
+            "required fixture missing (fail-closed): {}",
+            sample.display()
+        );
+        let cancel = Arc::new(AtomicBool::new(true));
+        let opts = ScanOptions {
+            cancel: Some(cancel),
+            retain_rows: false,
+            retain_candidates: true,
+            ..Default::default()
+        };
+        let outcome = run_scan(&[sample], &opts).expect("cancel must return Ok partial");
+        // Cancelled before first open: no file stats, no invented candidates.
+        assert!(outcome.summary.files.is_empty());
+        assert!(outcome.candidates.is_empty());
+        assert_eq!(outcome.summary.recoverable_messages, 0);
     }
 }

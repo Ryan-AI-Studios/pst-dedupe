@@ -70,6 +70,7 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
         skip_limit: args.skip_limit,
         retain_rows: false,
         retain_candidates: true,
+        cancel: None,
     };
 
     // Phase 1: integrity-aware scan collecting candidates.

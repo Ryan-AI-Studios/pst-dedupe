@@ -166,8 +166,18 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
     ui.separator();
     ui.add_space(8.0);
 
-    // Export controls
+    // Export controls — keep-set unique-PST is primary (0072 soft-closes D-0067-gui-keepset).
     ui.horizontal(|ui| {
+        if ui
+            .button("📦  Export Unique PST…")
+            .on_hover_text("Keep-set unique-pst path (preferred; same as CLI unique-pst)")
+            .clicked()
+        {
+            app.enter_unique_wizard_from_results();
+        }
+
+        ui.add_space(12.0);
+
         if ui.button("📄  Export CSV Report").clicked() {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("CSV", &["csv"])
@@ -180,7 +190,14 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
 
         ui.add_space(12.0);
 
-        if ui.button("📧  Export Unique Emails (EML)").clicked() {
+        if ui
+            .button("📧  Export Unique EML (legacy scan path)")
+            .on_hover_text(
+                "Legacy: re-exports unique rows from this scan as .eml. \
+                 Prefer Export Unique PST for keep-set fidelity.",
+            )
+            .clicked()
+        {
             if let Some(dir) = rfd::FileDialog::new()
                 .set_title("Select output folder for EML files")
                 .pick_folder()
@@ -198,14 +215,20 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
         }
     });
 
-    // Export result feedback
+    ui.add_space(4.0);
+    ui.colored_label(
+        egui::Color32::GRAY,
+        "Preferred unique export: Unique PST (keep-set). Legacy EML uses the scan-path exporter.",
+    );
+
+    // Export result feedback (legacy EML)
     if let Some((exported, failed, err)) = app.export_result() {
         ui.add_space(8.0);
         if failed > 0 || err.is_some() {
             ui.colored_label(
                 egui::Color32::YELLOW,
                 format!(
-                    "Export finished: {} written, {} failed.{}",
+                    "EML export finished: {} written, {} failed.{}",
                     exported,
                     failed,
                     err.as_ref()
@@ -216,7 +239,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
         } else {
             ui.colored_label(
                 egui::Color32::GREEN,
-                format!("Export complete: {} EML files written.", exported),
+                format!("EML export complete: {} files written.", exported),
             );
         }
     }

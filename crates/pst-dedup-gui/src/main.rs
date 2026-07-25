@@ -4,6 +4,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod unique_wizard;
+mod unique_worker;
 mod views;
 mod worker;
 

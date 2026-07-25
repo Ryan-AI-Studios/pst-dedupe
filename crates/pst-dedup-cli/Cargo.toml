@@ -6,6 +6,10 @@ description = "Command-line surface for PST deduplication and headless matter au
 license = "LicenseRef-Proprietary"
 license-file = "../../LICENSE"
 
+[lib]
+name = "pst_dedup_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pst-dedup"
 path = "src/main.rs"

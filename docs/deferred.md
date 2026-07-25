@@ -688,7 +688,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0067-gui-keepset | — | GUI `export_unique_eml` still uses legacy scan path + plain `export_eml` | P0 is CLI `unique-eml`; shared MIME writer in `dedup-engine` ready for later adopt | residual / **0072** soft |
+| D-0067-gui-keepset | — | **Soft-closed in 0072:** GUI primary unique export is keep-set **unique-pst** wizard; legacy EML retained as secondary (“Export Unique EML (legacy scan path)”) | Full EML co-export residual: **D-0071-also-eml** | **0072** |
 | D-0067-embedded-depth | — | Full recursive nested MAPI extract for embedded messages | P0 labels `message/rfc822` + streams raw bytes; `embedded_message_unparsed` honesty flag; max depth 3 residual | residual |
 | D-0067-long-path | — | Windows `\\?\` long-path support when abs root already > budget | P0 truncates subject to keep abs ≤250; extreme deep roots may still fail that file | residual |
 | D-0067-cloud-attaches | — | Resolve hyperlink-only / cloud modern attachments | Not downloaded; no invented file bytes | residual |
@@ -735,6 +735,13 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0071-also-eml | — | `--also-eml` co-export unique-eml pack alongside unique-pst | Flag accepted; co-export not wired in P0 (operators can run `unique-eml` separately) | residual / optional |
 | D-0071-operator-outlook | — | Operator Outlook / scanpst open of unique-pst multi-volume output | Same residual as D-0068-02; How-to documents checklist | operator residual |
 | D-0071-dest-nid | P3 | Optional `dest_nid` column on export_messages.csv | Writer does not surface destination NIDs to CLI today | residual polish |
+
+## From track 0072-DeskUniquePstWizard
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| (soft-close) | — | D-0067-gui-keepset | Soft-closed: Unique PST wizard is primary GUI unique export; legacy EML secondary | **0072** |
+| D-0072-operator-gui-smoke | P3 | Full interactive egui click-path smoke for wizard | Unit tests cover args/cancel/log/repaint/preflight; operator interactive residual (same class as other Desk tracks) | operator / polish |
 
 ## Hygiene
 
