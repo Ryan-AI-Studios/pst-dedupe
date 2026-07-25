@@ -1,6 +1,6 @@
 [package]
 name = "dedup-engine"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 edition = "2021"
 description = "Email deduplication engine — tiered hashing, indexing, and reporting"
 license = "LicenseRef-Proprietary"

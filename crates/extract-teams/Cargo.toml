@@ -1,6 +1,6 @@
 [package]
 name = "extract-teams"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 edition = "2021"
 description = "Offline Teams/chat export adapters + teams_extract job (track 0055)"
 license = "LicenseRef-Proprietary"
@@ -9,7 +9,8 @@ license-file = "../../LICENSE"
 [dependencies]
 matter-core = { path = "../matter-core" }
 file-category = { path = "../file-category" }
-ammonia = "4"
+# Pin past RUSTSEC-2026-0213 (SVG animate/set XSS); 4.1.4+ required.
+ammonia = "4.1.4"
 chrono = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

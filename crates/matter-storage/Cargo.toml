@@ -1,6 +1,6 @@
 [package]
 name = "matter-storage"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 edition = "2021"
 description = "Opt-in BlobStore backends for matter CAS: local FS (default), S3-compatible (feature cloud-s3), disk LRU cache"
 license = "LicenseRef-Proprietary"

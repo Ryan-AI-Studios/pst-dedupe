@@ -1,6 +1,6 @@
 [package]
 name = "matter-entity"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 edition = "2021"
 description = "Offline entity / PII regex packs: Luhn + mask/hash hits (track 0046)"
 license = "LicenseRef-Proprietary"

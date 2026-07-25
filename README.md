@@ -2,6 +2,8 @@
 
 A pure Rust Windows tool for deduplicating emails across Outlook PST files.
 
+**RC:** product version **0.2.0-rc.1** (schema **v39**). Operator day-1 runbook: [`docs/operator-golden-path.md`](docs/operator-golden-path.md). Release notes: [`CHANGELOG.md`](CHANGELOG.md). Residual checklist: [`docs/operator-rc-checklist.md`](docs/operator-rc-checklist.md).
+
 ## What It Does
 
 - Opens one or more **Unicode PST files** (Outlook 2003+ format), including **Permute**-encrypted stores.
@@ -288,7 +290,7 @@ Manual hygiene (same as pre-commit cargo steps):
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pre-commit.ps1
 ```
 
-CI (GitHub Actions) runs **Windows-only** `fmt` / `clippy` / `test` on push and PRs (`.github/workflows/ci.yml`).
+CI (GitHub Actions) runs **Windows-only** `fmt` / `clippy` / `test` / **`cargo audit`** / **`cargo deny check`** on push and PRs (`.github/workflows/ci.yml`, track 0062).
 
 ### PST Fixtures
 
@@ -306,10 +308,10 @@ Small Aspose/sample fixtures live under `fixtures/` (see `fixtures/README.md`). 
 |---|---|
 | `pst-reader` | Pure Rust PST parser: header, NDB, LTP, messaging extraction |
 | `dedup-engine` | Dedup hashing, index, CSV report, EML serialization |
-| `pst-dedup-cli` | CLI surface: inspect / scan / dups (JSON + CSV) |
-| `pst-dedup-gui` | egui app and background scan worker |
-| `pst-writer` | Experimental/fixture PST writing and EML import helpers |
-| `matter-core` | Matter layout + SQLite (schema v34: Normalized Item + dedupe/thread/neardup/cull/promote + `review_sets` + coding/`guidance` + `saved_searches` + review-list index + metadata filters + entity hits / `entity_flags` + people–comms graph + concept cluster tables + `sentiment_*` tone columns + semantic index meta / chunks + AI config / `item_ai_suggestions` + grounded `item_ai_suggestion_citations` + `transcript_*` STT bookkeeping + language packs / `fts_lang_fingerprint` / optional `language_tag` + Teams/chat columns `conversation_id` / `chat_type` / `team_name` / `channel_name` / `chat_export_format` / `conversation_bucket_date` / `teams_extract_*`) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + logical_hash v1 + `workspace/temp/` |
+| `pst-dedup-cli` | CLI surface: inspect / scan / dups / keep-set / unique-eml / **unique-pst** + headless matter automation (`matter`, `job`, `profile`, `workflow`, `produce`, `qc`, …) + opt-in `service` / `platform` |
+| `pst-dedup-gui` | egui scan/dedup + **Unique PST Export** wizard (shared keep-set path with CLI) |
+| `pst-writer` | Production Unicode PST writer used by unique-pst (streaming multi-GB path); fixture/EML helpers remain |
+| `matter-core` | Matter layout + SQLite (**schema v39**: Normalized Item + Series A–I columns through cloud blob/job backends) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + logical_hash v1 + `workspace/temp/` |
 | `extract-teams` | Offline Teams/chat export adapters (HTML+PST required, JSON best-effort) + resumable `teams_extract` job; plain-text bodies via ammonia; day-bucketed `conversation_id` (schema v34) |
 | `ingest-purview` | Purview/package/ZIP detect + safe expand + resumable inventory (blocking worker API; `*_on_job` for runner) |
 | `extract-pst` | PST → Normalized Items + families + logical_hash; `pst-native-message-v1` native (not EML); mid-folder resume (blocking; `*_on_job` for runner) |
