@@ -1,6 +1,6 @@
 [package]
 name = "pst-reader"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 edition = "2021"
 description = "Pure Rust PST (Personal Storage Table) reader — MS-PST spec implementation"
 license = "LicenseRef-Proprietary"

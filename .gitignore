@@ -25,3 +25,7 @@ matters/
 /*.pst
 # If you must place a local sample at repo root for smoke, use output/ or Desktop instead.
 
+
+dist/
+*.cdx.json
+

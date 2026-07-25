@@ -1,0 +1,12 @@
+# cargo-audit configuration (track 0062).
+# Prefer fixing advisories by upgrade. Each ignore maps to docs/deferred.md.
+
+[advisories]
+ignore = [
+    # rsa via openidconnect (matter-service SSO opt-in). No fixed upgrade on crates.io.
+    "RUSTSEC-2023-0071",
+    # quick-xml 0.39 via wayland-scanner (Linux GUI only; product is Windows).
+    # If a Windows path depends on vulnerable quick-xml, remove this ignore and bump.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

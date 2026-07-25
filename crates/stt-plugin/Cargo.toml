@@ -1,6 +1,6 @@
 [package]
 name = "stt-plugin"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 edition = "2021"
 description = "Opt-in local speech-to-text job (whisper.cpp CLI + mock engine) for Dedupe Desk (track 0053)"
 license = "LicenseRef-Proprietary"

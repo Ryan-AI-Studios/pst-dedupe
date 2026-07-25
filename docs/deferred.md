@@ -743,6 +743,15 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | (soft-close) | — | D-0067-gui-keepset | Soft-closed: Unique PST wizard is primary GUI unique export; legacy EML secondary | **0072** |
 | D-0072-operator-gui-smoke | P3 | Full interactive egui click-path smoke for wizard | Unit tests cover args/cancel/log/repaint/preflight; operator interactive residual (same class as other Desk tracks) | operator / polish |
 
+## From track 0062-ReleaseHardeningRc
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0062-codesign | — | Authenticode for operator-facing RC ZIP | Engineering docs/gates/package may complete; **external counsel handoff blocked** until cert + signed exes | release ops |
+| D-0062-audit-rsa | P3 | `rsa` 0.9.x Marvin (RUSTSEC-2023-0071) via `openidconnect` | No fixed upgrade; SSO opt-in path only; ignored in audit/deny with reason | residual / upstream |
+| D-0062-audit-quickxml | P3 | `quick-xml` 0.39 advisories via wayland-scanner | Linux GUI transitive only; Windows product path pruned in `deny.toml` targets; cargo-audit ignore until consumers bump | residual / upstream |
+| D-0062-audit-warnings | P3 | Unmaintained/unsound warnings (`ttf-parser`, `anyhow`, `memmap2`) | cargo-audit warnings only; not treated as hard RC fail | residual polish |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

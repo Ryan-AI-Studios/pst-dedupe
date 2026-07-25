@@ -96,3 +96,8 @@ object_store = { version = "0.14", default-features = false }
 # AI provider (track 0051) — OpenAI-compatible HTTP + OS keyring
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 keyring = "3"
+
+# Release profile (track 0062 RC): keep line tables for field panics without full debug=2 bloat.
+# Windows builds emit .pdb next to exes; package via scripts/package-release.ps1 (symbols/ or *-symbols.zip).
+[profile.release]
+debug = 1

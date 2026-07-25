@@ -1,0 +1,127 @@
+# cargo-deny configuration for Dedupe Desk / pst-dedupe RC (track 0062).
+# Goal: keep the proprietary Windows binary free of strong-copyleft (GPL/AGPL)
+# contamination while allowing standard permissive Rust ecosystem licenses.
+#
+# Product ships Windows only; graph is scoped to the Windows MSVC triple so
+# Linux-only GUI transitive crates (wayland, etc.) do not drive license noise.
+
+[graph]
+targets = [
+    "x86_64-pc-windows-msvc",
+]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+# Unfixable / residual advisories are documented in docs/deferred.md (D-0062-audit-*).
+# Prefer upgrading crates over ignore. Each ignore requires a D-0062 row.
+ignore = [
+    # rsa via openidconnect (matter-service SSO opt-in only). No fixed upgrade on crates.io.
+    { id = "RUSTSEC-2023-0071", reason = "D-0062-audit-rsa: rsa 0.9.x Marvin timing; transitive via openidconnect 4.x; SSO opt-in only; no fixed upgrade" },
+    # ttf-parser unmaintained via lopdf → pdf-extract (PDF text path). No safe upgrade; skrifa is alt but not drop-in for lopdf.
+    { id = "RUSTSEC-2026-0192", reason = "D-0062-audit-warnings: ttf-parser unmaintained via lopdf/pdf-extract; no safe upgrade" },
+    # Unsound warnings treated as residual polish (D-0062-audit-warnings); not exploitable RC blockers for our call sites.
+    { id = "RUSTSEC-2026-0190", reason = "D-0062-audit-warnings: anyhow Error::downcast_mut unsound; transitive" },
+    { id = "RUSTSEC-2026-0186", reason = "D-0062-audit-warnings: memmap2 unchecked offset; transitive (tantivy/mmap)" },
+    # quick-xml may appear if graph expands; Windows-only targets usually prune wayland-scanner.
+    { id = "RUSTSEC-2026-0194", reason = "D-0062-audit-quickxml: quick-xml via wayland (Linux); Windows product path" },
+    { id = "RUSTSEC-2026-0195", reason = "D-0062-audit-quickxml: quick-xml via wayland (Linux); Windows product path" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+
+# Explicit allow-list (permissive + dual-license options). Strong copyleft is NOT listed.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "Zlib",
+    "zlib-acknowledgement",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "BSL-1.0",
+    # Fonts embedded by egui/epaint (not software copyleft).
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    # Weak copyleft used only where dual-licensed OR explicit exception — see notes.
+    # MPL-2.0: symphonia (STT audio decode) + cssparser/htmlescape; file-level MPL, OK for binary link.
+    "MPL-2.0",
+]
+
+# Workspace crates use LicenseRef-Proprietary + LICENSE file.
+exceptions = [
+    { allow = ["LicenseRef-Proprietary"], crate = "dedup-engine" },
+    { allow = ["LicenseRef-Proprietary"], crate = "dedupe-desk" },
+    { allow = ["LicenseRef-Proprietary"], crate = "extract-calendar" },
+    { allow = ["LicenseRef-Proprietary"], crate = "extract-office" },
+    { allow = ["LicenseRef-Proprietary"], crate = "extract-pdf" },
+    { allow = ["LicenseRef-Proprietary"], crate = "extract-pst" },
+    { allow = ["LicenseRef-Proprietary"], crate = "extract-teams" },
+    { allow = ["LicenseRef-Proprietary"], crate = "file-category" },
+    { allow = ["LicenseRef-Proprietary"], crate = "ingest-purview" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-ai" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-cluster" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-core" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-cull" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-dedupe" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-entity" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-gap" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-neardup" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-people" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-platform" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-produce" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-promote" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-qc" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-search" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-semantic" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-sentiment" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-service" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-storage" },
+    { allow = ["LicenseRef-Proprietary"], crate = "matter-thread" },
+    { allow = ["LicenseRef-Proprietary"], crate = "ocr-plugin" },
+    { allow = ["LicenseRef-Proprietary"], crate = "process-runner" },
+    { allow = ["LicenseRef-Proprietary"], crate = "pst-dedup-cli" },
+    { allow = ["LicenseRef-Proprietary"], crate = "pst-dedup-gui" },
+    { allow = ["LicenseRef-Proprietary"], crate = "pst-reader" },
+    { allow = ["LicenseRef-Proprietary"], crate = "pst-writer" },
+    { allow = ["LicenseRef-Proprietary"], crate = "stt-plugin" },
+]
+
+# Dual-licensed crates (Apache OR GPL, MIT OR Apache OR LGPL) resolve via allow list:
+# - self_cell: Apache-2.0 OR GPL-2.0-only → Apache selected
+# - r-efi: MIT OR Apache-2.0 OR LGPL-2.1-or-later → MIT/Apache selected
+# Do NOT add GPL-2.0 / GPL-3.0 / AGPL-3.0 / LGPL to the global allow list.
+
+[licenses.private]
+ignore = true
+registries = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+allow-workspace = true
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

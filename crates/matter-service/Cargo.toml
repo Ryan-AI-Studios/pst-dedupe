@@ -1,6 +1,6 @@
 [package]
 name = "matter-service"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 edition = "2021"
 description = "Local multi-user matter HTTP service (track 0058) + optional platform OIDC SSO (0059)"
 license = "LicenseRef-Proprietary"

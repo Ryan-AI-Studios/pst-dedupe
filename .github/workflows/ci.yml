@@ -1,6 +1,7 @@
 # Windows-only CI for pst-dedupe.
 # Adapted from Ledgerful's hygiene gates (fmt / clippy / test) without multi-OS
-# or Ledgerful product-specific jobs (web SPA, nextest tiers, cargo-deny, etc.).
+# or Ledgerful product-specific jobs (web SPA, nextest tiers).
+# Track 0062 adds cargo-audit + cargo-deny (licenses / advisories / sources).
 #
 # Action Node runtimes: prefer actions that natively target Node.js 24
 # (Node 20 is deprecated on GitHub-hosted runners).
@@ -60,16 +61,44 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+  audit:
+    name: audit
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.1
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        # Uses .cargo/audit.toml ignores (documented D-0062-audit-* residuals).
+        run: cargo audit
+
+  deny:
+    name: deny
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.1
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: cargo deny check
+        # deny.toml: strict licenses (no GPL/AGPL allow), advisories, crates.io sources only.
+        run: cargo deny check
+
   # Mirrors local `ledgerful verify` steps when ledgerful is not available in CI.
   # Local pre-push runs: ledgerful verify --scope fast (which uses the same steps).
   verify-parity:
     name: verify-parity
     runs-on: windows-latest
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, audit, deny]
     timeout-minutes: 5
     steps:
       - name: Gate summary
         run: |
-          Write-Host "fmt + clippy + test matched .ledgerful/config.toml verify.steps"
+          Write-Host "fmt + clippy + test + audit + deny matched track 0062 RC gates"
           Write-Host "Local pre-push additionally runs: ledgerful verify --scope fast"
           Write-Host "Local pre-commit runs: ledgerful ledger status + scripts/pre-commit.ps1"

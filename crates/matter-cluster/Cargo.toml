@@ -1,6 +1,6 @@
 [package]
 name = "matter-cluster"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 edition = "2021"
 description = "Offline concept clustering: tfidf_kmeans_v1 + c-TF-IDF/ICF labels (track 0048)"
 license = "LicenseRef-Proprietary"
