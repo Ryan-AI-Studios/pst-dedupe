@@ -528,7 +528,19 @@ async fn oidc_callback(
             &nonce,
             &client_secret,
         )
-        .await?;
+        .await;
+
+    // Zeroize *our* local client-secret String after exchange. openidconnect's
+    // ClientSecret copies are scoped to the CoreClient tight block inside
+    // finish_authorization and drop with the client (D-0063-04 residual:
+    // dependency String is not zeroized on Drop).
+    {
+        use matter_platform::zeroize_string;
+        let mut secret = client_secret;
+        zeroize_string(&mut secret);
+    }
+
+    let claims = claims?;
 
     let platform = ps.platform.lock().await;
     let matter = state.gate.lock().await;

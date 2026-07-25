@@ -752,6 +752,16 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0062-audit-quickxml | P3 | `quick-xml` 0.39 advisories via wayland-scanner | Linux GUI transitive only; Windows product path pruned in `deny.toml` targets; cargo-audit ignore until consumers bump | residual / upstream |
 | D-0062-audit-warnings | P3 | Unmaintained/unsound warnings (`ttf-parser`, `anyhow`, `memmap2`) | cargo-audit warnings only; not treated as hard RC fail | residual polish |
 
+## From track 0063-SecurityRedTeamFixes
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0063-01 | P3 | Matter passphrase may remain in process **env** after unlock | Same class as D-0057-09; clear-after-read unsafe with concurrent workers. Production unlock/create/change-passphrase **heap** buffers use `Zeroizing<String>` (0063 fix round). | residual polish |
+| D-0063-02 | P3 | OIDC SSRF DNS rebinding / resolve-then-connect race | Mitigated by re-validating discovered token/jwks/auth URLs; multi-resolve residual | residual polish |
+| D-0063-03 | P3 | XBLOCK assemble hard-cap 64 MiB may reject huge legitimate single assemblies | Streaming redesign needed to raise safely | residual scale |
+| D-0063-04 | P3 | `openidconnect::ClientSecret` / bare `String` retains IdP client secret until client Drop; no zeroize API | **P3 residual** (dependency limitation; not a product control gap). Mitigated: `CoreClient` constructed only inside a tight exchange+verify block; route zeroizes local secret after `finish_authorization`. Heap residue only during exchange until allocator reuse. Full zeroize requires upstream `openidconnect` support. | residual / upstream |
+| D-0063-05 | P3 | Desk UI passphrase widgets are plain `String` (egui TextEdit) | Cleared after submit; heap residue residual. Production service/CLI unlock paths zeroize. Full zeroizing widgets would need egui field redesign. | residual polish |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

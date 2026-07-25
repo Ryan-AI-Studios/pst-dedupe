@@ -19,9 +19,11 @@ mod tenant_key;
 pub use error::{Error, Result};
 pub use pmk::{
     decrypt_idp_secret, encrypt_idp_secret, generate_pmk, load_pmk_from_env, parse_pmk,
-    zeroize_string, DOMAIN_IDP_SECRET, ENV_PLATFORM_MASTER_KEY,
+    zeroize_string, Pmk, DOMAIN_IDP_SECRET, ENV_PLATFORM_MASTER_KEY,
 };
-pub use sandbox::{assert_path_under_root, ENV_PLATFORM_STORAGE_ROOT};
+pub use sandbox::{
+    assert_path_under_root, reject_untrusted_path_component, ENV_PLATFORM_STORAGE_ROOT,
+};
 pub use schema::PLATFORM_SCHEMA_VERSION;
 pub use tenant_key::{NullTenantKeyProvider, TenantKeyProvider};
 
@@ -31,12 +33,13 @@ use camino::{Utf8Path, Utf8PathBuf};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 /// Open platform registry handle.
 pub struct Platform {
     conn: Connection,
     path: Utf8PathBuf,
-    pmk: Option<[u8; 32]>,
+    pmk: Option<Pmk>,
     storage_roots: Vec<PathBuf>,
 }
 
@@ -112,7 +115,7 @@ pub struct OidcPending {
 
 impl Platform {
     /// Create a new platform.db at `path` (file path).
-    pub fn create(path: &Utf8Path, pmk: Option<[u8; 32]>) -> Result<Self> {
+    pub fn create(path: &Utf8Path, pmk: Option<Pmk>) -> Result<Self> {
         if path.exists() {
             return Err(Error::PlatformAlreadyExists(path.to_string()));
         }
@@ -135,7 +138,7 @@ impl Platform {
     }
 
     /// Open an existing platform.db.
-    pub fn open(path: &Utf8Path, pmk: Option<[u8; 32]>) -> Result<Self> {
+    pub fn open(path: &Utf8Path, pmk: Option<Pmk>) -> Result<Self> {
         if !path.exists() {
             return Err(Error::PlatformNotFound(path.to_string()));
         }
@@ -155,7 +158,7 @@ impl Platform {
     }
 
     /// Create or open (tests / CLI convenience).
-    pub fn open_or_create(path: &Utf8Path, pmk: Option<[u8; 32]>) -> Result<Self> {
+    pub fn open_or_create(path: &Utf8Path, pmk: Option<Pmk>) -> Result<Self> {
         if path.exists() {
             Self::open(path, pmk)
         } else {
@@ -167,7 +170,7 @@ impl Platform {
         &self.path
     }
 
-    pub fn set_pmk(&mut self, pmk: Option<[u8; 32]>) {
+    pub fn set_pmk(&mut self, pmk: Option<Pmk>) {
         self.pmk = pmk;
     }
 
@@ -385,8 +388,20 @@ impl Platform {
         let ct = ct.ok_or(Error::SecretUnavailable)?;
         let nonce = nonce.ok_or(Error::SecretUnavailable)?;
         let pmk = self.pmk.as_ref().ok_or(Error::PmkRequired)?;
-        let plain = decrypt_idp_secret(pmk, &nonce, &ct)?;
-        String::from_utf8(plain).map_err(|e| Error::Crypto(format!("secret utf8: {e}")))
+        // Decrypt into a temporary buffer; zeroize intermediate bytes after UTF-8 conversion.
+        let mut plain = decrypt_idp_secret(pmk, &nonce, &ct)?;
+        let secret = match String::from_utf8(std::mem::take(&mut plain)) {
+            Ok(s) => s,
+            Err(e) => {
+                // `from_utf8` error retains the original bytes — scrub them.
+                let mut bad = e.into_bytes();
+                bad.zeroize();
+                return Err(Error::Crypto("secret utf8: invalid utf-8".into()));
+            }
+        };
+        // `plain` is empty after take; still scrub capacity/residual.
+        plain.zeroize();
+        Ok(secret)
     }
 
     // ------------------------------------------------------------------

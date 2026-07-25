@@ -67,4 +67,12 @@ pub enum PstError {
 
     #[error("Invalid UTF-16 string data")]
     InvalidUtf16,
+
+    /// Claimed size / allocation would exceed a hard safety cap (adversarial PST).
+    #[error("resource limit exceeded: {0}")]
+    ResourceLimit(String),
+
+    /// NBT/BBT/subnode page graph contains a cycle (adversarial PST).
+    #[error("B-tree cycle detected at page offset 0x{page_offset:X}")]
+    BtreeCycle { page_offset: u64 },
 }

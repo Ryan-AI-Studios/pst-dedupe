@@ -121,10 +121,13 @@ pub fn run_service(cmd: ServiceCmd) -> Result<ExitCode> {
                 None => default_bind(),
             };
             validate_bind(bind_addr, allow_lan).map_err(CliError::Usage)?;
+            // Zeroizing buffer; moved into ServeConfig and taken on open (not retained).
             let passphrase = if is_encrypted_matter(&root) {
-                Some(std::env::var(&passphrase_env).map_err(|_| {
-                    CliError::Usage(format!("encrypted matter requires env {passphrase_env}"))
-                })?)
+                Some(matter_core::ZeroizingString::new(
+                    std::env::var(&passphrase_env).map_err(|_| {
+                        CliError::Usage(format!("encrypted matter requires env {passphrase_env}"))
+                    })?,
+                ))
             } else {
                 None
             };
@@ -300,10 +303,12 @@ fn open_matter_cli(root: &Utf8PathBuf, passphrase_env: &str) -> Result<Matter> {
     // Admin CLI keeps strict actor **off** so bootstrap can use free-form "system"
     // before any matter_users exist. Service `serve` enables strict mode separately.
     if is_encrypted_matter(root) {
-        let pass = std::env::var(passphrase_env).map_err(|_| {
+        // Zeroizing heap buffer for unlock only; env residual is D-0063-01.
+        use matter_core::ZeroizingString;
+        let pass = ZeroizingString::new(std::env::var(passphrase_env).map_err(|_| {
             CliError::Usage(format!("encrypted matter requires env {passphrase_env}"))
-        })?;
-        Matter::open_with_passphrase(root, &pass, true).map_err(CliError::from)
+        })?);
+        Matter::open_with_passphrase(root, pass.as_str(), true).map_err(CliError::from)
     } else {
         Matter::open(root).map_err(CliError::from)
     }

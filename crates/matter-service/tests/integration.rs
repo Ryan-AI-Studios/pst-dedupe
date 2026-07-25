@@ -492,7 +492,11 @@ async fn encrypted_matter_service_login_and_code() {
         // drop before service open
         let _ = (item, code);
     }
-    let matter = open_matter_for_service(&root, Some(pass)).expect("service open");
+    let matter = open_matter_for_service(
+        &root,
+        Some(matter_core::ZeroizingString::new(pass.to_string())),
+    )
+    .expect("service open");
     let code_id = matter.list_code_definitions().expect("c")[0].id.clone();
     let item_id = matter.list_items_thin(None, 10).expect("list")[0]
         .id

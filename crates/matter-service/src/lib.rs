@@ -22,8 +22,9 @@ mod state;
 
 pub use error::{ApiError, ApiErrorBody};
 pub use oidc::{
-    complete_oidc_login, pkce_challenge_s256, random_urlsafe, validate_claims, MockOidcProvider,
-    OidcClaims, OidcProvider, OidcRuntime, OpenIdConnectProvider,
+    complete_oidc_login, pkce_challenge_s256, random_urlsafe, validate_claims,
+    validate_idp_url_for_ssrf, MockOidcProvider, OidcClaims, OidcProvider, OidcRuntime,
+    OpenIdConnectProvider,
 };
 pub use routes::{build_router, AppState};
 pub use state::{PlatformState, ServeConfig, WriteGate};
@@ -33,7 +34,9 @@ use std::sync::Arc;
 
 use axum::Router;
 use camino::Utf8Path;
-use matter_core::{is_encrypted_matter, passphrase_from_env, Matter, ENV_MATTER_PASSPHRASE};
+use matter_core::{
+    is_encrypted_matter, passphrase_from_env, Matter, ZeroizingString, ENV_MATTER_PASSPHRASE,
+};
 use matter_platform::{load_pmk_from_env, Platform};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -70,18 +73,23 @@ pub fn default_bind() -> SocketAddr {
 ///
 /// Fails closed if `multi_user_enabled` is not set (use `service bootstrap-admin` first).
 /// This ensures lock/batch/OCC multi-user guards are active for authenticated mutates.
+///
+/// Passphrase is taken by value (`ZeroizingString`) and wiped when this frame ends —
+/// callers must not retain a second bare copy after open.
 pub fn open_matter_for_service(
     root: &Utf8Path,
-    passphrase: Option<&str>,
+    passphrase: Option<ZeroizingString>,
 ) -> matter_core::Result<Matter> {
     let matter = if is_encrypted_matter(root) {
-        let pass = match passphrase {
-            Some(p) => p.to_string(),
+        // Zeroizing heap buffer: wiped when this stack frame ends.
+        // Env residual remains D-0063-01; Desk UI widgets residual D-0063-05.
+        let pass: ZeroizingString = match passphrase {
+            Some(p) => p,
             None => passphrase_from_env().ok_or_else(|| {
                 matter_core::Error::PassphraseRequired(ENV_MATTER_PASSPHRASE.to_string())
             })?,
         };
-        Matter::open_with_passphrase(root, &pass, true)?
+        Matter::open_with_passphrase(root, pass.as_str(), true)?
     } else {
         Matter::open(root)?
     };
@@ -110,15 +118,17 @@ pub fn router_from_state(state: AppState) -> Router {
 }
 
 /// Open platform + matter for hosted serve; validates registry membership.
+///
+/// Takes `&mut ServeConfig` so the passphrase can be moved out (not retained).
 pub fn open_platform_for_service(
-    config: &ServeConfig,
+    config: &mut ServeConfig,
 ) -> Result<(Matter, PlatformState), Box<dyn std::error::Error + Send + Sync>> {
     let platform_path = config
         .platform_db
         .as_ref()
         .ok_or("platform_db required for platform mode")?;
-    let pmk = match config.platform_master_key {
-        Some(k) => Some(k),
+    let pmk = match &config.platform_master_key {
+        Some(k) => Some(k.clone()),
         None => load_pmk_from_env()?,
     };
     let mut platform = Platform::open(platform_path, pmk)?;
@@ -164,7 +174,9 @@ pub fn open_platform_for_service(
         }
     }
 
-    let matter = open_matter_for_service(&open_root, config.passphrase.as_deref())?;
+    // Take passphrase by value so ServeConfig does not retain it after unlock.
+    let pass = config.passphrase.take();
+    let matter = open_matter_for_service(&open_root, pass)?;
     // Bind matter tenant_id to registry tenant.
     matter.set_matter_tenant_id(Some(&tenant.id))?;
 
@@ -187,16 +199,16 @@ pub fn open_platform_for_service(
 }
 
 /// Serve until Ctrl-C, then drop the matter (seals encrypted session).
-pub async fn serve(config: ServeConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn serve(
+    mut config: ServeConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_bind(config.bind, config.allow_lan)?;
     let (matter, platform) = if config.platform_db.is_some() {
-        let (m, p) = open_platform_for_service(&config)?;
+        let (m, p) = open_platform_for_service(&mut config)?;
         (m, Some(p))
     } else {
-        (
-            open_matter_for_service(&config.matter_root, config.passphrase.as_deref())?,
-            None,
-        )
+        let pass = config.passphrase.take();
+        (open_matter_for_service(&config.matter_root, pass)?, None)
     };
     let gate = Wg::new(matter);
     let app = build_router(AppState {

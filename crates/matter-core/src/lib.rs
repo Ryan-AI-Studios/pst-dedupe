@@ -169,8 +169,8 @@ pub use conversation::{
     REPLY_SNIPPET_UNAVAILABLE,
 };
 pub use crypto::{
-    is_encrypted_matter, passphrase_from_env, CRYPTO_HEADER_FILE, DEFAULT_CHUNK_BYTES,
-    ENV_MATTER_PASSPHRASE, MAGIC_CAS, MAGIC_DB,
+    is_encrypted_matter, passphrase_from_env, ZeroizingString, CRYPTO_HEADER_FILE,
+    DEFAULT_CHUNK_BYTES, ENV_MATTER_PASSPHRASE, MAGIC_CAS, MAGIC_DB,
 };
 pub use entity::{
     entity_flags, flag_bit_for_entity_type, CreateEntityHitInput, EntityScanCandidate,
