@@ -32,16 +32,40 @@ pub use session::{
     wipe_orphan_enc_db_session, EncryptedDbSession,
 };
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{Error, Result};
 
+/// Zeroizing heap `String` for passphrase buffers (wiped on drop).
+///
+/// Unlock / create / change-passphrase call sites should prefer this over bare
+/// `String` so passphrase material does not linger after the stack returns.
+pub type ZeroizingString = Zeroizing<String>;
+
 /// Resolve passphrase from env [`ENV_MATTER_PASSPHRASE`] (trimmed non-empty).
-pub fn passphrase_from_env() -> Option<String> {
-    std::env::var(ENV_MATTER_PASSPHRASE)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+///
+/// Returns [`Zeroizing<String>`] so the **heap copy** is wiped when the unlock
+/// stack drops it. Callers that obtain passphrases another way should wrap with
+/// `Zeroizing::new(...)` for the same discipline.
+///
+/// **Residual (D-0057-09 / D-0063-01):** the passphrase remains in the process
+/// **environment** after read. Clearing env after unlock is unsafe when concurrent
+/// workers or multi-open paths still rely on the var; do not `remove_var` here.
+/// Prefer OS-scoped secrets for multi-user hosts; env is a convenience for solo/offline.
+///
+/// **Residual (D-0063-05):** Desk UI passphrase widgets remain plain `String`
+/// (egui TextEdit); cleared after submit but heap residue is residual.
+pub fn passphrase_from_env() -> Option<Zeroizing<String>> {
+    let mut raw = std::env::var(ENV_MATTER_PASSPHRASE).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        raw.zeroize();
+        return None;
+    }
+    // Own a trimmed copy under Zeroizing; wipe the env-var String buffer.
+    let owned = Zeroizing::new(trimmed.to_string());
+    raw.zeroize();
+    Some(owned)
 }
 
 /// Derive DEK from passphrase + header; fail closed on wrong password.

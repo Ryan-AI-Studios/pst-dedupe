@@ -204,7 +204,9 @@ pub fn reason_from_pst_error(err: &pst_reader::PstError) -> IntegrityReason {
         | PstError::InvalidHnSignature(_)
         | PstError::InvalidBthType(_)
         | PstError::InvalidHid(_)
-        | PstError::InvalidUtf16 => IntegrityReason::InvalidStructure,
+        | PstError::InvalidUtf16
+        | PstError::ResourceLimit(_)
+        | PstError::BtreeCycle { .. } => IntegrityReason::InvalidStructure,
         PstError::PropertyNotFound(_) | PstError::PropertyTypeMismatch { .. } => {
             IntegrityReason::PropertyError
         }

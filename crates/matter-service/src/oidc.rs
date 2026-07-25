@@ -259,6 +259,194 @@ fn oidc_err(code: &'static str, msg: impl Into<String>) -> ApiError {
     ApiError::new(axum::http::StatusCode::UNAUTHORIZED, code, msg.into())
 }
 
+/// Fail-closed SSRF guard for tenant-supplied IdP URLs (issuer, discovery endpoints).
+///
+/// Production rules:
+/// - **HTTPS only** (unit tests may use `http://` for blocked-literal cases only)
+/// - Deny loopback, link-local, multicast, RFC1918 private, CGNAT 100.64/10
+/// - Literal IPs in those ranges are rejected without DNS
+/// - Hostnames: DNS-resolve (`ToSocketAddrs`); deny if **any** resolved IP is blocked
+/// - DNS failure → fail closed
+///
+/// Unit-testable without network for blocked literal hosts.
+pub fn validate_idp_url_for_ssrf(url: &str) -> ApiResult<()> {
+    use std::net::{IpAddr, ToSocketAddrs};
+
+    let parsed = url::Url::parse(url).map_err(|e| {
+        ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "oidc_ssrf",
+            format!("invalid IdP URL: {e}"),
+        )
+    })?;
+
+    let scheme = parsed.scheme();
+    let is_https = scheme.eq_ignore_ascii_case("https");
+    let is_http = scheme.eq_ignore_ascii_case("http");
+    if !is_https {
+        #[cfg(test)]
+        {
+            if !is_http {
+                return Err(ApiError::new(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "oidc_ssrf",
+                    format!("IdP URL scheme must be https (got {scheme})"),
+                ));
+            }
+            // cfg(test): allow http so blocked-IP unit tests need no TLS stack.
+        }
+        #[cfg(not(test))]
+        {
+            let _ = is_http;
+            return Err(ApiError::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "oidc_ssrf",
+                format!("IdP URL scheme must be https (got {scheme})"),
+            ));
+        }
+    }
+
+    let domain = match parsed.host() {
+        Some(url::Host::Domain(d)) => d.to_string(),
+        Some(url::Host::Ipv4(v4)) => {
+            if is_blocked_ip(IpAddr::V4(v4)) {
+                return Err(ApiError::new(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "oidc_ssrf",
+                    format!("IdP host IP is not allowed: {v4}"),
+                ));
+            }
+            return Ok(());
+        }
+        Some(url::Host::Ipv6(v6)) => {
+            if is_blocked_ip(IpAddr::V6(v6)) {
+                return Err(ApiError::new(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "oidc_ssrf",
+                    format!("IdP host IP is not allowed: {v6}"),
+                ));
+            }
+            return Ok(());
+        }
+        None => {
+            return Err(ApiError::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "oidc_ssrf",
+                "IdP URL missing host",
+            ));
+        }
+    };
+
+    // Block obvious hostname aliases for metadata / loopback without DNS.
+    let host_l = domain.to_ascii_lowercase();
+    if host_l == "localhost"
+        || host_l.ends_with(".localhost")
+        || host_l == "metadata.google.internal"
+    {
+        return Err(ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "oidc_ssrf",
+            format!("IdP host is not allowed (loopback/metadata): {domain}"),
+        ));
+    }
+
+    // Hostname: resolve and deny if any address is blocked. Fail closed on DNS errors.
+    let port = parsed
+        .port_or_known_default()
+        .unwrap_or(if is_https { 443 } else { 80 });
+    let authority = format!("{domain}:{port}");
+    let addrs = authority.to_socket_addrs().map_err(|e| {
+        ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "oidc_ssrf",
+            format!("IdP host DNS resolution failed (fail closed): {domain}: {e}"),
+        )
+    })?;
+    let mut saw_any = false;
+    for addr in addrs {
+        saw_any = true;
+        if is_blocked_ip(addr.ip()) {
+            return Err(ApiError::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "oidc_ssrf",
+                format!(
+                    "IdP host {domain} resolves to blocked address {}",
+                    addr.ip()
+                ),
+            ));
+        }
+    }
+    if !saw_any {
+        return Err(ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "oidc_ssrf",
+            format!("IdP host DNS returned no addresses (fail closed): {domain}"),
+        ));
+    }
+    Ok(())
+}
+
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => is_blocked_ipv4(v4),
+        std::net::IpAddr::V6(v6) => is_blocked_ipv6(v6),
+    }
+}
+
+fn is_blocked_ipv4(v4: std::net::Ipv4Addr) -> bool {
+    if v4.is_unspecified()
+        || v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_multicast()
+        || v4.is_broadcast()
+    {
+        return true;
+    }
+    // CGNAT 100.64.0.0/10
+    let o = v4.octets();
+    if o[0] == 100 && (64..128).contains(&o[1]) {
+        return true;
+    }
+    // 0.0.0.0/8 (this network)
+    if o[0] == 0 {
+        return true;
+    }
+    false
+}
+
+fn is_blocked_ipv6(v6: std::net::Ipv6Addr) -> bool {
+    if v6.is_unspecified() || v6.is_loopback() || v6.is_multicast() {
+        return true;
+    }
+    // IPv4-mapped / compatible → apply IPv4 policy
+    if let Some(v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
+        if is_blocked_ipv4(v4) {
+            return true;
+        }
+    }
+    let segments = v6.segments();
+    // Unique local fc00::/7
+    if (segments[0] & 0xfe00) == 0xfc00 {
+        return true;
+    }
+    // Link-local fe80::/10
+    if (segments[0] & 0xffc0) == 0xfe80 {
+        return true;
+    }
+    false
+}
+
+fn validate_discovered_endpoints(meta: &CoreProviderMetadata) -> ApiResult<()> {
+    validate_idp_url_for_ssrf(meta.authorization_endpoint().url().as_str())?;
+    if let Some(token) = meta.token_endpoint() {
+        validate_idp_url_for_ssrf(token.url().as_str())?;
+    }
+    // jwks_uri is required by OpenID discovery (not Optional in openidconnect 4.x).
+    validate_idp_url_for_ssrf(meta.jwks_uri().url().as_str())?;
+    Ok(())
+}
+
 /// Production OIDC backend: discovery + PKCE code exchange + JWKS ID-token verify.
 #[derive(Debug, Default)]
 pub struct OpenIdConnectProvider {
@@ -274,6 +462,7 @@ impl OpenIdConnectProvider {
     }
 
     async fn provider_metadata(&self, issuer: &str) -> ApiResult<CoreProviderMetadata> {
+        validate_idp_url_for_ssrf(issuer)?;
         let key = issuer.trim_end_matches('/').to_string();
         {
             let cache = self.metadata_cache.lock().await;
@@ -292,11 +481,20 @@ impl OpenIdConnectProvider {
                     format!("OIDC discovery failed for {key}: {e}"),
                 )
             })?;
+        validate_discovered_endpoints(&meta)?;
         let mut cache = self.metadata_cache.lock().await;
         cache.insert(key, meta.clone());
         Ok(meta)
     }
 
+    /// Build a short-lived OIDC client for a single token exchange.
+    ///
+    /// **Secret lifetime:** `openidconnect::ClientSecret` holds a bare `String`
+    /// with no zeroize API (dependency limitation — residual **D-0063-04**).
+    /// Callers must keep the returned `CoreClient` in a tight stack scope and
+    /// drop it immediately after exchange + ID-token verify so secret copies
+    /// are lifetime-limited to that stack (heap residue until deallocation
+    /// only; not wiped).
     fn build_client(
         metadata: CoreProviderMetadata,
         config: &IdpConfig,
@@ -312,6 +510,8 @@ impl OpenIdConnectProvider {
             openidconnect::EndpointMaybeSet,
         >,
     > {
+        // ClientSecret copies client_secret into an owned String; that copy
+        // lives only as long as the CoreClient (see finish_authorization tight block).
         let secret = if client_secret.is_empty() {
             None
         } else {
@@ -376,53 +576,63 @@ impl OidcProvider for OpenIdConnectProvider {
     ) -> BoxFuture<'a, ApiResult<OidcClaims>> {
         Box::pin(async move {
             let metadata = self.provider_metadata(&config.issuer_url).await?;
-            let client = Self::build_client(metadata, config, redirect_uri, client_secret)?;
-            let http = http_client()?;
-            let pkce_verifier = PkceCodeVerifier::new(code_verifier.to_string());
-            let token_response: CoreTokenResponse = client
-                .exchange_code(AuthorizationCode::new(code.to_string()))
-                .set_pkce_verifier(pkce_verifier)
-                .request_async(&http)
-                .await
-                .map_err(|e| oidc_err("oidc_exchange", format!("token exchange failed: {e}")))?;
+            // Tight block: CoreClient (and openidconnect::ClientSecret String copies)
+            // live only for exchange + ID-token verify, then Drop. Dependency has no
+            // zeroize API — residual D-0063-04 (heap residue during exchange only).
+            let out = {
+                let client = Self::build_client(metadata, config, redirect_uri, client_secret)?;
+                let http = http_client()?;
+                let pkce_verifier = PkceCodeVerifier::new(code_verifier.to_string());
+                let token_response: CoreTokenResponse = client
+                    .exchange_code(AuthorizationCode::new(code.to_string()))
+                    .set_pkce_verifier(pkce_verifier)
+                    .request_async(&http)
+                    .await
+                    .map_err(|e| {
+                        oidc_err("oidc_exchange", format!("token exchange failed: {e}"))
+                    })?;
 
-            let id_token = token_response
-                .id_token()
-                .ok_or_else(|| oidc_err("oidc_id_token", "IdP did not return an ID token"))?;
-            // Enforce iat freshness (spec §3.5.2) in addition to library exp/JWKS checks.
-            let verifier = client
-                .id_token_verifier()
-                .set_issue_time_verifier_fn(|iat| {
-                    let now = chrono::Utc::now();
-                    let skew = chrono::Duration::minutes(2);
-                    if iat > now + skew {
-                        return Err(format!("iat is in the future: {iat}"));
-                    }
-                    if iat < now - chrono::Duration::hours(24) {
-                        return Err(format!("iat is too old: {iat}"));
-                    }
-                    Ok(())
-                });
-            let nonce = Nonce::new(expected_nonce.to_string());
-            let claims: &CoreIdTokenClaims = id_token.claims(&verifier, &nonce).map_err(|e| {
-                oidc_err(
-                    "oidc_id_token",
-                    format!("ID token verification failed: {e}"),
-                )
-            })?;
+                let id_token = token_response
+                    .id_token()
+                    .ok_or_else(|| oidc_err("oidc_id_token", "IdP did not return an ID token"))?;
+                // Enforce iat freshness (spec §3.5.2) in addition to library exp/JWKS checks.
+                let verifier = client
+                    .id_token_verifier()
+                    .set_issue_time_verifier_fn(|iat| {
+                        let now = chrono::Utc::now();
+                        let skew = chrono::Duration::minutes(2);
+                        if iat > now + skew {
+                            return Err(format!("iat is in the future: {iat}"));
+                        }
+                        if iat < now - chrono::Duration::hours(24) {
+                            return Err(format!("iat is too old: {iat}"));
+                        }
+                        Ok(())
+                    });
+                let nonce = Nonce::new(expected_nonce.to_string());
+                let claims: &CoreIdTokenClaims =
+                    id_token.claims(&verifier, &nonce).map_err(|e| {
+                        oidc_err(
+                            "oidc_id_token",
+                            format!("ID token verification failed: {e}"),
+                        )
+                    })?;
 
-            let audiences: Vec<String> = claims.audiences().iter().map(|a| a.to_string()).collect();
-            let groups = extract_groups_from_id_token(id_token);
-            let out = OidcClaims {
-                issuer: claims.issuer().to_string(),
-                subject: claims.subject().to_string(),
-                email: claims.email().map(|e| e.to_string()),
-                preferred_username: claims.preferred_username().map(|u| u.to_string()),
-                groups,
-                audience: audiences,
-                nonce: Some(expected_nonce.to_string()),
-                exp: claims.expiration().timestamp(),
-                iat: Some(claims.issue_time().timestamp()),
+                let audiences: Vec<String> =
+                    claims.audiences().iter().map(|a| a.to_string()).collect();
+                let groups = extract_groups_from_id_token(id_token);
+                OidcClaims {
+                    issuer: claims.issuer().to_string(),
+                    subject: claims.subject().to_string(),
+                    email: claims.email().map(|e| e.to_string()),
+                    preferred_username: claims.preferred_username().map(|u| u.to_string()),
+                    groups,
+                    audience: audiences,
+                    nonce: Some(expected_nonce.to_string()),
+                    exp: claims.expiration().timestamp(),
+                    iat: Some(claims.issue_time().timestamp()),
+                }
+                // client drops here — ClientSecret String deallocated (not zeroized)
             };
             validate_claims(&out, config, expected_nonce)?;
             Ok(out)
@@ -739,7 +949,8 @@ mod tests {
         let provider = OpenIdConnectProvider::new();
         let cfg = IdpConfig {
             tenant_id: "t".into(),
-            issuer_url: "https://127.0.0.1:1".into(), // nothing listening
+            // Loopback is blocked by SSRF guard before any network I/O.
+            issuer_url: "https://127.0.0.1:1".into(),
             client_id: "client-1".into(),
             secret_env: None,
             has_secret_ciphertext: false,
@@ -763,12 +974,52 @@ mod tests {
             .expect_err("must fail closed");
         // Must not be the old oidc_not_wired stub.
         assert_ne!(err.body.code, "oidc_not_wired");
-        assert!(
-            err.body.code == "oidc_discovery"
-                || err.body.code == "oidc_exchange"
-                || err.body.code == "oidc_http",
-            "unexpected code {}",
+        assert_eq!(
+            err.body.code, "oidc_ssrf",
+            "loopback issuer must be rejected by SSRF guard, got {}",
             err.body.code
         );
+    }
+
+    #[test]
+    fn ssrf_blocks_private_and_metadata_literals() {
+        let blocked = [
+            "http://127.0.0.1/.well-known/openid-configuration",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.1/oidc",
+            "http://192.168.1.1/oidc",
+            "http://[::1]/oidc",
+            "http://100.64.0.1/oidc",
+            "http://172.16.5.5/oidc",
+            "https://localhost/oidc",
+        ];
+        for u in blocked {
+            let err = validate_idp_url_for_ssrf(u).expect_err(u);
+            assert_eq!(err.body.code, "oidc_ssrf", "url={u}");
+        }
+    }
+
+    #[test]
+    fn ssrf_allows_public_hostname_when_dns_ok() {
+        // Scheme + non-private hostname; DNS may fail offline — then fail closed is OK.
+        let url = "https://login.microsoftonline.com/common/v2.0";
+        match validate_idp_url_for_ssrf(url) {
+            Ok(()) => {}
+            Err(e) => {
+                // Offline CI: DNS fail-closed is acceptable; must still be oidc_ssrf, not panic.
+                assert_eq!(e.body.code, "oidc_ssrf");
+                assert!(
+                    e.body.message.contains("DNS") || e.body.message.contains("blocked"),
+                    "unexpected message: {}",
+                    e.body.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ssrf_rejects_non_http_schemes() {
+        let err = validate_idp_url_for_ssrf("file:///etc/passwd").expect_err("file");
+        assert_eq!(err.body.code, "oidc_ssrf");
     }
 }

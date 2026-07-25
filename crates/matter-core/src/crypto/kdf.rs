@@ -23,6 +23,17 @@ impl Dek {
     }
 }
 
+#[cfg(test)]
+mod zeroize_tests {
+    use super::*;
+
+    #[test]
+    fn dek_implements_zeroize_on_drop() {
+        fn assert_zod<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zod::<Dek>();
+    }
+}
+
 /// OWASP-ish interactive defaults (19 MiB, t=2, p=1).
 pub const DEFAULT_ARGON2_M_KIB: u32 = 19_456;
 pub const DEFAULT_ARGON2_T: u32 = 2;

@@ -2,7 +2,8 @@
 
 use camino::Utf8Path;
 use matter_core::{
-    passphrase_from_env, Matter, StorageBackendConfig, StorageBackendKind, ENV_MATTER_PASSPHRASE,
+    passphrase_from_env, Matter, StorageBackendConfig, StorageBackendKind, ZeroizingString,
+    ENV_MATTER_PASSPHRASE,
 };
 use serde_json::json;
 
@@ -21,12 +22,13 @@ pub fn matter_create(path: &std::path::Path, name: &str, encrypt: bool, json: bo
     }
     let root = resolve_cli_path_maybe_missing(path)?;
     let matter = if encrypt {
+        // Zeroizing: wipe heap passphrase when create path completes.
         let passphrase = passphrase_from_env().ok_or_else(|| {
             CliError::Usage(format!(
                 "--encrypt requires env {ENV_MATTER_PASSPHRASE} (non-empty)"
             ))
         })?;
-        Matter::create_encrypted(&root, name, &passphrase).map_err(CliError::from)?
+        Matter::create_encrypted(&root, name, passphrase.as_str()).map_err(CliError::from)?
     } else {
         Matter::create(&root, name).map_err(CliError::from)?
     };
@@ -96,37 +98,31 @@ pub fn matter_change_passphrase(path: &std::path::Path, json: bool) -> Result<()
             "matter is not encrypted; change-passphrase is a no-op".into(),
         ));
     }
+    // Zeroizing buffers for old/new/confirm — wiped after rewrap (D-0063 P1).
+    // Env residual remains D-0063-01 (process environment not cleared).
     let old = passphrase_from_env().ok_or_else(|| {
         CliError::Usage(format!(
             "set env {ENV_MATTER_PASSPHRASE} to the current passphrase"
         ))
     })?;
-    let new = std::env::var(ENV_MATTER_NEW_PASSPHRASE)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            CliError::Usage(format!(
-                "set env {ENV_MATTER_NEW_PASSPHRASE} to the new passphrase"
-            ))
-        })?;
-    let confirm = std::env::var(ENV_MATTER_NEW_PASSPHRASE_CONFIRM)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            CliError::Usage(format!(
-                "set env {ENV_MATTER_NEW_PASSPHRASE_CONFIRM} to confirm the new passphrase"
-            ))
-        })?;
-    if confirm != new {
+    let new = read_env_passphrase(ENV_MATTER_NEW_PASSPHRASE)?.ok_or_else(|| {
+        CliError::Usage(format!(
+            "set env {ENV_MATTER_NEW_PASSPHRASE} to the new passphrase"
+        ))
+    })?;
+    let confirm = read_env_passphrase(ENV_MATTER_NEW_PASSPHRASE_CONFIRM)?.ok_or_else(|| {
+        CliError::Usage(format!(
+            "set env {ENV_MATTER_NEW_PASSPHRASE_CONFIRM} to confirm the new passphrase"
+        ))
+    })?;
+    if confirm.as_str() != new.as_str() {
         return Err(CliError::Usage(
             "new passphrase and confirmation do not match".into(),
         ));
     }
-    let matter = Matter::open_with_passphrase(&root, &old, true).map_err(CliError::from)?;
+    let matter = Matter::open_with_passphrase(&root, old.as_str(), true).map_err(CliError::from)?;
     matter
-        .change_passphrase(&old, &new)
+        .change_passphrase(old.as_str(), new.as_str())
         .map_err(CliError::from)?;
     // Explicit seal so rekey durability errors surface (not only Drop).
     matter.seal_encrypted().map_err(CliError::from)?;
@@ -139,6 +135,23 @@ pub fn matter_change_passphrase(path: &std::path::Path, json: bool) -> Result<()
         println!("passphrase changed for matter at {root}");
     }
     Ok(())
+}
+
+/// Read a non-empty trimmed passphrase from an env var into a zeroizing buffer.
+///
+/// Returns `Ok(None)` when unset or empty after trim. Intermediate heap is
+/// zeroized on drop via [`ZeroizingString`] (env map residual: D-0063-01).
+fn read_env_passphrase(var: &str) -> Result<Option<ZeroizingString>> {
+    let Ok(raw) = std::env::var(var) else {
+        return Ok(None);
+    };
+    // Move into Zeroizing first so drop wipes even if we early-return empty.
+    let raw = ZeroizingString::new(raw);
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(ZeroizingString::new(trimmed.to_string())))
 }
 
 /// Resolve and verify a matter root (must contain matter.db or recoverable seal temp).

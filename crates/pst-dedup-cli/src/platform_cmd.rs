@@ -138,7 +138,7 @@ pub fn run_platform(cmd: PlatformCmd) -> Result<ExitCode> {
             let _plat = Platform::create(&path, pmk).map_err(|e| CliError::Msg(e.to_string()))?;
             if print_pmk {
                 let k = generate_pmk();
-                let pmk_hex = hex_encode(&k);
+                let pmk_hex = hex_encode(k.as_bytes());
                 eprintln!("Generated PMK (hex). Set {ENV_PLATFORM_MASTER_KEY} and store securely:");
                 eprintln!("{pmk_hex}");
             }

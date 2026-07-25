@@ -5,12 +5,41 @@
 //! XXBLOCK chains.
 
 use byteorder::{ByteOrder, LittleEndian};
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 
 use super::btree::BbtIndex;
 use super::nid::NodeId;
 use crate::crypto::{self, CryptMethod};
 use crate::error::{PstError, Result};
+
+/// Hard cap on XBLOCK/XXBLOCK assembly size (adversarial `lcbTotal` OOM guard).
+pub const MAX_XBLOCK_ASSEMBLE: usize = 64 * 1024 * 1024;
+
+/// Max recursion depth for subnode BTree walks (SL/SI blocks).
+pub const MAX_SUBNODE_DEPTH: u32 = 32;
+
+/// Record a visit to a subnode block; fail closed on cycle or excessive depth.
+///
+/// Mirrors [`super::btree::enter_btree_page`] for SL/SI walks. Unit-tested
+/// without full page fixtures; production paths call this before reading.
+pub(crate) fn enter_subnode_block(
+    block_id: u64,
+    depth: u32,
+    visited: &mut HashSet<u64>,
+) -> Result<()> {
+    if depth > MAX_SUBNODE_DEPTH {
+        return Err(PstError::ResourceLimit(format!(
+            "subnode depth {depth} exceeds max {MAX_SUBNODE_DEPTH}"
+        )));
+    }
+    if !visited.insert(block_id) {
+        return Err(PstError::BtreeCycle {
+            page_offset: block_id,
+        });
+    }
+    Ok(())
+}
 
 /// A Block ID — references a data or internal block in the BBT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -107,8 +136,12 @@ pub fn read_block_data<R: Read + Seek>(
     } else {
         // Internal block — check type
         // XBLOCK/XXBLOCK: btype=0x01; SLBLOCK/SIBLOCK: btype=0x02
-        if payload.is_empty() {
-            return Ok(Vec::new());
+        // Fail closed on truncated headers (cb < 2) — never panic on crafted PST.
+        if payload.len() < 2 {
+            return Err(PstError::DataTruncated {
+                needed: 2,
+                available: payload.len(),
+            });
         }
 
         let btype = payload[0];
@@ -131,6 +164,16 @@ pub fn read_block_data<R: Read + Seek>(
     }
 }
 
+/// Reject attacker-controlled `lcbTotal` before any preallocation.
+pub(crate) fn check_xblock_assemble_limit(lcb_total: usize) -> Result<()> {
+    if lcb_total > MAX_XBLOCK_ASSEMBLE {
+        return Err(PstError::ResourceLimit(format!(
+            "xblock/xxblock lcbTotal {lcb_total} exceeds max {MAX_XBLOCK_ASSEMBLE}"
+        )));
+    }
+    Ok(())
+}
+
 /// Read and assemble data from an XBLOCK (§2.2.2.8.3.1).
 ///
 /// Layout: btype(1) + cLevel(1) + cEntries(2) + lcbTotal(4) + rgBIDs(8*cEntries)
@@ -149,6 +192,7 @@ fn read_xblock_data<R: Read + Seek>(
 
     let c_entries = LittleEndian::read_u16(&xblock_data[2..4]) as usize;
     let lcb_total = LittleEndian::read_u32(&xblock_data[4..8]) as usize;
+    check_xblock_assemble_limit(lcb_total)?;
 
     let mut result = Vec::with_capacity(lcb_total);
 
@@ -168,6 +212,11 @@ fn read_xblock_data<R: Read + Seek>(
             .ok_or(PstError::BlockNotFound(child_bid.0))?;
         let mut payload = raw[..bbt_entry.cb as usize].to_vec();
         crypto::decrypt_block(&mut payload, crypt, child_bid.0);
+        if result.len().saturating_add(payload.len()) > MAX_XBLOCK_ASSEMBLE {
+            return Err(PstError::ResourceLimit(format!(
+                "xblock assembled size exceeds max {MAX_XBLOCK_ASSEMBLE}"
+            )));
+        }
         result.extend_from_slice(&payload);
     }
 
@@ -192,6 +241,7 @@ fn read_xxblock_data<R: Read + Seek>(
 
     let c_entries = LittleEndian::read_u16(&xxblock_data[2..4]) as usize;
     let lcb_total = LittleEndian::read_u32(&xxblock_data[4..8]) as usize;
+    check_xblock_assemble_limit(lcb_total)?;
 
     let mut result = Vec::with_capacity(lcb_total);
 
@@ -211,6 +261,11 @@ fn read_xxblock_data<R: Read + Seek>(
             .ok_or(PstError::BlockNotFound(child_bid.0))?;
         let xblock_payload = &raw[..bbt_entry.cb as usize];
         let chunk = read_xblock_data(reader, bbt, xblock_payload, crypt)?;
+        if result.len().saturating_add(chunk.len()) > MAX_XBLOCK_ASSEMBLE {
+            return Err(PstError::ResourceLimit(format!(
+                "xxblock assembled size exceeds max {MAX_XBLOCK_ASSEMBLE}"
+            )));
+        }
         result.extend_from_slice(&chunk);
     }
 
@@ -227,9 +282,23 @@ pub fn read_subnode_data<R: Read + Seek>(
     target_nid: NodeId,
     crypt: CryptMethod,
 ) -> Result<Vec<u8>> {
+    let mut visited = HashSet::new();
+    read_subnode_data_at(reader, bbt, sub_bid, target_nid, crypt, 0, &mut visited)
+}
+
+fn read_subnode_data_at<R: Read + Seek>(
+    reader: &mut R,
+    bbt: &BbtIndex,
+    sub_bid: BlockId,
+    target_nid: NodeId,
+    crypt: CryptMethod,
+    depth: u32,
+    visited: &mut HashSet<u64>,
+) -> Result<Vec<u8>> {
     if sub_bid.is_null() {
         return Err(PstError::SubnodeNotFound(target_nid.0));
     }
+    enter_subnode_block(sub_bid.0, depth, visited)?;
 
     // Read the subnode block
     let raw = read_raw_block(reader, bbt, sub_bid)?;
@@ -275,7 +344,15 @@ pub fn read_subnode_data<R: Read + Seek>(
                 let child_bid = BlockId(LittleEndian::read_u64(&payload[offset + 8..offset + 16]));
 
                 // Try this child — if the sub-NID is found, return
-                match read_subnode_data(reader, bbt, child_bid, target_nid, crypt) {
+                match read_subnode_data_at(
+                    reader,
+                    bbt,
+                    child_bid,
+                    target_nid,
+                    crypt,
+                    depth + 1,
+                    visited,
+                ) {
                     Ok(data) => return Ok(data),
                     Err(PstError::SubnodeNotFound(_)) => continue,
                     Err(e) => return Err(e),
@@ -296,9 +373,21 @@ pub fn list_subnode_entries<R: Read + Seek>(
     bbt: &BbtIndex,
     sub_bid: BlockId,
 ) -> Result<Vec<SubnodeEntry>> {
+    let mut visited = HashSet::new();
+    list_subnode_entries_at(reader, bbt, sub_bid, 0, &mut visited)
+}
+
+fn list_subnode_entries_at<R: Read + Seek>(
+    reader: &mut R,
+    bbt: &BbtIndex,
+    sub_bid: BlockId,
+    depth: u32,
+    visited: &mut HashSet<u64>,
+) -> Result<Vec<SubnodeEntry>> {
     if sub_bid.is_null() {
         return Ok(Vec::new());
     }
+    enter_subnode_block(sub_bid.0, depth, visited)?;
 
     let raw = read_raw_block(reader, bbt, sub_bid)?;
     let bbt_entry = bbt.get(sub_bid).ok_or(PstError::BlockNotFound(sub_bid.0))?;
@@ -334,7 +423,8 @@ pub fn list_subnode_entries<R: Read + Seek>(
                     break;
                 }
                 let child_bid = BlockId(LittleEndian::read_u64(&payload[offset + 8..offset + 16]));
-                let mut child_entries = list_subnode_entries(reader, bbt, child_bid)?;
+                let mut child_entries =
+                    list_subnode_entries_at(reader, bbt, child_bid, depth + 1, visited)?;
                 results.append(&mut child_entries);
             }
         }
@@ -361,11 +451,30 @@ pub fn collect_leaf_data_bids<R: Read + Seek>(
     bbt: &BbtIndex,
     bid: BlockId,
 ) -> Result<Vec<BlockId>> {
+    let mut visited = HashSet::new();
+    collect_leaf_data_bids_at(reader, bbt, bid, 0, &mut visited)
+}
+
+fn collect_leaf_data_bids_at<R: Read + Seek>(
+    reader: &mut R,
+    bbt: &BbtIndex,
+    bid: BlockId,
+    depth: u32,
+    visited: &mut HashSet<u64>,
+) -> Result<Vec<BlockId>> {
     if bid.is_null() {
         return Ok(Vec::new());
     }
     if !bid.is_internal() {
         return Ok(vec![bid]);
+    }
+    if depth > MAX_SUBNODE_DEPTH {
+        return Err(PstError::ResourceLimit(format!(
+            "xblock tree depth {depth} exceeds max {MAX_SUBNODE_DEPTH}"
+        )));
+    }
+    if !visited.insert(bid.0) {
+        return Err(PstError::BtreeCycle { page_offset: bid.0 });
     }
 
     let raw = read_raw_block(reader, bbt, bid)?;
@@ -400,7 +509,8 @@ pub fn collect_leaf_data_bids<R: Read + Seek>(
                     break;
                 }
                 let child = BlockId(LittleEndian::read_u64(&payload[bid_offset..bid_offset + 8]));
-                let mut child_leaves = collect_leaf_data_bids(reader, bbt, child)?;
+                let mut child_leaves =
+                    collect_leaf_data_bids_at(reader, bbt, child, depth + 1, visited)?;
                 leaves.append(&mut child_leaves);
             }
             Ok(leaves)
@@ -446,4 +556,147 @@ pub fn find_subnode_entry<R: Read + Seek>(
 /// Round up to 64-byte alignment.
 fn align64(size: usize) -> usize {
     (size + 63) & !63
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::CryptMethod;
+    use std::collections::HashMap;
+    use std::io::Cursor;
+
+    #[test]
+    fn internal_block_truncated_header_errors_not_panic() {
+        // cb=1 → payload len 1; must not index payload[1] (panic).
+        use super::super::btree::{BbtEntry, BbtIndex};
+        use crate::header::Bref;
+
+        // MS-PST: BID is internal when bit 1 (0x2) is set.
+        let bid = BlockId(0x02);
+        assert!(bid.is_internal(), "test BID must be classified internal");
+        let mut file = vec![0x01u8]; // single-byte payload
+        file.resize(64, 0);
+        file.extend_from_slice(&[0u8; 16]);
+
+        let mut bbt_entries = HashMap::new();
+        bbt_entries.insert(
+            bid.0,
+            BbtEntry {
+                bref: Bref { bid: bid.0, ib: 0 },
+                cb: 1,
+                c_ref: 1,
+            },
+        );
+        let bbt = BbtIndex::from_entries_for_test(bbt_entries);
+        let mut cursor = Cursor::new(file);
+        let err = read_block_data(&mut cursor, &bbt, bid, CryptMethod::None)
+            .expect_err("truncated internal header must error");
+        assert!(matches!(
+            err,
+            PstError::DataTruncated {
+                needed: 2,
+                available: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn xblock_huge_lcb_total_rejected_before_alloc() {
+        // Synthetic XBLOCK header: btype=1, clevel=1, cEntries=0, lcbTotal=u32::MAX
+        let mut data = vec![0x01u8, 0x01, 0x00, 0x00];
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let bbt = BbtIndex::from_entries_for_test(HashMap::new());
+        let err = read_xblock_data(&mut cursor, &bbt, &data, CryptMethod::None)
+            .expect_err("must reject huge lcbTotal");
+        assert!(matches!(err, PstError::ResourceLimit(_)));
+    }
+
+    #[test]
+    fn xxblock_huge_lcb_total_rejected_before_alloc() {
+        let mut data = vec![0x01u8, 0x02, 0x00, 0x00];
+        data.extend_from_slice(&(MAX_XBLOCK_ASSEMBLE as u32 + 1).to_le_bytes());
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let bbt = BbtIndex::from_entries_for_test(HashMap::new());
+        let err = read_xxblock_data(&mut cursor, &bbt, &data, CryptMethod::None)
+            .expect_err("must reject huge lcbTotal");
+        assert!(matches!(err, PstError::ResourceLimit(_)));
+    }
+
+    #[test]
+    fn check_xblock_assemble_limit_boundary() {
+        assert!(check_xblock_assemble_limit(MAX_XBLOCK_ASSEMBLE).is_ok());
+        assert!(check_xblock_assemble_limit(MAX_XBLOCK_ASSEMBLE + 1).is_err());
+        assert!(check_xblock_assemble_limit(0).is_ok());
+    }
+
+    #[test]
+    fn enter_subnode_block_detects_cycle() {
+        let mut visited = HashSet::new();
+        enter_subnode_block(0x22, 0, &mut visited).expect("first visit");
+        let err = enter_subnode_block(0x22, 1, &mut visited).expect_err("cycle");
+        assert!(matches!(err, PstError::BtreeCycle { page_offset: 0x22 }));
+    }
+
+    #[test]
+    fn enter_subnode_block_depth_limit() {
+        let mut visited = HashSet::new();
+        let err =
+            enter_subnode_block(0x30, MAX_SUBNODE_DEPTH + 1, &mut visited).expect_err("depth");
+        assert!(matches!(err, PstError::ResourceLimit(_)));
+    }
+
+    #[test]
+    fn enter_subnode_block_allows_distinct_bids() {
+        let mut visited = HashSet::new();
+        for i in 0..8u64 {
+            enter_subnode_block(0x100 + i, i as u32, &mut visited).expect("visit");
+        }
+        assert_eq!(visited.len(), 8);
+    }
+
+    /// Synthetic SIBLOCK that points at itself: public list path must fail closed.
+    #[test]
+    fn list_subnode_entries_detects_self_cycle() {
+        use super::super::btree::{BbtEntry, BbtIndex};
+        use crate::header::Bref;
+
+        const SI_BID: u64 = 0x42; // internal bit not required for subnode walk
+
+        // SIBLOCK: btype=0x02, clevel=0x01, cEntries=1, reserved=0,
+        // entry: nid=1 + child bid = SI_BID (self-loop).
+        let mut siblock = vec![0x02u8, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
+        siblock.extend_from_slice(&1u64.to_le_bytes());
+        siblock.extend_from_slice(&SI_BID.to_le_bytes());
+
+        let mut file = Vec::new();
+        let offset = file.len() as u64;
+        file.extend_from_slice(&siblock);
+        let padded = (siblock.len() + 63) & !63;
+        file.resize(file.len() + (padded - siblock.len()), 0);
+        file.extend_from_slice(&[0u8; 16]); // trailer (CRC/BID warn-only)
+
+        let mut bbt_entries = HashMap::new();
+        bbt_entries.insert(
+            SI_BID,
+            BbtEntry {
+                bref: Bref {
+                    bid: SI_BID,
+                    ib: offset,
+                },
+                cb: siblock.len() as u16,
+                c_ref: 1,
+            },
+        );
+        let bbt = BbtIndex::from_entries_for_test(bbt_entries);
+        let mut cursor = Cursor::new(file);
+        let err = list_subnode_entries(&mut cursor, &bbt, BlockId(SI_BID))
+            .expect_err("self-cycle must fail");
+        assert!(matches!(
+            err,
+            PstError::BtreeCycle {
+                page_offset: SI_BID
+            }
+        ));
+    }
 }
