@@ -8,6 +8,7 @@
 
 mod app;
 mod cluster_ui;
+mod connect;
 mod conversation_ui;
 mod dialogs;
 mod gap_ui;
@@ -19,6 +20,8 @@ mod params;
 mod people_ui;
 mod produce_qc;
 mod progress_ui;
+mod remote_client;
+mod remote_review_ui;
 mod review_body;
 mod review_nav;
 mod review_notes;

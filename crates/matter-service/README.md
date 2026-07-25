@@ -62,23 +62,36 @@ Platform serve:
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/v1/oidc/login?tenant=…` | Start PKCE; `?format=json` for headless/tests |
-| GET | `/v1/oidc/callback?code&state` | Exchange + issue bearer |
+| GET | `/v1/oidc/login?tenant=…` | Start PKCE; `?format=json` for headless/tests; optional `handoff_url` (loopback only) |
+| GET | `/v1/oidc/callback?code&state` | Exchange + issue bearer; with handoff → redirect one-time code to Desk loopback |
+| POST | `/v1/oidc/exchange` | Redeem one-time handoff code → `LoginResponse` (Desk SSO, track **0064**) |
 | POST | `/v1/logout` | Session kill + lock release |
 | POST | `/v1/oidc/logout` | Same local effect (IdP RP logout residual) |
 | GET | `/v1/tenants/me` | Current tenant metadata |
 | GET | `/v1/platform/matters` | Tenant-scoped matter list |
 | POST | `/v1/login` | Password login when OIDC not required |
 
+### Desk Connect client (0064)
+
+Native **dedupe-desk** can Connect as a multi-user client:
+
+1. Operator starts this service on the host (loopback default).
+2. Desk **Connect** dialog: `GET /healthz` then `POST /v1/login` (or SSO handoff).
+3. Thin review: `GET /v1/items`, `GET /v1/items/{id}/body`, `POST /v1/items/{id}/codes` with `expected_version`.
+4. Session actor is the bearer only — clients must not send body `actor` (ignored if present).
+5. SSO: Desk binds `127.0.0.1:ephemeral`, opens system browser to `/v1/oidc/login?handoff_url=…`, redeems code via `/v1/oidc/exchange`. IdP `redirect_uri` remains the service callback only.
+
+Produce and process-runner jobs stay on the **host** (Solo Desk or CLI) — this API does not expose produce.
+
 ## Honesty / scale
 
 Designed for small concurrent review teams (≈≤10) on **local disk** SQLite. Do not host the matter database on a network filesystem. Multi-matter single process and cloud backends are residual / later tracks (**D-0058-08** / **0061**).
 
-## Residuals (D-0059-*)
+## Residuals (D-0059-* / D-0064-*)
 
 - SAML 2.0
-- Desk browser “Sign in with SSO” UX (builds on D-0058-01 Connect)
 - IdP RP-initiated / back-channel logout (local logout + lock release is P0)
 - Per-tenant matter CMK / external KMS (`TenantKeyProvider` stub only)
 - Multi-matter single process host (D-0058-08)
 - SCIM provisioning; Postgres platform DB
+- Full remote Desk parity; custom URI scheme SSO; durable multi-instance handoff codes

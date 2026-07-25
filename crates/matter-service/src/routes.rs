@@ -31,6 +31,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/logout", post(logout))
         .route("/v1/oidc/login", get(oidc_login))
         .route("/v1/oidc/callback", get(oidc_callback))
+        .route("/v1/oidc/exchange", post(oidc_exchange))
         .route("/v1/oidc/logout", post(logout))
         .route("/v1/tenants/me", get(tenants_me))
         .route("/v1/platform/matters", get(platform_matters))
@@ -266,6 +267,13 @@ struct OidcLoginQuery {
     /// When `json` or Accept: application/json, return authorize URL as JSON (tests/headless).
     format: Option<String>,
     redirect_uri: Option<String>,
+    /// Desk loopback post-auth handoff (track 0064). Loopback-only; path `/connect/callback`.
+    handoff_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcExchangeRequest {
+    code: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -352,6 +360,19 @@ async fn oidc_login(
         crate::oidc::assert_redirect_allowed(&ps.public_base, req)?;
     }
 
+    // Optional Desk loopback handoff (0064). Never accept non-loopback open redirects.
+    let handoff_url = if let Some(h) = q
+        .handoff_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        crate::oidc::assert_loopback_handoff_url(h)?;
+        Some(h.to_string())
+    } else {
+        None
+    };
+
     let expires = chrono::Utc::now() + chrono::Duration::seconds(600);
     platform
         .store_oidc_pending(
@@ -373,6 +394,7 @@ async fn oidc_login(
                 nonce: nonce.clone(),
                 redirect_uri: redirect_uri.clone(),
                 expires_at: expires,
+                handoff_url: handoff_url.clone(),
             },
         );
     }
@@ -414,7 +436,7 @@ struct OidcCallbackQuery {
 async fn oidc_callback(
     State(state): State<AppState>,
     Query(q): Query<OidcCallbackQuery>,
-) -> ApiResult<Json<LoginResponse>> {
+) -> ApiResult<Response> {
     let ps = state.platform.as_ref().ok_or_else(|| {
         ApiError::new(
             StatusCode::NOT_FOUND,
@@ -454,7 +476,8 @@ async fn oidc_callback(
         // Best-effort delete even when memory already held the state.
         platform.take_oidc_pending(state_tok).ok()
     };
-    let (tenant_id, code_verifier, nonce, redirect_uri) = if let Some(p) = pending_mem {
+    let (tenant_id, code_verifier, nonce, redirect_uri, handoff_url) = if let Some(p) = pending_mem
+    {
         if p.expires_at < chrono::Utc::now() {
             return Err(ApiError::new(
                 StatusCode::UNAUTHORIZED,
@@ -462,9 +485,16 @@ async fn oidc_callback(
                 "OIDC state expired",
             ));
         }
-        (p.tenant_id, p.code_verifier, p.nonce, p.redirect_uri)
+        (
+            p.tenant_id,
+            p.code_verifier,
+            p.nonce,
+            p.redirect_uri,
+            p.handoff_url,
+        )
     } else if let Some(p) = pending_db {
         // platform OidcPending stores expires_at as RFC3339 string.
+        // Handoff is memory-only for P0 (pending was started in this process).
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         if p.expires_at.as_str() <= now.as_str() {
             return Err(ApiError::new(
@@ -473,7 +503,7 @@ async fn oidc_callback(
                 "OIDC state expired",
             ));
         }
-        (p.tenant_id, p.code_verifier, p.nonce, p.redirect_uri)
+        (p.tenant_id, p.code_verifier, p.nonce, p.redirect_uri, None)
     } else {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
@@ -546,10 +576,89 @@ async fn oidc_callback(
     let matter = state.gate.lock().await;
     let issue = complete_oidc_login(&platform, &matter, &tenant_id, &claims)?;
     let _ = q.format; // reserved for future HTML vs JSON
-    Ok(Json(LoginResponse {
+
+    let login = LoginResponse {
         token: issue.token,
         user: issue.user.into(),
         expires_at: issue.expires_at,
+    };
+
+    // Desk loopback handoff: issue one-time code; do not put long-lived bearer in the URL.
+    if let Some(handoff) = handoff_url {
+        crate::oidc::assert_loopback_handoff_url(&handoff)?;
+        let exchange_code = crate::oidc::random_urlsafe(32);
+        let handoff_ttl = chrono::Utc::now() + chrono::Duration::seconds(120);
+        {
+            let mut codes = ps.oidc.handoff_codes.lock().await;
+            // Opportunistic purge of expired codes.
+            codes.retain(|_, v| v.expires_at > chrono::Utc::now());
+            codes.insert(
+                exchange_code.clone(),
+                crate::oidc::HandoffCode {
+                    token: login.token.clone(),
+                    user_id: login.user.id.clone(),
+                    display_name: login.user.display_name.clone(),
+                    role: login.user.role.clone(),
+                    expires_at: handoff_ttl,
+                    session_expires_at: login.expires_at.clone(),
+                },
+            );
+        }
+        let sep = if handoff.contains('?') { '&' } else { '?' };
+        let dest = format!("{handoff}{sep}code={exchange_code}");
+        return Ok(Redirect::temporary(&dest).into_response());
+    }
+
+    Ok(Json(login).into_response())
+}
+
+/// Redeem a one-time Desk SSO handoff code for a session (`LoginResponse`).
+async fn oidc_exchange(
+    State(state): State<AppState>,
+    Json(body): Json<OidcExchangeRequest>,
+) -> ApiResult<Json<LoginResponse>> {
+    let ps = state.platform.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "platform mode not enabled",
+        )
+    })?;
+    let code = body.code.trim();
+    if code.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "missing_code",
+            "exchange code is required",
+        ));
+    }
+    let entry = {
+        let mut codes = ps.oidc.handoff_codes.lock().await;
+        codes.remove(code)
+    };
+    let Some(entry) = entry else {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_code",
+            "invalid or already-used exchange code",
+        ));
+    };
+    if entry.expires_at < chrono::Utc::now() {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "code_expired",
+            "exchange code expired",
+        ));
+    }
+    Ok(Json(LoginResponse {
+        token: entry.token,
+        user: UserDto {
+            id: entry.user_id,
+            display_name: entry.display_name,
+            role: entry.role,
+            disabled_at: None,
+        },
+        expires_at: entry.session_expires_at,
     }))
 }
 

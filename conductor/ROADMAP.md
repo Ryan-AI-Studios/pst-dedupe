@@ -171,7 +171,7 @@ Desk/CLI should always accept **absolute local paths**. Automated tests use `fix
 |---|---|---|---|---|
 | **0062** | ReleaseHardeningRc | **Completed** | **P0 cons.** | RC 0.2.0-rc.1 freeze; SBOM/PDBs/deny/audit; handoff blocked on codesign. Spec: `0062-ReleaseHardeningRc/`. |
 | **0063** | SecurityRedTeamFixes | **Completed** | **P0 cons.** | Time-boxed red team of 0057–0061 (+ light Series K path safety) + P0/P1 fixes. Spec: `0063-SecurityRedTeamFixes/`. |
-| **0064** | DeskPlatformConnectUx | **Proposed** | **P1 cons.** | Native egui Desk: Connect to matter-service, produce profile picker; closes D-0058-01 / D-0060-02. Spec: `0064-DeskPlatformConnectUx/`. |
+| **0064** | DeskPlatformConnectUx | **Completed** | **P1 cons.** | Native egui Desk: Connect to matter-service (thin review + OCC), Solo produce profile + `bates_start`; soft SSO handoff. Closes D-0058-01 / D-0060-02. Spec: `0064-DeskPlatformConnectUx/`. |
 
 **Order:** 0061 complete → **0062** RC → **0063** security → **0064** Desk UX (0063/0064 can partially overlap after 0062 freeze).
 
@@ -294,7 +294,7 @@ PST₁…PSTₙ ──► Open / Scan (harden) ──► Integrity (no source mu
 32. ~~Series I **`0059`** Multi-tenant + OIDC SSO~~ **done**  
 33. ~~Series I **`0060`** Multi-jurisdiction production profiles~~ **done**  
 34. Series I **`0061`** Cloud blob/job backends (**In Progress**) — Series I final track  
-35. Series J **`0062`** RC hardening → **`0063`** red team → **`0064`** Desk Connect UX (**Proposed**)  
+35. Series J **`0062`** RC hardening → **`0063`** red team → **`0064`** Desk Connect UX (**Completed**)
 36. Series K **`0065`–`0072`** Clean Unique export path (**Proposed** placeholders)
 
 ### Wave 3 — Plugins & platform
@@ -353,7 +353,7 @@ Deferred triage + operator soak       ← real PSTs local-only; bugfix tracks on
 Series K Clean Unique export (CLI)    ← planned product path (0065–0072 Proposed)
 ```
 
-Placeholders: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0064`](0064-DeskPlatformConnectUx/spec.md) · Series K [`0065`](0065-ScanIntegrityReport/spec.md)–[`0072`](0072-DeskUniquePstWizard/spec.md) (**Proposed**).
+Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedTeamFixes/spec.md) **Completed**; [`0064`](0064-DeskPlatformConnectUx/spec.md) **Completed**. Series K [`0065`](0065-ScanIntegrityReport/spec.md)–[`0072`](0072-DeskUniquePstWizard/spec.md) **Completed**.
 
 ### What each step is for
 
@@ -361,7 +361,7 @@ Placeholders: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0064`](0064-DeskPlat
 |---|---|---|
 | **0062 RC** | Tag/version, changelog, golden path (matter→produce offline), mode honesty (solo vs service vs SSO vs cloud **opt-in**), workspace gate green | New features, schema product work, “finish deferred” |
 | **0063 Red team** | Threat model; adversarial tests; fix **P0/P1** on encrypt, multi-user, OIDC, produce integrity, cloud CAS; cargo audit/deny | FedRAMP program, infinite audit, all historical security residuals |
-| **0064 Desk UX** | Connect to matter-service, session actor, produce profile + Bates start in Desk | WASM rewrite, full remote feature parity, portfolio multi-matter UI |
+| **0064 Desk UX** | Connect to matter-service (thin review + OCC), session actor, Solo produce profile + Bates start; soft SSO handoff | WASM rewrite, full remote feature parity, remote produce/jobs API, portfolio multi-matter UI |
 | **Triage + soak** | Close/never noise in deferred; promote 5–10 operator pains; local multi-mailbox smoke | Commit client PSTs |
 | **Series K** | Integrity + keep-set + unique EML first; then multi-track **production PST writer** + report pack | In-place source “repair”; overclaim scanpst; silent fidelity loss; all-messages-in-RAM |
 
