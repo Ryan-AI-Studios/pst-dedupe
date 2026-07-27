@@ -164,6 +164,28 @@ Legacy folders keep `plan.md`/`spec.md`/`tdd.md` as written. **New work uses `##
 
 ---
 
+
+## Series L - Unique export hardening (post-0072 / INC0102784 lessons)
+
+Operator evidence (2026-07-26): multi-mailbox `INC0102784.pst` + `-2.pst` -> unique-pst **3728** msgs, **366** attach fails, ~**108k** page CRC warns, **~275 s** export. Source PSTs stay out of git.
+
+| Track | Status | Summary |
+|---|---|---|
+| [0073-ExportAttachmentFailureLedger](0073-ExportAttachmentFailureLedger/spec.md) | **Completed** | Attach ledger: locus+source_id, reason taxonomy, CSV injection safe, row-cap, non-blocking sink; Codex luna PASS WITH DEFERRED P3 (D-0073-*) |
+| [0074-DeepAttachPreflightFidelity](0074-DeepAttachPreflightFidelity/spec.md) | **Ready** | Budgeted L2 probe; LRU handles; peer-probe cap; level-aware cache; winner-only; shared 0073 reasons; review folds |
+| [0075-KeepSetWinnerPolicies](0075-KeepSetWinnerPolicies/spec.md) | **Ready** | earliest_date + folder-class preference; document first_seen path-order |
+| [0076-ContentHashTierHardening](0076-ContentHashTierHardening/spec.md) | **Ready** | Optional Tier 2.5 full-body hash + cheap size/count gates |
+| [0077-CrcNoiseAndExportRisk](0077-CrcNoiseAndExportRisk/spec.md) | **Ready** | Rate-limit CRC spam; export_risk score; ScanPST/re-export guidance |
+| [0078-UniqueExportExitCodes](0078-UniqueExportExitCodes/spec.md) | **Ready** | Partial-fidelity exit 3 vs hard fail; automation contract |
+| [0079-MaterializeWritePerformance](0079-MaterializeWritePerformance/spec.md) | **Ready** | Phase timers; sticky PST opens; optional parallel materialize; writer buffers |
+| [0080-UniquePstOutlookQc](0080-UniquePstOutlookQc/spec.md) | **Ready** | Post-export QC (folder/attach sample; optional Outlook COM) |
+| [0081-UniqueExportDepsAndOperatorDocs](0081-UniqueExportDepsAndOperatorDocs/spec.md) | **Ready** | Dep pin audit + eDiscovery unique-pst operator runbook |
+
+**Suggested order:** 0073 -> 0074 (fidelity) // 0077 (noise) // 0078 (exits) ; then 0075 policies; 0076 hash; 0079 perf; 0080 QC; 0081 docs anytime after 0073/0077 facts land.
+
+**Maps prior improvement list:**
+1 attach ledger -> 0073 | 2 deep preflight -> 0074 | 3 first_seen/date -> 0075 | 4 tier2 -> 0076 | 5 folder class -> 0075 | 6 near-dup -> use existing 0022/0023 matter jobs (not re-opened here) | 7 CRC noise -> 0077 | 8 exit codes -> 0078 | 9 export risk -> 0077 | 10 multi-volume exists (0070/0071) | 11 Outlook QC -> 0080 | perf -> 0079 | deps/docs -> 0081
+
 ## Notes
 
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.

@@ -84,8 +84,16 @@ fn streaming_small_n_matches_collect_counts() {
 
     let r1 =
         write_unicode_pst(&path_a, msgs.clone(), &[], &WritePstOpts::default()).expect("collect");
-    let r2 = write_unicode_pst_streaming(&path_b, msgs, &[], &WritePstOpts::default(), None, None)
-        .expect("stream");
+    let r2 = write_unicode_pst_streaming(
+        &path_b,
+        msgs,
+        &[],
+        &WritePstOpts::default(),
+        None,
+        None,
+        None,
+    )
+    .expect("stream");
 
     assert_eq!(r1.messages_written, r2.messages_written);
     assert_eq!(r1.folders_created, r2.folders_created);
@@ -225,7 +233,7 @@ fn many_small_messages_reader_count() {
         .map(|i| base_msg(&format!("<m{i}@ex.com>"), &format!("M{i}")))
         .collect();
     let report =
-        write_unicode_pst_streaming(&path, msgs, &[], &WritePstOpts::default(), None, None)
+        write_unicode_pst_streaming(&path, msgs, &[], &WritePstOpts::default(), None, None, None)
             .expect("write");
     assert_eq!(report.messages_written, n);
 
@@ -250,6 +258,7 @@ fn large_body_xblock_round_trip_streaming() {
         std::iter::once(msg),
         &[],
         &WritePstOpts::default(),
+        None,
         None,
         None,
     )
@@ -354,6 +363,7 @@ fn progress_exposes_physical_size_and_stages() {
         &WritePstOpts::default(),
         None,
         Some(&mut sink),
+        None,
     )
     .expect("write");
 
@@ -396,6 +406,7 @@ fn stop_and_finalize_exact_n_openable() {
         &WritePstOpts::default(),
         None,
         Some(&mut sink),
+        None,
     )
     .expect("write");
 
@@ -439,6 +450,7 @@ fn cancel_mid_write_no_final_pst_temp_cleaned() {
         &WritePstOpts::default(),
         None,
         Some(&mut sink),
+        None,
     )
     .expect_err("cancel should error");
     assert!(
@@ -506,6 +518,7 @@ fn stop_on_physical_size_threshold_openable() {
         &WritePstOpts::default(),
         None,
         Some(&mut sink),
+        None,
     )
     .expect("write");
 
@@ -741,6 +754,7 @@ fn streaming_refuses_protected_source() {
         &opts,
         None,
         None,
+        None,
     );
     assert!(err.is_err());
     cleanup(&path);
@@ -835,6 +849,7 @@ fn ci_capped_stress_16mb_attach_stream() {
         &[],
         &WritePstOpts::default(),
         Some(&mut src),
+        None,
         None,
     )
     .expect("write");
@@ -965,6 +980,7 @@ fn one_pass_streaming_no_dto_precollect() {
         &WritePstOpts::default(),
         None,
         Some(&mut sink),
+        None,
     )
     .expect("write");
 

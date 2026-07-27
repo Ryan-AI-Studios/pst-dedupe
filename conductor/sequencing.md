@@ -134,3 +134,17 @@
 
 - Legacy `track001`–`track011` folders remain historical; do not renumber them.
 - If 0024 is delayed, 0025 may promote “all processed non-error items” or “unique-only” as an interim policy — document in 0025 review if so.
+
+## Series L - Unique export hardening (0073-0081)
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0073** Attach failure ledger | **Completed** — locus CSV + reason codes + histogram; unblocks 0074/0077/0081 |
+| 2 | **0074** Deep attach preflight | Budgeted L2 + winner-only; parallelizable with 0077/0078 after 0073 reason freeze |
+| 2b | **0077** CRC noise + risk | Parallel with 0074 |
+| 2c | **0078** Exit codes | Parallel; small CLI contract |
+| 3 | **0075** Winner policies | Independent of attach ledger |
+| 4 | **0076** Tier-2 hardening | After 0065 semantics solid |
+| 5 | **0079** Performance | After fidelity/report stable preferred |
+| 6 | **0080** Outlook QC | After unique-pst stable |
+| 7 | **0081** Deps + runbook | Can draft early; finalize after 0073/0077 |

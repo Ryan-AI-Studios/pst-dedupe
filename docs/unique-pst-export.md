@@ -36,6 +36,8 @@ Source PSTs are **read-only**. The writer never mutates inputs.
 | `--overwrite` | Required to replace existing `--out` / non-empty report-dir |
 | `--verify-hash` | Full-file rehash vs report digests (default **off** for multi-GB comfort) |
 | `--also-eml <dir>` | Soft residual (accepted; co-export may be ignored — see deferred) |
+| `--attach-ledger full\|summary-only\|off` | **0073** — attachment failure ledger (default **`full`**) |
+| `--attach-ledger-max-rows <N>` | Cap on `export_attachments.csv` rows (default **500000**); histogram never truncated |
 | `--json` | Summary JSON on **stdout**; human progress on **stderr** |
 
 ## Multi-volume naming
@@ -64,23 +66,84 @@ If volume *k* fails fatally (disk full, path unwritable, layout hard fail):
 
 ```text
 {report-dir}/
-  summary.json           # unique_export_report_v1
-  decisions.csv          # keep-set decision stream
-  keepset.json           # winners + stats (no bodies)
-  volumes.csv            # one row per completed volume (+ sha256/md5)
-  export_messages.csv    # MANDATORY winner → volume cross-reference
-  integrity.csv          # optional / if requested
+  summary.json              # unique_export_report_v1 (+ 0073 attach histogram fields)
+  decisions.csv             # keep-set decision stream
+  keepset.json              # winners + stats (no bodies)
+  volumes.csv               # one row per completed volume (+ sha256/md5)
+  export_messages.csv       # MANDATORY winner → volume cross-reference
+  export_attachments.csv    # 0073 attach failure ledger (mode=full)
+  integrity.csv             # optional / if requested
 ```
+
+### Sensitivity (handoff)
+
+The entire **`report-dir` is operator-sensitive**: absolute paths, folder names, subjects, and attachment filenames can leak PII or privilege context. Do **not** post report packs to untrusted third parties without redaction. Prefer sharing the summary histogram + reason codes first. Primary join key that avoids path strings: **`source_id`** (0-based index into `summary.inputs`). Optional basename redaction mode is residual (**D-0073-basename**).
+
+### CSV open safety
+
+Free-text cells in `export_attachments.csv` and `export_messages.csv` neutralize spreadsheet formula injection: values whose leading non-space character is `=`, `+`, `-`, or `@` are prefixed with `'` before CSV quoting. Still open CSVs as text when possible; treat the pack as sensitive.
 
 ### `export_messages.csv` (mandatory)
 
-Fixed columns (order locked):
+Fixed columns (prefix locked; **0073** appends one column at the end):
 
 ```text
-source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index
+source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count
 ```
 
 One row per **successfully written** unique winner. **No body text** columns.
+
+`attachments_failed_count` is the number of **fail-severity** attach outcomes for that message on the write path (left-join alternative: count fail rows in `export_attachments.csv` for the same `source_path` + `msg_nid`).
+
+### `export_attachments.csv` (0073; `--attach-ledger=full`)
+
+Streamed / batched via a background writer thread (critical path enqueues only; no fsync-per-row). One row per attach outcome of interest — **never** one row per CRC page.
+
+```text
+source_id,source_path,folder_path,msg_nid,attach_nid,attach_index,filename,size,attach_method,reason_code,severity,volume_path,volume_index,winner_promoted,peer_source_id,peer_msg_nid,message_subject
+```
+
+| Column | Notes |
+|---|---|
+| `source_id` | 0-based index into `summary.inputs` (same order as CLI inputs) |
+| `source_path` | **Same string** as `export_messages.csv` for join |
+| `severity` | `fail` increments `attachments_failed`; `info` does not (policy omit, truncation marker) |
+| `reason_code` | Stable `SCREAMING_SNAKE` — see reason→action below |
+| `winner_promoted` | Always `false` in P0 (Mode A promote residual **D-0073-promote**) |
+
+**Modes:**
+
+| `--attach-ledger` | CSV | Histogram in summary |
+|---|---|---|
+| `full` (default) | Yes | Yes |
+| `summary-only` | No | Yes |
+| `off` | No | No (counts still honest for exit) |
+
+**Row cap:** default 500 000 CSV rows; when hit, one final `ATTACH_LEDGER_TRUNCATED` (`severity=info`) is written, CSV stops, histogram + `attachments_failed` continue, `attachment_ledger_truncated=true`.
+
+### summary.json attach fields (additive v1)
+
+```json
+"export": {
+  "attachments_written": 18609,
+  "attachments_failed": 366,
+  "attachments_omitted_by_policy": 0,
+  "attachments_failed_by_reason": { "ATTACH_STREAM_READ_FAILED": 200 },
+  "attachment_ledger": "export_attachments.csv",
+  "attachment_ledger_mode": "full",
+  "attachment_ledger_truncated": false,
+  "attachment_ledger_rows_written": 366
+}
+```
+
+### Reason → operator action (buckets)
+
+| Bucket | Example codes | Operator action |
+|---|---|---|
+| Corrupt / unreadable | `ATTACH_STREAM_CRC`, `ATTACH_BLOCK_NOT_FOUND`, `ATTACH_DATA_TRUNCATED`, `ATTACH_STREAM_OPEN_FAILED`, `ATTACH_STREAM_READ_FAILED` | Re-export source; ScanPST (external); do **not** claim in-tool repair |
+| Non-portable method | `ATTACH_METHOD_UNSUPPORTED` | EML path, re-export with cloud content, or accept omit |
+| Fidelity limit | `ATTACH_DEPTH_LIMIT`, `ATTACH_EMBEDDED_UNPARSED` | Residual fidelity; peer promote if available (not auto in P0) |
+| Policy | `ATTACH_OMITTED_BY_POLICY` | Expected under `parents_only` — not a fail |
 
 ### Default hash trust vs `--verify-hash`
 
@@ -90,13 +153,19 @@ One row per **successfully written** unique winner. **No body text** columns.
 
 ## Fidelity & residuals
 
-- Writer fidelity: see `docs/pst-writer-fidelity-v1.md` (0068–0070).
+- Writer fidelity: see `docs/pst-writer-fidelity-v1.md` (0068–0070, **0073** reason taxonomy).
 - Operator residual: Outlook / `scanpst.exe` structural check on multi-GB artifacts (not CI DoD).
 - Count invariant (full success): sum of messages across volumes == `keep_set.stats.unique`.
+- **Attach soft-fail invariant:** `export.attachments_failed` == sum of fail-severity ledger accounting (histogram always complete; CSV may be truncated under the row cap).
+- **Promote-on-attach-fail (Mode A):** not shipped in 0073 — default is **Mode C ledger-only** (write best-effort message, ledger fails, `ok=false`). Residual **D-0073-promote**. Write-time mid-message promote is out.
+- **unique-eml:** no attach ledger CSV in this track — residual **D-0073-eml** (operators use unique-pst ledger or re-run unique-eml with pack logs).
+- **GUI:** no attach-ledger UI controls — residual **D-0073-gui** (CLI flags work via shared args).
+- CRC stderr noise is **0077**; ledger is not a dump of page CRCs.
+- Deep attach preflight before export is **0074** (shared reason code strings).
 
 ## Exit honesty
 
-Integrity thresholds, export partials, and verification failures still **flush the report pack** before non-zero exit. With `--json`, the summary is printed on stdout even when `ok` is false.
+Integrity thresholds, export partials, verification failures, and **`attachments_failed > 0`** still **flush the report pack** before non-zero exit (`ok=false`). With `--json`, the summary is printed on stdout even when `ok` is false.
 
 ## GUI wizard (`pst-dedup-gui`, track 0072)
 

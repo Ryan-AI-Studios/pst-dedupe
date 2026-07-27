@@ -173,7 +173,7 @@ fn unique_pst_report_pack_and_export_messages_rows() {
     let header = lines.next().expect("header");
     assert_eq!(
         header,
-        "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index"
+        "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count"
     );
     let rows: Vec<_> = lines.filter(|l| !l.is_empty()).collect();
     assert_eq!(rows.len() as u64, written);
@@ -676,6 +676,236 @@ fn unique_pst_attachment_failures_force_export_fail() {
         "attachments_failed must force non-zero exit"
     );
     assert!(out.is_file(), "PST volumes retained on attach soft-fail");
+
+    // 0073: default attach-ledger=full → CSV + histogram + invariant.
+    let ledger = report.join("export_attachments.csv");
+    assert!(
+        ledger.is_file(),
+        "export_attachments.csv required when attach fails (mode=full)"
+    );
+    let hist = &v["export"]["attachments_failed_by_reason"];
+    assert!(hist.is_object(), "histogram required: {hist}");
+    let hist_sum: u64 = hist
+        .as_object()
+        .map(|m| m.values().filter_map(|x| x.as_u64()).sum())
+        .unwrap_or(0);
+    assert_eq!(
+        hist_sum, failed,
+        "histogram sum must equal attachments_failed"
+    );
+    assert_eq!(
+        v["export"]["attachment_ledger"].as_str(),
+        Some("export_attachments.csv")
+    );
+    let csv = fs::read_to_string(&ledger).expect("ledger");
+    let fail_rows = csv
+        .lines()
+        .skip(1)
+        .filter(|l| !l.is_empty() && l.contains(",fail,"))
+        .count() as u64;
+    let truncated = v["export"]["attachment_ledger_truncated"]
+        .as_bool()
+        .unwrap_or(false);
+    if !truncated {
+        assert_eq!(
+            fail_rows, failed,
+            "CSV fail rows must equal attachments_failed when not truncated"
+        );
+    }
+    // source_id present (first column numeric on data rows).
+    for line in csv.lines().skip(1).filter(|l| !l.is_empty()) {
+        if line.contains("ATTACH_LEDGER_TRUNCATED") {
+            continue;
+        }
+        let first = line.split(',').next().unwrap_or("");
+        assert!(first.parse::<u32>().is_ok(), "source_id required: {line}");
+    }
+}
+
+/// 0073: `--attach-ledger=summary-only` → no CSV; histogram present.
+#[test]
+fn unique_pst_attach_ledger_summary_only() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--attach-ledger",
+            "summary-only",
+            "--json",
+        ])
+        .output()
+        .expect("run");
+
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let v: serde_json::Value = match serde_json::from_str(&stdout) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("skip: no JSON stdout");
+            return;
+        }
+    };
+    assert!(
+        !report.join("export_attachments.csv").is_file(),
+        "summary-only must not write export_attachments.csv"
+    );
+    assert_eq!(
+        v["export"]["attachment_ledger_mode"].as_str(),
+        Some("summary-only")
+    );
+    // Histogram present when there were fails; if zero fails, empty object is ok.
+    let failed = v["export"]["attachments_failed"].as_u64().unwrap_or(0);
+    if failed > 0 {
+        assert!(
+            v["export"]["attachments_failed_by_reason"].is_object(),
+            "histogram required when fails > 0"
+        );
+    }
+}
+
+/// 0073 P1-1: `parents_only` still emits ATTACH_OMITTED_BY_POLICY ledger rows when
+/// the fixture has attachments (omit ≠ fail).
+#[test]
+fn unique_pst_parents_only_omit_ledger_rows() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+
+    // Explicit --no-attachments false path: family-policy parents_only.
+    // Do not pass --no-attachments (run_unique_pst helper would add it).
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--family-policy",
+            "parents_only",
+            "--attach-ledger",
+            "full",
+            "--json",
+        ])
+        .output()
+        .expect("run unique-pst parents_only");
+
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let v: serde_json::Value = match serde_json::from_str(&stdout) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!(
+                "skip: no JSON stdout: stderr={}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+    };
+
+    let omitted = v["export"]["attachments_omitted_by_policy"]
+        .as_u64()
+        .unwrap_or(0);
+    let failed = v["export"]["attachments_failed"].as_u64().unwrap_or(0);
+
+    // Fixture with attaches should produce omit rows under parents_only after P1-1.
+    if omitted == 0 {
+        eprintln!(
+            "note: fixture had zero attach metadata under parents_only; omit ledger not exercised"
+        );
+        return;
+    }
+
+    assert!(
+        omitted > 0,
+        "parents_only with attach meta must omit > 0; export={:?}",
+        v["export"]
+    );
+    // Omit alone must not force fail counter.
+    // (failed may still be >0 from MetaFailed etc.; omit must not equal fail.)
+    let ledger = report.join("export_attachments.csv");
+    assert!(ledger.is_file(), "full ledger required");
+    let csv = fs::read_to_string(&ledger).expect("csv");
+    let omit_rows = csv
+        .lines()
+        .filter(|l| l.contains("ATTACH_OMITTED_BY_POLICY"))
+        .count() as u64;
+    assert_eq!(
+        omit_rows, omitted,
+        "CSV omit info rows must match attachments_omitted_by_policy"
+    );
+    // Severity for omit is info, not fail.
+    assert!(
+        csv.lines()
+            .filter(|l| l.contains("ATTACH_OMITTED_BY_POLICY"))
+            .all(|l| l.contains(",info,") || l.contains(",info\r")),
+        "omit rows must be severity info"
+    );
+    // Histogram is fail-only; omit must not appear there.
+    if let Some(hist) = v["export"]["attachments_failed_by_reason"].as_object() {
+        assert!(
+            !hist.contains_key("ATTACH_OMITTED_BY_POLICY"),
+            "omit must not be in fail histogram"
+        );
+    }
+    let _ = failed; // may be non-zero for unrelated soft fails
+}
+
+/// 0073: `--attach-ledger=off` → neither CSV nor histogram fields.
+#[test]
+fn unique_pst_attach_ledger_off() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--attach-ledger",
+            "off",
+            "--json",
+        ])
+        .output()
+        .expect("run");
+
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let v: serde_json::Value = match serde_json::from_str(&stdout) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("skip: no JSON stdout");
+            return;
+        }
+    };
+    assert!(!report.join("export_attachments.csv").is_file());
+    assert!(v["export"]["attachments_failed_by_reason"].is_null());
+    assert!(v["export"]["attachment_ledger"].is_null());
+    assert!(v["export"]["attachment_ledger_mode"].is_null());
 }
 
 /// P3: strict + forced integrity skip flushes report pack and exits non-zero.

@@ -756,6 +756,16 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | (soft-close) | — | D-0067-gui-keepset | Soft-closed: Unique PST wizard is primary GUI unique export; legacy EML secondary | **0072** |
 | D-0072-operator-gui-smoke | P3 | Full interactive egui click-path smoke for wizard | Unit tests cover args/cancel/log/repaint/preflight; operator interactive residual (same class as other Desk tracks) | operator / polish |
 
+## From track 0073-ExportAttachmentFailureLedger
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0073-promote | P1 | Mode A pre-write promote-on-attach-fail | P0 ships Mode C ledger-only; no write-time mid-message promote | residual / Series L |
+| D-0073-eml | P2 | unique-eml attach skip ledger parity | unique-pst has full ledger; unique-eml soft-skips with counts/tracing only | residual |
+| D-0073-gui | P3 | GUI wizard attach-ledger mode / summary UI | CLI flags default full; GUI uses defaults via UniquePstCliArgs | residual polish |
+| D-0073-basename | P3 | `--ledger-path-mode=full\|basename` handoff redaction | source_id remains join key; must apply to both export_messages + export_attachments if shipped | residual / 0081 |
+| D-0073-vec-events | P3 | Writer still accumulates `attachment_fidelity_events` Vec | CLI uses AttachEventSink for CSV; large fail storms grow Vec until 0079 channel-only path | residual polish |
+
 ## From track 0062-ReleaseHardeningRc
 
 | ID | Severity | Item | Notes | Owner |

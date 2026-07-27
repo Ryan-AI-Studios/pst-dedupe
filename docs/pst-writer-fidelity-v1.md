@@ -82,24 +82,45 @@ IPM_SUBTREE ("Top of Personal Folders")
 | Flat policy | `FolderLayoutPolicy::Flat { folder_display_name }` — all messages in one folder (0068 behavior). |
 | Folder object | Every folder still four-part: PC + hierarchy + contents + assoc-contents. |
 
-### Report counters + per-attachment fidelity events (0069)
+### Report counters + per-attachment fidelity events (0069 / **0073**)
 
 `WritePstReport` adds aggregate counters: `attachments_written`, `attachments_failed`,
 `attachments_omitted_by_policy`, `folders_created`, `embedded_messages_written`,
 `embedded_depth_limit_hits`, **`embedded_unparsed`**, **`folder_paths_residual`**,
 **`folder_paths_degraded`**.
 
-Plus **`attachment_fidelity_events: Vec<AttachmentFidelityEvent>`** — the DoD-8
-per-attachment honesty surface (not stored as MAPI properties on items):
+Plus **`attachment_fidelity_events: Vec<AttachmentFidelityEvent>`** — per-attachment
+honesty surface (not stored as MAPI properties). **0073** expands locus + reason
+taxonomy so every former silent `attachments_failed++` path emits an event.
 
 | Field | Meaning |
 |---|---|
-| `message_subject` | Best-effort identifier of the parent message in the batch |
+| `message_subject` | Display only (not a primary key) |
 | `attach_filename` | Attachment filename as supplied on the DTO |
-| `kind` | `AttachmentFidelityKind::DepthLimitExceeded` or `::EmbeddedUnparsed` |
+| `kind` | `AttachmentFidelityKind` — stable `as_code()` → `SCREAMING_SNAKE` |
+| `source_path` / `folder_path` | Locus (empty if unknown) |
+| `msg_nid` / `attach_nid` / `attach_index` | Joinable identity |
+| `size` / `attach_method` | Best-effort metadata (`attach_method` = −1 if unknown) |
+| `severity` | `Fail` (counts) or `Info` (policy omit; not in `attachments_failed`) |
 
-Events are appended when an embedded attach is skipped for depth limit or missing
-nested content (alongside the matching aggregate counter).
+**Reason codes (`kind.as_code()`):**
+
+| Code | Severity | When |
+|---|---|---|
+| `ATTACH_METHOD_UNSUPPORTED` | fail | method ∉ {1, 5} |
+| `ATTACH_STREAM_OPEN_FAILED` | fail | resolve/open payload None or open err |
+| `ATTACH_STREAM_READ_FAILED` | fail | mid-stream I/O while writing chain |
+| `ATTACH_STREAM_CRC` / `ATTACH_BLOCK_NOT_FOUND` / `ATTACH_DATA_TRUNCATED` / `ATTACH_SIZE_CAP` | fail | reserved when distinguishable |
+| `ATTACH_DEPTH_LIMIT` | fail | was `DepthLimitExceeded` |
+| `ATTACH_EMBEDDED_UNPARSED` | fail | method-5 without nested message |
+| `ATTACH_META_FAILED` | fail | materialize meta (when surfaced) |
+| `ATTACH_OMITTED_BY_POLICY` | **info** | `parents_only` — does **not** increment `attachments_failed` |
+| `ATTACH_UNKNOWN` | fail | last resort |
+| `ATTACH_LEDGER_TRUNCATED` | info | CLI CSV row-cap marker (not a writer fail) |
+
+Optional **`AttachEventSink`** on `write_unicode_pst_streaming` streams events to
+callers (unique-pst mpsc → background CSV). Events always accumulate in the
+report `Vec` for tests. Invariant: fail-severity event count == `attachments_failed`.
 
 ### Tests
 

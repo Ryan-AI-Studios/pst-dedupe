@@ -6,8 +6,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use pst_writer::{
-    write_unicode_pst, write_unicode_pst_with_streams, AttachStreamSource, AttachmentFidelityKind,
-    FolderLayoutPolicy, WriteAttachment, WriteMessage, WritePstOpts,
+    write_unicode_pst, write_unicode_pst_with_streams, AttachRead, AttachStreamSource,
+    AttachmentFidelityKind, FolderLayoutPolicy, WriteAttachment, WriteMessage, WritePstOpts,
 };
 
 fn scratch_path(name: &str) -> PathBuf {
@@ -642,9 +642,18 @@ fn embedded_depth_cap_enforced() {
         report
             .attachment_fidelity_events
             .iter()
-            .any(|e| e.kind == AttachmentFidelityKind::DepthLimitExceeded),
-        "per-attach depth_limit_exceeded event required; events={:?}",
+            .any(|e| e.kind == AttachmentFidelityKind::DepthLimit),
+        "per-attach ATTACH_DEPTH_LIMIT event required; events={:?}",
         report.attachment_fidelity_events
+    );
+    assert!(
+        report
+            .attachment_fidelity_events
+            .iter()
+            .filter(|e| e.kind == AttachmentFidelityKind::DepthLimit)
+            .all(|e| e.severity == pst_writer::AttachEventSeverity::Fail
+                && e.kind.as_code() == "ATTACH_DEPTH_LIMIT"),
+        "depth events must be fail severity with stable code"
     );
 
     cleanup(&path);
@@ -1180,6 +1189,318 @@ fn embedded_unparsed_method_5_without_nested() {
         .expect("per-attach embedded_unparsed event");
     assert_eq!(ev.message_subject, "No nested");
     assert_eq!(ev.attach_filename, "missing.msg");
+    assert_eq!(ev.kind.as_code(), "ATTACH_EMBEDDED_UNPARSED");
+    assert_eq!(ev.severity, pst_writer::AttachEventSeverity::Fail);
+    assert_eq!(ev.attach_method, 5);
+
+    cleanup(&path);
+}
+
+// ── 0073: reason taxonomy + locus events ─────────────────────────────────────
+
+#[test]
+fn method_unsupported_emits_fail_event() {
+    let path = scratch_path("method_unsup");
+    cleanup(&path);
+
+    let mut msg = base_msg("<mu@ex.com>", "Bad method");
+    msg.source_path = Some(r"C:\src\a.pst".into());
+    msg.source_folder_path = Some("Inbox".into());
+    msg.attachments.push(WriteAttachment {
+        filename: "cloud.ref".into(),
+        size: 0,
+        attach_method: Some(4), // not by-value / not embedded
+        data: None,
+        parent_nid: Some(0x100),
+        attach_nid: Some(0x200),
+        source_path: Some(r"C:\src\a.pst".into()),
+        ..Default::default()
+    });
+
+    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    assert_eq!(report.attachments_failed, 1);
+    assert_eq!(report.attachments_written, 0);
+    let fail_events: Vec<_> = report
+        .attachment_fidelity_events
+        .iter()
+        .filter(|e| e.severity == pst_writer::AttachEventSeverity::Fail)
+        .collect();
+    assert_eq!(fail_events.len() as u64, report.attachments_failed);
+    let ev = fail_events
+        .iter()
+        .find(|e| e.kind == AttachmentFidelityKind::MethodUnsupported)
+        .expect("METHOD_UNSUPPORTED event");
+    assert_eq!(ev.kind.as_code(), "ATTACH_METHOD_UNSUPPORTED");
+    assert_eq!(ev.attach_method, 4);
+    assert_eq!(ev.msg_nid, 0x100);
+    assert_eq!(ev.attach_index, 0);
+    assert_eq!(ev.source_path, r"C:\src\a.pst");
+
+    cleanup(&path);
+}
+
+#[test]
+fn stream_open_fail_emits_stream_open_failed() {
+    let path = scratch_path("stream_open_evt");
+    cleanup(&path);
+
+    let mut msg = base_msg("<so@ex.com>", "Open fail");
+    msg.attachments.push(WriteAttachment {
+        filename: "missing.txt".into(),
+        size: 10,
+        attach_method: Some(1),
+        data: None,
+        stream_available: true,
+        parent_nid: Some(9),
+        ..Default::default()
+    });
+
+    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    assert_eq!(report.attachments_failed, 1);
+    let ev = report
+        .attachment_fidelity_events
+        .iter()
+        .find(|e| e.kind == AttachmentFidelityKind::StreamOpenFailed)
+        .expect("STREAM_OPEN_FAILED");
+    assert_eq!(ev.kind.as_code(), "ATTACH_STREAM_OPEN_FAILED");
+    assert_eq!(ev.severity, pst_writer::AttachEventSeverity::Fail);
+    assert_eq!(
+        report
+            .attachment_fidelity_events
+            .iter()
+            .filter(|e| e.severity == pst_writer::AttachEventSeverity::Fail)
+            .count() as u64,
+        report.attachments_failed
+    );
+
+    cleanup(&path);
+}
+
+#[test]
+fn parents_only_omit_info_events_do_not_fail() {
+    let path = scratch_path("parents_only_evt");
+    cleanup(&path);
+
+    let mut msg = base_msg("<po@ex.com>", "Parents only events");
+    msg.attachments.push(WriteAttachment {
+        filename: "x.txt".into(),
+        size: 3,
+        attach_method: Some(1),
+        data: Some(b"xyz".to_vec()),
+        parent_nid: Some(1),
+        ..Default::default()
+    });
+    msg.attachments.push(WriteAttachment {
+        filename: "y.txt".into(),
+        size: 1,
+        attach_method: Some(1),
+        data: Some(b"z".to_vec()),
+        parent_nid: Some(1),
+        ..Default::default()
+    });
+
+    let opts = WritePstOpts {
+        parents_only: true,
+        ..WritePstOpts::default()
+    };
+    let report = write_unicode_pst(&path, vec![msg], &[], &opts).expect("write");
+    assert_eq!(report.attachments_failed, 0);
+    assert_eq!(report.attachments_omitted_by_policy, 2);
+    let omit: Vec<_> = report
+        .attachment_fidelity_events
+        .iter()
+        .filter(|e| e.kind == AttachmentFidelityKind::OmittedByPolicy)
+        .collect();
+    assert_eq!(omit.len(), 2);
+    assert!(omit
+        .iter()
+        .all(|e| e.severity == pst_writer::AttachEventSeverity::Info
+            && e.kind.as_code() == "ATTACH_OMITTED_BY_POLICY"));
+    assert!(
+        report
+            .attachment_fidelity_events
+            .iter()
+            .filter(|e| e.severity == pst_writer::AttachEventSeverity::Fail)
+            .count()
+            == 0
+    );
+
+    cleanup(&path);
+}
+
+/// 0073: `attach_list_failed` emits one ATTACH_META_FAILED and increments attachments_failed.
+#[test]
+fn attach_list_failed_emits_meta_failed() {
+    let path = scratch_path("attach_list_meta");
+    cleanup(&path);
+
+    let mut msg = base_msg("<meta@ex.com>", "Meta failed list");
+    msg.source_path = Some(r"C:\src\mail.pst".into());
+    msg.source_folder_path = Some("Inbox".into());
+    msg.source_msg_nid = Some(0x2004);
+    msg.attach_list_failed = true;
+    // Empty attach list (list_attachments failed) — still one fail event.
+
+    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    assert_eq!(report.attachments_failed, 1);
+    let meta: Vec<_> = report
+        .attachment_fidelity_events
+        .iter()
+        .filter(|e| e.kind == AttachmentFidelityKind::MetaFailed)
+        .collect();
+    assert_eq!(meta.len(), 1);
+    assert_eq!(meta[0].severity, pst_writer::AttachEventSeverity::Fail);
+    assert_eq!(meta[0].msg_nid, 0x2004);
+    assert_eq!(meta[0].attach_method, -1);
+    assert_eq!(meta[0].kind.as_code(), "ATTACH_META_FAILED");
+    assert_eq!(
+        report
+            .attachment_fidelity_events
+            .iter()
+            .filter(|e| e.severity == pst_writer::AttachEventSeverity::Fail)
+            .count() as u64,
+        report.attachments_failed
+    );
+
+    cleanup(&path);
+}
+
+/// 0073: MetaFailed + parents_only omits both appear; omit does not add to failed.
+#[test]
+fn attach_list_failed_with_parents_only_still_fails() {
+    let path = scratch_path("meta_parents_only");
+    cleanup(&path);
+
+    let mut msg = base_msg("<both@ex.com>", "Meta + parents");
+    msg.source_msg_nid = Some(7);
+    msg.attach_list_failed = true;
+    msg.attachments.push(WriteAttachment {
+        filename: "ghost.txt".into(),
+        size: 1,
+        attach_method: Some(1),
+        data: Some(b"x".to_vec()),
+        parent_nid: Some(7),
+        ..Default::default()
+    });
+
+    let opts = WritePstOpts {
+        parents_only: true,
+        ..WritePstOpts::default()
+    };
+    let report = write_unicode_pst(&path, vec![msg], &[], &opts).expect("write");
+    assert_eq!(report.attachments_failed, 1);
+    assert_eq!(report.attachments_omitted_by_policy, 1);
+    assert!(report
+        .attachment_fidelity_events
+        .iter()
+        .any(|e| e.kind == AttachmentFidelityKind::MetaFailed));
+    assert!(report
+        .attachment_fidelity_events
+        .iter()
+        .any(|e| e.kind == AttachmentFidelityKind::OmittedByPolicy));
+
+    cleanup(&path);
+}
+
+#[test]
+fn zero_byte_by_value_still_succeeds() {
+    let path = scratch_path("zero_byte_0073");
+    cleanup(&path);
+
+    let mut msg = base_msg("<zb@ex.com>", "Zero byte");
+    msg.attachments.push(WriteAttachment {
+        filename: "empty.bin".into(),
+        size: 0,
+        attach_method: Some(1),
+        data: Some(Vec::new()),
+        ..Default::default()
+    });
+
+    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    assert_eq!(report.attachments_written, 1);
+    assert_eq!(report.attachments_failed, 0);
+    assert!(report.attachment_fidelity_events.is_empty());
+
+    cleanup(&path);
+}
+
+#[test]
+fn stream_read_fail_emits_stream_read_failed() {
+    use std::io::{self, Read};
+
+    struct FailAfterChunk {
+        sent: bool,
+    }
+    impl Read for FailAfterChunk {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.sent {
+                self.sent = true;
+                let n = buf.len().min(100);
+                buf[..n].fill(0xAB);
+                return Ok(n);
+            }
+            Err(io::Error::other("mid-stream fail"))
+        }
+    }
+    struct FailSrc;
+    impl AttachStreamSource for FailSrc {
+        fn open_attach(
+            &mut self,
+            _: Option<&str>,
+            _: Option<u64>,
+            _: Option<u64>,
+            _: &str,
+        ) -> Result<Option<Vec<u8>>, String> {
+            Ok(None)
+        }
+        fn open_attach_stream(
+            &mut self,
+            _: Option<&str>,
+            _: Option<u64>,
+            _: Option<u64>,
+            _: &str,
+        ) -> Result<Option<AttachRead>, String> {
+            Ok(Some(AttachRead::from_reader(Box::new(FailAfterChunk {
+                sent: false,
+            }))))
+        }
+    }
+
+    let path = scratch_path("stream_read_evt");
+    cleanup(&path);
+    let mut msg = base_msg("<sr@ex.com>", "Stream read fail");
+    msg.attachments.push(WriteAttachment {
+        filename: "x.bin".into(),
+        size: 100_000,
+        attach_method: Some(1),
+        data: None,
+        stream_available: true,
+        parent_nid: Some(3),
+        ..Default::default()
+    });
+    let mut src = FailSrc;
+    let report = write_unicode_pst_with_streams(
+        &path,
+        vec![msg],
+        &[],
+        &WritePstOpts::default(),
+        Some(&mut src),
+    )
+    .expect("write");
+    assert_eq!(report.attachments_failed, 1);
+    assert!(report
+        .attachment_fidelity_events
+        .iter()
+        .any(|e| e.kind == AttachmentFidelityKind::StreamReadFailed
+            && e.kind.as_code() == "ATTACH_STREAM_READ_FAILED"));
+    assert_eq!(
+        report
+            .attachment_fidelity_events
+            .iter()
+            .filter(|e| e.severity == pst_writer::AttachEventSeverity::Fail)
+            .count() as u64,
+        report.attachments_failed
+    );
 
     cleanup(&path);
 }

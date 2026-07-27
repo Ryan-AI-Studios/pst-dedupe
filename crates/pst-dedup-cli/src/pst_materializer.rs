@@ -24,7 +24,7 @@ pub struct PstMaterializer {
     psts: HashMap<String, PstFile>,
     /// When false / parents_only, skip loading attach bytes (metadata list may still be empty).
     load_attach_payloads: bool,
-    /// parents_only: do not list attaches at all for payload purposes.
+    /// parents_only: still list attach metadata for omit ledger rows; never load payloads.
     parents_only: bool,
     /// Soft attach/open warnings (in addition to tracing).
     on_warn: Option<MaterializeWarnCb>,
@@ -200,69 +200,78 @@ impl MessageMaterializer for PstMaterializer {
         };
 
         let mut attachments = Vec::new();
-        // parents_only: empty attachments list (family policy).
-        // KeepAttachmentsWithParent: always list metadata; payloads optional / size-capped.
-        if !parents_only {
-            match pst.list_attachments(nid) {
-                Ok(list) => {
-                    // Cap optional small-payload probe so we never materialize multi-GB Vecs.
-                    const SMALL_ATTACH_CAP: u32 = 64 * 1024;
-                    for att in list {
-                        let mut data = None;
-                        let stream_available = att.size > 0 || !att.filename.is_empty();
-                        if load_payloads && att.size > 0 && att.size <= SMALL_ATTACH_CAP {
-                            match pst.open_attachment_data(nid, att.nid) {
-                                Ok(mut reader) => {
-                                    let mut buf = Vec::new();
-                                    match reader.read_to_end(&mut buf) {
-                                        Ok(_) => data = Some(buf),
-                                        Err(e) => {
-                                            emit_soft(format!(
-                                                "open/read attachment payload failed (soft ATTACH_META_FAILED) nid={:#x} attach_nid={:#x}: {e}",
-                                                locus.nid, att.nid.0
-                                            ));
-                                            if !soft_reasons.contains(
-                                                &dedup_engine::IntegrityReason::AttachMetaFailed,
-                                            ) {
-                                                soft_reasons.push(
-                                                    dedup_engine::IntegrityReason::AttachMetaFailed,
-                                                );
-                                            }
+        // Always list attachment *metadata* (including parents_only) so the writer can emit
+        // ATTACH_OMITTED_BY_POLICY info rows / ATTACH_META_FAILED when list fails.
+        // Payloads are never loaded under parents_only; under keep-with-parent only small
+        // probes are optionally buffered (large streams stay on AttachStreamSource).
+        match pst.list_attachments(nid) {
+            Ok(list) => {
+                // Cap optional small-payload probe so we never materialize multi-GB Vecs.
+                const SMALL_ATTACH_CAP: u32 = 64 * 1024;
+                for att in list {
+                    let mut data = None;
+                    // parents_only: metadata only — writer omits payloads by policy.
+                    let stream_available = if parents_only {
+                        false
+                    } else {
+                        att.size > 0 || !att.filename.is_empty()
+                    };
+                    if !parents_only
+                        && load_payloads
+                        && att.size > 0
+                        && att.size <= SMALL_ATTACH_CAP
+                    {
+                        match pst.open_attachment_data(nid, att.nid) {
+                            Ok(mut reader) => {
+                                let mut buf = Vec::new();
+                                match reader.read_to_end(&mut buf) {
+                                    Ok(_) => data = Some(buf),
+                                    Err(e) => {
+                                        emit_soft(format!(
+                                            "open/read attachment payload failed (soft ATTACH_META_FAILED) nid={:#x} attach_nid={:#x}: {e}",
+                                            locus.nid, att.nid.0
+                                        ));
+                                        if !soft_reasons.contains(
+                                            &dedup_engine::IntegrityReason::AttachMetaFailed,
+                                        ) {
+                                            soft_reasons.push(
+                                                dedup_engine::IntegrityReason::AttachMetaFailed,
+                                            );
                                         }
                                     }
                                 }
-                                Err(e) => {
-                                    emit_soft(format!(
-                                        "open_attachment_data failed (soft ATTACH_META_FAILED) nid={:#x} attach_nid={:#x}: {e}",
-                                        locus.nid, att.nid.0
-                                    ));
-                                    if !soft_reasons
-                                        .contains(&dedup_engine::IntegrityReason::AttachMetaFailed)
-                                    {
-                                        soft_reasons
-                                            .push(dedup_engine::IntegrityReason::AttachMetaFailed);
-                                    }
+                            }
+                            Err(e) => {
+                                emit_soft(format!(
+                                    "open_attachment_data failed (soft ATTACH_META_FAILED) nid={:#x} attach_nid={:#x}: {e}",
+                                    locus.nid, att.nid.0
+                                ));
+                                if !soft_reasons
+                                    .contains(&dedup_engine::IntegrityReason::AttachMetaFailed)
+                                {
+                                    soft_reasons
+                                        .push(dedup_engine::IntegrityReason::AttachMetaFailed);
                                 }
                             }
                         }
-                        attachments.push(CanonicalAttachment {
-                            filename: att.filename,
-                            size: att.size,
-                            mime: att.mime_tag,
-                            data,
-                            stream_available,
-                            attach_nid: Some(att.nid.0),
-                            attach_method: att.attach_method,
-                        });
                     }
+                    attachments.push(CanonicalAttachment {
+                        filename: att.filename,
+                        size: att.size,
+                        mime: att.mime_tag,
+                        data,
+                        stream_available,
+                        attach_nid: Some(att.nid.0),
+                        attach_method: att.attach_method,
+                    });
                 }
-                Err(e) => {
-                    emit_soft(format!(
-                        "list_attachments failed during materialize (soft ATTACH_META_FAILED) nid={:#x}: {e}",
-                        locus.nid
-                    ));
-                    soft_reasons.push(dedup_engine::IntegrityReason::AttachMetaFailed);
-                }
+            }
+            Err(e) => {
+                emit_soft(format!(
+                    "list_attachments failed during materialize (soft ATTACH_META_FAILED) nid={:#x}: {e}",
+                    locus.nid
+                ));
+                soft_reasons.push(dedup_engine::IntegrityReason::AttachMetaFailed);
             }
         }
 
