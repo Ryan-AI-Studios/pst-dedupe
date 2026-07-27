@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use dedup_engine::integrity::ScanMode;
 use dedup_engine::keepset::{FamilyPolicy, KeepPolicy};
 use pst_dedup_cli::paths::{is_same_or_under, is_same_or_under_resolved, paths_equal};
-use pst_dedup_cli::unique_export_report::volume_path_for;
+use pst_dedup_cli::unique_export_report::{
+    volume_path_for, AttachLedgerMode, DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+};
 use pst_dedup_cli::unique_pst_cmd::{FolderLayoutArg, UniquePstCliArgs};
 
 /// Prefer absolute paths from dialogs (canonicalize when the path exists).
@@ -357,6 +359,8 @@ impl UniqueWizardForm {
             allow_failed_files: false,
             integrity_csv: None,
             skip_limit: 10_000,
+            attach_ledger: AttachLedgerMode::Full,
+            attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
         })
     }
 

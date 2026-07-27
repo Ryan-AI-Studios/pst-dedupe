@@ -41,8 +41,9 @@ use crate::pst_materializer::{PstAttachStreamSource, PstMaterializer};
 use crate::scan::{evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions};
 use crate::unique_export_report::{
     default_report_dir, volume_path_for, write_export_messages_csv, write_summary_json,
-    write_volumes_csv, ExportMessageRow, ExportSection, SummaryError, UniqueExportSummary,
-    VerificationReport, VolumeReportRow, VolumeVerification, UNIQUE_EXPORT_REPORT_SCHEMA,
+    write_volumes_csv, AttachLedgerMode, AttachLedgerSink, ExportMessageRow, ExportSection,
+    SummaryError, UniqueExportSummary, VerificationReport, VolumeAttachBuffer, VolumeReportRow,
+    VolumeVerification, DEFAULT_ATTACH_LEDGER_MAX_ROWS, UNIQUE_EXPORT_REPORT_SCHEMA,
 };
 
 /// Max volume index considered for stale-sibling cleanup and collision guards.
@@ -114,6 +115,12 @@ pub struct UniquePstClapArgs {
     pub integrity_csv: Option<PathBuf>,
     #[arg(long, default_value_t = 10_000)]
     pub skip_limit: usize,
+    /// Attachment failure ledger: `full` (default CSV+histogram), `summary-only`, or `off`.
+    #[arg(long = "attach-ledger", default_value = "full", value_parser = parse_attach_ledger_mode_arg)]
+    pub attach_ledger: AttachLedgerMode,
+    /// Max rows written to `export_attachments.csv` (default 500000). Histogram is never truncated.
+    #[arg(long = "attach-ledger-max-rows", default_value_t = DEFAULT_ATTACH_LEDGER_MAX_ROWS)]
+    pub attach_ledger_max_rows: u64,
 }
 
 /// Runtime options for `unique-pst` orchestration.
@@ -143,6 +150,10 @@ pub struct UniquePstCliArgs {
     pub allow_failed_files: bool,
     pub integrity_csv: Option<PathBuf>,
     pub skip_limit: usize,
+    /// Attachment failure ledger mode (0073). Default `full`.
+    pub attach_ledger: AttachLedgerMode,
+    /// Max CSV rows for attach ledger (0073). Default 500_000.
+    pub attach_ledger_max_rows: u64,
 }
 
 /// Run options / hooks for GUI and library callers (0072).
@@ -258,6 +269,8 @@ impl UniquePstClapArgs {
             allow_failed_files: self.allow_failed_files,
             integrity_csv: self.integrity_csv,
             skip_limit: self.skip_limit,
+            attach_ledger: self.attach_ledger,
+            attach_ledger_max_rows: self.attach_ledger_max_rows,
         })
     }
 }
@@ -304,6 +317,11 @@ fn parse_family_policy_arg(s: &str) -> std::result::Result<FamilyPolicy, String>
 
 fn parse_scan_mode_arg(s: &str) -> std::result::Result<ScanMode, String> {
     ScanMode::parse(s).ok_or_else(|| format!("invalid mode '{s}': expected best-effort or strict"))
+}
+
+fn parse_attach_ledger_mode_arg(s: &str) -> std::result::Result<AttachLedgerMode, String> {
+    AttachLedgerMode::parse(s)
+        .ok_or_else(|| format!("invalid attach-ledger '{s}': expected full, summary-only, or off"))
 }
 
 fn parse_rate_threshold_arg(s: &str) -> std::result::Result<f64, String> {
@@ -587,6 +605,12 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
             messages_written_total: 0,
             attachments_written: 0,
             attachments_failed: 0,
+            attachments_omitted_by_policy: None,
+            attachments_failed_by_reason: None,
+            attachment_ledger: None,
+            attachment_ledger_mode: None,
+            attachment_ledger_truncated: None,
+            attachment_ledger_rows_written: None,
             error: Some("cancelled".into()),
             failed_volume_index: None,
         },
@@ -1003,6 +1027,7 @@ pub fn run_unique_pst_with_options(
     let mut export_message_index: u64 = 0;
     let mut attach_written_total: u64 = 0;
     let mut attach_failed_total: u64 = 0;
+    let mut attach_omitted_total: u64 = 0;
     let mut export_partial = false;
     let mut export_error: Option<String> = None;
     let mut failed_volume_index: Option<u32> = None;
@@ -1011,6 +1036,30 @@ pub fn run_unique_pst_with_options(
     let mut messages_written_prior: u64 = 0;
 
     let protected: Vec<PathBuf> = paths.clone();
+    // 0073: attach ledger (histogram always unless off; CSV when full).
+    // Input path strings must match `summary.inputs` / export_messages source_path.
+    let input_path_strings: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    // Ledger init failure with mode != Off is a report-pack error (fail closed).
+    let mut ledger_init_error: Option<String> = None;
+    let mut attach_ledger = match AttachLedgerSink::new(
+        args.attach_ledger,
+        args.attach_ledger_max_rows,
+        &report_dir,
+        &input_path_strings,
+    ) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            let msg = format!("attach ledger init failed: {e}");
+            tracing::warn!("{msg}");
+            emit_log(stderr, &on_log, &format!("warning: {msg}"));
+            if args.attach_ledger != AttachLedgerMode::Off {
+                // Operator requested ledger/histogram — do not silently continue with None.
+                ledger_init_error = Some(msg);
+            }
+            // Off: init can stay None (no CSV/hist expected).
+            None
+        }
+    };
 
     if cancelled {
         export_partial = true;
@@ -1135,6 +1184,14 @@ pub fn run_unique_pst_with_options(
             pos: 0,
         };
 
+        let vol_path_str = vol_path.display().to_string();
+        if let Some(ledger) = attach_ledger.as_mut() {
+            ledger.set_volume(&vol_path_str, volume_index);
+        }
+
+        // Volume-local buffer: only commit attach events after Ok(report) so a hard
+        // volume failure does not pollute CSV / histogram / msg fail counts.
+        let mut vol_attach_buf = VolumeAttachBuffer::new();
         let write_result = write_unicode_pst_streaming(
             &vol_path,
             iter,
@@ -1142,10 +1199,18 @@ pub fn run_unique_pst_with_options(
             &vol_opts,
             Some(&mut adapter),
             Some(&mut sink),
+            Some(&mut vol_attach_buf as &mut dyn pst_writer::AttachEventSink),
         );
 
         match write_result {
             Ok(report) => {
+                // Commit volume attach events into global ledger (if any).
+                if let Some(ledger) = attach_ledger.as_mut() {
+                    vol_attach_buf.commit_into(ledger);
+                } else {
+                    drop(vol_attach_buf);
+                }
+
                 let written = report.messages_written as usize;
                 let exceeded = args
                     .max_volume_bytes
@@ -1156,6 +1221,10 @@ pub fn run_unique_pst_with_options(
                 for i in 0..written {
                     let p = &prepared[start_cursor + i];
                     export_message_index += 1;
+                    let attach_fails = attach_ledger
+                        .as_ref()
+                        .map(|l| l.fail_count_for(&p.source_path, p.nid))
+                        .unwrap_or(0);
                     export_rows.push(ExportMessageRow {
                         source_path: p.source_path.clone(),
                         folder_path: p.folder_path.clone(),
@@ -1163,16 +1232,17 @@ pub fn run_unique_pst_with_options(
                         message_id_norm: p.message_id_norm.clone(),
                         edrm_mih: p.edrm_mih.clone(),
                         content_hash_hex: p.content_hash_hex.clone(),
-                        volume_path: vol_path.display().to_string(),
+                        volume_path: vol_path_str.clone(),
                         volume_index,
                         export_message_index,
+                        attachments_failed_count: attach_fails,
                         subject: p.subject.clone(),
                     });
                 }
 
                 volumes.push(VolumeReportRow {
                     volume_index,
-                    path: vol_path.display().to_string(),
+                    path: vol_path_str,
                     bytes: report.bytes,
                     sha256_hex: report.sha256_hex,
                     md5_hex: report.md5_hex,
@@ -1183,6 +1253,8 @@ pub fn run_unique_pst_with_options(
                 attach_written_total =
                     attach_written_total.saturating_add(report.attachments_written);
                 attach_failed_total = attach_failed_total.saturating_add(report.attachments_failed);
+                attach_omitted_total =
+                    attach_omitted_total.saturating_add(report.attachments_omitted_by_policy);
 
                 cursor = start_cursor + written;
                 messages_written_prior =
@@ -1211,6 +1283,8 @@ pub fn run_unique_pst_with_options(
                 }
             }
             Err(e) => {
+                // Discard volume-local attach events (do not pollute ledger).
+                drop(vol_attach_buf);
                 // §3.3.1: delete incomplete current volume (and temp sibling); keep prior.
                 // Writer TempGuard also deletes staging on cancel/error; this covers
                 // any residual final path and same-dir temp.
@@ -1292,6 +1366,9 @@ pub fn run_unique_pst_with_options(
         winners_total,
     );
     let mut report_write_errors: Vec<String> = Vec::new();
+    if let Some(msg) = ledger_init_error.take() {
+        report_write_errors.push(msg);
+    }
     let mut decision_csv_out: Option<String> = None;
     if let Some(path) = &decision_csv {
         match DecisionCsvWriter::create(path) {
@@ -1338,6 +1415,27 @@ pub fn run_unique_pst_with_options(
         tracing::warn!("{msg}");
         emit_log(stderr, &on_log, &format!("warning: {msg}"));
         report_write_errors.push(msg);
+    }
+
+    // Flush attach ledger (background CSV join) before export_messages / summary.
+    let attach_ledger_finish = match attach_ledger.take() {
+        Some(ledger) => match ledger.finish() {
+            Ok(f) => Some(f),
+            Err(e) => {
+                let msg = format!("attach ledger flush failed: {e}");
+                tracing::warn!("{msg}");
+                emit_log(stderr, &on_log, &format!("warning: {msg}"));
+                report_write_errors.push(msg);
+                None
+            }
+        },
+        None => None,
+    };
+    // Backfill fail counts if export rows were built before a late tally (should already match).
+    if let Some(finish) = attach_ledger_finish.as_ref() {
+        for row in &mut export_rows {
+            row.attachments_failed_count = finish.fail_count_for(&row.source_path, row.nid);
+        }
     }
 
     // export_messages.csv mandatory (always attempt; empty header when zero winners).
@@ -1439,14 +1537,29 @@ pub fn run_unique_pst_with_options(
         report_dir: report_dir.display().to_string(),
         keep_set: keep_set.clone(),
         scan: outcome.summary,
-        export: ExportSection {
-            volumes: volumes.clone(),
-            partial: export_partial || !ok && messages_written_total < keep_set.stats.unique,
-            messages_written_total,
-            attachments_written: attach_written_total,
-            attachments_failed: attach_failed_total,
-            error: export_error.clone(),
-            failed_volume_index,
+        export: {
+            let mut section = ExportSection {
+                volumes: volumes.clone(),
+                partial: export_partial || !ok && messages_written_total < keep_set.stats.unique,
+                messages_written_total,
+                attachments_written: attach_written_total,
+                attachments_failed: attach_failed_total,
+                attachments_omitted_by_policy: Some(attach_omitted_total),
+                attachments_failed_by_reason: None,
+                attachment_ledger: None,
+                attachment_ledger_mode: Some(args.attach_ledger.as_str().to_string()),
+                attachment_ledger_truncated: None,
+                attachment_ledger_rows_written: None,
+                error: export_error.clone(),
+                failed_volume_index,
+            };
+            if let Some(finish) = attach_ledger_finish.as_ref() {
+                finish.apply_to_export_section(&mut section);
+            }
+            // Writer counter is ground truth for omit (ledger Off never tallies
+            // events; full/summary ledger omit should match but prefer writer).
+            section.attachments_omitted_by_policy = Some(attach_omitted_total);
+            section
         },
         verification,
         duration_ms,
@@ -1592,7 +1705,19 @@ fn prepare_winner(
     msg.message_id_norm = entry.message_id_norm.clone();
     msg.content_hash = entry.content_hash;
     msg.edrm_mih_hex = entry.edrm_mih_hex.clone();
-    msg.fidelity = entry.integrity.clone();
+    // Merge re-materialize soft reasons (e.g. ATTACH_META_FAILED) into keep-set integrity
+    // so from_canonical can set attach_list_failed honestly.
+    let mut integrity = entry.integrity.clone();
+    for r in &msg.fidelity.degraded_reasons {
+        if !integrity.degraded_reasons.contains(r) {
+            integrity.degraded_reasons.push(*r);
+            integrity.degraded = true;
+        }
+    }
+    if msg.fidelity.is_orphaned {
+        integrity.is_orphaned = true;
+    }
+    msg.fidelity = integrity;
 
     let (write_msg, _dropped) = from_canonical_message(&msg);
     let content_hash_hex = entry
@@ -2196,6 +2321,8 @@ mod tests {
             allow_failed_files: false,
             integrity_csv: None,
             skip_limit: 10_000,
+            attach_ledger: AttachLedgerMode::Full,
+            attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -2265,6 +2392,8 @@ mod tests {
             allow_failed_files: false,
             integrity_csv: None,
             skip_limit: 10_000,
+            attach_ledger: AttachLedgerMode::Full,
+            attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -2341,6 +2470,8 @@ mod tests {
             allow_failed_files: false,
             integrity_csv: None,
             skip_limit: 10_000,
+            attach_ledger: AttachLedgerMode::Full,
+            attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -2408,6 +2539,8 @@ mod tests {
             allow_failed_files: false,
             integrity_csv: None,
             skip_limit: 10_000,
+            attach_ledger: AttachLedgerMode::Full,
+            attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
         };
         let outcome = run_unique_pst_with_options(
             args,

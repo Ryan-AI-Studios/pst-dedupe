@@ -344,6 +344,11 @@ pub struct WriteMessage {
     pub source_folder_path: Option<String>,
     /// Absolute source PST path (multi-source prefix key).
     pub source_path: Option<String>,
+    /// Source message NID (locus) for attach fidelity events when attach list is empty.
+    pub source_msg_nid: Option<u64>,
+    /// `list_attachments` / attach-meta failed during materialize — emit one
+    /// `ATTACH_META_FAILED` fail event at write time (track 0073).
+    pub attach_list_failed: bool,
 }
 
 /// How user folders are laid out under IPM_SUBTREE (track 0069).
@@ -501,23 +506,130 @@ pub struct WritePstReport {
     pub finalized_early: bool,
 }
 
-/// Kind of per-attachment fidelity honesty event (DoD-8).
+/// Severity of an attachment accounting event (track 0073).
+///
+/// `Fail` increments [`WritePstReport::attachments_failed`]. `Info` does not
+/// (policy omit, ledger truncation marker).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttachmentFidelityKind {
-    /// Nested `ATTACH_EMBEDDED_MSG` halted by `max_embedded_depth`.
-    DepthLimitExceeded,
-    /// Method-5 attach had no extractable nested message (never invented).
-    EmbeddedUnparsed,
+pub enum AttachEventSeverity {
+    Fail,
+    Info,
 }
 
-/// Per-attachment fidelity record identifying the affected message/attach.
+impl AttachEventSeverity {
+    /// Stable lowercase string for CSV / summary (`fail` | `info`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fail => "fail",
+            Self::Info => "info",
+        }
+    }
+}
+
+/// Kind of per-attachment fidelity honesty event (DoD-8 / track 0073).
+///
+/// Stable public API is [`Self::as_code`] / [`Self::as_str`] (`SCREAMING_SNAKE`).
+/// Former two-variant surface (`DepthLimitExceeded`, `EmbeddedUnparsed`) maps to
+/// [`Self::DepthLimit`] and [`Self::EmbeddedUnparsed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentFidelityKind {
+    /// method ∉ {BY_VALUE=1, EMBEDDED_MSG=5}.
+    MethodUnsupported,
+    /// Cannot resolve/open payload (`Ok(None)` / open err).
+    StreamOpenFailed,
+    /// Mid-stream I/O while writing the attach chain.
+    StreamReadFailed,
+    /// CRC mismatch on attach stream (when distinguishable).
+    StreamCrc,
+    /// Block missing on attach path.
+    BlockNotFound,
+    /// Truncated attach data.
+    DataTruncated,
+    /// Documented size cap rejected the attach.
+    SizeCap,
+    /// Nested `ATTACH_EMBEDDED_MSG` halted by `max_embedded_depth`.
+    /// Was `DepthLimitExceeded` (0069).
+    DepthLimit,
+    /// Method-5 attach had no extractable nested message (never invented).
+    EmbeddedUnparsed,
+    /// Materialize/list attach meta failed (align 0065) when surfaced at export.
+    MetaFailed,
+    /// `parents_only` / family omit — severity `info`, not a fail count.
+    OmittedByPolicy,
+    /// Last-resort unclassified soft-fail (should be rare).
+    Unknown,
+    /// CLI ledger CSV row-cap marker (info; not an attach failure itself).
+    LedgerTruncated,
+}
+
+impl AttachmentFidelityKind {
+    /// Stable reason code (`SCREAMING_SNAKE`) for CSV / summary histogram.
+    pub fn as_code(self) -> &'static str {
+        match self {
+            Self::MethodUnsupported => "ATTACH_METHOD_UNSUPPORTED",
+            Self::StreamOpenFailed => "ATTACH_STREAM_OPEN_FAILED",
+            Self::StreamReadFailed => "ATTACH_STREAM_READ_FAILED",
+            Self::StreamCrc => "ATTACH_STREAM_CRC",
+            Self::BlockNotFound => "ATTACH_BLOCK_NOT_FOUND",
+            Self::DataTruncated => "ATTACH_DATA_TRUNCATED",
+            Self::SizeCap => "ATTACH_SIZE_CAP",
+            Self::DepthLimit => "ATTACH_DEPTH_LIMIT",
+            Self::EmbeddedUnparsed => "ATTACH_EMBEDDED_UNPARSED",
+            Self::MetaFailed => "ATTACH_META_FAILED",
+            Self::OmittedByPolicy => "ATTACH_OMITTED_BY_POLICY",
+            Self::Unknown => "ATTACH_UNKNOWN",
+            Self::LedgerTruncated => "ATTACH_LEDGER_TRUNCATED",
+        }
+    }
+
+    /// Alias of [`Self::as_code`].
+    pub fn as_str(self) -> &'static str {
+        self.as_code()
+    }
+
+    /// Default severity for this kind (omit / ledger marker → Info; else Fail).
+    pub fn default_severity(self) -> AttachEventSeverity {
+        match self {
+            Self::OmittedByPolicy | Self::LedgerTruncated => AttachEventSeverity::Info,
+            _ => AttachEventSeverity::Fail,
+        }
+    }
+}
+
+/// Per-attachment fidelity record with locus keys (track 0073).
+///
+/// Subject/filename remain for display; joinable identity is
+/// `source_path` + `msg_nid` + `attach_index` / `attach_nid`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentFidelityEvent {
-    /// Source message subject (best-effort identifier for the batch item).
+    /// Source message subject (display only; not a primary key).
     pub message_subject: String,
     /// Attachment filename as supplied on the DTO.
     pub attach_filename: String,
     pub kind: AttachmentFidelityKind,
+    /// Source PST path (same encoding as export_messages when threaded).
+    pub source_path: String,
+    /// Source folder path (best-effort; empty if unknown).
+    pub folder_path: String,
+    /// Parent message source NID (`parent_nid` / 0 if unknown).
+    pub msg_nid: u64,
+    /// Source attach NID when known.
+    pub attach_nid: Option<u64>,
+    /// 0-based index within the parent message's attach list.
+    pub attach_index: u32,
+    /// Declared or actual size when known.
+    pub size: Option<u64>,
+    /// Raw `PidTagAttachMethod` (MS-OXCMSG); `-1` if unknown.
+    pub attach_method: i32,
+    pub severity: AttachEventSeverity,
+}
+
+/// Streaming sink for attachment accounting events (track 0073).
+///
+/// Critical path must not fsync-per-row: implementations should enqueue/tally
+/// only. CLI wires an mpsc → background CSV writer.
+pub trait AttachEventSink {
+    fn on_attach_event(&mut self, event: &AttachmentFidelityEvent);
 }
 
 /// Mutable counters accumulated during a write (internal).
@@ -535,6 +647,56 @@ struct WriteCounters {
     folder_paths_residual: u64,
     folder_paths_degraded: u64,
     attachment_fidelity_events: Vec<AttachmentFidelityEvent>,
+}
+
+/// Build a locus-bearing attach event from message + attachment DTOs.
+fn make_attach_event(
+    msg: &WriteMessage,
+    attach: &WriteAttachment,
+    attach_index: u32,
+    kind: AttachmentFidelityKind,
+    severity: AttachEventSeverity,
+) -> AttachmentFidelityEvent {
+    let method = attach.attach_method.unwrap_or(-1);
+    let msg_nid = attach.parent_nid.or(msg.source_msg_nid).unwrap_or(0);
+    let size = if attach.size > 0 {
+        Some(u64::from(attach.size))
+    } else {
+        attach.data.as_ref().map(|d| d.len() as u64)
+    };
+    AttachmentFidelityEvent {
+        message_subject: msg.subject.clone(),
+        attach_filename: attach.filename.clone(),
+        kind,
+        source_path: attach
+            .source_path
+            .clone()
+            .or_else(|| msg.source_path.clone())
+            .unwrap_or_default(),
+        folder_path: msg.source_folder_path.clone().unwrap_or_default(),
+        msg_nid,
+        attach_nid: attach.attach_nid,
+        attach_index,
+        size,
+        attach_method: method,
+        severity,
+    }
+}
+
+/// Record an attach event: always push to the Vec; Fail severity increments
+/// `attachments_failed`; optional sink receives a clone-free borrow.
+fn record_attach_event(
+    counters: &mut WriteCounters,
+    event: AttachmentFidelityEvent,
+    sink: &mut Option<&mut dyn AttachEventSink>,
+) {
+    if event.severity == AttachEventSeverity::Fail {
+        counters.attachments_failed = counters.attachments_failed.saturating_add(1);
+    }
+    if let Some(s) = sink.as_mut() {
+        s.on_attach_event(&event);
+    }
+    counters.attachment_fidelity_events.push(event);
 }
 
 /// Map a `CanonicalMessage` (0066 keep-set winner) to the plain `WriteMessage`
@@ -569,6 +731,15 @@ pub fn from_canonical_message(
             embedded_message: None,
         })
         .collect();
+    // Only true list_attachments failure: AttachMetaFailed with an empty list.
+    // Per-attach payload probe soft-fails also push AttachMetaFailed but still
+    // leave metadata rows; those must not synthesize a message-level MetaFailed
+    // (would double-count when the writer later emits STREAM_* for that attach).
+    let attach_list_failed = attachments.is_empty()
+        && msg
+            .fidelity
+            .degraded_reasons
+            .contains(&dedup_engine::IntegrityReason::AttachMetaFailed);
     let write_msg = WriteMessage {
         message_id: msg.message_id.clone(),
         subject: msg.subject.clone().unwrap_or_default(),
@@ -583,6 +754,8 @@ pub fn from_canonical_message(
         attachments,
         source_folder_path: Some(msg.locus.folder_path.clone()),
         source_path: Some(msg.locus.source_path.clone()),
+        source_msg_nid: Some(msg.locus.nid),
+        attach_list_failed,
     };
     (write_msg, 0)
 }
@@ -652,7 +825,8 @@ pub fn write_unicode_pst(
 /// Like [`write_unicode_pst`], with an optional [`AttachStreamSource`] used
 /// **only** when a by-value attach has `data: None`.
 ///
-/// Thin wrapper around [`write_unicode_pst_streaming`] with no progress sink.
+/// Thin wrapper around [`write_unicode_pst_streaming`] with no progress or
+/// attach-event sinks.
 pub fn write_unicode_pst_with_streams(
     path: &Path,
     messages: impl IntoIterator<Item = WriteMessage>,
@@ -660,7 +834,15 @@ pub fn write_unicode_pst_with_streams(
     opts: &WritePstOpts,
     streams: Option<&mut dyn AttachStreamSource>,
 ) -> Result<WritePstReport> {
-    write_unicode_pst_streaming(path, messages, protected_source_paths, opts, streams, None)
+    write_unicode_pst_streaming(
+        path,
+        messages,
+        protected_source_paths,
+        opts,
+        streams,
+        None,
+        None,
+    )
 }
 
 /// Streaming production write: messages are consumed **one at a time** from the
@@ -690,6 +872,7 @@ pub fn write_unicode_pst_streaming(
     opts: &WritePstOpts,
     mut streams: Option<&mut dyn AttachStreamSource>,
     mut progress: Option<&mut dyn WriteProgressSink>,
+    mut attach_event_sink: Option<&mut dyn AttachEventSink>,
 ) -> Result<WritePstReport> {
     check_not_protected_source(path, protected_source_paths)?;
 
@@ -1079,6 +1262,7 @@ pub fn write_unicode_pst_streaming(
             &mut counters,
             0,
             &mut streams,
+            &mut attach_event_sink,
         )?;
         message_nids.push(nid);
         if body_incomplete {
@@ -2236,49 +2420,67 @@ struct WrittenAttach {
 ///   `pc_len + actual_len`.
 /// - **Embedded** nested object is outside the attach PC →
 ///   `pc_len + nested_size`.
-#[allow(clippy::too_many_arguments)] // streams/counters/subject needed for soft-fail fidelity
+#[allow(clippy::too_many_arguments)] // streams/counters/locus needed for soft-fail fidelity
 fn write_one_attachment(
     layout: &mut Layout,
+    msg: &WriteMessage,
     attach: &WriteAttachment,
+    attach_index: u32,
     depth: u32,
     max_depth: u32,
     counters: &mut WriteCounters,
     attach_nid_counter: &mut u32,
     streams: &mut Option<&mut dyn AttachStreamSource>,
-    message_subject: &str,
+    attach_event_sink: &mut Option<&mut dyn AttachEventSink>,
 ) -> Result<Option<WrittenAttach>> {
     let method = attach.attach_method.unwrap_or(ATTACH_BY_VALUE);
 
     // Cloud / reference / OLE — skip soft.
     if method != ATTACH_BY_VALUE && method != ATTACH_EMBEDDED_MSG {
-        counters.attachments_failed += 1;
+        record_attach_event(
+            counters,
+            make_attach_event(
+                msg,
+                attach,
+                attach_index,
+                AttachmentFidelityKind::MethodUnsupported,
+                AttachEventSeverity::Fail,
+            ),
+            attach_event_sink,
+        );
         return Ok(None);
     }
 
     if method == ATTACH_EMBEDDED_MSG {
         if depth >= max_depth {
             counters.embedded_depth_limit_hits += 1;
-            counters.attachments_failed += 1;
-            counters
-                .attachment_fidelity_events
-                .push(AttachmentFidelityEvent {
-                    message_subject: message_subject.to_string(),
-                    attach_filename: attach.filename.clone(),
-                    kind: AttachmentFidelityKind::DepthLimitExceeded,
-                });
+            record_attach_event(
+                counters,
+                make_attach_event(
+                    msg,
+                    attach,
+                    attach_index,
+                    AttachmentFidelityKind::DepthLimit,
+                    AttachEventSeverity::Fail,
+                ),
+                attach_event_sink,
+            );
             return Ok(None);
         }
         let Some(embedded) = attach.embedded_message.as_ref() else {
             // Not extractable — never invent nested content.
             counters.embedded_unparsed += 1;
-            counters.attachments_failed += 1;
-            counters
-                .attachment_fidelity_events
-                .push(AttachmentFidelityEvent {
-                    message_subject: message_subject.to_string(),
-                    attach_filename: attach.filename.clone(),
-                    kind: AttachmentFidelityKind::EmbeddedUnparsed,
-                });
+            record_attach_event(
+                counters,
+                make_attach_event(
+                    msg,
+                    attach,
+                    attach_index,
+                    AttachmentFidelityKind::EmbeddedUnparsed,
+                    AttachEventSeverity::Fail,
+                ),
+                attach_event_sink,
+            );
             return Ok(None);
         };
 
@@ -2295,6 +2497,7 @@ fn write_one_attachment(
             max_depth,
             counters,
             streams,
+            attach_event_sink,
         )?;
 
         let attach_sub_entries = vec![(nested_nid, nested_bid, nested_sub)];
@@ -2343,7 +2546,17 @@ fn write_one_attachment(
 
     // ATTACH_BY_VALUE — resolve without inventing.
     let Some(payload) = resolve_attach_payload(attach, streams) else {
-        counters.attachments_failed += 1;
+        record_attach_event(
+            counters,
+            make_attach_event(
+                msg,
+                attach,
+                attach_index,
+                AttachmentFidelityKind::StreamOpenFailed,
+                AttachEventSeverity::Fail,
+            ),
+            attach_event_sink,
+        );
         return Ok(None);
     };
 
@@ -2379,7 +2592,19 @@ fn write_one_attachment(
             let (bid, total_len) = match layout.write_data_chain_from_reader(&mut reader) {
                 Ok(v) => v,
                 Err(_) => {
-                    counters.attachments_failed += 1;
+                    // WriterError does not yet distinguish CRC/block/truncated on
+                    // this path — map to STREAM_READ_FAILED (0074 may refine).
+                    record_attach_event(
+                        counters,
+                        make_attach_event(
+                            msg,
+                            attach,
+                            attach_index,
+                            AttachmentFidelityKind::StreamReadFailed,
+                            AttachEventSeverity::Fail,
+                        ),
+                        attach_event_sink,
+                    );
                     return Ok(None);
                 }
             };
@@ -2452,12 +2677,20 @@ fn build_embedded_message_object(
     max_depth: u32,
     counters: &mut WriteCounters,
     streams: &mut Option<&mut dyn AttachStreamSource>,
+    attach_event_sink: &mut Option<&mut dyn AttachEventSink>,
 ) -> Result<(u64, u64, u64, u64)> {
     // Allocate a message-type NID for use as a subnode key only (not an NBT entry).
     let msg_nid = layout.alloc_nid(NID_TYPE_NORMAL_MESSAGE);
 
-    let (heap_bytes, sub_bid, size_contrib) =
-        build_message_payload(layout, msg, max_depth, counters, depth, streams)?;
+    let (heap_bytes, sub_bid, size_contrib) = build_message_payload(
+        layout,
+        msg,
+        max_depth,
+        counters,
+        depth,
+        streams,
+        attach_event_sink,
+    )?;
     let bid_data = layout.write_data_chain(heap_bytes)?;
     Ok((msg_nid, bid_data, sub_bid, size_contrib))
 }
@@ -2471,6 +2704,7 @@ fn build_message_payload(
     counters: &mut WriteCounters,
     depth: u32,
     streams: &mut Option<&mut dyn AttachStreamSource>,
+    attach_event_sink: &mut Option<&mut dyn AttachEventSink>,
 ) -> Result<(Vec<u8>, u64, u64)> {
     let plain_text: Option<&str> = if msg.body_unavailable {
         None
@@ -2552,16 +2786,18 @@ fn build_message_payload(
 
     // Attachments: embeds always write attaches (parents_only is only applied
     // at top level in `build_message_node`).
-    for attach in &msg.attachments {
+    for (attach_index, attach) in msg.attachments.iter().enumerate() {
         if let Some(written) = write_one_attachment(
             layout,
+            msg,
             attach,
+            attach_index as u32,
             depth,
             max_depth,
             counters,
             &mut attach_nid_counter,
             streams,
-            &msg.subject,
+            attach_event_sink,
         )? {
             subnode_entries.push((written.nid, written.bid_data, written.bid_sub));
             written_content_bytes += written.size_contrib;
@@ -2627,6 +2863,7 @@ fn build_message_payload(
     Ok((msg_heap_bytes, sub_bid, message_size_u64))
 }
 
+#[allow(clippy::too_many_arguments)] // streams + attach_event_sink for 0073 fidelity
 fn build_message_node(
     layout: &mut Layout,
     msg: &WriteMessage,
@@ -2635,14 +2872,52 @@ fn build_message_node(
     counters: &mut WriteCounters,
     depth: u32,
     streams: &mut Option<&mut dyn AttachStreamSource>,
+    attach_event_sink: &mut Option<&mut dyn AttachEventSink>,
 ) -> Result<u64> {
     let msg_nid = layout.alloc_nid(NID_TYPE_NORMAL_MESSAGE);
     let max_depth = opts.embedded_depth_limit();
 
-    // parents_only: count omitted attaches and write with empty attach list.
+    // list_attachments / attach-meta failed at materialize: one synthetic fail event.
+    // Must run before parents_only omit so histogram includes MetaFailed even when
+    // the attach list is empty (or would be emptied by policy).
+    if msg.attach_list_failed {
+        let synthetic = WriteAttachment {
+            source_path: msg.source_path.clone(),
+            parent_nid: msg.source_msg_nid,
+            attach_method: None,
+            ..WriteAttachment::default()
+        };
+        record_attach_event(
+            counters,
+            make_attach_event(
+                msg,
+                &synthetic,
+                0,
+                AttachmentFidelityKind::MetaFailed,
+                AttachEventSeverity::Fail,
+            ),
+            attach_event_sink,
+        );
+    }
+
+    // parents_only: emit info omit events (not fail) and write with empty attach list.
     let owned: WriteMessage;
     let msg_ref: &WriteMessage = if opts.parents_only && !msg.attachments.is_empty() {
-        counters.attachments_omitted_by_policy += msg.attachments.len() as u64;
+        for (i, attach) in msg.attachments.iter().enumerate() {
+            counters.attachments_omitted_by_policy =
+                counters.attachments_omitted_by_policy.saturating_add(1);
+            record_attach_event(
+                counters,
+                make_attach_event(
+                    msg,
+                    attach,
+                    i as u32,
+                    AttachmentFidelityKind::OmittedByPolicy,
+                    AttachEventSeverity::Info,
+                ),
+                attach_event_sink,
+            );
+        }
         owned = WriteMessage {
             attachments: Vec::new(),
             ..msg.clone()
@@ -2652,8 +2927,15 @@ fn build_message_node(
         msg
     };
 
-    let (heap_bytes, sub_bid, _size) =
-        build_message_payload(layout, msg_ref, max_depth, counters, depth, streams)?;
+    let (heap_bytes, sub_bid, _size) = build_message_payload(
+        layout,
+        msg_ref,
+        max_depth,
+        counters,
+        depth,
+        streams,
+        attach_event_sink,
+    )?;
     layout.add_node_data(msg_nid, heap_bytes, parent_nid, sub_bid)?;
     Ok(msg_nid)
 }

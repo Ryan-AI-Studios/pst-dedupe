@@ -19,9 +19,10 @@ pub mod production;
 pub use production::{
     build_bth_checked, build_pc_v2, build_tc_inline_checked, from_canonical_message,
     temp_sibling_path, write_unicode_pst, write_unicode_pst_streaming,
-    write_unicode_pst_with_streams, AttachRead, AttachStreamSource, AttachmentFidelityEvent,
-    AttachmentFidelityKind, FolderLayoutPolicy, PcValue, WriteAttachment, WriteMessage,
-    WriteProgress, WriteProgressSink, WritePstOpts, WritePstReport, WriteStage,
+    write_unicode_pst_with_streams, AttachEventSeverity, AttachEventSink, AttachRead,
+    AttachStreamSource, AttachmentFidelityEvent, AttachmentFidelityKind, FolderLayoutPolicy,
+    PcValue, WriteAttachment, WriteMessage, WriteProgress, WriteProgressSink, WritePstOpts,
+    WritePstReport, WriteStage,
 };
 
 // EagerWriteCtx is defined above on Layout; re-exported for tests/integrations.

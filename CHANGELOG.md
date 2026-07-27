@@ -5,6 +5,22 @@ All notable changes to **Dedupe Desk** / **pst-dedupe** are documented in this f
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning uses release candidates after Series I + Series K consolidation (`0.2.0-rc.N`).
 
+## [Unreleased]
+
+### Added (0073 — Export attachment failure ledger)
+
+- **unique-pst** streams `export_attachments.csv` (default `--attach-ledger=full`) with locus keys, stable reason codes, CSV injection neutralization, and a default 500k row cap.
+- Additive `unique_export_report_v1` fields: `attachments_failed_by_reason`, `attachment_ledger*`, `attachments_omitted_by_policy`.
+- `export_messages.csv` appends `attachments_failed_count` (column prefix stable).
+- Writer: expanded `AttachmentFidelityKind` / locus events; every soft-fail path emits accounting; `parents_only` is severity `info` (omit ≠ fail).
+
+### Residuals
+
+- **D-0073-promote** — Mode A pre-write promote-on-attach-fail not shipped (ledger-only Mode C).
+- **D-0073-eml** — unique-eml has no attach ledger parity yet.
+- **D-0073-gui** — no GUI attach-ledger controls.
+- **D-0073-basename** — optional handoff path redaction mode.
+
 ## [0.2.0-rc.1] — 2026-07-24
 
 First counsel-facing **release candidate** after platform Series I and clean unique-export Series K.
