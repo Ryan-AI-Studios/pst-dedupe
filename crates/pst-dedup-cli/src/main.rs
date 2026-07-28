@@ -402,6 +402,15 @@ enum Commands {
         /// Seconds between aggregate CRC summary lines after first-N (0077).
         #[arg(long = "crc-log-interval-secs", default_value_t = 30)]
         crc_log_interval_secs: u64,
+        /// Fail (exit 64) when fidelity is partial. Default on; exclusive with allow (0078).
+        #[arg(long = "fail-on-partial-fidelity", action = clap::ArgAction::SetTrue)]
+        fail_on_partial_fidelity: bool,
+        /// Allow partial fidelity to exit 0 (JSON still `partial`; 0078).
+        #[arg(long = "allow-partial-fidelity", action = clap::ArgAction::SetTrue)]
+        allow_partial_fidelity: bool,
+        /// Opt-in: exit 65 when export_risk rank ≥ level (default off; 0078).
+        #[arg(long = "fail-on-export-risk", value_parser = parse_fail_on_export_risk)]
+        fail_on_export_risk: Option<String>,
     },
 
     /// Export unique messages as streaming PST volume(s) + report pack (`unique_export_report_v1`).
@@ -895,7 +904,7 @@ fn main() -> ExitCode {
             let json = command_wants_json(&cli.command);
 
             match run(cli) {
-                Ok(()) => CliExit::Success.into(),
+                Ok(code) => code.into(),
                 Err(e) => {
                     // JobFailed / AlreadyEmitted already wrote the operator payload.
                     if !e.already_emitted() {
@@ -917,7 +926,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
+fn run(cli: Cli) -> Result<CliExit> {
     match cli.command {
         Commands::Scan {
             paths,
@@ -1165,6 +1174,9 @@ fn run(cli: Cli) -> Result<()> {
             allow_crc_suspect_tier2,
             crc_log_limit,
             crc_log_interval_secs,
+            fail_on_partial_fidelity,
+            allow_partial_fidelity,
+            fail_on_export_risk,
         } => {
             let mut all = paths;
             all.extend(input);
@@ -1173,7 +1185,18 @@ fn run(cli: Cli) -> Result<()> {
                     "unique-eml requires at least one PST path (positional or --input)".into(),
                 ));
             }
-            unique_eml_cmd::run_unique_eml(unique_eml_cmd::UniqueEmlCliArgs {
+            if fail_on_partial_fidelity && allow_partial_fidelity {
+                return Err(CliError::Usage(
+                    "--fail-on-partial-fidelity and --allow-partial-fidelity are mutually exclusive"
+                        .into(),
+                ));
+            }
+            let fail_on_partial = if allow_partial_fidelity {
+                false
+            } else {
+                true // default on
+            };
+            return unique_eml_cmd::run_unique_eml(unique_eml_cmd::UniqueEmlCliArgs {
                 paths: all,
                 out,
                 policy,
@@ -1211,11 +1234,14 @@ fn run(cli: Cli) -> Result<()> {
                 allow_crc_suspect_tier2,
                 crc_log_limit,
                 crc_log_interval_secs,
-            })
+                fail_on_partial_fidelity: fail_on_partial,
+                allow_partial_fidelity,
+                fail_on_export_risk,
+            });
         }
         Commands::UniquePst(clap_args) => {
             let args = clap_args.into_cli_args()?;
-            unique_pst_cmd::run_unique_pst(args)
+            return unique_pst_cmd::run_unique_pst(args);
         }
         Commands::Matter { cmd } => match cmd {
             MatterCmd::Create {
@@ -1363,9 +1389,21 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Service { cmd } => service_cmd::run_service(cmd).map(|_| ()),
         Commands::Platform { cmd } => platform_cmd::run_platform(cmd).map(|_| ()),
     }
+    .map(|()| CliExit::Success)
 }
 
 /// Validate preflight rate knobs: finite and in [0.0, 1.0].
+fn parse_fail_on_export_risk(s: &str) -> std::result::Result<String, String> {
+    pst_dedup_cli::export_outcome::RiskGate::parse(s)
+        .filter(|g| *g != pst_dedup_cli::export_outcome::RiskGate::Off)
+        .map(|g| g.as_str().to_string())
+        .ok_or_else(|| {
+            format!(
+                "invalid --fail-on-export-risk '{s}': expected ok, re_export_recommended, or not_export_ready"
+            )
+        })
+}
+
 fn parse_strong_content_hash(s: &str) -> std::result::Result<String, String> {
     pst_dedup_cli::grouping_cli::parse_identity_level(s)?;
     Ok(s.to_string())

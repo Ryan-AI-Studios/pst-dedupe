@@ -400,6 +400,9 @@ impl UniqueWizardForm {
             allow_crc_suspect_tier2: false,
             crc_log_limit: 10,
             crc_log_interval_secs: 30,
+            fail_on_partial_fidelity: true,
+            allow_partial_fidelity: false,
+            fail_on_export_risk: None,
         })
     }
 

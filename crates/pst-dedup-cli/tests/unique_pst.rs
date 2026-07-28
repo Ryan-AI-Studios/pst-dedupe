@@ -676,10 +676,23 @@ fn unique_pst_attachment_failures_force_export_fail() {
         v["ok"], false,
         "attachments_failed={failed} must force ok=false"
     );
-    assert!(
-        !result.status.success(),
-        "attachments_failed must force non-zero exit"
-    );
+    // 0078: attach soft-fail → exit 64 (PartialFidelity); refinement keeps non-zero.
+    // Accept 64 (preferred) or any non-zero so fixture hard-fails elsewhere still fail the gate.
+    let code = result.status.code().unwrap_or(1);
+    assert_ne!(code, 0, "attachments_failed must force non-zero exit");
+    if let Some(fidelity) = v["fidelity"].as_str() {
+        if fidelity == "partial" {
+            assert_eq!(
+                code, 64,
+                "partial attach soft-fail must exit 64 (got {code})"
+            );
+            assert_eq!(
+                v["exit_code"].as_u64(),
+                Some(64),
+                "JSON exit_code must match process status"
+            );
+        }
+    }
     assert!(out.is_file(), "PST volumes retained on attach soft-fail");
 
     // 0073: default attach-ledger=full → CSV + histogram + invariant.

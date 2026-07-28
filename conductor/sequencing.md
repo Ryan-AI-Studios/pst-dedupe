@@ -142,7 +142,7 @@
 | 1 | **0073** Attach failure ledger | **Completed** — locus CSV + reason codes + histogram; unblocks 0074/0077/0081 |
 | 2 | **0074** Deep attach preflight | **Completed** — budgeted L2, peer-cap, cache→stream_available; D-0074-* residual |
 | 2b | **0077** CRC noise + risk | **Completed** — data-path CRC telemetry, CRC_SUSPECT (split-only Tier-2), dual-rate poly reclassify, `export_risk` on PreflightRecommendation, attach stream CRC→risk, Desk banner; Codex luna PASS WITH DEFERRED P3; feeds **0078** / **0081** |
-| 2c | **0078** Exit codes | Parallel; small CLI contract |
+| 2c | **0078** Exit codes | **Completed** — `classify_export`, exit 64/65/130, cancel quarantine, JSON contract; feeds **0080** QC / **0081** runbook (anti-recommendation: no blanket retry exit 5 / `AuditChainBroken`); Codex luna PASS WITH DEFERRED P3 |
 | 3 | **0075** Winner policies | **Completed** — ladder fidelity→bcc→source→folder→policy + `decided_by` + All Custodians; D-0075-* residual |
 | 4 | **0076** Tier-2 hardening | **Completed** — char-clamp, split-only guards, BoundBy, Tier 2.5 body/body-recip, `--dedupe-scope` (closes D-0075-scope); Codex luna PASS WITH DEFERRED P3 |
 | 5 | **0079** Performance | After fidelity/report stable preferred |
