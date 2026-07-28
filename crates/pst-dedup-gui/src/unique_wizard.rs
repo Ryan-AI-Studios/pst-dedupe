@@ -361,6 +361,16 @@ impl UniqueWizardForm {
             skip_limit: 10_000,
             attach_ledger: AttachLedgerMode::Full,
             attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+            // Deep attach preflight is CLI opt-in; GUI residual D-0074-gui.
+            deep_attach_preflight: false,
+            deep_attach_level: "head".into(),
+            deep_attach_max_attaches: 50_000,
+            deep_attach_max_probe_bytes: 268_435_456,
+            deep_attach_per_attach_max_bytes: 1_048_576,
+            deep_attach_max_probe_time_ms: 2000,
+            deep_attach_max_open_psts: 32,
+            deep_attach_max_peer_probes: 3,
+            max_attach_fail_rate: 0.05,
         })
     }
 

@@ -6,14 +6,18 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use dedup_engine::attach_reason_from_pst_error;
 use dedup_engine::reason_from_pst_error;
 use dedup_engine::{
     AttachStreamSource, CanonicalAttachment, CanonicalMessage, EmlWriteError, FamilyPolicy,
-    MaterializeError, MessageLocus, MessageMaterializer,
+    IntegrityReason, MaterializeError, MessageLocus, MessageMaterializer,
 };
 use pst_reader::{NodeId, PstFile};
+
+use crate::attach_probe::{path_mtime_and_size, probe_attach_stream, ProbeLevel, ProbeResultCache};
 
 /// Optional soft-warning sink (GUI Log panel / CLI on_log bridge).
 pub type MaterializeWarnCb = Arc<Mutex<dyn FnMut(String) + Send>>;
@@ -28,6 +32,17 @@ pub struct PstMaterializer {
     parents_only: bool,
     /// Soft attach/open warnings (in addition to tracing).
     on_warn: Option<MaterializeWarnCb>,
+    /// When set (0074 deep attach), verify stream open/head at materialize and set
+    /// `stream_available` from the probe (not optimistic size/filename).
+    deep_probe_level: Option<ProbeLevel>,
+    /// Per-attach head-read budget when deep_probe_level is Head/Full (default 1 MiB).
+    deep_probe_per_attach_max_bytes: u64,
+    deep_probe_time_ms: u64,
+    /// Cooperative cancel for deep attach probe (0074) — cancel ≠ attach fail.
+    cancel: Option<Arc<AtomicBool>>,
+    /// Phase-1b probe cache: set `stream_available` without re-opening streams (0074 P1-A).
+    /// `Arc` so materialize can consult the cache while holding a PST handle borrow.
+    probe_result_cache: Option<(Arc<ProbeResultCache>, ProbeLevel)>,
 }
 
 impl PstMaterializer {
@@ -37,12 +52,50 @@ impl PstMaterializer {
             load_attach_payloads: family == FamilyPolicy::KeepAttachmentsWithParent,
             parents_only: family == FamilyPolicy::ParentsOnly,
             on_warn: None,
+            deep_probe_level: None,
+            deep_probe_per_attach_max_bytes: 1_048_576,
+            deep_probe_time_ms: 2000,
+            cancel: None,
+            probe_result_cache: None,
         }
     }
 
     /// Bridge soft attach/open warnings to a structured log sink (unique-pst GUI).
     pub fn with_warn_sink(mut self, on_warn: MaterializeWarnCb) -> Self {
         self.on_warn = Some(on_warn);
+        self
+    }
+
+    /// Enable deep attach stream probe during materialize (0074). Corrects optimistic
+    /// `stream_available`. L2 head success ⇒ stream_available=true (not "fully verified").
+    ///
+    /// Prefer [`with_probe_result_cache`] after a phase-1b budgeted pass so materialize
+    /// does not re-open streams under a second budget.
+    pub fn with_deep_attach_probe(
+        mut self,
+        level: ProbeLevel,
+        per_attach_max_bytes: u64,
+        max_probe_time_ms: u64,
+    ) -> Self {
+        self.deep_probe_level = Some(level);
+        self.deep_probe_per_attach_max_bytes = per_attach_max_bytes;
+        self.deep_probe_time_ms = max_probe_time_ms;
+        self
+    }
+
+    /// Apply phase-1b probe outcomes at materialize without re-I/O (0074 P1-A).
+    ///
+    /// Cache hit at `level`: fail → `stream_available=false` (+ soft reason);
+    /// ok → `stream_available=true` (non-parents_only). Miss → legacy optimistic
+    /// (honest when attach_probe.truncated / unprobed peers).
+    pub fn with_probe_result_cache(mut self, cache: ProbeResultCache, level: ProbeLevel) -> Self {
+        self.probe_result_cache = Some((Arc::new(cache), level));
+        self
+    }
+
+    /// Thread run-level cancel into deep attach probe (do not re-degrade cancel as fail).
+    pub fn with_cancel(mut self, cancel: Option<Arc<AtomicBool>>) -> Self {
+        self.cancel = cancel;
         self
     }
 
@@ -86,6 +139,16 @@ impl MessageMaterializer for PstMaterializer {
         // that open_attachment_data can be used by downstream exporters.
         let parents_only = self.parents_only;
         let load_payloads = self.load_attach_payloads;
+        let deep_level = self.deep_probe_level;
+        let deep_per = self.deep_probe_per_attach_max_bytes;
+        let deep_time_ms = self.deep_probe_time_ms;
+        let cancel = self.cancel.clone();
+        // Phase-1b cache takes precedence over live deep re-probe (no second budget).
+        // Clone Arc before opening PST so we can look up while holding a handle borrow.
+        let probe_cache = self.probe_result_cache.clone();
+        let cache_identity = probe_cache
+            .as_ref()
+            .map(|_| path_mtime_and_size(&locus.source_path));
         // Clone warn sink before opening PST (pst holds &mut self.psts).
         let warn_cb = self.on_warn.clone();
         let emit_soft = |msg: String| {
@@ -211,12 +274,92 @@ impl MessageMaterializer for PstMaterializer {
                 for att in list {
                     let mut data = None;
                     // parents_only: metadata only — writer omits payloads by policy.
-                    let stream_available = if parents_only {
+                    // Default (no deep probe): optimistic size/filename (legacy).
+                    // Deep probe (0074): set from open/head outcome — never claim exportable on fail.
+                    let mut stream_available = if parents_only {
                         false
                     } else {
                         att.size > 0 || !att.filename.is_empty()
                     };
-                    if !parents_only
+
+                    // Prefer phase-1b cache (no re-I/O). Cache miss keeps optimistic.
+                    let mut applied_cache = false;
+                    if !parents_only {
+                        if let (Some((cache, level)), Some((mtime, source_size))) =
+                            (probe_cache.as_ref(), cache_identity)
+                        {
+                            if let Some(outcome) = cache.get(
+                                &locus.source_path,
+                                locus.nid,
+                                att.nid.0,
+                                att.size,
+                                mtime,
+                                source_size,
+                                *level,
+                            ) {
+                                applied_cache = true;
+                                stream_available = outcome.ok;
+                                if !outcome.ok {
+                                    let reason = outcome
+                                        .reason
+                                        .unwrap_or(IntegrityReason::AttachStreamOpenFailed);
+                                    emit_soft(format!(
+                                        "deep attach probe cache fail (soft {}) nid={:#x} attach_nid={:#x}",
+                                        reason.as_str(),
+                                        locus.nid,
+                                        att.nid.0
+                                    ));
+                                    if !soft_reasons.contains(&reason) {
+                                        soft_reasons.push(reason);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !parents_only && !applied_cache && deep_level.is_some() {
+                        // Cancel mid-materialize: do not re-degrade as attach fail.
+                        let cancelled_now = cancel
+                            .as_ref()
+                            .map(|c| c.load(Ordering::SeqCst))
+                            .unwrap_or(false);
+                        if cancelled_now {
+                            // Leave optimistic stream_available unset for export honesty.
+                            stream_available = false;
+                        } else {
+                            let level = deep_level.unwrap_or(ProbeLevel::Head);
+                            let deadline = std::time::Instant::now()
+                                + std::time::Duration::from_millis(deep_time_ms);
+                            let outcome = probe_attach_stream(
+                                pst, nid, att.nid, level, deep_per, deep_per, deadline, &cancel,
+                            );
+                            let cancelled_after = cancel
+                                .as_ref()
+                                .map(|c| c.load(Ordering::SeqCst))
+                                .unwrap_or(false);
+                            if cancelled_after {
+                                // Cancel outcome is non-fail (ok=true, reason=None); no soft degrade.
+                                stream_available = false;
+                            } else {
+                                stream_available = outcome.ok;
+                                if !outcome.ok {
+                                    let reason = outcome
+                                        .reason
+                                        .unwrap_or(IntegrityReason::AttachStreamOpenFailed);
+                                    emit_soft(format!(
+                                        "deep attach probe failed (soft {}) nid={:#x} attach_nid={:#x}",
+                                        reason.as_str(),
+                                        locus.nid,
+                                        att.nid.0
+                                    ));
+                                    if !soft_reasons.contains(&reason) {
+                                        soft_reasons.push(reason);
+                                    }
+                                }
+                            }
+                        }
+                    } else if !parents_only
+                        && !applied_cache
                         && load_payloads
                         && att.size > 0
                         && att.size <= SMALL_ATTACH_CAP
@@ -228,30 +371,29 @@ impl MessageMaterializer for PstMaterializer {
                                     Ok(_) => data = Some(buf),
                                     Err(e) => {
                                         emit_soft(format!(
-                                            "open/read attachment payload failed (soft ATTACH_META_FAILED) nid={:#x} attach_nid={:#x}: {e}",
+                                            "open/read attachment payload failed (soft ATTACH_STREAM_READ_FAILED) nid={:#x} attach_nid={:#x}: {e}",
                                             locus.nid, att.nid.0
                                         ));
-                                        if !soft_reasons.contains(
-                                            &dedup_engine::IntegrityReason::AttachMetaFailed,
-                                        ) {
-                                            soft_reasons.push(
-                                                dedup_engine::IntegrityReason::AttachMetaFailed,
-                                            );
+                                        let reason = IntegrityReason::AttachStreamReadFailed;
+                                        if !soft_reasons.contains(&reason) {
+                                            soft_reasons.push(reason);
                                         }
+                                        stream_available = false;
                                     }
                                 }
                             }
                             Err(e) => {
+                                let reason = attach_reason_from_pst_error(&e);
                                 emit_soft(format!(
-                                    "open_attachment_data failed (soft ATTACH_META_FAILED) nid={:#x} attach_nid={:#x}: {e}",
-                                    locus.nid, att.nid.0
+                                    "open_attachment_data failed (soft {}) nid={:#x} attach_nid={:#x}: {e}",
+                                    reason.as_str(),
+                                    locus.nid,
+                                    att.nid.0
                                 ));
-                                if !soft_reasons
-                                    .contains(&dedup_engine::IntegrityReason::AttachMetaFailed)
-                                {
-                                    soft_reasons
-                                        .push(dedup_engine::IntegrityReason::AttachMetaFailed);
+                                if !soft_reasons.contains(&reason) {
+                                    soft_reasons.push(reason);
                                 }
+                                stream_available = false;
                             }
                         }
                     }

@@ -766,6 +766,17 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0073-basename | P3 | `--ledger-path-mode=full\|basename` handoff redaction | source_id remains join key; must apply to both export_messages + export_attachments if shipped | residual / 0081 |
 | D-0073-vec-events | P3 | Writer still accumulates `attachment_fidelity_events` Vec | CLI uses AttachEventSink for CSV; large fail storms grow Vec until 0079 channel-only path | residual polish |
 
+## From track 0074-DeepAttachPreflightFidelity
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0074-gui | P3 | GUI wizard checkbox / summary for deep-attach preflight | CLI `--deep-attach-preflight` works; wizard defaults off via UniquePstCliArgs | residual polish |
+| D-0074-mat-lru | P3 | Bound materializer/export sticky PST handle map to `max_open_psts` LRU | Probe path has LRU (default 32); materializer/export still HashMap | residual / 0079 |
+| D-0074-cache-share | P3 | Cross-process or durable scan→unique probe result cache | In-process level/mtime/size cache only for phase 1b→materialize | residual polish |
+| D-0074-crc-fixture | P3 | Synthetic corrupt-attach PST E2E for CRC/open/read | Unit mapping + mock readers cover codes; no committed corrupt PST fixture | residual polish |
+| D-0074-timeout-join | P3 | Join/cancel timed-out per-attach probe worker | `recv_timeout` returns ATTACH_PROBE_TIMEOUT; worker may finish in background; budget charged | residual polish |
+| D-0074-e2e-fixture | P3 | Full production-path §3.11 fixture matrix (scan JSON/CSV + unique-pst) | Locked unit matrix green; multi-file fixture E2E residual | residual polish |
+
 ## From track 0062-ReleaseHardeningRc
 
 | ID | Severity | Item | Notes | Owner |
