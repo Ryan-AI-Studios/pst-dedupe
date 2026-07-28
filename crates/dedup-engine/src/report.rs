@@ -110,7 +110,7 @@ impl StreamingCsvReportWriter {
                     &degraded_reasons,
                 ])?;
             }
-            DedupResult::DuplicateOf { original, tier } => {
+            DedupResult::DuplicateOf { original, tier, .. } => {
                 self.wtr.write_record([
                     "Duplicate",
                     &tier.to_string(),

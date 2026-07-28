@@ -1,0 +1,13 @@
+# Pre-0076 content_hash digests (Phase 0 baseline)
+# Captured before hasher char-clamp change on branch feat/0076-content-hash-tier-hardening
+# at commit f996392. Used by hasher unit tests and refinement assertions.
+
+# compute_content_hash(None, None, None, Some("a"*5000), &[])
+# ASCII body normalizes to 5000 'a's; byte clamp takes first 4096 bytes (=4096 chars).
+# Char clamp is byte-identical for pure ASCII — digest must stay stable.
+ASCII_LONG_BODY_V1=a163356e463e6b6bf1c52dd1977779d2bb99546bd63497c0c016317d488fbf5d
+
+# Cyrillic "я"*4096 (2 bytes/char UTF-8). Pre-0076 byte clamp (when boundary holds)
+# vs post-0076 char clamp. Change is split-only (rule 5 exception).
+CYRILLIC_4096_BYTE_CLAMP=78df2ccca7afb7825a3e697b1d8ef6e539e9056bfec067debf3cde3725e5407a
+CYRILLIC_4096_CHAR_CLAMP=f88faa1821f7e26e2ef16756f16f13859f7101d168f1ca1483b71d68dcd32cc3

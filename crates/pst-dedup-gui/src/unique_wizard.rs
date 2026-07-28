@@ -154,6 +154,8 @@ pub struct UniqueWizardForm {
     pub mode: ScanMode,
     pub no_tier2: bool,
     pub no_attachments: bool,
+    /// Strong content hash at `body` level (0076 Desk surface; enums stay CLI-only).
+    pub strong_content_hash: bool,
     pub overwrite: bool,
     /// Pending overwrite confirm dialog.
     pub confirm_overwrite: bool,
@@ -176,6 +178,7 @@ impl Default for UniqueWizardForm {
             mode: ScanMode::BestEffort,
             no_tier2: false,
             no_attachments: false,
+            strong_content_hash: false,
             overwrite: false,
             confirm_overwrite: false,
         }
@@ -383,6 +386,17 @@ impl UniqueWizardForm {
             deep_attach_max_open_psts: 32,
             deep_attach_max_peer_probes: 3,
             max_attach_fail_rate: 0.05,
+            strong_content_hash: if self.strong_content_hash {
+                "body".into()
+            } else {
+                "off".into()
+            },
+            dedupe_scope: "global".into(),
+            tier1_verify: "off".into(),
+            tier1_backfill: false,
+            identity_ignore_inline_attachments: false,
+            allow_cross_mid_tier2: false,
+            allow_degenerate_tier2: false,
         })
     }
 
@@ -495,6 +509,7 @@ mod tests {
             max_volume_text: "12345".into(),
             mode: ScanMode::Strict,
             no_tier2: true,
+            strong_content_hash: false,
             no_attachments: true,
             overwrite: true,
             ..Default::default()
@@ -521,6 +536,19 @@ mod tests {
         assert!(!args.prefer_bcc_copy);
         assert!(!args.prefer_folder_class);
         assert_eq!(args.fidelity_rank, "binary");
+        assert_eq!(args.strong_content_hash, "off");
+    }
+
+    #[test]
+    fn strong_content_hash_checkbox_maps_to_body() {
+        let form = UniqueWizardForm {
+            inputs: vec![PathBuf::from(r"C:\data\a.pst")],
+            out: Some(PathBuf::from(r"C:\export\unique.pst")),
+            strong_content_hash: true,
+            ..Default::default()
+        };
+        let args = form.to_cli_args().expect("map");
+        assert_eq!(args.strong_content_hash, "body");
     }
 
     #[test]

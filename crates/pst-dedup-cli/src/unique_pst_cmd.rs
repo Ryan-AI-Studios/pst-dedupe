@@ -22,9 +22,9 @@ use dedup_engine::integrity::{
     SCAN_INTEGRITY_SCHEMA,
 };
 use dedup_engine::keepset::{
-    finalize_with_materialize, recoverable_items_hint, resolve_groups_with_ctx, sort_input_paths,
-    write_keep_set_json, DecisionCsvWriter, FamilyPolicy, KeepEntry, KeepPolicy, KeepSet,
-    KeepSetProvenance, KeepSetStats, MessageMaterializer, KEEP_SET_SCHEMA,
+    finalize_with_materialize, recoverable_items_hint, resolve_groups_with_grouping,
+    sort_input_paths, write_keep_set_json, DecisionCsvWriter, FamilyPolicy, KeepEntry, KeepPolicy,
+    KeepSet, KeepSetProvenance, KeepSetStats, MessageMaterializer, KEEP_SET_SCHEMA,
 };
 use pst_reader::PstFile;
 use pst_writer::{
@@ -41,7 +41,7 @@ use crate::paths::{
 };
 use crate::pst_materializer::{PstAttachStreamSource, PstMaterializer};
 use crate::scan::{
-    apply_strict_probe_skips_to_file_stats, evaluate_exit_policy, rebuild_dedup_results,
+    apply_strict_probe_skips_to_file_stats, evaluate_exit_policy, rebuild_dedup_results_with_ctx,
     recompute_file_status_counts, recompute_per_file_degraded_from_candidates,
     recompute_per_file_dup_from_results, resolve_pst_paths, run_scan, ScanOptions,
 };
@@ -167,6 +167,23 @@ pub struct UniquePstClapArgs {
     /// Max attach-stream probe fail rate before preflight recommends re-export (default 0.05).
     #[arg(long = "max-attach-fail-rate", default_value_t = 0.05, value_parser = parse_rate_threshold_arg)]
     pub max_attach_fail_rate: f64,
+    /// Strong content identity: off|body|body-recip (0076). body-recip-attach deferred (D-0076-attach-content).
+    #[arg(long = "strong-content-hash", default_value = "off", value_parser = parse_strong_content_hash_arg)]
+    pub strong_content_hash: String,
+    /// Dedupe partition: global|per-source (0076).
+    #[arg(long = "dedupe-scope", default_value = "global", value_parser = parse_dedupe_scope_arg)]
+    pub dedupe_scope: String,
+    /// Subdivide MID groups: off|content|body (0076).
+    #[arg(long = "tier1-verify", default_value = "off", value_parser = parse_tier1_verify_arg)]
+    pub tier1_verify: String,
+    #[arg(long = "tier1-backfill")]
+    pub tier1_backfill: bool,
+    #[arg(long = "identity-ignore-inline-attachments")]
+    pub identity_ignore_inline_attachments: bool,
+    #[arg(long = "allow-cross-mid-tier2")]
+    pub allow_cross_mid_tier2: bool,
+    #[arg(long = "allow-degenerate-tier2")]
+    pub allow_degenerate_tier2: bool,
 }
 
 /// Runtime options for `unique-pst` orchestration.
@@ -216,6 +233,13 @@ pub struct UniquePstCliArgs {
     pub deep_attach_max_open_psts: usize,
     pub deep_attach_max_peer_probes: u64,
     pub max_attach_fail_rate: f64,
+    pub strong_content_hash: String,
+    pub dedupe_scope: String,
+    pub tier1_verify: String,
+    pub tier1_backfill: bool,
+    pub identity_ignore_inline_attachments: bool,
+    pub allow_cross_mid_tier2: bool,
+    pub allow_degenerate_tier2: bool,
 }
 
 /// Run options / hooks for GUI and library callers (0072).
@@ -348,6 +372,13 @@ impl UniquePstClapArgs {
             deep_attach_max_open_psts: self.deep_attach_max_open_psts,
             deep_attach_max_peer_probes: self.deep_attach_max_peer_probes,
             max_attach_fail_rate: self.max_attach_fail_rate,
+            strong_content_hash: self.strong_content_hash,
+            dedupe_scope: self.dedupe_scope,
+            tier1_verify: self.tier1_verify,
+            tier1_backfill: self.tier1_backfill,
+            identity_ignore_inline_attachments: self.identity_ignore_inline_attachments,
+            allow_cross_mid_tier2: self.allow_cross_mid_tier2,
+            allow_degenerate_tier2: self.allow_degenerate_tier2,
         })
     }
 }
@@ -419,6 +450,21 @@ fn parse_deep_attach_level_arg(s: &str) -> std::result::Result<String, String> {
 fn parse_attach_ledger_mode_arg(s: &str) -> std::result::Result<AttachLedgerMode, String> {
     AttachLedgerMode::parse(s)
         .ok_or_else(|| format!("invalid attach-ledger '{s}': expected full, summary-only, or off"))
+}
+
+fn parse_strong_content_hash_arg(s: &str) -> std::result::Result<String, String> {
+    crate::grouping_cli::parse_identity_level(s)?;
+    Ok(s.to_string())
+}
+
+fn parse_dedupe_scope_arg(s: &str) -> std::result::Result<String, String> {
+    crate::grouping_cli::parse_dedupe_scope(s)?;
+    Ok(s.to_string())
+}
+
+fn parse_tier1_verify_arg(s: &str) -> std::result::Result<String, String> {
+    crate::grouping_cli::parse_tier1_verify(s)?;
+    Ok(s.to_string())
 }
 
 fn parse_rate_threshold_arg(s: &str) -> std::result::Result<f64, String> {
@@ -675,12 +721,15 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
         preflight,
         skips: vec![],
         integrity_csv: None,
+        grouping: Default::default(),
     };
     let keep_set = KeepSet {
         schema: KEEP_SET_SCHEMA.to_string(),
         policy: ctx.policy,
         family_policy: ctx.family_policy,
         created_from: None,
+        identity_level: None,
+        dedupe_scope: None,
         winners: vec![],
         stats: KeepSetStats::default(),
     };
@@ -952,6 +1001,17 @@ pub fn run_unique_pst_with_options(
         deep_attach_max_probe_time_ms: args.deep_attach_max_probe_time_ms,
         deep_attach_max_open_psts: args.deep_attach_max_open_psts,
         deep_attach_max_peer_probes_per_group: args.deep_attach_max_peer_probes,
+        grouping: crate::grouping_cli::grouping_context_from_cli(
+            args.no_tier2,
+            &args.strong_content_hash,
+            &args.dedupe_scope,
+            &args.tier1_verify,
+            args.allow_cross_mid_tier2,
+            args.allow_degenerate_tier2,
+            args.tier1_backfill,
+            args.identity_ignore_inline_attachments,
+        )
+        .map_err(CliError::Usage)?,
     };
 
     // ── Phase 1: integrity scan ─────────────────────────────────────────────
@@ -1117,7 +1177,7 @@ pub fn run_unique_pst_with_options(
                 policy: args.policy,
                 family: effective_family_for_probe,
                 prefer_path: &args.prefer_path_contains,
-                tier2_enabled: !args.no_tier2,
+                grouping: opts.grouping.clone(),
                 mode: args.mode,
                 cancel: cancel.clone(),
                 progress: progress_cb,
@@ -1222,10 +1282,14 @@ pub fn run_unique_pst_with_options(
                 }
             }
             // Reconcile recoverable/unique/dup so preflight is not pre-probe stale.
+            // Use the same GroupingContext as scan/resolve (0076 guards), not
+            // tier2-only defaults — otherwise deep-attach rebuild can re-bind
+            // under different identity rules than the keep-set path.
             outcome.summary.recoverable_messages = outcome.candidates.len() as u64;
             outcome.summary.total_messages = outcome.summary.recoverable_messages;
             let empty_refs = std::collections::HashMap::new();
-            let rebuild = rebuild_dedup_results(&outcome.candidates, &empty_refs, !args.no_tier2);
+            let rebuild =
+                rebuild_dedup_results_with_ctx(&outcome.candidates, &empty_refs, &opts.grouping);
             outcome.summary.unique = rebuild.unique_count;
             outcome.summary.duplicates = rebuild.duplicate_count;
             outcome.summary.tier1_hits = rebuild.tier1_hits;
@@ -1317,11 +1381,22 @@ pub fn run_unique_pst_with_options(
         args.rank_folder_class_first,
         &args.fidelity_rank,
     );
-    let mut resolved = resolve_groups_with_ctx(
+    let grouping = crate::grouping_cli::grouping_context_from_cli(
+        args.no_tier2,
+        &args.strong_content_hash,
+        &args.dedupe_scope,
+        &args.tier1_verify,
+        args.allow_cross_mid_tier2,
+        args.allow_degenerate_tier2,
+        args.tier1_backfill,
+        args.identity_ignore_inline_attachments,
+    )
+    .map_err(CliError::Usage)?;
+    let mut resolved = resolve_groups_with_grouping(
         outcome.candidates,
         args.family_policy,
         &rank_ctx,
-        !args.no_tier2,
+        &grouping,
         Some(provenance),
     );
 
@@ -2129,6 +2204,9 @@ pub fn run_unique_pst_with_options(
             "  groups_date_source_mixed: {}",
             keep_set.stats.groups_date_source_mixed
         );
+        for line in crate::grouping_cli::format_grouping_stats_human(&keep_set.stats.grouping) {
+            println!("{line}");
+        }
         for v in &volumes {
             println!(
                 "  volume {}: {} ({} msgs, {} bytes)",
@@ -2792,6 +2870,13 @@ mod tests {
             deep_attach_max_open_psts: 32,
             deep_attach_max_peer_probes: 3,
             max_attach_fail_rate: 0.05,
+            strong_content_hash: "off".into(),
+            dedupe_scope: "global".into(),
+            tier1_verify: "off".into(),
+            tier1_backfill: false,
+            identity_ignore_inline_attachments: false,
+            allow_cross_mid_tier2: false,
+            allow_degenerate_tier2: false,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -2878,6 +2963,13 @@ mod tests {
             deep_attach_max_open_psts: 32,
             deep_attach_max_peer_probes: 3,
             max_attach_fail_rate: 0.05,
+            strong_content_hash: "off".into(),
+            dedupe_scope: "global".into(),
+            tier1_verify: "off".into(),
+            tier1_backfill: false,
+            identity_ignore_inline_attachments: false,
+            allow_cross_mid_tier2: false,
+            allow_degenerate_tier2: false,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -2971,6 +3063,13 @@ mod tests {
             deep_attach_max_open_psts: 32,
             deep_attach_max_peer_probes: 3,
             max_attach_fail_rate: 0.05,
+            strong_content_hash: "off".into(),
+            dedupe_scope: "global".into(),
+            tier1_verify: "off".into(),
+            tier1_backfill: false,
+            identity_ignore_inline_attachments: false,
+            allow_cross_mid_tier2: false,
+            allow_degenerate_tier2: false,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3055,6 +3154,13 @@ mod tests {
             deep_attach_max_open_psts: 32,
             deep_attach_max_peer_probes: 3,
             max_attach_fail_rate: 0.05,
+            strong_content_hash: "off".into(),
+            dedupe_scope: "global".into(),
+            tier1_verify: "off".into(),
+            tier1_backfill: false,
+            identity_ignore_inline_attachments: false,
+            allow_cross_mid_tier2: false,
+            allow_degenerate_tier2: false,
         };
         let outcome = run_unique_pst_with_options(
             args,

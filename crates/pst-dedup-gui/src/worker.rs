@@ -7,9 +7,9 @@ use std::time::Instant;
 use dedup_engine::{
     exporter::{export_eml, EmlMessage},
     filetime_to_unix,
-    hasher::{self, AttachmentInfo},
+    hasher::{self, AttachmentInfo, Tier2IneligibleReason},
     report::ReportRow,
-    DedupIndex, DedupResult, MessageRef,
+    DedupIndex, DedupResult, GroupingContext, IndexItem, MessageRef,
 };
 use pst_reader::PstFile;
 
@@ -78,13 +78,20 @@ pub struct FileStats {
 }
 
 /// Run the full scan pipeline. Called from a background thread.
+///
+/// Uses default 0076 `GroupingContext` guards (unreadable/degenerate + cross-MID)
+/// with Tier-2 enabled/disabled from config — same split-only semantics as CLI scan.
 pub fn run_scan(
     files: Vec<PathBuf>,
     config: DedupConfig,
     progress: Arc<Mutex<ScanProgress>>,
 ) -> ScanResult {
     let start = Instant::now();
-    let mut index = DedupIndex::with_capacity_and_tier2(100_000, config.enable_tier2);
+    let grouping = GroupingContext {
+        tier2_enabled: config.enable_tier2,
+        ..GroupingContext::default()
+    };
+    let mut index = DedupIndex::with_capacity_and_context(100_000, grouping);
     let mut all_rows = Vec::new();
     let mut file_stats = Vec::new();
     let mut total_savings: u64 = 0;
@@ -160,6 +167,16 @@ pub fn run_scan(
             p.messages_estimated += total_msgs;
         }
 
+        // Windows path compare key matches keep-set / CLI (lowercased absolute path).
+        let source_key = {
+            let s = file_path.to_string_lossy();
+            if cfg!(windows) {
+                s.to_lowercase()
+            } else {
+                s.into_owned()
+            }
+        };
+
         // Process each folder's messages
         for folder in &folders {
             for &msg_nid in &folder.message_nids {
@@ -187,9 +204,10 @@ pub fn run_scan(
                         match pst.read_attachment_metadata(msg_nid) {
                             Ok(atts) => atts
                                 .into_iter()
-                                .map(|a| AttachmentInfo {
-                                    filename: a.filename,
-                                    size: a.size,
+                                .map(|a| {
+                                    let mut info = AttachmentInfo::new(a.filename, a.size);
+                                    info.is_inline = a.is_inline;
+                                    info
                                 })
                                 .collect(),
                             Err(e) => {
@@ -206,7 +224,7 @@ pub fn run_scan(
                         Vec::new()
                     };
 
-                // Compute dedup keys
+                // Compute dedup keys (v1; default GUI identity is Off / GroupingContext::default)
                 let keys = hasher::compute_dedup_keys(
                     props.message_id.as_deref(),
                     props.subject.as_deref(),
@@ -215,6 +233,9 @@ pub fn run_scan(
                     props.body_preview.as_deref(),
                     &attachments,
                 );
+                if keys.preview_bytes_over_budget {
+                    index.record_preview_over_budget();
+                }
 
                 // Build message reference
                 let msg_ref = MessageRef {
@@ -228,12 +249,58 @@ pub fn run_scan(
                     size: props.message_size.unwrap_or(0) as u32,
                 };
 
-                // Check against index
-                let result = index.check_and_insert(
-                    keys.message_id.as_deref(),
-                    keys.content_hash,
-                    msg_ref.clone(),
-                );
+                // 0076 §3.3 eligibility: clean empty body is present; unreadable/degenerate blocked.
+                let has_body = props.body_preview.is_some();
+                let subject_ne = props
+                    .subject
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+                let sender_ne = props
+                    .sender_email
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+                let eligible = match hasher::tier2_eligibility(
+                    props.body_incomplete,
+                    props.body_unavailable,
+                    has_body,
+                    subject_ne,
+                    props.submit_time.is_some(),
+                    sender_ne,
+                    attachments.len(),
+                ) {
+                    Ok(()) => true,
+                    Err(Tier2IneligibleReason::UnreadableBody) => {
+                        if index.context().enforce_readable_body() {
+                            index.record_tier2_block_unreadable();
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    Err(Tier2IneligibleReason::Degenerate) => {
+                        if index.context().enforce_readable_body() {
+                            index.record_tier2_block_degenerate();
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                };
+
+                let result = index.check_and_insert_item(IndexItem {
+                    message_id: keys.message_id.clone(),
+                    content_hash: keys.content_hash,
+                    strong_content_hash: keys.strong_content_hash,
+                    tier2_eligible: eligible,
+                    source_key: source_key.clone(),
+                    fp_body: keys.fp_body,
+                    fp_header: keys.fp_header,
+                    fp_recipients: keys.fp_recipients,
+                    fp_attachments: keys.fp_attachments,
+                    msg_ref: msg_ref.clone(),
+                });
 
                 // Track duplicates for savings estimate
                 if let DedupResult::DuplicateOf { .. } = &result {

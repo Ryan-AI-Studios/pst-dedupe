@@ -282,6 +282,64 @@ Also available on plain `pst-dedup scan --deep-attach-preflight --json` under `s
 - **Structural proof:** open with `pst-reader`, message count == `messages_written`, sample ≥ min(5, N) Message-IDs.
 - **`--verify-hash`:** independent full-file SHA-256; sets `verification.hash_match` (use on small fixtures / CI).
 
+## Identity and binding (0076)
+
+Dedup identity is tiered. Defaults may only **split** groups relative to pre-0076 (never merge more).
+
+| Tier | Key | Default |
+|---|---|---|
+| **1** | Normalized `InternetMessageId` | Always on; MID match is definitive |
+| **2** (v1) | SHA-256 of normalized subject \| submit FILETIME \| sender \| ≤4096 **chars** body preview \| sorted attach `name:size` | On (`--no-tier2` disables) |
+| **2.5** (v2) | v1 preimage **plus** layered extras | Off — `--strong-content-hash body\|body-recip` (`body-recip-attach` deferred **D-0076-attach-content**) |
+
+**Named divergences from Relativity’s four-component hash:**
+
+| Component | Relativity | This tool (v1 default) |
+|---|---|---|
+| Body | Full `PR_BODY` with CR/LF/space/tab stripped | First **4096 characters** of whitespace-normalized body (spaces kept) |
+| Header | Subject + sender name/email + ClientSubmitTime | Subject + sender email + submit FILETIME (no separate display name) |
+| Recipients | All recipients incl. BCC (address-oriented) | **Absent at v1**; opt-in at `body-recip` via display strings |
+| Attachments | Per-attachment **content** SHA-256 | Name + size metadata only (content digests deferred or opt-in attach level) |
+
+### Split-only guards (default on)
+
+1. **Unreadable / degenerate body** — items with `body_incomplete` / `body_unavailable`, or no body and fewer than two weak fields (subject / time / sender / ≥1 attach), do **not** bind on Tier 2. Escape: `--allow-degenerate-tier2`.
+2. **Cross-MID** — two items with **different** non-empty Message-IDs never merge on content hash. Escape: `--allow-cross-mid-tier2`.
+
+**Bulk-mail warning:** blocking cross-MID merges inflates unique counts most for newsletters, HR templates, and automated mailers (each dispatch has its own Message-ID). Read `cross_mid_blocked_max_group` in the run summary first. Use `--allow-cross-mid-tier2` only when aggressive bulk culling is intentional and recipient-level evidence is not at issue.
+
+**Recipient warning (`body-recip`):** `display_to` / `cc` / `bcc` are *display names*, not SMTP addresses, and vary between copies (`"Smith, John"` vs `"John Smith"` vs `/O=EXCHANGELABS/…`). Check `tier2_5_splits_recipients_only` and `x500_recipient_items` before trusting results. Long-term fix is recipient-table reads (**D-0076-recipient-table**).
+
+**Inline attachments:** signature logos can false-split attachment-parity comparisons. `--identity-ignore-inline-attachments` (opt-in, merge-increasing) uses MAPI flags (`PidTagAttachContentId` / rendered-in-body / hidden), not a size threshold.
+
+**Scope:** `--dedupe-scope global` (default) vs `per-source` (custodial / vertical — each source’s winners survive). Under `per-source`, the All Custodians aggregate correctly degenerates (each winner lists one source).
+
+**BCC at ≥ `body-recip`:** a sender copy with BCC and a recipient copy without split at Tier 2.5 unless they share a MID (Tier 1 still binds; use 0075 `--prefer-bcc-copy` for winner choice).
+
+**Tier-1 divergence:** MID groups can hold different content (Purview edited-but-unsent). Stats `tier1_divergent_body` / `_metadata` / `_recipients` always report; human hint fires on **body** only. Opt-in `--tier1-verify content|body` splits.
+
+**Reproducibility:** for non-Latin bodies over ~2048 characters, pre-0076 `content_hash_hex` may not reproduce (byte clamp → char clamp). Counted by `tier2_preview_bytes_over_budget`. Change is split-only.
+
+**Closed vocabularies (decision CSV / JSON):** `bound_by` ∈ {`seed`,`message_id`,`content_hash`,`content_hash_strong`}; `identity_version` ∈ {`v1`,`v2`}; `dedupe_scope` ∈ {`global`,`per-source`}.
+
+**Unique counts rising after 0076** means the guards refused an unsafe merge — not a regression.
+
+Related: **0080** (QC sampling per bind tier), **0081** (operator runbook).
+
+### Identity flags (scan / dups / keep-set / unique-eml / unique-pst)
+
+| Flag | Default | Direction |
+|---|---|---|
+| `--strong-content-hash <off\|body\|body-recip>` | `off` | split (`body-recip-attach` rejected until **D-0076-attach-content**) |
+| `--dedupe-scope <global\|per-source>` | `global` | split |
+| `--tier1-verify <off\|content\|body>` | `off` | split |
+| `--tier1-backfill` | off | **merge** (keep-set / unique-pst / unique-eml post-pass only; **rejected** on streaming `scan`/`dups` — DedupIndex cannot retro-merge already-emitted uniques) |
+| `--identity-ignore-inline-attachments` | off | **merge** (MAPI inline: Content-ID / rendered-in-body / hidden) |
+| `--allow-cross-mid-tier2` | off | **merge** (pre-0076) |
+| `--allow-degenerate-tier2` | off | **merge** (pre-0076) |
+
+Desk wizard: single **Strong content hash** checkbox → `body` level. Full enums stay CLI-only (**D-0076-gui**).
+
 ## Fidelity & residuals
 
 - Writer fidelity: see `docs/pst-writer-fidelity-v1.md` (0068–0070, **0073** reason taxonomy).

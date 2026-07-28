@@ -146,7 +146,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
                             ui.end_row();
 
                             for row in &duplicates {
-                                if let DedupResult::DuplicateOf { original, tier } = &row.result {
+                                if let DedupResult::DuplicateOf { original, tier, .. } = &row.result
+                                {
                                     let subj = truncate_utf8(&row.message.subject, 40);
                                     ui.label(subj);
                                     ui.label(truncate_utf8(&row.message.sender, 25));

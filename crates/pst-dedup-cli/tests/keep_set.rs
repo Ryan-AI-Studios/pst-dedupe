@@ -561,10 +561,22 @@ fn source_rank_flips_winner_file_a_vs_a2() {
                 .eq_ignore_ascii_case("a-2.pst")
         })
         .count();
-    // With path order, a-2 tends to win ties.
+    let from_a_default = winners_default
+        .iter()
+        .filter(|w| {
+            w["locus"]["source_pst"]
+                .as_str()
+                .unwrap_or("")
+                .eq_ignore_ascii_case("a.pst")
+        })
+        .count();
+    // With path order, a-2 tends to win ties for grouped pairs.
+    // Note: 0076 may leave a degenerate empty-MID item ungrouped (Tier-2
+    // ineligible), so unique can be 18 rather than 17 — ranking still flips
+    // the grouped majority.
     assert!(
-        from_a2_default > 0,
-        "expected some winners from a-2.pst by default"
+        from_a2_default > from_a_default,
+        "expected default path order to prefer a-2.pst; a2={from_a2_default} a={from_a_default}"
     );
 
     let v_ranked = run(&["--source-rank", "a.pst", "--source-rank", "a-2.pst"]);
@@ -578,11 +590,6 @@ fn source_rank_flips_winner_file_a_vs_a2() {
                 .eq_ignore_ascii_case("a.pst")
         })
         .count();
-    assert!(
-        from_a_ranked > from_a2_default || from_a_ranked == winners_ranked.len(),
-        "source-rank should prefer a.pst; from_a={from_a_ranked} default_a2={from_a2_default}"
-    );
-    // At least one flip relative to default when full dups exist.
     let from_a2_ranked = winners_ranked
         .iter()
         .filter(|w| {
@@ -592,6 +599,10 @@ fn source_rank_flips_winner_file_a_vs_a2() {
                 .eq_ignore_ascii_case("a-2.pst")
         })
         .count();
+    assert!(
+        from_a_ranked > from_a_default,
+        "source-rank should increase winners from a.pst; ranked_a={from_a_ranked} default_a={from_a_default}"
+    );
     assert!(
         from_a_ranked > from_a2_ranked,
         "ranked run should prefer a.pst over a-2.pst; a={from_a_ranked} a2={from_a2_ranked}"
