@@ -89,6 +89,28 @@ enum Commands {
         /// Cap on JSON skip sample rows (default 10000). Full ledger = integrity CSV.
         #[arg(long, default_value_t = 10_000)]
         skip_limit: usize,
+        /// Opt-in budgeted deep attach stream preflight (0074). Default off.
+        #[arg(long = "deep-attach-preflight")]
+        deep_attach_preflight: bool,
+        /// Deep probe level: `head` (L2 default) or `full` (L3).
+        #[arg(long = "deep-attach-level", default_value = "head", value_parser = parse_deep_attach_level)]
+        deep_attach_level: String,
+        #[arg(long = "deep-attach-max-attaches", default_value_t = 50_000)]
+        deep_attach_max_attaches: u64,
+        #[arg(long = "deep-attach-max-probe-bytes", default_value_t = 268_435_456)]
+        deep_attach_max_probe_bytes: u64,
+        #[arg(long = "deep-attach-per-attach-max-bytes", default_value_t = 1_048_576)]
+        deep_attach_per_attach_max_bytes: u64,
+        #[arg(long = "deep-attach-max-probe-time-ms", default_value_t = 2000)]
+        deep_attach_max_probe_time_ms: u64,
+        #[arg(long = "deep-attach-max-open-psts", default_value_t = 32)]
+        deep_attach_max_open_psts: usize,
+        /// Max peers probed per keep-set group during deep attach preflight (default 3).
+        #[arg(long = "deep-attach-max-peer-probes", default_value_t = 3)]
+        deep_attach_max_peer_probes: u64,
+        /// Max attach-stream probe fail rate before preflight recommends re-export (default 0.05).
+        #[arg(long = "max-attach-fail-rate", default_value_t = 0.05, value_parser = parse_rate_threshold)]
+        max_attach_fail_rate: f64,
     },
 
     /// Inspect PST structure: encryption, folder tree, message counts.
@@ -773,6 +795,15 @@ fn run(cli: Cli) -> Result<()> {
             allow_failed_files,
             integrity_csv,
             skip_limit,
+            deep_attach_preflight,
+            deep_attach_level,
+            deep_attach_max_attaches,
+            deep_attach_max_probe_bytes,
+            deep_attach_per_attach_max_bytes,
+            deep_attach_max_probe_time_ms,
+            deep_attach_max_open_psts,
+            deep_attach_max_peer_probes,
+            max_attach_fail_rate,
         } => cmd_scan(ScanCliArgs {
             paths,
             no_tier2,
@@ -788,6 +819,15 @@ fn run(cli: Cli) -> Result<()> {
             allow_failed_files,
             integrity_csv,
             skip_limit,
+            deep_attach_preflight,
+            deep_attach_level,
+            deep_attach_max_attaches,
+            deep_attach_max_probe_bytes,
+            deep_attach_per_attach_max_bytes,
+            deep_attach_max_probe_time_ms,
+            deep_attach_max_open_psts,
+            deep_attach_max_peer_probes,
+            max_attach_fail_rate,
         }),
         Commands::Inspect { path, top, json } => cmd_inspect(path, top, json),
         Commands::Dups {
@@ -817,6 +857,15 @@ fn run(cli: Cli) -> Result<()> {
             allow_failed_files,
             integrity_csv,
             skip_limit,
+            deep_attach_preflight: false,
+            deep_attach_level: "head".into(),
+            deep_attach_max_attaches: 50_000,
+            deep_attach_max_probe_bytes: 268_435_456,
+            deep_attach_per_attach_max_bytes: 1_048_576,
+            deep_attach_max_probe_time_ms: 2000,
+            deep_attach_max_open_psts: 32,
+            deep_attach_max_peer_probes: 3,
+            max_attach_fail_rate: 0.05,
         }),
         Commands::KeepSet {
             paths,
@@ -1090,6 +1139,15 @@ fn parse_scan_mode(s: &str) -> std::result::Result<ScanMode, String> {
     ScanMode::parse(s).ok_or_else(|| format!("invalid mode '{s}': expected best-effort or strict"))
 }
 
+fn parse_deep_attach_level(s: &str) -> std::result::Result<String, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "head" | "full" => Ok(s.trim().to_ascii_lowercase()),
+        other => Err(format!(
+            "invalid deep-attach-level '{other}': expected head or full"
+        )),
+    }
+}
+
 fn parse_keep_policy(s: &str) -> std::result::Result<KeepPolicy, String> {
     KeepPolicy::parse(s).ok_or_else(|| {
         format!("invalid policy '{s}': expected first_seen, keep_largest, or prefer_path")
@@ -1120,6 +1178,15 @@ struct ScanCliArgs {
     allow_failed_files: bool,
     integrity_csv: Option<PathBuf>,
     skip_limit: usize,
+    deep_attach_preflight: bool,
+    deep_attach_level: String,
+    deep_attach_max_attaches: u64,
+    deep_attach_max_probe_bytes: u64,
+    deep_attach_per_attach_max_bytes: u64,
+    deep_attach_max_probe_time_ms: u64,
+    deep_attach_max_open_psts: usize,
+    deep_attach_max_peer_probes: u64,
+    max_attach_fail_rate: f64,
 }
 
 fn cmd_scan(args: ScanCliArgs) -> Result<()> {
@@ -1132,6 +1199,7 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
             max_skip_rate: args.max_skip_rate,
             max_crc_skip_rate: args.max_crc_skip_rate,
             max_failed_file_rate: args.max_failed_file_rate,
+            max_attach_fail_rate: args.max_attach_fail_rate,
         },
         allow_failed_files: args.allow_failed_files,
         integrity_csv: args.integrity_csv,
@@ -1140,6 +1208,14 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
         retain_rows: args.list_dups,
         retain_candidates: false,
         cancel: None,
+        deep_attach_preflight: args.deep_attach_preflight,
+        deep_attach_level: args.deep_attach_level,
+        deep_attach_max_attaches: args.deep_attach_max_attaches,
+        deep_attach_max_probe_bytes: args.deep_attach_max_probe_bytes,
+        deep_attach_per_attach_max_bytes: args.deep_attach_per_attach_max_bytes,
+        deep_attach_max_probe_time_ms: args.deep_attach_max_probe_time_ms,
+        deep_attach_max_open_psts: args.deep_attach_max_open_psts,
+        deep_attach_max_peer_probes_per_group: args.deep_attach_max_peer_probes,
     };
     // Artifacts (CSV/integrity) are streamed and flushed inside run_scan before return.
     let outcome = run_scan(&paths, &opts)?;
@@ -1249,6 +1325,7 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
             max_skip_rate: args.max_skip_rate,
             max_crc_skip_rate: args.max_crc_skip_rate,
             max_failed_file_rate: args.max_failed_file_rate,
+            max_attach_fail_rate: args.max_attach_fail_rate,
         },
         allow_failed_files: args.allow_failed_files,
         integrity_csv: args.integrity_csv,
@@ -1257,6 +1334,14 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
         retain_rows: true,
         retain_candidates: false,
         cancel: None,
+        deep_attach_preflight: false,
+        deep_attach_level: "head".into(),
+        deep_attach_max_attaches: 50_000,
+        deep_attach_max_probe_bytes: 268_435_456,
+        deep_attach_per_attach_max_bytes: 1_048_576,
+        deep_attach_max_probe_time_ms: 2000,
+        deep_attach_max_open_psts: 32,
+        deep_attach_max_peer_probes_per_group: 3,
     };
     let outcome = run_scan(&paths, &opts)?;
     let dup_limit = if args.limit == 0 {

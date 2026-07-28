@@ -140,10 +140,10 @@
 | Order | Track | Notes |
 |---|---|---|
 | 1 | **0073** Attach failure ledger | **Completed** — locus CSV + reason codes + histogram; unblocks 0074/0077/0081 |
-| 2 | **0074** Deep attach preflight | Budgeted L2 + winner-only; parallelizable with 0077/0078 after 0073 reason freeze |
+| 2 | **0074** Deep attach preflight | **Completed** — budgeted L2, peer-cap, cache→stream_available; D-0074-* residual |
 | 2b | **0077** CRC noise + risk | Parallel with 0074 |
 | 2c | **0078** Exit codes | Parallel; small CLI contract |
-| 3 | **0075** Winner policies | Independent of attach ledger |
+| 3 | **0075** Winner policies | Ladder (fidelity → folder class → source rank → policy) + `decided_by`; independent of attach ledger, but **rebase after 0074 merges** (shares `scan.rs` / `unique_pst_cmd.rs`); graded-fidelity item needs 0074 attach reasons |
 | 4 | **0076** Tier-2 hardening | After 0065 semantics solid |
 | 5 | **0079** Performance | After fidelity/report stable preferred |
 | 6 | **0080** Outlook QC | After unique-pst stable |

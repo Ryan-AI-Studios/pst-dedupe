@@ -95,6 +95,9 @@ impl std::fmt::Display for FileScanStatus {
 }
 
 /// Stable integrity reason codes (API for 0071 — additive only after v1).
+///
+/// Attachment stream codes (**0073** / **0074**) use `ATTACH_*` public strings so
+/// scan preflight, keep-set fidelity, and export ledger share one vocabulary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IntegrityReason {
     OpenFailed,
@@ -112,6 +115,24 @@ pub enum IntegrityReason {
     PropertyError,
     MessageReadFailed,
     AttachMetaFailed,
+    /// Attachment binary stream could not be opened (0073/0074).
+    AttachStreamOpenFailed,
+    /// Mid-stream read I/O failure on attachment data (0073/0074).
+    AttachStreamReadFailed,
+    /// CRC mismatch while reading attachment stream blocks (0073/0074).
+    AttachStreamCrc,
+    /// Attachment data block missing from NDB (0073/0074).
+    AttachBlockNotFound,
+    /// Attachment payload truncated vs expected (0073/0074).
+    AttachDataTruncated,
+    /// Attach method not portable for export (0073/0074).
+    AttachMethodUnsupported,
+    /// Info: global attach-probe budget hit (not an attach fail; 0074).
+    AttachProbeTruncated,
+    /// Per-attach probe wall-clock exceeded (0074).
+    AttachProbeTimeout,
+    /// Info: stopped peer walk after max_peer_probes_per_group (0074).
+    AttachPeerProbeCap,
     PathNotFound,
     NotPst,
     ReadError,
@@ -136,10 +157,36 @@ impl IntegrityReason {
             Self::PropertyError => "PROPERTY_ERROR",
             Self::MessageReadFailed => "MESSAGE_READ_FAILED",
             Self::AttachMetaFailed => "ATTACH_META_FAILED",
+            Self::AttachStreamOpenFailed => "ATTACH_STREAM_OPEN_FAILED",
+            Self::AttachStreamReadFailed => "ATTACH_STREAM_READ_FAILED",
+            Self::AttachStreamCrc => "ATTACH_STREAM_CRC",
+            Self::AttachBlockNotFound => "ATTACH_BLOCK_NOT_FOUND",
+            Self::AttachDataTruncated => "ATTACH_DATA_TRUNCATED",
+            Self::AttachMethodUnsupported => "ATTACH_METHOD_UNSUPPORTED",
+            Self::AttachProbeTruncated => "ATTACH_PROBE_TRUNCATED",
+            Self::AttachProbeTimeout => "ATTACH_PROBE_TIMEOUT",
+            Self::AttachPeerProbeCap => "ATTACH_PEER_PROBE_CAP",
             Self::PathNotFound => "PATH_NOT_FOUND",
             Self::NotPst => "NOT_PST",
             Self::ReadError => "READ_ERROR",
         }
+    }
+
+    /// True when this reason is an attach-stream probe **fail** (counts toward fail_rate).
+    ///
+    /// Info-only codes (`ATTACH_PROBE_TRUNCATED`, `ATTACH_PEER_PROBE_CAP`) return false.
+    pub fn is_attach_probe_fail(self) -> bool {
+        matches!(
+            self,
+            Self::AttachStreamOpenFailed
+                | Self::AttachStreamReadFailed
+                | Self::AttachStreamCrc
+                | Self::AttachBlockNotFound
+                | Self::AttachDataTruncated
+                | Self::AttachMethodUnsupported
+                | Self::AttachProbeTimeout
+                | Self::AttachMetaFailed
+        )
     }
 }
 
@@ -174,6 +221,15 @@ impl<'de> Deserialize<'de> for IntegrityReason {
             "PROPERTY_ERROR" => Ok(Self::PropertyError),
             "MESSAGE_READ_FAILED" => Ok(Self::MessageReadFailed),
             "ATTACH_META_FAILED" => Ok(Self::AttachMetaFailed),
+            "ATTACH_STREAM_OPEN_FAILED" => Ok(Self::AttachStreamOpenFailed),
+            "ATTACH_STREAM_READ_FAILED" => Ok(Self::AttachStreamReadFailed),
+            "ATTACH_STREAM_CRC" => Ok(Self::AttachStreamCrc),
+            "ATTACH_BLOCK_NOT_FOUND" => Ok(Self::AttachBlockNotFound),
+            "ATTACH_DATA_TRUNCATED" => Ok(Self::AttachDataTruncated),
+            "ATTACH_METHOD_UNSUPPORTED" => Ok(Self::AttachMethodUnsupported),
+            "ATTACH_PROBE_TRUNCATED" => Ok(Self::AttachProbeTruncated),
+            "ATTACH_PROBE_TIMEOUT" => Ok(Self::AttachProbeTimeout),
+            "ATTACH_PEER_PROBE_CAP" => Ok(Self::AttachPeerProbeCap),
             "PATH_NOT_FOUND" => Ok(Self::PathNotFound),
             "NOT_PST" => Ok(Self::NotPst),
             "READ_ERROR" => Ok(Self::ReadError),
@@ -212,6 +268,34 @@ pub fn reason_from_pst_error(err: &pst_reader::PstError) -> IntegrityReason {
         }
         // I/O during open or mid-read — open failures use OPEN_FAILED; message path may remap.
         PstError::Io(_) => IntegrityReason::OpenFailed,
+    }
+}
+
+/// Map a `PstError` in an **attachment stream** context to `ATTACH_*` integrity reasons.
+///
+/// Use for deep attach preflight / export attach paths so codes align with **0073**.
+/// Non-attach paths must continue to use [`reason_from_pst_error`].
+///
+/// `Io` maps to [`IntegrityReason::AttachStreamOpenFailed`]; callers that already
+/// opened a stream and fail mid-read should prefer [`IntegrityReason::AttachStreamReadFailed`].
+pub fn attach_reason_from_pst_error(err: &pst_reader::PstError) -> IntegrityReason {
+    use pst_reader::PstError;
+    match err {
+        PstError::CrcMismatch { .. } => IntegrityReason::AttachStreamCrc,
+        PstError::BlockNotFound(_) => IntegrityReason::AttachBlockNotFound,
+        PstError::DataTruncated { .. } => IntegrityReason::AttachDataTruncated,
+        PstError::NodeNotFound(_) | PstError::SubnodeNotFound(_) | PstError::NoSubnodeBTree(_) => {
+            IntegrityReason::AttachStreamOpenFailed
+        }
+        // Stream-open context: missing/wrong-type payload props are open fails, not list-meta.
+        // list_attachments failures must use AttachMetaFailed at the call site instead.
+        PstError::PropertyNotFound(_) | PstError::PropertyTypeMismatch { .. } => {
+            IntegrityReason::AttachStreamOpenFailed
+        }
+        // Open-context default; remapped to READ_FAILED by probe after successful open.
+        PstError::Io(_) => IntegrityReason::AttachStreamOpenFailed,
+        // Structural / other: treat as open fail for attach probe (not body-path codes).
+        _ => IntegrityReason::AttachStreamOpenFailed,
     }
 }
 
@@ -269,6 +353,13 @@ pub struct IntegrityThresholds {
     pub max_skip_rate: f64,
     pub max_crc_skip_rate: f64,
     pub max_failed_file_rate: f64,
+    /// Max attach-stream probe fail rate before `re_export_recommended` (0074; default 0.05).
+    #[serde(default = "default_max_attach_fail_rate")]
+    pub max_attach_fail_rate: f64,
+}
+
+fn default_max_attach_fail_rate() -> f64 {
+    0.05
 }
 
 impl Default for IntegrityThresholds {
@@ -277,6 +368,94 @@ impl Default for IntegrityThresholds {
             max_skip_rate: 0.05,
             max_crc_skip_rate: 0.01,
             max_failed_file_rate: 0.0,
+            max_attach_fail_rate: default_max_attach_fail_rate(),
+        }
+    }
+}
+
+/// Nested attach-probe preflight object (0074 deep attach preflight).
+///
+/// Present even when probe is disabled (`enabled: false`) so operators see the
+/// gate state. Rates use **attempted** only; residual mid-tail risk remains after L2.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AttachProbePreflight {
+    pub enabled: bool,
+    /// `"head"` | `"full"` | `"off"`.
+    pub level: String,
+    pub attempted: u64,
+    pub failed: u64,
+    pub truncated: bool,
+    pub fail_rate: f64,
+    pub max_attach_fail_rate: f64,
+    pub coverage_note: String,
+    /// Keep-set groups that hit `max_peer_probes_per_group` without a clean peer.
+    #[serde(default)]
+    pub peer_probe_capped_groups: u64,
+    /// Cooperative cancel aborted the probe pass mid-way (incomplete coverage).
+    /// Additive JSON; absent in older payloads deserializes as `false`.
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
+impl AttachProbePreflight {
+    /// Disabled probe (default for plain scan / when flag off).
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            level: "off".into(),
+            attempted: 0,
+            failed: 0,
+            truncated: false,
+            fail_rate: 0.0,
+            max_attach_fail_rate: default_max_attach_fail_rate(),
+            coverage_note: "deep attach preflight disabled".into(),
+            peer_probe_capped_groups: 0,
+            cancelled: false,
+        }
+    }
+
+    /// Build from probe tallies.
+    pub fn from_tallies(
+        level: &str,
+        attempted: u64,
+        failed: u64,
+        truncated: bool,
+        max_attach_fail_rate: f64,
+        peer_probe_capped_groups: u64,
+        cancelled: bool,
+    ) -> Self {
+        let fail_rate = if attempted == 0 {
+            0.0
+        } else {
+            failed as f64 / attempted as f64
+        };
+        // Cancel and budget truncation both mean incomplete coverage.
+        let coverage_incomplete = truncated || cancelled;
+        let coverage_note = if cancelled {
+            format!(
+                "budgeted attach probe cancelled after {attempted} attempts; coverage incomplete; residual export ledger (0073)"
+            )
+        } else if coverage_incomplete {
+            format!(
+                "budgeted L2/L3 attach probe truncated after {attempted} attempts; residual export ledger (0073)"
+            )
+        } else {
+            format!(
+                "budgeted attach probe level={level}; residual export ledger (0073); L2 ≠ full verify"
+            )
+        };
+        Self {
+            enabled: true,
+            level: level.to_string(),
+            attempted,
+            failed,
+            // Cancel implies incomplete coverage; surface as truncated for older consumers.
+            truncated: coverage_incomplete,
+            fail_rate,
+            max_attach_fail_rate,
+            coverage_note,
+            peer_probe_capped_groups,
+            cancelled,
         }
     }
 }
@@ -317,6 +496,9 @@ pub struct PreflightReport {
     pub thresholds: IntegrityThresholds,
     pub recommendation: PreflightRecommendation,
     pub reasons: Vec<String>,
+    /// Deep attach probe coverage / rates (0074). Always present; `enabled: false` when off.
+    #[serde(default = "AttachProbePreflight::disabled")]
+    pub attach_probe: AttachProbePreflight,
 }
 
 /// Inputs for pure preflight computation.
@@ -329,14 +511,78 @@ pub struct PreflightInputs {
     pub failed_files: u64,
     pub input_file_count: u64,
     pub thresholds: IntegrityThresholds,
+    /// When true, attach probe tallies influence recommendation (0074).
+    pub attach_probe_enabled: bool,
+    /// `"head"` | `"full"` | `"off"`.
+    pub attach_probe_level: String,
+    pub attach_attempted: u64,
+    pub attach_failed: u64,
+    pub attach_probe_truncated: bool,
+    pub peer_probe_capped_groups: u64,
+    /// Probe pass aborted by cooperative cancel (incomplete coverage).
+    pub attach_probe_cancelled: bool,
+}
+
+impl PreflightInputs {
+    /// Construct inputs with attach probe disabled (backward-compatible helper).
+    pub fn without_attach_probe(
+        mode: ScanMode,
+        recoverable: u64,
+        skipped: u64,
+        crc_skips: u64,
+        failed_files: u64,
+        input_file_count: u64,
+        thresholds: IntegrityThresholds,
+    ) -> Self {
+        Self {
+            mode,
+            recoverable,
+            skipped,
+            crc_skips,
+            failed_files,
+            input_file_count,
+            thresholds,
+            attach_probe_enabled: false,
+            attach_probe_level: "off".into(),
+            attach_attempted: 0,
+            attach_failed: 0,
+            attach_probe_truncated: false,
+            peer_probe_capped_groups: 0,
+            attach_probe_cancelled: false,
+        }
+    }
 }
 
 /// Compute preflight recommendation from scan tallies (pure).
+///
+/// **Strict mode + attach probe (0074):** deep-probe fails **degrade** messages during the
+/// probe pass (and under strict, scan-time degradations that become skips are already in
+/// `skipped`). Attach probe fail_rate alone does **not** invent a new strict exit; it may
+/// escalate `ok` → `re_export_recommended` when above `max_attach_fail_rate`. Existing
+/// `strict_integrity_failure` / `not_export_ready` paths are never overridden downward.
 pub fn compute_preflight(input: &PreflightInputs) -> PreflightReport {
     let denom = (input.recoverable + input.skipped).max(1) as f64;
     let skip_rate = input.skipped as f64 / denom;
     let crc_skip_rate = input.crc_skips as f64 / denom;
     let failed_file_rate = input.failed_files as f64 / (input.input_file_count.max(1) as f64);
+
+    let attach_probe = if input.attach_probe_enabled {
+        AttachProbePreflight::from_tallies(
+            if input.attach_probe_level.is_empty() {
+                "head"
+            } else {
+                &input.attach_probe_level
+            },
+            input.attach_attempted,
+            input.attach_failed,
+            input.attach_probe_truncated,
+            input.thresholds.max_attach_fail_rate,
+            input.peer_probe_capped_groups,
+            input.attach_probe_cancelled,
+        )
+    } else {
+        AttachProbePreflight::disabled()
+    };
 
     let mut reasons: Vec<String> = Vec::new();
     let mut recommendation = PreflightRecommendation::Ok;
@@ -375,6 +621,23 @@ pub fn compute_preflight(input: &PreflightInputs) -> PreflightReport {
         }
     }
 
+    // Attach fail rate: escalate ok → re_export_recommended only; never override not_export_ready.
+    if input.attach_probe_enabled
+        && attach_probe.fail_rate > input.thresholds.max_attach_fail_rate
+        && recommendation == PreflightRecommendation::Ok
+    {
+        recommendation = PreflightRecommendation::ReExportRecommended;
+        reasons.push("attach_stream_fail_rate_exceeded".into());
+    } else if input.attach_probe_enabled
+        && attach_probe.fail_rate > input.thresholds.max_attach_fail_rate
+        && recommendation == PreflightRecommendation::ReExportRecommended
+        && !reasons
+            .iter()
+            .any(|r| r == "attach_stream_fail_rate_exceeded")
+    {
+        reasons.push("attach_stream_fail_rate_exceeded".into());
+    }
+
     PreflightReport {
         schema: SCAN_INTEGRITY_SCHEMA.to_string(),
         mode: input.mode,
@@ -384,6 +647,7 @@ pub fn compute_preflight(input: &PreflightInputs) -> PreflightReport {
         thresholds: input.thresholds,
         recommendation,
         reasons,
+        attach_probe,
     }
 }
 
@@ -555,6 +819,32 @@ impl IntegrityCsvWriter {
         })
     }
 
+    /// Open an existing integrity CSV for append (no header rewrite).
+    ///
+    /// Used by unique-pst phase-1b strict probe skips after scan has already
+    /// closed its streaming writer. Creates with header when the path is missing.
+    pub fn open_append(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        use std::fs::OpenOptions;
+        let path = path.as_ref().to_path_buf();
+        if !path.exists() {
+            return Self::create(&path);
+        }
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let file = OpenOptions::new().append(true).open(&path)?;
+        let wtr = csv::WriterBuilder::new()
+            .has_headers(false)
+            .from_writer(BufWriter::new(file));
+        Ok(Self {
+            wtr,
+            path,
+            rows_written: 0,
+        })
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -712,6 +1002,110 @@ mod tests {
     }
 
     #[test]
+    fn attach_reason_codes_match_0073_public_names() {
+        // Must match pst-writer AttachmentFidelityKind::as_code overlapping set.
+        assert_eq!(
+            IntegrityReason::AttachStreamOpenFailed.as_str(),
+            "ATTACH_STREAM_OPEN_FAILED"
+        );
+        assert_eq!(
+            IntegrityReason::AttachStreamReadFailed.as_str(),
+            "ATTACH_STREAM_READ_FAILED"
+        );
+        assert_eq!(
+            IntegrityReason::AttachStreamCrc.as_str(),
+            "ATTACH_STREAM_CRC"
+        );
+        assert_eq!(
+            IntegrityReason::AttachBlockNotFound.as_str(),
+            "ATTACH_BLOCK_NOT_FOUND"
+        );
+        assert_eq!(
+            IntegrityReason::AttachDataTruncated.as_str(),
+            "ATTACH_DATA_TRUNCATED"
+        );
+        assert_eq!(
+            IntegrityReason::AttachMethodUnsupported.as_str(),
+            "ATTACH_METHOD_UNSUPPORTED"
+        );
+        assert_eq!(
+            IntegrityReason::AttachMetaFailed.as_str(),
+            "ATTACH_META_FAILED"
+        );
+        assert_eq!(
+            IntegrityReason::AttachProbeTruncated.as_str(),
+            "ATTACH_PROBE_TRUNCATED"
+        );
+        assert_eq!(
+            IntegrityReason::AttachProbeTimeout.as_str(),
+            "ATTACH_PROBE_TIMEOUT"
+        );
+        assert_eq!(
+            IntegrityReason::AttachPeerProbeCap.as_str(),
+            "ATTACH_PEER_PROBE_CAP"
+        );
+    }
+
+    #[test]
+    fn attach_reason_from_pst_error_maps_attach_context() {
+        assert_eq!(
+            attach_reason_from_pst_error(&PstError::CrcMismatch {
+                computed: 1,
+                stored: 2
+            }),
+            IntegrityReason::AttachStreamCrc
+        );
+        assert_eq!(
+            attach_reason_from_pst_error(&PstError::BlockNotFound(1)),
+            IntegrityReason::AttachBlockNotFound
+        );
+        assert_eq!(
+            attach_reason_from_pst_error(&PstError::DataTruncated {
+                needed: 10,
+                available: 2
+            }),
+            IntegrityReason::AttachDataTruncated
+        );
+        assert_eq!(
+            attach_reason_from_pst_error(&PstError::Io(std::io::Error::other("x"))),
+            IntegrityReason::AttachStreamOpenFailed
+        );
+        // Stream-open missing/wrong-type payload props → open fail (not meta).
+        assert_eq!(
+            attach_reason_from_pst_error(&PstError::PropertyNotFound(0x3701)),
+            IntegrityReason::AttachStreamOpenFailed
+        );
+        assert_eq!(
+            attach_reason_from_pst_error(&PstError::PropertyTypeMismatch {
+                tag: 0x3701,
+                expected: "binary",
+                actual: 0x1e,
+            }),
+            IntegrityReason::AttachStreamOpenFailed
+        );
+        // Non-attach path still uses generic CRC_MISMATCH:
+        assert_eq!(
+            reason_from_pst_error(&PstError::CrcMismatch {
+                computed: 1,
+                stored: 2
+            }),
+            IntegrityReason::CrcMismatch
+        );
+    }
+
+    #[test]
+    fn attach_probe_cancelled_sets_coverage_incomplete() {
+        let report = AttachProbePreflight::from_tallies("head", 10, 1, false, 0.05, 0, true);
+        assert!(report.cancelled);
+        assert!(report.truncated, "cancel implies incomplete coverage");
+        assert!(
+            report.coverage_note.contains("cancelled"),
+            "note={}",
+            report.coverage_note
+        );
+    }
+
+    #[test]
     fn scan_mode_serde_cli_strings() {
         assert_eq!(
             serde_json::to_string(&ScanMode::BestEffort).unwrap(),
@@ -729,31 +1123,32 @@ mod tests {
 
     #[test]
     fn preflight_ok_when_rates_low() {
-        let report = compute_preflight(&PreflightInputs {
-            mode: ScanMode::BestEffort,
-            recoverable: 100,
-            skipped: 1,
-            crc_skips: 0,
-            failed_files: 0,
-            input_file_count: 1,
-            thresholds: IntegrityThresholds::default(),
-        });
+        let report = compute_preflight(&PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            100,
+            1,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        ));
         assert_eq!(report.recommendation, PreflightRecommendation::Ok);
         assert_eq!(report.schema, SCAN_INTEGRITY_SCHEMA);
         assert!((report.skip_rate - 1.0 / 101.0).abs() < 1e-9);
+        assert!(!report.attach_probe.enabled);
     }
 
     #[test]
     fn preflight_re_export_on_high_skip_rate() {
-        let report = compute_preflight(&PreflightInputs {
-            mode: ScanMode::BestEffort,
-            recoverable: 90,
-            skipped: 10, // 10%
-            crc_skips: 0,
-            failed_files: 0,
-            input_file_count: 1,
-            thresholds: IntegrityThresholds::default(),
-        });
+        let report = compute_preflight(&PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            90,
+            10, // 10%
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        ));
         assert_eq!(
             report.recommendation,
             PreflightRecommendation::ReExportRecommended
@@ -763,15 +1158,15 @@ mod tests {
 
     #[test]
     fn preflight_not_export_ready_zero_recoverable() {
-        let report = compute_preflight(&PreflightInputs {
-            mode: ScanMode::BestEffort,
-            recoverable: 0,
-            skipped: 5,
-            crc_skips: 0,
-            failed_files: 0,
-            input_file_count: 1,
-            thresholds: IntegrityThresholds::default(),
-        });
+        let report = compute_preflight(&PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            0,
+            5,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        ));
         assert_eq!(
             report.recommendation,
             PreflightRecommendation::NotExportReady
@@ -780,15 +1175,15 @@ mod tests {
 
     #[test]
     fn preflight_strict_skip_not_export_ready() {
-        let report = compute_preflight(&PreflightInputs {
-            mode: ScanMode::Strict,
-            recoverable: 100,
-            skipped: 1,
-            crc_skips: 0,
-            failed_files: 0,
-            input_file_count: 1,
-            thresholds: IntegrityThresholds::default(),
-        });
+        let report = compute_preflight(&PreflightInputs::without_attach_probe(
+            ScanMode::Strict,
+            100,
+            1,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        ));
         assert_eq!(
             report.recommendation,
             PreflightRecommendation::NotExportReady
@@ -797,6 +1192,106 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r == "strict_integrity_failure"));
+    }
+
+    #[test]
+    fn preflight_attach_fail_rate_escalates_to_re_export() {
+        let mut input = PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            100,
+            0,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        );
+        input.attach_probe_enabled = true;
+        input.attach_probe_level = "head".into();
+        input.attach_attempted = 100;
+        input.attach_failed = 10; // 10% > 5%
+        let report = compute_preflight(&input);
+        assert_eq!(
+            report.recommendation,
+            PreflightRecommendation::ReExportRecommended
+        );
+        assert!(report
+            .reasons
+            .iter()
+            .any(|r| r == "attach_stream_fail_rate_exceeded"));
+        assert!(report.attach_probe.enabled);
+        assert!((report.attach_probe.fail_rate - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn preflight_attach_fail_rate_below_threshold_stays_ok() {
+        let mut input = PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            100,
+            0,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        );
+        input.attach_probe_enabled = true;
+        input.attach_probe_level = "head".into();
+        input.attach_attempted = 100;
+        input.attach_failed = 2; // 2% < 5%
+        let report = compute_preflight(&input);
+        assert_eq!(report.recommendation, PreflightRecommendation::Ok);
+        assert!(!report
+            .reasons
+            .iter()
+            .any(|r| r == "attach_stream_fail_rate_exceeded"));
+    }
+
+    #[test]
+    fn preflight_not_export_ready_not_overridden_by_attach_rate() {
+        let mut input = PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            0,
+            5,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        );
+        input.attach_probe_enabled = true;
+        input.attach_probe_level = "head".into();
+        input.attach_attempted = 10;
+        input.attach_failed = 10;
+        let report = compute_preflight(&input);
+        assert_eq!(
+            report.recommendation,
+            PreflightRecommendation::NotExportReady
+        );
+    }
+
+    #[test]
+    fn preflight_attach_rates_from_attempted_only_when_truncated() {
+        let mut input = PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            1000,
+            0,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        );
+        input.attach_probe_enabled = true;
+        input.attach_probe_level = "head".into();
+        input.attach_attempted = 50;
+        input.attach_failed = 5;
+        input.attach_probe_truncated = true;
+        let report = compute_preflight(&input);
+        assert!(report.attach_probe.truncated);
+        assert_eq!(report.attach_probe.attempted, 50);
+        assert!((report.attach_probe.fail_rate - 0.1).abs() < 1e-9);
+        // 10% > 5% → re_export even when truncated
+        assert_eq!(
+            report.recommendation,
+            PreflightRecommendation::ReExportRecommended
+        );
     }
 
     #[test]

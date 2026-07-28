@@ -1,6 +1,6 @@
 //! Shared scan orchestration for CLI commands (track 0065 integrity).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -46,6 +46,16 @@ pub struct ScanOptions {
     /// safe boundaries and returns `Ok` with partial results so far. CLI leaves
     /// this `None` so scan/dups behavior is unchanged.
     pub cancel: Option<Arc<AtomicBool>>,
+    /// Opt-in deep attach stream preflight (0074). Default **off**.
+    pub deep_attach_preflight: bool,
+    /// Deep probe level: `head` (L2 default) or `full` (L3).
+    pub deep_attach_level: String,
+    pub deep_attach_max_attaches: u64,
+    pub deep_attach_max_probe_bytes: u64,
+    pub deep_attach_per_attach_max_bytes: u64,
+    pub deep_attach_max_probe_time_ms: u64,
+    pub deep_attach_max_open_psts: usize,
+    pub deep_attach_max_peer_probes_per_group: u64,
 }
 
 impl Default for ScanOptions {
@@ -62,6 +72,14 @@ impl Default for ScanOptions {
             retain_rows: true,
             retain_candidates: false,
             cancel: None,
+            deep_attach_preflight: false,
+            deep_attach_level: "head".into(),
+            deep_attach_max_attaches: 50_000,
+            deep_attach_max_probe_bytes: 256 * 1024 * 1024,
+            deep_attach_per_attach_max_bytes: 1024 * 1024,
+            deep_attach_max_probe_time_ms: 2000,
+            deep_attach_max_open_psts: 32,
+            deep_attach_max_peer_probes_per_group: 3,
         }
     }
 }
@@ -146,6 +164,161 @@ pub struct ScanOutcome {
     pub csv_streamed: bool,
 }
 
+/// Outcome of rebuilding dedup relationships from a surviving candidate set.
+#[derive(Debug, Clone)]
+pub struct RebuildDedupOutcome {
+    /// `(source_pst basename, nid) → DedupResult` after insert in scan_order.
+    pub results: HashMap<(String, u64), DedupResult>,
+    pub unique_count: u64,
+    pub duplicate_count: u64,
+    pub tier1_hits: u64,
+    pub tier2_hits: u64,
+    pub total_savings: u64,
+}
+
+/// Rebuild `DedupResult` for remaining candidates in `scan_order`.
+///
+/// Used after strict deep-attach probe removes candidates so buffered CSV rows
+/// never still say `DuplicateOf` a skipped message (0074 P1-1).
+///
+/// `message_refs` supplies full [`MessageRef`] identity (subject/folder/sender)
+/// keyed by `(source_pst, nid)` — typically from pre-probe buffered report rows.
+/// Missing keys fall back to a minimal ref built from the candidate locus.
+pub fn rebuild_dedup_results(
+    candidates: &[RecoverableScanItem],
+    message_refs: &HashMap<(String, u64), MessageRef>,
+    enable_tier2: bool,
+) -> RebuildDedupOutcome {
+    let mut ordered: Vec<&RecoverableScanItem> = candidates.iter().collect();
+    ordered.sort_by_key(|c| c.scan_order);
+
+    let mut index = DedupIndex::with_capacity_and_tier2(ordered.len().max(1), enable_tier2);
+    let mut results: HashMap<(String, u64), DedupResult> = HashMap::with_capacity(ordered.len());
+    let mut total_savings = 0u64;
+
+    for c in ordered {
+        let key = (c.locus.source_pst.clone(), c.locus.nid);
+        let msg_ref = message_refs
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| MessageRef {
+                pst_index: 0,
+                pst_name: c.locus.source_pst.clone(),
+                folder_path: c.locus.folder_path.clone(),
+                nid: c.locus.nid,
+                subject: String::new(),
+                submit_time: None,
+                sender: String::new(),
+                size: c.size,
+            });
+        let result = index.check_and_insert(c.message_id_norm.as_deref(), c.content_hash, msg_ref);
+        if let DedupResult::DuplicateOf { .. } = &result {
+            total_savings = total_savings.saturating_add(c.size as u64);
+        }
+        results.insert(key, result);
+    }
+
+    RebuildDedupOutcome {
+        results,
+        unique_count: index.unique_count,
+        duplicate_count: index.duplicate_count,
+        tier1_hits: index.tier1_hits,
+        tier2_hits: index.tier2_hits,
+        total_savings,
+    }
+}
+
+/// Apply strict probe skips to per-file scan tallies (scan / unique-pst shared).
+///
+/// Increments `skipped`, decrements `messages` and `recoverable_messages`,
+/// tallies reason, and flips `Opened → Partial` when any skip lands on a
+/// previously clean open. Callers must also run
+/// [`recompute_per_file_dup_from_results`] so per-file `duplicates` match the
+/// post-probe index rebuild.
+pub fn apply_strict_probe_skips_to_file_stats(files: &mut [FileScanStats], skips: &[SkipRecord]) {
+    for skip in skips {
+        if let Some(fs) = files.iter_mut().find(|f| f.path == skip.source_path) {
+            fs.skipped = fs.skipped.saturating_add(1);
+            tally_reason(&mut fs.skipped_by_reason, skip.reason);
+            fs.recoverable_messages = fs.recoverable_messages.saturating_sub(1);
+            // `messages` counts recoverable scan hits for the file (pre-probe);
+            // a strict skip removes that message from recoverable output.
+            fs.messages = fs.messages.saturating_sub(1);
+            if fs.status == FileScanStatus::Opened {
+                fs.status = FileScanStatus::Partial;
+            }
+        }
+    }
+}
+
+/// Zero then recompute per-file `duplicates` from post-probe `DedupResult` map.
+///
+/// Keyed by `(source_pst basename, nid)` — same identity as
+/// [`rebuild_dedup_results`]. Matches file stats via `FileScanStats.name`
+/// (basename) when path-based lookup fails.
+pub fn recompute_per_file_dup_from_results(
+    files: &mut [FileScanStats],
+    results: &HashMap<(String, u64), DedupResult>,
+) {
+    for fs in files.iter_mut() {
+        fs.duplicates = 0;
+    }
+    for ((pst_name, _nid), result) in results {
+        if let DedupResult::DuplicateOf { .. } = result {
+            if let Some(fs) = files
+                .iter_mut()
+                .find(|f| f.name == *pst_name || f.path.ends_with(pst_name.as_str()))
+            {
+                fs.duplicates = fs.duplicates.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Recompute per-file degraded tallies from post-probe candidates (best-effort).
+///
+/// Replaces per-file `degraded_messages` / `degraded_by_reason` from the current
+/// candidate set so file-level output matches aggregate after phase-1b probe.
+pub fn recompute_per_file_degraded_from_candidates(
+    files: &mut [FileScanStats],
+    candidates: &[RecoverableScanItem],
+) {
+    for fs in files.iter_mut() {
+        fs.degraded_messages = 0;
+        fs.degraded_by_reason.clear();
+    }
+    for c in candidates {
+        if !c.integrity.degraded {
+            continue;
+        }
+        if let Some(fs) = files
+            .iter_mut()
+            .find(|f| f.path == c.locus.source_path || f.name == c.locus.source_pst)
+        {
+            fs.degraded_messages = fs.degraded_messages.saturating_add(1);
+            for r in &c.integrity.degraded_reasons {
+                tally_reason(&mut fs.degraded_by_reason, *r);
+            }
+            if fs.status == FileScanStatus::Opened {
+                fs.status = FileScanStatus::Partial;
+            }
+        }
+    }
+}
+
+/// Recompute aggregate `partial_files` / `opened_files` from per-file stats.
+pub fn recompute_file_status_counts(files: &[FileScanStats]) -> (u64, u64) {
+    let partial_files = files
+        .iter()
+        .filter(|f| f.status == FileScanStatus::Partial)
+        .count() as u64;
+    let opened_files = files
+        .iter()
+        .filter(|f| f.status == FileScanStatus::Opened)
+        .count() as u64;
+    (partial_files, opened_files)
+}
+
 /// Validate and normalize input PST paths to absolute/canonical form.
 pub fn resolve_pst_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     if paths.is_empty() {
@@ -202,6 +375,10 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     let mut crc_skips: u64 = 0;
     let mut skip_sample: Vec<SkipRecord> = Vec::new();
     let skip_limit = opts.skip_limit;
+    // When deep attach preflight is on, defer dedup CSV / all_rows until after probe
+    // so row integrity matches post-probe candidates (0074 P1-B).
+    let defer_dedup_rows = opts.deep_attach_preflight;
+    let mut buffered_rows: Vec<ReportRow> = Vec::new();
 
     // Open streaming writers at start (after path validation is caller's job).
     let integrity_path = resolve_integrity_path(opts);
@@ -553,7 +730,9 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                             total_savings += msg_ref.size as u64;
                         }
 
-                        if opts.retain_candidates {
+                        // Deep attach preflight needs loci even when keep-set candidates
+                        // are not otherwise retained (0074).
+                        if opts.retain_candidates || opts.deep_attach_preflight {
                             candidates.push(RecoverableScanItem {
                                 locus: MessageLocus {
                                     source_path: path_str.clone(),
@@ -577,19 +756,24 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                             integrity,
                         };
 
-                        if let Some(wtr) = dedup_wtr.as_mut() {
-                            wtr.write_row(&report_row)
-                                .map_err(|source| CliError::CsvWrite {
-                                    path: opts
-                                        .csv
-                                        .clone()
-                                        .unwrap_or_else(|| PathBuf::from("report.csv")),
-                                    source,
+                        if defer_dedup_rows {
+                            buffered_rows.push(report_row);
+                        } else {
+                            if let Some(wtr) = dedup_wtr.as_mut() {
+                                wtr.write_row(&report_row).map_err(|source| {
+                                    CliError::CsvWrite {
+                                        path: opts
+                                            .csv
+                                            .clone()
+                                            .unwrap_or_else(|| PathBuf::from("report.csv")),
+                                        source,
+                                    }
                                 })?;
-                        }
+                            }
 
-                        if opts.retain_rows {
-                            all_rows.push(report_row);
+                            if opts.retain_rows {
+                                all_rows.push(report_row);
+                            }
                         }
                         file_messages += 1;
                     }
@@ -625,7 +809,7 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         }
     }
 
-    // Always flush writers before return (including integrity failure paths).
+    // Flush integrity early; dedup CSV may still receive post-probe reconciled rows.
     if let Some(wtr) = integrity_wtr.as_mut() {
         wtr.flush().map_err(|source| CliError::CsvWrite {
             path: integrity_path
@@ -634,6 +818,297 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             source: Box::new(source),
         })?;
     }
+    if !defer_dedup_rows {
+        if let Some(wtr) = dedup_wtr.as_mut() {
+            wtr.flush().map_err(|source| CliError::CsvWrite {
+                path: opts
+                    .csv
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("report.csv")),
+                source,
+            })?;
+        }
+    }
+
+    let failed_files = file_stats
+        .iter()
+        .filter(|f| f.status == FileScanStatus::Failed)
+        .count() as u64;
+    let mut partial_files = file_stats
+        .iter()
+        .filter(|f| f.status == FileScanStatus::Partial)
+        .count() as u64;
+    let mut opened_files = file_stats
+        .iter()
+        .filter(|f| f.status == FileScanStatus::Opened)
+        .count() as u64;
+
+    let mut recoverable_messages = index.total();
+
+    // ── Deep attach preflight (0074, opt-in) ────────────────────────────────
+    // Skipped when parents_only equivalent: include_attachments == false.
+    let mut attach_attempted = 0u64;
+    let mut attach_failed = 0u64;
+    let mut attach_truncated = false;
+    let mut attach_cancelled = false;
+    let mut peer_probe_capped_groups = 0u64;
+    let mut unique_count = index.unique_count;
+    let mut duplicate_count = index.duplicate_count;
+    let mut tier1_hits = index.tier1_hits;
+    let mut tier2_hits = index.tier2_hits;
+    let attach_probe_wanted = opts.deep_attach_preflight && opts.include_attachments;
+    let attach_probe_enabled = attach_probe_wanted && !candidates.is_empty();
+    let attach_level = if opts.deep_attach_level.is_empty() {
+        "head".to_string()
+    } else {
+        opts.deep_attach_level.clone()
+    };
+    let mut probe_completed = false;
+    // Strict post-probe rebuilt DedupResult map (P1-1); None for best-effort / no probe.
+    let mut strict_rebuilt_results: Option<HashMap<(String, u64), DedupResult>> = None;
+
+    if attach_probe_enabled && !scan_cancel_requested(&opts.cancel) {
+        use crate::attach_probe::{probe_scan_items, ProbeBudgets, ProbeLevel, ProbeProgressCb};
+        use std::io::Write;
+        let level = ProbeLevel::parse(&attach_level).unwrap_or(ProbeLevel::Head);
+        let budgets = ProbeBudgets {
+            max_attaches: opts.deep_attach_max_attaches,
+            max_probe_bytes: opts.deep_attach_max_probe_bytes,
+            per_attach_max_bytes: opts.deep_attach_per_attach_max_bytes,
+            max_probe_time_ms: opts.deep_attach_max_probe_time_ms,
+            max_open_psts: opts.deep_attach_max_open_psts,
+            max_peer_probes_per_group: opts.deep_attach_max_peer_probes_per_group,
+        };
+        // Capture pre-probe degraded reason sets so we only tally *new* probe reasons.
+        let pre_degraded: Vec<(bool, HashSet<IntegrityReason>)> = candidates
+            .iter()
+            .map(|c| {
+                (
+                    c.integrity.degraded,
+                    c.integrity.degraded_reasons.iter().copied().collect(),
+                )
+            })
+            .collect();
+
+        // CLI/library stderr progress sink (0074 P2-A).
+        let progress_cb: Option<ProbeProgressCb> = Some(Box::new(move |attempted, bytes, base| {
+            if attempted == 1 || attempted.is_multiple_of(500) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "scan: deep-attach-preflight: attempted={attempted} bytes={bytes} source={base}"
+                );
+            }
+        }));
+
+        let (probe_summary, _probe_cache) = probe_scan_items(
+            &mut candidates,
+            budgets,
+            level,
+            opts.mode,
+            opts.cancel.clone(),
+            progress_cb,
+        );
+        probe_completed = true;
+        attach_attempted = probe_summary.attempted;
+        attach_failed = probe_summary.failed;
+        attach_truncated = probe_summary.truncated;
+        attach_cancelled = probe_summary.cancelled || scan_cancel_requested(&opts.cancel);
+        peer_probe_capped_groups = probe_summary.peer_probe_capped_groups;
+
+        if attach_cancelled {
+            // Cancel during probe is not attach corruption; leave tallies as pre-cancel.
+            // Coverage incomplete is surfaced via attach_probe.cancelled / truncated.
+        } else if opts.mode == ScanMode::Strict {
+            // Strict: probe fail → skip (match classify_attach_meta_fail / body strict).
+            let mut kept = Vec::with_capacity(candidates.len());
+            for (i, c) in candidates.drain(..).enumerate() {
+                let pre = pre_degraded
+                    .get(i)
+                    .map(|(_, s)| s)
+                    .cloned()
+                    .unwrap_or_default();
+                let new_fail = c
+                    .integrity
+                    .degraded_reasons
+                    .iter()
+                    .copied()
+                    .find(|r| r.is_attach_probe_fail() && !pre.contains(r));
+                if let Some(reason) = new_fail {
+                    let skip = SkipRecord {
+                        source_path: c.locus.source_path.clone(),
+                        source_pst: c.locus.source_pst.clone(),
+                        folder_path: c.locus.folder_path.clone(),
+                        is_orphaned: c.locus.is_orphaned,
+                        nid: c.locus.nid,
+                        reason,
+                        detail: format!("strict deep-attach-preflight skip: {}", reason.as_str()),
+                        mode: opts.mode,
+                    };
+                    total_skipped += 1;
+                    tally_reason(&mut skipped_by_reason, reason);
+                    if reason == IntegrityReason::CrcMismatch {
+                        crc_skips += 1;
+                    }
+                    // Reconcile file-level skipped/messages/recoverable tallies (0074 P1).
+                    if let Some(fs) = file_stats
+                        .iter_mut()
+                        .find(|f| f.path == c.locus.source_path)
+                    {
+                        fs.skipped = fs.skipped.saturating_add(1);
+                        tally_reason(&mut fs.skipped_by_reason, reason);
+                        fs.recoverable_messages = fs.recoverable_messages.saturating_sub(1);
+                        fs.messages = fs.messages.saturating_sub(1);
+                        if fs.status == FileScanStatus::Opened {
+                            fs.status = FileScanStatus::Partial;
+                        }
+                    }
+                    if skip_sample.len() < skip_limit {
+                        skip_sample.push(skip.clone());
+                    }
+                    if let Some(wtr) = integrity_wtr.as_mut() {
+                        wtr.write_skip(&skip).map_err(|source| CliError::CsvWrite {
+                            path: integrity_path
+                                .clone()
+                                .unwrap_or_else(|| PathBuf::from("integrity.csv")),
+                            source: Box::new(source),
+                        })?;
+                    }
+                    // Drop from candidates (must not remain recoverable under strict).
+                } else {
+                    kept.push(c);
+                }
+            }
+            candidates = kept;
+
+            // Reconcile summary recoverable + unique/dup from remaining candidates.
+            // Rebuild DedupResult map so buffered rows never DuplicateOf a skipped msg (P1-1).
+            recoverable_messages = candidates.len() as u64;
+            let mut message_refs: HashMap<(String, u64), MessageRef> = HashMap::new();
+            if defer_dedup_rows {
+                for row in &buffered_rows {
+                    message_refs.insert(
+                        (row.message.pst_name.clone(), row.message.nid),
+                        row.message.clone(),
+                    );
+                }
+            }
+            let rebuild = rebuild_dedup_results(&candidates, &message_refs, opts.enable_tier2);
+            unique_count = rebuild.unique_count;
+            duplicate_count = rebuild.duplicate_count;
+            tier1_hits = rebuild.tier1_hits;
+            tier2_hits = rebuild.tier2_hits;
+            total_savings = rebuild.total_savings;
+            // Per-file messages already adjusted by apply_strict_probe_skips; rebuild dups.
+            recompute_per_file_dup_from_results(&mut file_stats, &rebuild.results);
+            // Stash for post-probe row.result rewrite (strict only).
+            strict_rebuilt_results = Some(rebuild.results);
+
+            // Recompute file open/partial counts after status flips.
+            let (p, o) = recompute_file_status_counts(&file_stats);
+            partial_files = p;
+            opened_files = o;
+        } else {
+            // Best-effort: tally only newly added probe reasons; clean→degraded transitions.
+            let empty_pre: HashSet<IntegrityReason> = HashSet::new();
+            for (i, c) in candidates.iter().enumerate() {
+                let (was_degraded, pre) = match pre_degraded.get(i) {
+                    Some((d, s)) => (*d, s),
+                    None => (false, &empty_pre),
+                };
+                let mut added_probe_fail = false;
+                for r in &c.integrity.degraded_reasons {
+                    if r.is_attach_probe_fail() && !pre.contains(r) {
+                        tally_reason(&mut degraded_by_reason, *r);
+                        // Per-file degraded tallies (0074 P1-B).
+                        if let Some(fs) = file_stats
+                            .iter_mut()
+                            .find(|f| f.path == c.locus.source_path)
+                        {
+                            tally_reason(&mut fs.degraded_by_reason, *r);
+                        }
+                        added_probe_fail = true;
+                    }
+                }
+                if added_probe_fail && !was_degraded && c.integrity.degraded {
+                    total_degraded += 1;
+                    if let Some(fs) = file_stats
+                        .iter_mut()
+                        .find(|f| f.path == c.locus.source_path)
+                    {
+                        fs.degraded_messages = fs.degraded_messages.saturating_add(1);
+                        if fs.status == FileScanStatus::Opened {
+                            fs.status = FileScanStatus::Partial;
+                        }
+                    }
+                }
+            }
+            // Recompute file open/partial after best-effort status flips.
+            partial_files = file_stats
+                .iter()
+                .filter(|f| f.status == FileScanStatus::Partial)
+                .count() as u64;
+            opened_files = file_stats
+                .iter()
+                .filter(|f| f.status == FileScanStatus::Opened)
+                .count() as u64;
+        }
+    } else if attach_probe_wanted && scan_cancel_requested(&opts.cancel) {
+        // Cancel before/without completing probe: coverage is incomplete (0074 P1-D).
+        attach_cancelled = true;
+    }
+
+    // ── Post-probe row reconciliation (0074 P1-B) ───────────────────────────
+    if defer_dedup_rows {
+        // Key by (source_pst basename, nid) — matches MessageRef identity used in ReportRow.
+        let cand_integrity: std::collections::HashMap<(String, u64), RecoverableIntegrity> =
+            candidates
+                .iter()
+                .map(|c| {
+                    (
+                        (c.locus.source_pst.clone(), c.locus.nid),
+                        c.integrity.clone(),
+                    )
+                })
+                .collect();
+
+        for mut row in buffered_rows.drain(..) {
+            let key = (row.message.pst_name.clone(), row.message.nid);
+            match cand_integrity.get(&key) {
+                Some(integ) => {
+                    // Best-effort (and kept strict): adopt post-probe integrity.
+                    row.integrity = integ.clone();
+                    // Strict: also adopt rebuilt DedupResult so no row still says
+                    // DuplicateOf a probe-skipped winner (0074 P1-1).
+                    if let Some(map) = strict_rebuilt_results.as_ref() {
+                        if let Some(rebuilt) = map.get(&key) {
+                            row.result = rebuilt.clone();
+                        }
+                    }
+                }
+                None if opts.mode == ScanMode::Strict && probe_completed && !attach_cancelled => {
+                    // Strict probe skip: integrity CSV already has the skip; omit recoverable row.
+                    continue;
+                }
+                None => {
+                    // Cancel mid-probe or probe never ran: keep pre-probe integrity.
+                }
+            }
+
+            if let Some(wtr) = dedup_wtr.as_mut() {
+                wtr.write_row(&row).map_err(|source| CliError::CsvWrite {
+                    path: opts
+                        .csv
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from("report.csv")),
+                    source,
+                })?;
+            }
+            if opts.retain_rows {
+                all_rows.push(row);
+            }
+        }
+    }
+
     if let Some(wtr) = dedup_wtr.as_mut() {
         wtr.flush().map_err(|source| CliError::CsvWrite {
             path: opts
@@ -643,21 +1118,21 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             source,
         })?;
     }
+    // Integrity may have received post-probe strict skips.
+    if let Some(wtr) = integrity_wtr.as_mut() {
+        wtr.flush().map_err(|source| CliError::CsvWrite {
+            path: integrity_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("integrity.csv")),
+            source: Box::new(source),
+        })?;
+    }
 
-    let failed_files = file_stats
-        .iter()
-        .filter(|f| f.status == FileScanStatus::Failed)
-        .count() as u64;
-    let partial_files = file_stats
-        .iter()
-        .filter(|f| f.status == FileScanStatus::Partial)
-        .count() as u64;
-    let opened_files = file_stats
-        .iter()
-        .filter(|f| f.status == FileScanStatus::Opened)
-        .count() as u64;
+    // Drop probe-only candidates when keep-set retention was not requested.
+    if !opts.retain_candidates {
+        candidates.clear();
+    }
 
-    let recoverable_messages = index.total();
     let preflight = compute_preflight(&PreflightInputs {
         mode: opts.mode,
         recoverable: recoverable_messages,
@@ -666,6 +1141,17 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         failed_files,
         input_file_count: paths.len() as u64,
         thresholds: opts.thresholds,
+        attach_probe_enabled: attach_probe_wanted,
+        attach_probe_level: if attach_probe_wanted {
+            attach_level
+        } else {
+            "off".into()
+        },
+        attach_attempted,
+        attach_failed,
+        attach_probe_truncated: attach_truncated,
+        peer_probe_capped_groups,
+        attach_probe_cancelled: attach_cancelled,
     });
 
     let summary = ScanSummary {
@@ -673,10 +1159,10 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         mode: opts.mode,
         files: file_stats,
         total_messages: recoverable_messages,
-        unique: index.unique_count,
-        duplicates: index.duplicate_count,
-        tier1_hits: index.tier1_hits,
-        tier2_hits: index.tier2_hits,
+        unique: unique_count,
+        duplicates: duplicate_count,
+        tier1_hits,
+        tier2_hits,
         savings_bytes: total_savings,
         skipped: total_skipped,
         skipped_by_reason,
@@ -829,6 +1315,230 @@ mod tests {
         classify_attach_meta_fail, classify_body_flags, classify_orphaned, IntegrityReason,
         MessageClassification, ScanMode,
     };
+    use dedup_engine::keepset::MessageLocus;
+
+    /// Winner skipped by strict probe: surviving duplicate must become Unique (P1-1).
+    #[test]
+    fn rebuild_dedup_promotes_survivor_when_winner_dropped() {
+        let winner_ref = MessageRef {
+            pst_index: 0,
+            pst_name: "a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 1,
+            subject: "Hello".into(),
+            submit_time: None,
+            sender: "a@x".into(),
+            size: 100,
+        };
+        let dup_ref = MessageRef {
+            pst_index: 0,
+            pst_name: "a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 2,
+            subject: "Hello".into(),
+            submit_time: None,
+            sender: "a@x".into(),
+            size: 100,
+        };
+        // Pre-probe: both share message-id; winner first.
+        let mut pre = DedupIndex::with_tier2(true);
+        assert!(matches!(
+            pre.check_and_insert(Some("mid-1"), [9; 32], winner_ref.clone()),
+            DedupResult::Unique
+        ));
+        assert!(matches!(
+            pre.check_and_insert(Some("mid-1"), [9; 32], dup_ref.clone()),
+            DedupResult::DuplicateOf { .. }
+        ));
+
+        // Strict probe drops winner; only survivor remains.
+        let survivor = RecoverableScanItem {
+            locus: MessageLocus {
+                source_path: r"C:\mail\a.pst".into(),
+                source_pst: "a.pst".into(),
+                folder_path: "Inbox".into(),
+                nid: 2,
+                is_orphaned: false,
+            },
+            message_id_norm: Some("mid-1".into()),
+            content_hash: [9; 32],
+            size: 100,
+            integrity: RecoverableIntegrity::clean(),
+            scan_order: 1,
+        };
+        let mut refs = HashMap::new();
+        refs.insert(("a.pst".into(), 2u64), dup_ref);
+        let rebuild = rebuild_dedup_results(&[survivor], &refs, true);
+        assert_eq!(rebuild.unique_count, 1);
+        assert_eq!(rebuild.duplicate_count, 0);
+        let result = rebuild
+            .results
+            .get(&("a.pst".into(), 2u64))
+            .expect("survivor result");
+        assert!(
+            matches!(result, DedupResult::Unique),
+            "survivor must not remain DuplicateOf skipped winner: {result:?}"
+        );
+    }
+
+    /// Two survivors keep first-in-scan-order as Unique (P1-1 pure rebuild).
+    #[test]
+    fn rebuild_dedup_preserves_scan_order_winner() {
+        let c1 = RecoverableScanItem {
+            locus: MessageLocus {
+                source_path: r"C:\mail\a.pst".into(),
+                source_pst: "a.pst".into(),
+                folder_path: "Inbox".into(),
+                nid: 10,
+                is_orphaned: false,
+            },
+            message_id_norm: Some("same".into()),
+            content_hash: [1; 32],
+            size: 50,
+            integrity: RecoverableIntegrity::clean(),
+            scan_order: 0,
+        };
+        let c2 = RecoverableScanItem {
+            locus: MessageLocus {
+                source_path: r"C:\mail\a.pst".into(),
+                source_pst: "a.pst".into(),
+                folder_path: "Inbox".into(),
+                nid: 20,
+                is_orphaned: false,
+            },
+            message_id_norm: Some("same".into()),
+            content_hash: [1; 32],
+            size: 50,
+            integrity: RecoverableIntegrity::clean(),
+            scan_order: 1,
+        };
+        // Pass in reverse order; scan_order must still make nid=10 the winner.
+        let rebuild = rebuild_dedup_results(&[c2, c1], &HashMap::new(), true);
+        assert_eq!(rebuild.unique_count, 1);
+        assert_eq!(rebuild.duplicate_count, 1);
+        assert!(matches!(
+            rebuild.results.get(&("a.pst".into(), 10u64)),
+            Some(DedupResult::Unique)
+        ));
+        match rebuild.results.get(&("a.pst".into(), 20u64)) {
+            Some(DedupResult::DuplicateOf { original, .. }) => {
+                assert_eq!(original.nid, 10);
+            }
+            other => panic!("expected DuplicateOf winner 10, got {other:?}"),
+        }
+    }
+
+    /// Per-file tally helper after strict probe skips (P1-2).
+    #[test]
+    fn apply_strict_probe_skips_updates_file_stats() {
+        let mut files = vec![FileScanStats {
+            path: r"C:\mail\a.pst".into(),
+            name: "a.pst".into(),
+            status: FileScanStatus::Opened,
+            folders: 1,
+            messages: 2,
+            recoverable_messages: 2,
+            duplicates: 0,
+            skipped: 0,
+            skipped_by_reason: BTreeMap::new(),
+            degraded_messages: 0,
+            degraded_by_reason: BTreeMap::new(),
+            error_code: None,
+            error: None,
+        }];
+        let skips = vec![SkipRecord {
+            source_path: r"C:\mail\a.pst".into(),
+            source_pst: "a.pst".into(),
+            folder_path: "Inbox".into(),
+            is_orphaned: false,
+            nid: 1,
+            reason: IntegrityReason::AttachStreamOpenFailed,
+            detail: "strict deep-attach-preflight skip".into(),
+            mode: ScanMode::Strict,
+        }];
+        apply_strict_probe_skips_to_file_stats(&mut files, &skips);
+        assert_eq!(files[0].skipped, 1);
+        assert_eq!(files[0].recoverable_messages, 1);
+        assert_eq!(files[0].messages, 1);
+        assert_eq!(files[0].status, FileScanStatus::Partial);
+        assert_eq!(
+            files[0]
+                .skipped_by_reason
+                .get(IntegrityReason::AttachStreamOpenFailed.as_str())
+                .copied(),
+            Some(1)
+        );
+        let (partial, opened) = recompute_file_status_counts(&files);
+        assert_eq!(partial, 1);
+        assert_eq!(opened, 0);
+    }
+
+    #[test]
+    fn recompute_per_file_dup_and_degraded_from_candidates() {
+        let mut files = vec![FileScanStats {
+            path: r"C:\mail\a.pst".into(),
+            name: "a.pst".into(),
+            status: FileScanStatus::Opened,
+            folders: 1,
+            messages: 2,
+            recoverable_messages: 2,
+            duplicates: 99, // stale pre-probe
+            skipped: 0,
+            skipped_by_reason: BTreeMap::new(),
+            degraded_messages: 0,
+            degraded_by_reason: BTreeMap::new(),
+            error_code: None,
+            error: None,
+        }];
+        let mut results = HashMap::new();
+        results.insert(("a.pst".into(), 1u64), DedupResult::Unique);
+        results.insert(
+            ("a.pst".into(), 2u64),
+            DedupResult::DuplicateOf {
+                original: MessageRef {
+                    pst_index: 0,
+                    pst_name: "a.pst".into(),
+                    folder_path: "Inbox".into(),
+                    nid: 1,
+                    subject: String::new(),
+                    submit_time: None,
+                    sender: String::new(),
+                    size: 10,
+                },
+                tier: dedup_engine::DedupTier::MessageId,
+            },
+        );
+        recompute_per_file_dup_from_results(&mut files, &results);
+        assert_eq!(files[0].duplicates, 1);
+
+        let cand = RecoverableScanItem {
+            locus: MessageLocus {
+                source_path: r"C:\mail\a.pst".into(),
+                source_pst: "a.pst".into(),
+                folder_path: "Inbox".into(),
+                nid: 2,
+                is_orphaned: false,
+            },
+            message_id_norm: None,
+            content_hash: [0u8; 32],
+            size: 10,
+            integrity: RecoverableIntegrity::with_degraded(
+                vec![IntegrityReason::AttachStreamReadFailed],
+                false,
+            ),
+            scan_order: 1,
+        };
+        recompute_per_file_degraded_from_candidates(&mut files, &[cand]);
+        assert_eq!(files[0].degraded_messages, 1);
+        assert_eq!(files[0].status, FileScanStatus::Partial);
+        assert_eq!(
+            files[0]
+                .degraded_by_reason
+                .get(IntegrityReason::AttachStreamReadFailed.as_str())
+                .copied(),
+            Some(1)
+        );
+    }
 
     #[test]
     fn best_effort_attach_is_degraded_keep() {
@@ -911,15 +1621,15 @@ mod tests {
         use dedup_engine::integrity::{
             compute_preflight, PreflightInputs, PreflightRecommendation, SCAN_INTEGRITY_SCHEMA,
         };
-        let preflight = compute_preflight(&PreflightInputs {
-            mode: ScanMode::BestEffort,
-            recoverable: 10,
-            skipped: 0,
-            crc_skips: 0,
-            failed_files: 1,
-            input_file_count: 2,
-            thresholds: IntegrityThresholds::default(),
-        });
+        let preflight = compute_preflight(&PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            10,
+            0,
+            0,
+            1,
+            2,
+            IntegrityThresholds::default(),
+        ));
         assert_ne!(preflight.recommendation, PreflightRecommendation::Ok);
 
         let summary = ScanSummary {
@@ -955,15 +1665,15 @@ mod tests {
     #[test]
     fn exit_policy_strict_on_skip() {
         use dedup_engine::integrity::{compute_preflight, PreflightInputs, SCAN_INTEGRITY_SCHEMA};
-        let preflight = compute_preflight(&PreflightInputs {
-            mode: ScanMode::Strict,
-            recoverable: 10,
-            skipped: 1,
-            crc_skips: 0,
-            failed_files: 0,
-            input_file_count: 1,
-            thresholds: IntegrityThresholds::default(),
-        });
+        let preflight = compute_preflight(&PreflightInputs::without_attach_probe(
+            ScanMode::Strict,
+            10,
+            1,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        ));
         let summary = ScanSummary {
             schema: SCAN_INTEGRITY_SCHEMA.to_string(),
             mode: ScanMode::Strict,
@@ -1019,5 +1729,55 @@ mod tests {
         assert!(outcome.summary.files.is_empty());
         assert!(outcome.candidates.is_empty());
         assert_eq!(outcome.summary.recoverable_messages, 0);
+    }
+
+    /// Cancel with deep_attach_preflight on: attach_probe must report cancelled + incomplete
+    /// even when the probe phase never starts (0074 P1-D).
+    #[test]
+    fn deep_attach_cancel_before_probe_marks_attach_probe_cancelled() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let sample =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/aspose_outlook.pst");
+        assert!(
+            sample.is_file(),
+            "required fixture missing (fail-closed): {}",
+            sample.display()
+        );
+        let cancel = Arc::new(AtomicBool::new(true));
+        let opts = ScanOptions {
+            cancel: Some(cancel),
+            deep_attach_preflight: true,
+            deep_attach_level: "head".into(),
+            retain_rows: false,
+            retain_candidates: true,
+            include_attachments: true,
+            ..Default::default()
+        };
+        let outcome = run_scan(&[sample], &opts).expect("cancel must return Ok partial");
+        assert!(
+            outcome.summary.preflight.attach_probe.enabled,
+            "deep flag must enable attach_probe block"
+        );
+        assert!(
+            outcome.summary.preflight.attach_probe.cancelled,
+            "cancel-before-probe must set attach_probe.cancelled"
+        );
+        assert_eq!(
+            outcome.summary.preflight.attach_probe.attempted, 0,
+            "probe never started"
+        );
+        assert!(
+            outcome
+                .summary
+                .preflight
+                .attach_probe
+                .coverage_note
+                .contains("cancel")
+                || outcome.summary.preflight.attach_probe.truncated,
+            "coverage must be incomplete: {}",
+            outcome.summary.preflight.attach_probe.coverage_note
+        );
     }
 }

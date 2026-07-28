@@ -172,8 +172,8 @@ Operator evidence (2026-07-26): multi-mailbox `INC0102784.pst` + `-2.pst` -> uni
 | Track | Status | Summary |
 |---|---|---|
 | [0073-ExportAttachmentFailureLedger](0073-ExportAttachmentFailureLedger/spec.md) | **Completed** | Attach ledger: locus+source_id, reason taxonomy, CSV injection safe, row-cap, non-blocking sink; Codex luna PASS WITH DEFERRED P3 (D-0073-*) |
-| [0074-DeepAttachPreflightFidelity](0074-DeepAttachPreflightFidelity/spec.md) | **Ready** | Budgeted L2 probe; LRU handles; peer-probe cap; level-aware cache; winner-only; shared 0073 reasons; review folds |
-| [0075-KeepSetWinnerPolicies](0075-KeepSetWinnerPolicies/spec.md) | **Ready** | earliest_date + folder-class preference; document first_seen path-order |
+| [0074-DeepAttachPreflightFidelity](0074-DeepAttachPreflightFidelity/spec.md) | **Completed** | Budgeted L2 deep attach preflight; opt-in scan+unique-pst; peer-cap + unprobed degrade; cache→stream_available; strict rebuild; Codex luna PASS WITH DEFERRED P3 (D-0074-*) |
+| [0075-KeepSetWinnerPolicies](0075-KeepSetWinnerPolicies/spec.md) | **Ready** | Winner ladder: earliest_date, folder-class ladder, ordered source-rank, `decided_by` + duplicate-source provenance; opt-in graded fidelity (D-0066-fine-fidelity); all flags default off; spec expanded 2026-07-28 |
 | [0076-ContentHashTierHardening](0076-ContentHashTierHardening/spec.md) | **Ready** | Optional Tier 2.5 full-body hash + cheap size/count gates |
 | [0077-CrcNoiseAndExportRisk](0077-CrcNoiseAndExportRisk/spec.md) | **Ready** | Rate-limit CRC spam; export_risk score; ScanPST/re-export guidance |
 | [0078-UniqueExportExitCodes](0078-UniqueExportExitCodes/spec.md) | **Ready** | Partial-fidelity exit 3 vs hard fail; automation contract |

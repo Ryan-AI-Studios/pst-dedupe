@@ -32,9 +32,9 @@ pub use exporter::export_eml;
 pub use hasher::{compute_dedup_keys, normalize_message_id};
 pub use index::{DedupIndex, DedupResult, DedupTier, MessageRef};
 pub use integrity::{
-    compute_preflight, reason_from_pst_error, FileScanStatus, IntegrityCsvWriter, IntegrityReason,
-    IntegrityThresholds, PreflightRecommendation, PreflightReport, ScanMode, SkipRecord,
-    SCAN_INTEGRITY_SCHEMA,
+    attach_reason_from_pst_error, compute_preflight, reason_from_pst_error, AttachProbePreflight,
+    FileScanStatus, IntegrityCsvWriter, IntegrityReason, IntegrityThresholds, PreflightInputs,
+    PreflightRecommendation, PreflightReport, ScanMode, SkipRecord, SCAN_INTEGRITY_SCHEMA,
 };
 pub use keepset::{
     build_keep_set, build_keep_set_materialized, edrm_mih_hex, finalize_with_materialize,

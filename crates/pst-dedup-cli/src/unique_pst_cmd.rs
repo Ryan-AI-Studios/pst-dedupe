@@ -17,7 +17,8 @@ use std::time::Instant;
 
 use clap::Args;
 use dedup_engine::integrity::{
-    compute_preflight, IntegrityThresholds, PreflightInputs, ScanMode, SCAN_INTEGRITY_SCHEMA,
+    compute_preflight, IntegrityReason, IntegrityThresholds, PreflightInputs, ScanMode,
+    SCAN_INTEGRITY_SCHEMA,
 };
 use dedup_engine::keepset::{
     finalize_with_materialize, resolve_groups, sort_input_paths, write_keep_set_json,
@@ -38,7 +39,11 @@ use crate::paths::{
     resolve_cli_path_maybe_missing,
 };
 use crate::pst_materializer::{PstAttachStreamSource, PstMaterializer};
-use crate::scan::{evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions};
+use crate::scan::{
+    apply_strict_probe_skips_to_file_stats, evaluate_exit_policy, rebuild_dedup_results,
+    recompute_file_status_counts, recompute_per_file_degraded_from_candidates,
+    recompute_per_file_dup_from_results, resolve_pst_paths, run_scan, ScanOptions,
+};
 use crate::unique_export_report::{
     default_report_dir, volume_path_for, write_export_messages_csv, write_summary_json,
     write_volumes_csv, AttachLedgerMode, AttachLedgerSink, ExportMessageRow, ExportSection,
@@ -121,6 +126,27 @@ pub struct UniquePstClapArgs {
     /// Max rows written to `export_attachments.csv` (default 500000). Histogram is never truncated.
     #[arg(long = "attach-ledger-max-rows", default_value_t = DEFAULT_ATTACH_LEDGER_MAX_ROWS)]
     pub attach_ledger_max_rows: u64,
+    /// Opt-in budgeted deep attach stream preflight before keep-set resolve (0074). Default off.
+    #[arg(long = "deep-attach-preflight")]
+    pub deep_attach_preflight: bool,
+    /// Deep probe level: `head` (L2, default) or `full` (L3).
+    #[arg(long = "deep-attach-level", default_value = "head", value_parser = parse_deep_attach_level_arg)]
+    pub deep_attach_level: String,
+    #[arg(long = "deep-attach-max-attaches", default_value_t = 50_000)]
+    pub deep_attach_max_attaches: u64,
+    #[arg(long = "deep-attach-max-probe-bytes", default_value_t = 268_435_456)]
+    pub deep_attach_max_probe_bytes: u64,
+    #[arg(long = "deep-attach-per-attach-max-bytes", default_value_t = 1_048_576)]
+    pub deep_attach_per_attach_max_bytes: u64,
+    #[arg(long = "deep-attach-max-probe-time-ms", default_value_t = 2000)]
+    pub deep_attach_max_probe_time_ms: u64,
+    #[arg(long = "deep-attach-max-open-psts", default_value_t = 32)]
+    pub deep_attach_max_open_psts: usize,
+    #[arg(long = "deep-attach-max-peer-probes", default_value_t = 3)]
+    pub deep_attach_max_peer_probes: u64,
+    /// Max attach-stream probe fail rate before preflight recommends re-export (default 0.05).
+    #[arg(long = "max-attach-fail-rate", default_value_t = 0.05, value_parser = parse_rate_threshold_arg)]
+    pub max_attach_fail_rate: f64,
 }
 
 /// Runtime options for `unique-pst` orchestration.
@@ -154,6 +180,16 @@ pub struct UniquePstCliArgs {
     pub attach_ledger: AttachLedgerMode,
     /// Max CSV rows for attach ledger (0073). Default 500_000.
     pub attach_ledger_max_rows: u64,
+    /// Opt-in deep attach preflight (0074). Default off.
+    pub deep_attach_preflight: bool,
+    pub deep_attach_level: String,
+    pub deep_attach_max_attaches: u64,
+    pub deep_attach_max_probe_bytes: u64,
+    pub deep_attach_per_attach_max_bytes: u64,
+    pub deep_attach_max_probe_time_ms: u64,
+    pub deep_attach_max_open_psts: usize,
+    pub deep_attach_max_peer_probes: u64,
+    pub max_attach_fail_rate: f64,
 }
 
 /// Run options / hooks for GUI and library callers (0072).
@@ -271,6 +307,15 @@ impl UniquePstClapArgs {
             skip_limit: self.skip_limit,
             attach_ledger: self.attach_ledger,
             attach_ledger_max_rows: self.attach_ledger_max_rows,
+            deep_attach_preflight: self.deep_attach_preflight,
+            deep_attach_level: self.deep_attach_level,
+            deep_attach_max_attaches: self.deep_attach_max_attaches,
+            deep_attach_max_probe_bytes: self.deep_attach_max_probe_bytes,
+            deep_attach_per_attach_max_bytes: self.deep_attach_per_attach_max_bytes,
+            deep_attach_max_probe_time_ms: self.deep_attach_max_probe_time_ms,
+            deep_attach_max_open_psts: self.deep_attach_max_open_psts,
+            deep_attach_max_peer_probes: self.deep_attach_max_peer_probes,
+            max_attach_fail_rate: self.max_attach_fail_rate,
         })
     }
 }
@@ -317,6 +362,15 @@ fn parse_family_policy_arg(s: &str) -> std::result::Result<FamilyPolicy, String>
 
 fn parse_scan_mode_arg(s: &str) -> std::result::Result<ScanMode, String> {
     ScanMode::parse(s).ok_or_else(|| format!("invalid mode '{s}': expected best-effort or strict"))
+}
+
+fn parse_deep_attach_level_arg(s: &str) -> std::result::Result<String, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "head" | "full" => Ok(s.trim().to_ascii_lowercase()),
+        other => Err(format!(
+            "invalid deep-attach-level '{other}': expected head or full"
+        )),
+    }
 }
 
 fn parse_attach_ledger_mode_arg(s: &str) -> std::result::Result<AttachLedgerMode, String> {
@@ -546,15 +600,15 @@ struct CancelledSummaryCtx<'a> {
 /// Minimal cancelled `summary.json` when cancel hits after report-dir prepare but
 /// before a full report pack can be built (pre-scan / early exit).
 fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
-    let preflight = compute_preflight(&PreflightInputs {
-        mode: ctx.mode,
-        recoverable: 0,
-        skipped: 0,
-        crc_skips: 0,
-        failed_files: 0,
-        input_file_count: ctx.inputs.len() as u64,
-        thresholds: IntegrityThresholds::default(),
-    });
+    let preflight = compute_preflight(&PreflightInputs::without_attach_probe(
+        ctx.mode,
+        0,
+        0,
+        0,
+        0,
+        ctx.inputs.len() as u64,
+        IntegrityThresholds::default(),
+    ));
     let scan = crate::scan::ScanSummary {
         schema: SCAN_INTEGRITY_SCHEMA.to_string(),
         mode: ctx.mode,
@@ -836,6 +890,7 @@ pub fn run_unique_pst_with_options(
             max_skip_rate: args.max_skip_rate,
             max_crc_skip_rate: args.max_crc_skip_rate,
             max_failed_file_rate: args.max_failed_file_rate,
+            max_attach_fail_rate: args.max_attach_fail_rate,
         },
         allow_failed_files: args.allow_failed_files,
         integrity_csv: integrity_csv.clone(),
@@ -845,10 +900,19 @@ pub fn run_unique_pst_with_options(
         retain_candidates: true,
         // Cooperative cancel checked between files/folders/messages in run_scan.
         cancel: cancel.clone(),
+        // Unique-pst runs group-aware peer-capped probe after scan (not flat scan probe).
+        deep_attach_preflight: false,
+        deep_attach_level: args.deep_attach_level.clone(),
+        deep_attach_max_attaches: args.deep_attach_max_attaches,
+        deep_attach_max_probe_bytes: args.deep_attach_max_probe_bytes,
+        deep_attach_per_attach_max_bytes: args.deep_attach_per_attach_max_bytes,
+        deep_attach_max_probe_time_ms: args.deep_attach_max_probe_time_ms,
+        deep_attach_max_open_psts: args.deep_attach_max_open_psts,
+        deep_attach_max_peer_probes_per_group: args.deep_attach_max_peer_probes,
     };
 
     // ── Phase 1: integrity scan ─────────────────────────────────────────────
-    let outcome = run_scan(&paths, &opts)?;
+    let mut outcome = run_scan(&paths, &opts)?;
 
     // Scan-level integrity warnings must reach on_log (GUI Log panel), not only tracing.
     {
@@ -902,6 +966,301 @@ pub fn run_unique_pst_with_options(
         input_files: paths.iter().map(|p| p.display().to_string()).collect(),
     };
 
+    // ── Phase 1b: deep attach preflight (winner/group path, 0074) ───────────
+    // Opt-in; skipped for parents_only / --no-attachments. Peer-capped per group.
+    let effective_family_for_probe = if args.no_attachments {
+        FamilyPolicy::ParentsOnly
+    } else {
+        args.family_policy
+    };
+    // Phase-1b result cache for materializer stream_available (no re-I/O).
+    let mut phase1b_probe_cache: Option<(
+        crate::attach_probe::ProbeResultCache,
+        crate::attach_probe::ProbeLevel,
+    )> = None;
+    if args.deep_attach_preflight
+        && effective_family_for_probe == FamilyPolicy::KeepAttachmentsWithParent
+    {
+        use crate::attach_probe::{
+            probe_keep_set_groups, KeepSetProbeOpts, ProbeBudgets, ProbeLevel, ProbeProgressCb,
+        };
+        let level = ProbeLevel::parse(&args.deep_attach_level).unwrap_or(ProbeLevel::Head);
+
+        // Cancel between scan and probe: mark attach_probe incomplete (0074 P1-D).
+        if cancel_requested(&cancel) {
+            emit_log(stderr, &on_log, "cancelled before deep_attach_preflight");
+            let crc_skips = outcome
+                .summary
+                .skipped_by_reason
+                .get(IntegrityReason::CrcMismatch.as_str())
+                .copied()
+                .unwrap_or(0);
+            let mut thresholds = outcome.summary.preflight.thresholds;
+            thresholds.max_attach_fail_rate = args.max_attach_fail_rate;
+            outcome.summary.preflight = compute_preflight(&PreflightInputs {
+                mode: args.mode,
+                recoverable: outcome.summary.recoverable_messages,
+                skipped: outcome.summary.skipped,
+                crc_skips,
+                failed_files: outcome.summary.failed_files,
+                input_file_count: paths.len() as u64,
+                thresholds,
+                attach_probe_enabled: true,
+                attach_probe_level: level.as_str().to_string(),
+                attach_attempted: 0,
+                attach_failed: 0,
+                attach_probe_truncated: false,
+                peer_probe_capped_groups: 0,
+                attach_probe_cancelled: true,
+            });
+            write_cancelled_summary_json(&CancelledSummaryCtx {
+                summary_path: &summary_path,
+                inputs: &paths,
+                out: &out,
+                report_dir: &report_dir,
+                policy: args.policy,
+                family_policy: args.family_policy,
+                mode: args.mode,
+                folder_layout: args.folder_layout,
+                max_volume_bytes: args.max_volume_bytes,
+                duration_ms: started.elapsed().as_millis() as u64,
+            });
+            return Ok(UniquePstOutcome {
+                ok: false,
+                cancelled: true,
+                report_dir,
+                summary_path,
+                out,
+                messages_written_total: 0,
+                unique: 0,
+                volume_count: 0,
+                volumes: vec![],
+                error_message: Some("cancelled".into()),
+            });
+        }
+
+        emit_log(stderr, &on_log, "stage=deep_attach_preflight");
+        emit_stage_progress(&on_progress, "deep_attach_preflight", 0, 0, 0, 0, None);
+        let budgets = ProbeBudgets {
+            max_attaches: args.deep_attach_max_attaches,
+            max_probe_bytes: args.deep_attach_max_probe_bytes,
+            per_attach_max_bytes: args.deep_attach_per_attach_max_bytes,
+            max_probe_time_ms: args.deep_attach_max_probe_time_ms,
+            max_open_psts: args.deep_attach_max_open_psts,
+            max_peer_probes_per_group: args.deep_attach_max_peer_probes,
+        };
+        let log_for_progress = on_log.clone();
+        let stderr_p = stderr;
+        let progress_cb: Option<ProbeProgressCb> = Some(Box::new(move |attempted, bytes, base| {
+            if attempted.is_multiple_of(500) || attempted == 1 {
+                let line = format!(
+                    "deep-attach-preflight: attempted={attempted} bytes={bytes} source={base}"
+                );
+                if stderr_p {
+                    let _ = writeln!(std::io::stderr(), "unique-pst: {line}");
+                }
+                if let Some(log) = &log_for_progress {
+                    if let Ok(mut g) = log.lock() {
+                        g(format!("unique-pst: {line}"));
+                    }
+                }
+            }
+        }));
+        let (probe_summary, probe_cache) = probe_keep_set_groups(
+            &mut outcome.candidates,
+            KeepSetProbeOpts {
+                budgets,
+                level,
+                policy: args.policy,
+                family: effective_family_for_probe,
+                prefer_path: &args.prefer_path_contains,
+                tier2_enabled: !args.no_tier2,
+                mode: args.mode,
+                cancel: cancel.clone(),
+                progress: progress_cb,
+            },
+        );
+        phase1b_probe_cache = Some((probe_cache, level));
+
+        // Cancel during probe must not resolve/materialize/write with partial integrity.
+        if probe_summary.cancelled || cancel_requested(&cancel) {
+            emit_log(stderr, &on_log, "cancelled during deep_attach_preflight");
+            write_cancelled_summary_json(&CancelledSummaryCtx {
+                summary_path: &summary_path,
+                inputs: &paths,
+                out: &out,
+                report_dir: &report_dir,
+                policy: args.policy,
+                family_policy: args.family_policy,
+                mode: args.mode,
+                folder_layout: args.folder_layout,
+                max_volume_bytes: args.max_volume_bytes,
+                duration_ms: started.elapsed().as_millis() as u64,
+            });
+            return Ok(UniquePstOutcome {
+                ok: false,
+                cancelled: true,
+                report_dir,
+                summary_path,
+                out,
+                messages_written_total: 0,
+                unique: 0,
+                volume_count: 0,
+                volumes: vec![],
+                error_message: Some("cancelled".into()),
+            });
+        }
+
+        // Strict: probe fails must not win — remove from recoverable candidates (skip).
+        if args.mode == ScanMode::Strict {
+            use dedup_engine::integrity::{
+                tally_reason, IntegrityCsvWriter, IntegrityLedgerWriter,
+            };
+            use dedup_engine::SkipRecord;
+            let mut probe_skips: Vec<SkipRecord> = Vec::new();
+            outcome.candidates.retain(|c| {
+                if let Some(r) = c
+                    .integrity
+                    .degraded_reasons
+                    .iter()
+                    .copied()
+                    .find(|r| r.is_attach_probe_fail())
+                {
+                    probe_skips.push(SkipRecord {
+                        source_path: c.locus.source_path.clone(),
+                        source_pst: c.locus.source_pst.clone(),
+                        folder_path: c.locus.folder_path.clone(),
+                        is_orphaned: c.locus.is_orphaned,
+                        nid: c.locus.nid,
+                        reason: r,
+                        detail: format!("strict deep-attach-preflight skip: {}", r.as_str()),
+                        mode: args.mode,
+                    });
+                    false
+                } else {
+                    true
+                }
+            });
+            let skipped_probe = probe_skips.len() as u64;
+            for skip in &probe_skips {
+                tally_reason(&mut outcome.summary.skipped_by_reason, skip.reason);
+                if outcome.summary.skips.len() < args.skip_limit {
+                    outcome.summary.skips.push(skip.clone());
+                }
+            }
+            outcome.summary.skipped = outcome.summary.skipped.saturating_add(skipped_probe);
+            // Per-file tallies: skipped/messages/recoverable/status must match aggregate.
+            apply_strict_probe_skips_to_file_stats(&mut outcome.summary.files, &probe_skips);
+            // Append integrity CSV rows when path was requested (scan already closed its writer).
+            if let Some(path) = integrity_csv.as_ref() {
+                if !probe_skips.is_empty() {
+                    match IntegrityCsvWriter::open_append(path) {
+                        Ok(mut wtr) => {
+                            for skip in &probe_skips {
+                                if let Err(e) = wtr.write_skip(skip) {
+                                    tracing::warn!(
+                                        path = %path.display(),
+                                        error = %e,
+                                        "failed to append deep-probe strict skip to integrity CSV"
+                                    );
+                                    break;
+                                }
+                            }
+                            let _ = wtr.flush();
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %e,
+                                "failed to open integrity CSV for deep-probe strict skip append"
+                            );
+                        }
+                    }
+                }
+            }
+            // Reconcile recoverable/unique/dup so preflight is not pre-probe stale.
+            outcome.summary.recoverable_messages = outcome.candidates.len() as u64;
+            outcome.summary.total_messages = outcome.summary.recoverable_messages;
+            let empty_refs = std::collections::HashMap::new();
+            let rebuild = rebuild_dedup_results(&outcome.candidates, &empty_refs, !args.no_tier2);
+            outcome.summary.unique = rebuild.unique_count;
+            outcome.summary.duplicates = rebuild.duplicate_count;
+            outcome.summary.tier1_hits = rebuild.tier1_hits;
+            outcome.summary.tier2_hits = rebuild.tier2_hits;
+            outcome.summary.savings_bytes = rebuild.total_savings;
+            recompute_per_file_dup_from_results(&mut outcome.summary.files, &rebuild.results);
+            let (partial, opened) = recompute_file_status_counts(&outcome.summary.files);
+            outcome.summary.partial_files = partial;
+            outcome.summary.opened_files = opened;
+        }
+
+        // Recompute degraded tallies after probe (honest for newly probe-degraded).
+        {
+            use dedup_engine::integrity::tally_reason;
+            let mut degraded_messages = 0u64;
+            let mut degraded_by_reason = std::collections::BTreeMap::new();
+            for c in &outcome.candidates {
+                if c.integrity.degraded {
+                    degraded_messages += 1;
+                    for r in &c.integrity.degraded_reasons {
+                        tally_reason(&mut degraded_by_reason, *r);
+                    }
+                }
+            }
+            outcome.summary.degraded_messages = degraded_messages;
+            outcome.summary.degraded_by_reason = degraded_by_reason;
+            // Per-file degraded must match aggregate (best-effort + residual after strict).
+            recompute_per_file_degraded_from_candidates(
+                &mut outcome.summary.files,
+                &outcome.candidates,
+            );
+            let (partial, opened) = recompute_file_status_counts(&outcome.summary.files);
+            outcome.summary.partial_files = partial;
+            outcome.summary.opened_files = opened;
+        }
+
+        // Full preflight recompute with updated skipped/recoverable + attach probe tallies.
+        let crc_skips = outcome
+            .summary
+            .skipped_by_reason
+            .get(IntegrityReason::CrcMismatch.as_str())
+            .copied()
+            .unwrap_or(0);
+        let mut thresholds = outcome.summary.preflight.thresholds;
+        thresholds.max_attach_fail_rate = args.max_attach_fail_rate;
+        outcome.summary.preflight = compute_preflight(&PreflightInputs {
+            mode: args.mode,
+            recoverable: outcome.summary.recoverable_messages,
+            skipped: outcome.summary.skipped,
+            crc_skips,
+            failed_files: outcome.summary.failed_files,
+            input_file_count: paths.len() as u64,
+            thresholds,
+            attach_probe_enabled: true,
+            attach_probe_level: level.as_str().to_string(),
+            attach_attempted: probe_summary.attempted,
+            attach_failed: probe_summary.failed,
+            attach_probe_truncated: probe_summary.truncated,
+            peer_probe_capped_groups: probe_summary.peer_probe_capped_groups,
+            attach_probe_cancelled: probe_summary.cancelled,
+        });
+        if probe_summary.attempted > 0 || probe_summary.truncated || probe_summary.cancelled {
+            emit_log(
+                stderr,
+                &on_log,
+                &format!(
+                    "deep-attach-preflight: attempted={} failed={} truncated={} cancelled={} peer_capped_groups={} recommendation={}",
+                    probe_summary.attempted,
+                    probe_summary.failed,
+                    outcome.summary.preflight.attach_probe.truncated,
+                    probe_summary.cancelled,
+                    probe_summary.peer_probe_capped_groups,
+                    outcome.summary.preflight.recommendation.as_str()
+                ),
+            );
+        }
+    }
+
     // ── Phase 2 / 2b: resolve + promote ─────────────────────────────────────
     emit_log(stderr, &on_log, "stage=resolve");
     emit_stage_progress(&on_progress, "resolve", 0, 0, 0, 0, None);
@@ -943,10 +1302,18 @@ pub fn run_unique_pst_with_options(
             }
         })) as crate::pst_materializer::MaterializeWarnCb
     });
+    // Phase 1b already ran the budgeted deep probe. Pass the result cache so
+    // materialize sets stream_available from probe outcomes without re-I/O
+    // (0074 P1-A). Unprobed attaches stay optimistic (honest via truncated).
+    // Residual mid-tail fails go to the 0073 export ledger.
+    // Residual: D-0074-mat-lru (bounded materializer handle cache).
     let mut mat = match mat_warn {
         Some(cb) => PstMaterializer::new(effective_family).with_warn_sink(cb),
         None => PstMaterializer::new(effective_family),
     };
+    if let Some((cache, level)) = phase1b_probe_cache {
+        mat = mat.with_probe_result_cache(cache, level);
+    }
     let mut attach_src = PstAttachStreamSource::new();
     let _materialized_count =
         finalize_with_materialize(&mut resolved, &mut mat, &mut |_msg| Ok(()))
@@ -2323,6 +2690,15 @@ mod tests {
             skip_limit: 10_000,
             attach_ledger: AttachLedgerMode::Full,
             attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+            deep_attach_preflight: false,
+            deep_attach_level: "head".into(),
+            deep_attach_max_attaches: 50_000,
+            deep_attach_max_probe_bytes: 268_435_456,
+            deep_attach_per_attach_max_bytes: 1_048_576,
+            deep_attach_max_probe_time_ms: 2000,
+            deep_attach_max_open_psts: 32,
+            deep_attach_max_peer_probes: 3,
+            max_attach_fail_rate: 0.05,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -2394,6 +2770,15 @@ mod tests {
             skip_limit: 10_000,
             attach_ledger: AttachLedgerMode::Full,
             attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+            deep_attach_preflight: false,
+            deep_attach_level: "head".into(),
+            deep_attach_max_attaches: 50_000,
+            deep_attach_max_probe_bytes: 268_435_456,
+            deep_attach_per_attach_max_bytes: 1_048_576,
+            deep_attach_max_probe_time_ms: 2000,
+            deep_attach_max_open_psts: 32,
+            deep_attach_max_peer_probes: 3,
+            max_attach_fail_rate: 0.05,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -2472,6 +2857,15 @@ mod tests {
             skip_limit: 10_000,
             attach_ledger: AttachLedgerMode::Full,
             attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+            deep_attach_preflight: false,
+            deep_attach_level: "head".into(),
+            deep_attach_max_attaches: 50_000,
+            deep_attach_max_probe_bytes: 268_435_456,
+            deep_attach_per_attach_max_bytes: 1_048_576,
+            deep_attach_max_probe_time_ms: 2000,
+            deep_attach_max_open_psts: 32,
+            deep_attach_max_peer_probes: 3,
+            max_attach_fail_rate: 0.05,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -2541,6 +2935,15 @@ mod tests {
             skip_limit: 10_000,
             attach_ledger: AttachLedgerMode::Full,
             attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+            deep_attach_preflight: false,
+            deep_attach_level: "head".into(),
+            deep_attach_max_attaches: 50_000,
+            deep_attach_max_probe_bytes: 268_435_456,
+            deep_attach_per_attach_max_bytes: 1_048_576,
+            deep_attach_max_probe_time_ms: 2000,
+            deep_attach_max_open_psts: 32,
+            deep_attach_max_peer_probes: 3,
+            max_attach_fail_rate: 0.05,
         };
         let outcome = run_unique_pst_with_options(
             args,

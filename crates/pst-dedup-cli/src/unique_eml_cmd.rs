@@ -127,6 +127,7 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
             max_skip_rate: args.max_skip_rate,
             max_crc_skip_rate: args.max_crc_skip_rate,
             max_failed_file_rate: args.max_failed_file_rate,
+            max_attach_fail_rate: 0.05,
         },
         allow_failed_files: args.allow_failed_files,
         integrity_csv: integrity_csv.clone(),
@@ -135,6 +136,7 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
         retain_rows: false,
         retain_candidates: true,
         cancel: None,
+        ..Default::default()
     };
 
     // Phase 1: integrity-aware scan collecting candidates.

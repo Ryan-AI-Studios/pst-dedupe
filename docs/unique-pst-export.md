@@ -38,7 +38,35 @@ Source PSTs are **read-only**. The writer never mutates inputs.
 | `--also-eml <dir>` | Soft residual (accepted; co-export may be ignored — see deferred) |
 | `--attach-ledger full\|summary-only\|off` | **0073** — attachment failure ledger (default **`full`**) |
 | `--attach-ledger-max-rows <N>` | Cap on `export_attachments.csv` rows (default **500000**); histogram never truncated |
+| `--deep-attach-preflight` | **0074** — opt-in budgeted attach stream probe before keep-set resolve (default **off**) |
+| `--deep-attach-level head\|full` | Probe depth: **`head`** (L2, default) or **`full`** (L3). L2 ≠ full verify. Unknown level is a usage error. Under **`--mode strict`**, probe fails **skip** the message (same as attach-meta/body strict); best-effort **degrades** only. |
+| `--deep-attach-max-attaches` | Hard stop on attach count probed (default **50000**) |
+| `--deep-attach-max-probe-bytes` | Global I/O budget (default **256 MiB**) |
+| `--deep-attach-per-attach-max-bytes` | L2 head-read cap per attach (default **1 MiB**) |
+| `--deep-attach-max-probe-time-ms` | Per-attach wall-clock abort (default **2000**) |
+| `--deep-attach-max-open-psts` | Bounded sticky PST handle LRU (default **32**) — avoids FD exhaustion |
+| `--deep-attach-max-peer-probes` | Max peers probed per keep-set group (default **3**) |
+| `--max-attach-fail-rate` | Preflight escalate when attach fail rate exceeds (default **0.05**) |
 | `--json` | Summary JSON on **stdout**; human progress on **stderr** |
+
+### Deep attach preflight (0074) — honesty
+
+| Claim allowed | Claim forbidden |
+|---|---|
+| “Budgeted L2 head-probe of N attaches; M failed; rate R” | “All attachments will export cleanly” |
+| `recommendation: re_export_recommended` from attach rate | Silent `ok` when rate exceeds threshold |
+| Residual mid-tail risk after L2 | Equating L2 success with L3 full verification |
+
+- **Default off** on both `scan` and `unique-pst` (opt-in). Skipped entirely under `parents_only` / `--no-attachments`.
+- Probe fails **degrade** message integrity so `fidelity_rank` prefers clean peers; does not invent a new exit code.
+- When attach fail rate > `--max-attach-fail-rate`, preflight escalates `ok` → `re_export_recommended` + reason `attach_stream_fail_rate_exceeded`.
+- **0073 residual ledger** at export is still required for mid-tail / residual fails.
+- **0077** owns CRC stderr noise — probe uses structured counters only (no per-page CRC log spam).
+- **Materialize does not re-probe** when phase-1b deep preflight already ran (shared hard budgets). Winner fidelity is from phase-1b degrade; residual mid-tail fails → 0073 ledger.
+- **Cancel** during probe sets `attach_probe.cancelled=true` and marks coverage incomplete (`truncated` + coverage note).
+- Plain **`pst-dedup scan`** accepts the same deep-attach budget flags, including `--deep-attach-max-peer-probes` (default **3**).
+- High rates → **re-export from Purview/Exchange** preferred. **ScanPST only on a copy**, last resort (may change metadata). Never auto-ScanPST; never mutate sources.
+- Preflight JSON nests `attach_probe` under `summary.preflight` (always present; `enabled: false` when off).
 
 ## Multi-volume naming
 
@@ -136,6 +164,24 @@ source_id,source_path,folder_path,msg_nid,attach_nid,attach_index,filename,size,
 }
 ```
 
+### `preflight.attach_probe` (0074; nested under scan preflight)
+
+```json
+"attach_probe": {
+  "enabled": true,
+  "level": "head",
+  "attempted": 12000,
+  "failed": 80,
+  "truncated": false,
+  "fail_rate": 0.0067,
+  "max_attach_fail_rate": 0.05,
+  "coverage_note": "budgeted attach probe level=head; residual export ledger (0073); L2 ≠ full verify",
+  "peer_probe_capped_groups": 0
+}
+```
+
+Also available on plain `pst-dedup scan --deep-attach-preflight --json` under `summary.preflight.attach_probe` (same budget flags as unique-pst: level, max-attaches, max-probe-bytes, per-attach-max-bytes, max-probe-time-ms, max-open-psts, **max-peer-probes**, max-attach-fail-rate).
+
 ### Reason → operator action (buckets)
 
 | Bucket | Example codes | Operator action |
@@ -161,7 +207,8 @@ source_id,source_path,folder_path,msg_nid,attach_nid,attach_index,filename,size,
 - **unique-eml:** no attach ledger CSV in this track — residual **D-0073-eml** (operators use unique-pst ledger or re-run unique-eml with pack logs).
 - **GUI:** no attach-ledger UI controls — residual **D-0073-gui** (CLI flags work via shared args).
 - CRC stderr noise is **0077**; ledger is not a dump of page CRCs.
-- Deep attach preflight before export is **0074** (shared reason code strings).
+- Deep attach preflight before export is **0074** (shared reason code strings with **0073**).
+- **GUI deep-attach checkbox:** residual **D-0074-gui** (CLI `--deep-attach-preflight` works; wizard defaults off).
 
 ## Exit honesty
 

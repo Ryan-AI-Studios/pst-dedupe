@@ -4,6 +4,7 @@
 //! Track **0072** depends on [`unique_pst_cmd::run_unique_pst_with_options`] so the
 //! GUI wizard shares the same pipeline as the CLI (no process spawn, no dual path).
 
+pub mod attach_probe;
 pub mod convenience;
 pub mod error;
 pub mod inspect;

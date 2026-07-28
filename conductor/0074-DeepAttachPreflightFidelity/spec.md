@@ -4,7 +4,7 @@
 - **Execution repo:** `C:\dev\dedupe`  
 - **Governance:** this directory in `C:\dev\dedupe\conductor\`  
 - **Plan-of-record:** Series L — Unique export hardening (post-0072 / INC0102784 lessons)  
-- **Status:** **Ready** — architectural review folds accepted 2026-07-26 (§3.12); resource/DoS/cache folds 2026-07-26 (§3.4, §3.7, §3.9–3.10)  
+- **Status:** **Completed** — Codex luna PASS WITH DEFERRED P3 (`review.codex.final5.md`); residuals D-0074-*
 - **Depends on:** Hard **0065** (scan integrity / preflight), **0066** (keep-set fidelity). Soft **0071** unique-pst. Soft **0073** attach reason strings (share vocabulary; 0074 may land first if codes frozen to match). Soft **0077** CRC noise (do not dump page CRC spam from probe).  
 - **Downstream:** Earlier risk signal before multi-hour unique-pst; feeds 0073 Mode A promote; **0081** operator runbook.  
 - **Priority:** **P0 Series L** (close scan-ok / export-fail attach gap).  
