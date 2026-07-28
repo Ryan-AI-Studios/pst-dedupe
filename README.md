@@ -238,18 +238,25 @@ $m = "C:\Matters\cli-smoke"
 
 **Exit codes**
 
+Severity order (not numeric): cancelled → hard fail → risk gate → partial → success.
+
 | Code | Meaning |
 |---|---|
-| **0** | Success |
-| **1** | Generic / unexpected error |
+| **0** | Success (complete fidelity; nothing to review) |
+| **1** | Generic / hard fail (artifact absent or untrustworthy) |
 | **2** | Usage / validation (bad args, bad JSON, unknown kind, relative path in params) |
 | **3** | Matter busy (another job active) |
 | **4** | Job finished **failed** or **cancelled** |
 | **5** | Matter open/create/IO error |
+| **64** | Partial fidelity — **message-complete artifact retained**; attach/body soft-fail (unique-pst / unique-eml) |
+| **65** | Export risk gate met (`--fail-on-export-risk`; 0077 `export_risk`) |
+| **130** | Operator cancelled unique-export (SIGINT convention); truncated PST quarantined to `.partial` |
+
+Unique-export detail: [`docs/unique-pst-export.md`](docs/unique-pst-export.md). **Do not** treat exit 64 as “delete the PST” — the artifact is usable with disclosure. **0081:** do not blanket-retry exit 5 (`AuditChainBroken` is not retryable).
 
 **SIGINT / Ctrl+C**
 
-1. First Ctrl+C → request cooperative cancel (no `process::exit` in the handler); wait for terminal + runner join + clean SQLite drop. Interrupted jobs often end **paused** or **cancelled** → exit **4** (`ok: false`).
+1. First Ctrl+C → request cooperative cancel (no `process::exit` in the handler); wait for terminal + runner join + clean SQLite drop. Matter jobs interrupted often end **paused** or **cancelled** → exit **4** (`ok: false`). Unique-pst cancel → exit **130** with cancelled `summary.json` and quarantined partial volumes.
 2. Second Ctrl+C → force-abort request (documented last resort).
 
 **`job cancel` vs SIGINT:** `job cancel` marks a non-terminal job **cancelled** in the matter DB (cleanup / leftover rows). In-flight work in the *current* process is stopped with **Ctrl+C** (cooperative cancel on the ProcessRunner).

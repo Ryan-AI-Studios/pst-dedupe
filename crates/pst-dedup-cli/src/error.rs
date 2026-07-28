@@ -4,12 +4,15 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 /// Stable process exit codes for automation scripts.
+///
+/// Codes `0`–`5` are frozen. New application codes live in **64–113** (sysexits band).
+/// Cancellation uses conventional SIGINT exit **130** (`128 + 2`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CliExit {
     /// Success.
     Success = 0,
-    /// Generic / unexpected error.
+    /// Generic / unexpected error (hard fail — artifact absent or untrustworthy).
     Generic = 1,
     /// Usage / validation (bad args, bad JSON, unknown kind, relative path in params).
     Usage = 2,
@@ -19,11 +22,24 @@ pub enum CliExit {
     JobFailed = 4,
     /// Matter open/create/IO error.
     MatterIo = 5,
+    /// Message-complete artifact; attachment/body soft-failures recorded (track 0078).
+    PartialFidelity = 64,
+    /// 0077 `export_risk` met the configured `--fail-on-export-risk` gate (track 0078).
+    ExportRiskBlocked = 65,
+    /// Operator cancelled (SIGINT convention; track 0078).
+    Cancelled = 130,
 }
 
 impl From<CliExit> for ExitCode {
     fn from(c: CliExit) -> Self {
         ExitCode::from(c as u8)
+    }
+}
+
+impl CliExit {
+    /// Numeric code for JSON `exit_code` / scripting.
+    pub fn as_u8(self) -> u8 {
+        self as u8
     }
 }
 

@@ -74,6 +74,12 @@ pub struct UniqueOutcomeView {
     pub error_message: Option<String>,
     /// Post-export risk (0077); qualifies the Done banner.
     pub export_risk: dedup_engine::integrity::PreflightRecommendation,
+    /// Classified exit code (0078); Desk full fidelity UI is D-0078-gui residual.
+    #[allow(dead_code)]
+    pub exit_code: u8,
+    /// Terminal fidelity string (0078).
+    #[allow(dead_code)]
+    pub fidelity: String,
 }
 
 impl From<UniquePstOutcome> for UniqueOutcomeView {
@@ -90,6 +96,8 @@ impl From<UniquePstOutcome> for UniqueOutcomeView {
             volumes: o.volumes.into_iter().map(VolumeDigestView::from).collect(),
             error_message: o.error_message,
             export_risk: o.export_risk,
+            exit_code: o.exit.as_u8(),
+            fidelity: o.fidelity.as_str().to_string(),
         }
     }
 }
@@ -301,6 +309,8 @@ pub fn run_unique_pst_worker(
             volumes: vec![],
             error_message: Some(e.to_string()),
             export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
+            exit_code: 1,
+            fidelity: "failed".into(),
         },
     };
 
@@ -345,6 +355,20 @@ mod tests {
             volumes: vec![],
             error_message: None,
             export_risk: risk,
+            exit_code: if cancelled {
+                130
+            } else if ok {
+                0
+            } else {
+                1
+            },
+            fidelity: if cancelled {
+                "failed".into()
+            } else if ok {
+                "complete".into()
+            } else {
+                "failed".into()
+            },
         }
     }
 

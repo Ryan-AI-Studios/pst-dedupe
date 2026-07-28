@@ -405,7 +405,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0045-01 | — | Fire-and-forget / `--no-wait` detach | P0 always waits for terminal | residual |
-| D-0045-02 | — | Cross-process cancel of in-flight job | `job cancel` marks DB; SIGINT cancels in-process runner | residual |
+| D-0045-02 | — | Cross-process cancel of in-flight job | `job cancel` marks DB; SIGINT cancels in-process runner. **0078 makes in-process cancel observable** (exit 130) but does **not** close this — cross-process cancel is still unimplemented. | residual |
 | D-0045-03 | — | Binary rename to `dedupe-cli` | Keep `pst-dedup` P0 | residual |
 | D-0045-04 | P3 | Schema-driven path tags beyond known key list | Known keys preflight P0 | residual polish |
 | D-0019-02 | — | Full CLI job control | **Closed in 0045** | — |
@@ -761,7 +761,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0073-promote | P1 | Mode A pre-write promote-on-attach-fail | P0 ships Mode C ledger-only; no write-time mid-message promote | residual / Series L |
-| D-0073-eml | P2 | unique-eml attach skip ledger parity | unique-pst has full ledger; unique-eml soft-skips with counts/tracing only | residual |
+| D-0073-eml | P2 | unique-eml attach skip ledger parity | **Narrowed by 0078** (not closed): 0078 adds only the *data-path* attach counters unique-eml needs to compute `fidelity`/exit 64 honestly. The full ledger-CSV parity (locus, reason taxonomy, row-cap) remains open here. | residual / narrowed **0078** |
 | D-0073-gui | P3 | GUI wizard attach-ledger mode / summary UI | CLI flags default full; GUI uses defaults via UniquePstCliArgs | residual polish |
 | D-0073-basename | P3 | `--ledger-path-mode=full\|basename` handoff redaction | source_id remains join key; must apply to both export_messages + export_attachments if shipped | residual / 0081 |
 | D-0073-vec-events | P3 | Writer still accumulates `attachment_fidelity_events` Vec | **Closed in 0077**: first-N cap 1000 + `attachment_fidelity_events_truncated` / `_total`. 0079 may still redesign to channel-only (no Vec). | **closed / 0077** |
@@ -812,6 +812,13 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0077-gui | P3 | Desk per-source CRC counter tables / distinct-bad-BID drill-down | Banner + export_risk stats row shipped; richer UI residual | residual polish |
 | D-0077-repair-diff | P3 | `pst-dedup compare-counts` wrapper for ScanPST before/after | Runbook documents two-command `scan --json` workflow; product decision | residual / **0081** |
 | D-0077-systematic-poly | P3 | True poly fingerprint/allowlist vs dual-rate heuristic | **Policy (final-gate P1):** dual-rate (`page≥0.50` AND `block≥0.50`) **clears** false-positive `CRC_SUSPECT` from candidates/integrity (reclassify, not keep-taint + auto-allow Tier-2). Raw `page_crc_*`/`block_crc_*` + `poly_class_crc` telemetry retained for reporting/`export_risk`. High block alone keeps taint **and** blocks Tier-2. Residual: true poly fingerprint/allowlist; streaming unique may under-merge until keep-set rebuild | residual / product |
+
+## From track 0078-UniqueExportExitCodes (planned)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0078-retryable | P3 | Transient (retry-safe) vs permanent failure — as a **`retryable: bool` JSON field, not a new exit code** | Retryability cross-cuts outcome classes (a transient IO surfaces as exit 1 in scan or exit 5 in matter open), so encoding it in the integer would double the table. Real need: SMB/cloud-mount PST reads hit network drops + AV file locks constantly. Blocked on a taxonomy across `PstError` / `matter_core::Error`. **0081 must not advise blanket "retry exit 5"** — `CliExit::MatterIo` also covers `AuditChainBroken` / `SchemaVersionMismatch` / `WrongPassphrase`, where retry is useless and delays escalation. | residual |
+| D-0078-gui | P3 | Desk surfacing of `fidelity` / `exit_reason` | 0077 banner already covers `export_risk` (the safety-critical half); wizard shows completion, not exit class | residual polish |
 
 ## From track 0062-ReleaseHardeningRc
 

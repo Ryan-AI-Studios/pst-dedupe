@@ -3,7 +3,8 @@
 //! Phases: sort paths → integrity scan (collect candidates) → resolve →
 //! optional materialize+promote → stream decision CSV + keep-set JSON.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use dedup_engine::integrity::{IntegrityThresholds, ScanMode, SCAN_INTEGRITY_SCHEMA};
 use dedup_engine::keepset::{
@@ -13,7 +14,7 @@ use dedup_engine::keepset::{
 };
 use serde::Serialize;
 
-use crate::error::{CliError, Result};
+use crate::error::{CliError, CliExit, Result};
 use crate::grouping_cli::{format_grouping_stats_human, grouping_context_from_cli};
 use crate::pst_materializer::PstMaterializer;
 use crate::scan::{evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions, ScanSummary};
@@ -54,6 +55,48 @@ pub struct KeepSetCliArgs {
     pub allow_crc_suspect_tier2: bool,
     pub crc_log_limit: u64,
     pub crc_log_interval_secs: u64,
+}
+
+/// Resolve on-disk path for the self-locating keep-set exit-contract summary (0078 DoD-22).
+///
+/// Prefers sibling of `--keep-set-json`, then `--decision-csv`, then `--integrity-csv`.
+/// When none of those are set (stdout-only JSON), still writes next to the first input
+/// path so every run has an absolute, self-locating `summary_path`.
+fn resolve_keep_set_summary_path(args: &KeepSetCliArgs, resolved_paths: &[PathBuf]) -> PathBuf {
+    if let Some(anchor) = args
+        .keep_set_json
+        .as_ref()
+        .or(args.decision_csv.as_ref())
+        .or(args.integrity_csv.as_ref())
+    {
+        let parent = anchor.parent().unwrap_or_else(|| Path::new("."));
+        return parent.join("keep_set_summary.json");
+    }
+    // Stdout-only: anchor beside the first input PST (always known after resolve).
+    if let Some(first) = resolved_paths.first() {
+        let parent = first.parent().unwrap_or_else(|| Path::new("."));
+        return parent.join("keep_set_summary.json");
+    }
+    PathBuf::from("keep_set_summary.json")
+}
+
+fn write_keep_set_summary_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            CliError::Msg(format!(
+                "create keep_set_summary.json parent {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    let json = serde_json::to_string_pretty(value)?;
+    std::fs::write(path, json).map_err(|e| {
+        CliError::Msg(format!(
+            "write keep_set_summary.json {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(())
 }
 
 /// Build [`RankContext`] from CLI keep-set / unique-* flags (0075).
@@ -97,6 +140,20 @@ struct KeepSetSummaryOut {
     decision_csv: Option<String>,
     keep_set_json: Option<String>,
     materialized: u64,
+    ok: bool,
+    #[serde(default)]
+    fidelity: crate::export_outcome::ExportFidelity,
+    #[serde(default)]
+    exit_code: u8,
+    #[serde(default)]
+    exit_reason: Vec<String>,
+    #[serde(default)]
+    artifact_state: crate::export_outcome::ArtifactState,
+    /// Absolute path of this summary file (always written; self-locating).
+    #[serde(default)]
+    summary_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<serde_json::Value>,
 }
 
 /// Run keep-set orchestration end-to-end.
@@ -219,36 +276,117 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
     // Exit policy after artifacts flushed.
     let exit_err = evaluate_exit_policy(&outcome.summary, &opts).err();
 
-    if args.json {
-        let ok = exit_err.is_none();
+    // DoD-22: always establish a self-locating summary path (even pure --json).
+    let summary_disk = resolve_keep_set_summary_path(&args, &paths);
+    let summary_path_str = std::path::absolute(&summary_disk)
+        .unwrap_or_else(|_| summary_disk.clone())
+        .display()
+        .to_string();
+
+    // 0078: keep-set is not an export artifact write, but shares classify_export for
+    // scan integrity → fidelity/exit (no attach soft-fail path here).
+    let mut report_ok = true;
+    let mut classified = crate::export_outcome::classify_export(
+        crate::export_outcome::ExportOkInput {
+            scan_ok: exit_err.is_none(),
+            verify_ok: true,
+            export_err_absent: true,
+            export_partial: false,
+            messages_written_total: keep_set.stats.unique,
+            unique: keep_set.stats.unique,
+            attach_failed_total: 0,
+            body_soft_fail_total: 0,
+            report_ok,
+        },
+        outcome.summary.preflight.recommendation,
+        crate::export_outcome::RiskGate::Off,
+        true,
+        false,
+    );
+
+    let mut error_obj = exit_err.as_ref().map(|msg| {
+        serde_json::json!({
+            "code": "scan_integrity",
+            "message": msg,
+        })
+    });
+
+    let build_summary = |classified: &crate::export_outcome::ExportOutcome,
+                         error: &Option<serde_json::Value>|
+     -> Result<serde_json::Value> {
+        let ok = classified.fidelity == crate::export_outcome::ExportFidelity::Complete;
         let payload = KeepSetSummaryOut {
             schema: keep_set.schema.clone(),
             policy: args.policy.as_str().to_string(),
             family_policy: args.family_policy.as_str().to_string(),
-            keep_set,
-            scan: outcome.summary,
-            decision_csv: decision_csv_out,
-            keep_set_json: keep_set_json_out,
+            keep_set: keep_set.clone(),
+            scan: outcome.summary.clone(),
+            decision_csv: decision_csv_out.clone(),
+            keep_set_json: keep_set_json_out.clone(),
             materialized: materialized_count,
+            ok,
+            fidelity: classified.fidelity,
+            exit_code: classified.exit.as_u8(),
+            exit_reason: classified
+                .reasons
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            artifact_state: crate::export_outcome::ArtifactState::Absent,
+            summary_path: summary_path_str.clone(),
+            error: error.clone(),
         };
-        let mut v = serde_json::to_value(&payload)?;
-        if let Some(obj) = v.as_object_mut() {
-            obj.insert("ok".into(), serde_json::Value::Bool(ok));
-            if let Some(msg) = &exit_err {
-                obj.insert(
-                    "error".into(),
-                    serde_json::json!({
-                        "code": "scan_integrity",
-                        "message": msg,
-                    }),
-                );
-            }
-        }
-        println!("{}", serde_json::to_string_pretty(&v)?);
-        if let Some(msg) = exit_err {
+        Ok(serde_json::to_value(&payload)?)
+    };
+
+    let mut summary_value = build_summary(&classified, &error_obj)?;
+
+    // Fail-closed: summary write failure is a report failure (DoD-22).
+    if let Err(e) = write_keep_set_summary_json(&summary_disk, &summary_value) {
+        report_ok = false;
+        let msg = format!("keep_set_summary.json write failed: {e}");
+        tracing::warn!(path = %summary_disk.display(), "{msg}");
+        error_obj = Some(serde_json::json!({
+            "code": "report",
+            "message": msg,
+        }));
+        classified = crate::export_outcome::classify_export(
+            crate::export_outcome::ExportOkInput {
+                scan_ok: exit_err.is_none(),
+                verify_ok: true,
+                export_err_absent: true,
+                export_partial: false,
+                messages_written_total: keep_set.stats.unique,
+                unique: keep_set.stats.unique,
+                attach_failed_total: 0,
+                body_soft_fail_total: 0,
+                report_ok,
+            },
+            outcome.summary.preflight.recommendation,
+            crate::export_outcome::RiskGate::Off,
+            true,
+            false,
+        );
+        summary_value = build_summary(&classified, &error_obj)?;
+        // Best-effort rewrite of corrected summary (may still fail).
+        let _ = write_keep_set_summary_json(&summary_disk, &summary_value);
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&summary_value)?);
+        if classified.exit != CliExit::Success {
+            let msg = exit_err
+                .or_else(|| {
+                    error_obj
+                        .as_ref()
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "keep-set failed".into());
             return Err(CliError::AlreadyEmitted {
                 message: msg,
-                exit: crate::error::CliExit::Generic,
+                exit: classified.exit,
             });
         }
         return Ok(());
@@ -303,6 +441,9 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
     if let Some(p) = &keep_set_json_out {
         println!("  keep_set_json: {p}");
     }
+    if !summary_path_str.is_empty() {
+        println!("  summary:       {summary_path_str}");
+    }
     if args.materialize {
         println!("  materialized:  {materialized_count}");
     }
@@ -310,8 +451,15 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
         println!("  integrity_csv: {ic}");
     }
 
-    if let Some(msg) = exit_err {
-        return Err(CliError::Msg(msg));
+    if classified.exit != CliExit::Success {
+        if !summary_path_str.is_empty() {
+            let _ = writeln!(std::io::stderr(), "summary: {summary_path_str}");
+        }
+        let msg = exit_err.unwrap_or_else(|| "keep-set failed".into());
+        return Err(CliError::AlreadyEmitted {
+            message: msg,
+            exit: classified.exit,
+        });
     }
     Ok(())
 }

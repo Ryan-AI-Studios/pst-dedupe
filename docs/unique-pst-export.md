@@ -389,9 +389,65 @@ Desk wizard: single **Strong content hash** checkbox → `body` level. Full enum
 - Deep attach preflight before export is **0074** (shared reason code strings with **0073**).
 - **GUI deep-attach checkbox:** residual **D-0074-gui** (CLI `--deep-attach-preflight` works; wizard defaults off).
 
-## Exit honesty
+## Exit honesty & automation contract (0078)
 
-Integrity thresholds, export partials, verification failures, and **`attachments_failed > 0`** still **flush the report pack** before non-zero exit (`ok=false`). With `--json`, the summary is printed on stdout even when `ok` is false.
+Integrity thresholds, export partials, verification failures, and **`attachments_failed > 0`** still **flush the report pack** before any non-zero exit. With `--json`, the summary is printed on stdout even when `ok` is false.
+
+**Severity order (not numeric order):** cancelled → hard fail → risk gate → partial fidelity → success.
+
+| Code | Name | Meaning | Script action |
+|---:|---|---|---|
+| **0** | Success | Complete fidelity; nothing to review | proceed |
+| **1** | Generic | Hard fail — artifact absent or untrustworthy | investigate; do not ship |
+| **2** | Usage | Bad arguments | fix invocation |
+| **3–5** | Busy / JobFailed / MatterIo | Frozen matter/service codes | as today |
+| **64** | PartialFidelity | **Artifact exists and is message-complete;** attachment/body soft-failures recorded | review ledger; ship only with disclosure |
+| **65** | ExportRiskBlocked | 0077 `export_risk` met `--fail-on-export-risk` | re-export from source; do not produce |
+| **130** | Cancelled | Operator cancelled (SIGINT convention) | rerun; not an error |
+
+**64 means the artifact exists and is message-complete.** Do not delete a usable PST solely because the shell said non-zero — inspect `fidelity` / `exit_reason` first.
+
+### Flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--fail-on-partial-fidelity` | **on** (implicit) | Partial → exit **64** |
+| `--allow-partial-fidelity` | off | Partial → exit **0**; JSON still `fidelity: partial` |
+| both fidelity flags | — | **exit 2** (usage) |
+| `--fail-on-export-risk <ok\|re_export_recommended\|not_export_ready>` | **off** | When `export_risk` rank ≥ level → exit **65** |
+
+### JSON fields (additive)
+
+`fidelity`, `exit_code`, `exit_reason`, `artifact_state`, `summary_path` — all on every summary. `ok == (fidelity == complete)`. **`exit_code` must equal the process exit status.**
+
+`artifact_state`: `complete` | `partial_retained` | `partial_quarantined` | `invalid_in_place` | `absent`.
+- **`partial_retained`**: message-complete soft-fail deliverable (exit 64) — ship only with disclosure.
+- **`invalid_in_place`**: bytes still at `--out` but **must not ship** — cancel quarantine failed, **or** hard-fail after write (incomplete / untrustworthy). Purge or quarantine manually before retry.
+- Spec has no `failed_retained`; hard-fail with retained bytes uses `invalid_in_place`.
+
+### Cancel quarantine
+
+On cancel after bytes written, volumes are renamed to
+`{filename}.cancelled-{unix_secs}-{millis}.partial`
+(e.g. `unique.pst` → `unique.pst.cancelled-1720000000-042.partial`) so `--out` is free for a plain retry (no `--overwrite`). Never deleted. If that name already exists, a collision suffix is used (`_2`, `_3`, …); existing quarantine files are never overwritten.
+
+### PowerShell dispatch example
+
+```powershell
+.\target\release\pst-dedup.exe unique-pst $src --out $out --report-dir $report --json
+$code = $LASTEXITCODE
+switch ($code) {
+    0   { "complete — proceed" }
+    64  { "partial fidelity — review attach ledger; artifact retained" }
+    65  { "export risk gate — re-export from source" }
+    130 { "cancelled — retry when ready" }
+    1   { "hard fail — do not ship" }
+    2   { "usage — fix args" }
+    default { "other: $code" }
+}
+```
+
+Cross-links: **0080** QC scripts branch on these codes; **0081** runbook (do **not** blanket-retry exit 5 — `MatterIo` includes `AuditChainBroken`).
 
 ## GUI wizard (`pst-dedup-gui`, track 0072)
 

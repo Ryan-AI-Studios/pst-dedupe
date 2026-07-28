@@ -19,6 +19,7 @@ use pst_writer::{AttachEventSeverity, AttachEventSink, AttachmentFidelityEvent};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CliError, Result};
+use crate::export_outcome::{ArtifactState, ExportFidelity};
 
 /// Schema id for the unique-export summary JSON.
 pub const UNIQUE_EXPORT_REPORT_SCHEMA: &str = "unique_export_report_v1";
@@ -365,6 +366,21 @@ pub fn compute_export_risk_with_thresholds(
 pub struct UniqueExportSummary {
     pub schema: String,
     pub ok: bool,
+    /// Terminal fidelity (0078): `complete` | `partial` | `failed`.
+    #[serde(default)]
+    pub fidelity: ExportFidelity,
+    /// Process exit code that must equal the real process status (0078 DoD-9).
+    #[serde(default)]
+    pub exit_code: u8,
+    /// Closed-vocabulary reason codes, worst-first (0078).
+    #[serde(default)]
+    pub exit_reason: Vec<String>,
+    /// On-disk artifact disposition (0078 closed vocabulary).
+    #[serde(default)]
+    pub artifact_state: ArtifactState,
+    /// Absolute path of this summary file (self-locating; 0078).
+    #[serde(default)]
+    pub summary_path: String,
     pub inputs: Vec<String>,
     pub policy: String,
     pub family_policy: String,

@@ -7,6 +7,7 @@
 //! then each winner is re-materialized once and written in keep-set order.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::grouping_cli::{format_grouping_stats_human, grouping_context_from_cli};
@@ -68,6 +69,12 @@ pub struct UniqueEmlCliArgs {
     pub allow_crc_suspect_tier2: bool,
     pub crc_log_limit: u64,
     pub crc_log_interval_secs: u64,
+    /// Fail (exit 64) on partial fidelity (default true; 0078).
+    pub fail_on_partial_fidelity: bool,
+    /// Allow partial → exit 0 (default false; 0078).
+    pub allow_partial_fidelity: bool,
+    /// Opt-in risk gate level (0078).
+    pub fail_on_export_risk: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,11 +94,23 @@ struct UniqueEmlSummaryOut {
     volumes: u64,
     attach_parts_written: u64,
     embedded_messages_written: u64,
+    /// Data-path attach fail counter for fidelity (0078 narrow half of D-0073-eml).
+    /// Full attach ledger CSV remains deferred to D-0073-eml residual.
     attach_parts_failed: u64,
+    #[serde(default)]
+    fidelity: crate::export_outcome::ExportFidelity,
+    #[serde(default)]
+    exit_code: u8,
+    #[serde(default)]
+    exit_reason: Vec<String>,
+    #[serde(default)]
+    artifact_state: crate::export_outcome::ArtifactState,
+    #[serde(default)]
+    summary_path: String,
 }
 
 /// Run unique-eml orchestration end-to-end.
-pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
+pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
     // Phase 0: resolve + deterministic sort.
     let mut paths = resolve_pst_paths(&args.paths)?;
     sort_input_paths(&mut paths);
@@ -350,7 +369,7 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
 
     // Success invariant: eml_written == unique (exportable post-promotion).
     let count_mismatch = manifest.stats.eml_written != keep_set.stats.unique;
-    let pack_err = if count_mismatch {
+    let mut pack_err = if count_mismatch {
         Some(format!(
             "eml_written ({}) != unique ({}); write_errors={:?}",
             manifest.stats.eml_written, keep_set.stats.unique, write_errors
@@ -361,52 +380,161 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
         None
     };
 
-    let ok = exit_err.is_none() && pack_err.is_none();
+    // 0078: data-path counters (narrow D-0073-eml) — attach_parts_failed is ground truth
+    // for ATTACH_SOFT_FAIL; full ledger CSV still deferred.
+    let attach_failed = manifest.stats.attach_parts_failed;
+    // Pack hard fail only when count mismatch or write errors; attach soft alone is partial.
+    let export_ok_input = crate::export_outcome::ExportOkInput {
+        scan_ok: exit_err.is_none(),
+        verify_ok: true,
+        export_err_absent: write_errors.is_empty(),
+        export_partial: count_mismatch || !write_errors.is_empty(),
+        messages_written_total: manifest.stats.eml_written,
+        unique: keep_set.stats.unique,
+        attach_failed_total: attach_failed,
+        body_soft_fail_total: 0,
+        report_ok: true,
+    };
+    let risk_gate = args
+        .fail_on_export_risk
+        .as_deref()
+        .and_then(crate::export_outcome::RiskGate::parse)
+        .unwrap_or(crate::export_outcome::RiskGate::Off);
+    let fail_on_partial = args.fail_on_partial_fidelity && !args.allow_partial_fidelity;
+    // unique-eml has no export_risk yet — use Ok; risk gate only fires if set to ok.
+    let mut classified = crate::export_outcome::classify_export(
+        export_ok_input,
+        dedup_engine::integrity::PreflightRecommendation::Ok,
+        risk_gate,
+        fail_on_partial,
+        false,
+    );
+    let ok = classified.fidelity == crate::export_outcome::ExportFidelity::Complete;
+    // Same disposition helper as unique-pst (0078): PartialRetained only for soft-fail;
+    // hard-fail with bytes → InvalidInPlace (not shippable).
+    let artifact_state = crate::export_outcome::artifact_state_for(
+        &classified,
+        manifest.stats.eml_written > 0,
+        crate::export_outcome::QuarantineResult::NotAttempted,
+    );
 
-    if args.json {
-        let payload = UniqueEmlSummaryOut {
-            schema: keep_set.schema.clone(),
-            eml_pack_schema: EML_PACK_SCHEMA.to_string(),
-            policy: args.policy.as_str().to_string(),
-            family_policy: args.family_policy.as_str().to_string(),
-            keep_set,
-            scan: outcome.summary,
-            out: out.display().to_string(),
-            manifest_json: manifest_path.display().to_string(),
-            decision_csv: decision_csv_out,
-            keep_set_json: keep_set_json_out,
-            eml_written: manifest.stats.eml_written,
-            unique: manifest.stats.unique,
-            volumes: manifest.stats.volumes,
-            attach_parts_written: manifest.stats.attach_parts_written,
-            embedded_messages_written: manifest.stats.embedded_messages_written,
-            attach_parts_failed: manifest.stats.attach_parts_failed,
-        };
-        let mut v = serde_json::to_value(&payload)?;
-        if let Some(obj) = v.as_object_mut() {
-            obj.insert("ok".into(), serde_json::Value::Bool(ok));
-            if let Some(msg) = exit_err.as_ref().or(pack_err.as_ref()) {
-                obj.insert(
-                    "error".into(),
-                    serde_json::json!({
-                        "code": if pack_err.is_some() { "eml_pack" } else { "scan_integrity" },
-                        "message": msg,
-                    }),
-                );
-            }
+    // DoD-22: write a dedicated summary.json containing fidelity/exit fields (not
+    // manifest.json, which lacks them). Path is self-locating.
+    let summary_path = out.join("summary.json");
+    let summary_abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
+    let summary_path_str = summary_abs.display().to_string();
+
+    let payload = UniqueEmlSummaryOut {
+        schema: keep_set.schema.clone(),
+        eml_pack_schema: EML_PACK_SCHEMA.to_string(),
+        policy: args.policy.as_str().to_string(),
+        family_policy: args.family_policy.as_str().to_string(),
+        keep_set,
+        scan: outcome.summary.clone(),
+        out: out.display().to_string(),
+        manifest_json: manifest_path.display().to_string(),
+        decision_csv: decision_csv_out.clone(),
+        keep_set_json: keep_set_json_out.clone(),
+        eml_written: manifest.stats.eml_written,
+        unique: manifest.stats.unique,
+        volumes: manifest.stats.volumes,
+        attach_parts_written: manifest.stats.attach_parts_written,
+        embedded_messages_written: manifest.stats.embedded_messages_written,
+        attach_parts_failed: attach_failed,
+        fidelity: classified.fidelity,
+        exit_code: classified.exit.as_u8(),
+        exit_reason: classified
+            .reasons
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        artifact_state,
+        summary_path: summary_path_str.clone(),
+    };
+    let mut v = serde_json::to_value(&payload)?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("ok".into(), serde_json::Value::Bool(ok));
+        if let Some(msg) = exit_err.as_ref().or(pack_err.as_ref()) {
             obj.insert(
-                "materialized".into(),
-                serde_json::Value::from(materialized_count),
+                "error".into(),
+                serde_json::json!({
+                    "code": if pack_err.is_some() { "eml_pack" } else { "scan_integrity" },
+                    "message": msg,
+                }),
             );
         }
+        obj.insert(
+            "materialized".into(),
+            serde_json::Value::from(materialized_count),
+        );
+    }
+
+    // Always write summary.json so summary_path is self-consistent with on-disk fields.
+    // Fail-closed: write failure reclassifies as report hard-fail (DoD-22).
+    let summary_write_err = (|| -> std::result::Result<(), String> {
+        fs::create_dir_all(&out).map_err(|e| format!("summary parent create failed: {e}"))?;
+        let body = serde_json::to_string_pretty(&v)
+            .map_err(|e| format!("summary.json serialize failed: {e}"))?;
+        fs::write(&summary_path, body).map_err(|e| format!("summary.json write failed: {e}"))?;
+        Ok(())
+    })();
+    if let Err(msg) = summary_write_err {
+        tracing::warn!(path = %summary_path.display(), "{msg}");
+        pack_err = Some(msg.clone());
+        // Rebuild export input with report_ok=false and reclassify.
+        let mut hard_input = export_ok_input;
+        hard_input.report_ok = false;
+        classified = crate::export_outcome::classify_export(
+            hard_input,
+            dedup_engine::integrity::PreflightRecommendation::Ok,
+            risk_gate,
+            fail_on_partial,
+            false,
+        );
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "ok".into(),
+                serde_json::Value::Bool(
+                    classified.fidelity == crate::export_outcome::ExportFidelity::Complete,
+                ),
+            );
+            obj.insert(
+                "fidelity".into(),
+                serde_json::Value::String(classified.fidelity.as_str().to_string()),
+            );
+            obj.insert(
+                "exit_code".into(),
+                serde_json::Value::from(classified.exit.as_u8()),
+            );
+            obj.insert(
+                "exit_reason".into(),
+                serde_json::Value::Array(
+                    classified
+                        .reasons
+                        .iter()
+                        .map(|s| serde_json::Value::String((*s).to_string()))
+                        .collect(),
+                ),
+            );
+            obj.insert(
+                "error".into(),
+                serde_json::json!({ "code": "report", "message": msg }),
+            );
+        }
+    }
+
+    if args.json {
         println!("{}", serde_json::to_string_pretty(&v)?);
-        if let Some(msg) = pack_err.or(exit_err) {
+        if classified.exit != crate::error::CliExit::Success {
+            let msg = pack_err
+                .or(exit_err)
+                .unwrap_or_else(|| "unique-eml incomplete".into());
             return Err(CliError::AlreadyEmitted {
                 message: msg,
-                exit: crate::error::CliExit::Generic,
+                exit: classified.exit,
             });
         }
-        return Ok(());
+        return Ok(crate::error::CliExit::Success);
     }
 
     // Human summary.
@@ -428,29 +556,32 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
     );
     println!(
         "  recoverable:   {}  duplicates: {}  materialize_failed: {}",
-        keep_set.stats.recoverable, keep_set.stats.duplicates, keep_set.stats.materialize_failed
+        payload.keep_set.stats.recoverable,
+        payload.keep_set.stats.duplicates,
+        payload.keep_set.stats.materialize_failed
     );
     println!(
         "  degraded winners: {}  files_per_volume: {files_per_volume}",
-        keep_set.stats.degraded_winners
+        payload.keep_set.stats.degraded_winners
     );
     // 0075 honesty counters (always printed, including when 0).
     println!(
         "  winners_from_recoverable_items: {}",
-        keep_set.stats.winners_from_recoverable_items
+        payload.keep_set.stats.winners_from_recoverable_items
     );
     println!(
         "  winners_without_bcc_peer_had_bcc: {}",
-        keep_set.stats.winners_without_bcc_peer_had_bcc
+        payload.keep_set.stats.winners_without_bcc_peer_had_bcc
     );
     println!(
         "  groups_date_source_mixed: {}",
-        keep_set.stats.groups_date_source_mixed
+        payload.keep_set.stats.groups_date_source_mixed
     );
-    for line in format_grouping_stats_human(&keep_set.stats.grouping) {
+    for line in format_grouping_stats_human(&payload.keep_set.stats.grouping) {
         println!("{line}");
     }
     println!("  manifest:      {}", manifest_path.display());
+    println!("  summary:       {summary_path_str}");
     if let Some(p) = &decision_csv_out {
         println!("  decision_csv:  {p}");
     }
@@ -461,10 +592,10 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
         println!("  integrity_csv: {ic}");
     }
 
-    if let Some(msg) = pack_err.or(exit_err) {
-        return Err(CliError::Msg(msg));
+    if classified.exit != crate::error::CliExit::Success {
+        let _ = writeln!(std::io::stderr(), "summary: {summary_path_str}");
     }
-    Ok(())
+    Ok(classified.exit)
 }
 
 /// Refuse path layouts that would delete or overwrite source PSTs.

@@ -193,6 +193,16 @@ pub struct UniquePstClapArgs {
     /// Seconds between aggregate CRC summary lines after first-N (0077).
     #[arg(long = "crc-log-interval-secs", default_value_t = 30)]
     pub crc_log_interval_secs: u64,
+    /// Fail (exit 64) when fidelity is partial. Default **on** when neither
+    /// fidelity flag is supplied; mutually exclusive with `--allow-partial-fidelity` (0078).
+    #[arg(long = "fail-on-partial-fidelity", action = clap::ArgAction::SetTrue)]
+    pub fail_on_partial_fidelity: bool,
+    /// Allow partial fidelity to exit 0 (JSON still reports `partial`; 0078).
+    #[arg(long = "allow-partial-fidelity", action = clap::ArgAction::SetTrue)]
+    pub allow_partial_fidelity: bool,
+    /// Opt-in: exit 65 when `export_risk` rank ≥ level (default off; 0078).
+    #[arg(long = "fail-on-export-risk", value_parser = parse_fail_on_export_risk_arg)]
+    pub fail_on_export_risk: Option<String>,
 }
 
 /// Runtime options for `unique-pst` orchestration.
@@ -252,6 +262,12 @@ pub struct UniquePstCliArgs {
     pub allow_crc_suspect_tier2: bool,
     pub crc_log_limit: u64,
     pub crc_log_interval_secs: u64,
+    /// Fail (exit 64) on partial fidelity (default true; 0078).
+    pub fail_on_partial_fidelity: bool,
+    /// Allow partial → exit 0 (default false; 0078).
+    pub allow_partial_fidelity: bool,
+    /// Opt-in risk gate level string or None (0078).
+    pub fail_on_export_risk: Option<String>,
 }
 
 /// Run options / hooks for GUI and library callers (0072).
@@ -333,6 +349,14 @@ pub struct UniquePstOutcome {
     pub error_message: Option<String>,
     /// Post-export risk level (0077); Desk wizard qualifies success banner.
     pub export_risk: dedup_engine::integrity::PreflightRecommendation,
+    /// Classified process exit (0078).
+    pub exit: crate::error::CliExit,
+    /// Terminal fidelity (0078).
+    pub fidelity: crate::export_outcome::ExportFidelity,
+    /// Closed-vocabulary exit reasons (0078).
+    pub exit_reasons: Vec<&'static str>,
+    /// Artifact disposition (0078).
+    pub artifact_state: crate::export_outcome::ArtifactState,
 }
 
 impl UniquePstClapArgs {
@@ -345,6 +369,19 @@ impl UniquePstClapArgs {
                 "unique-pst requires at least one PST path (positional or --input)".into(),
             ));
         }
+        // Fidelity flags: default fail-on is ON; both explicit → usage (0078).
+        if self.fail_on_partial_fidelity && self.allow_partial_fidelity {
+            return Err(CliError::Usage(
+                "--fail-on-partial-fidelity and --allow-partial-fidelity are mutually exclusive"
+                    .into(),
+            ));
+        }
+        let fail_on_partial_fidelity = if self.allow_partial_fidelity {
+            false
+        } else {
+            // Default on when neither flag, or when --fail-on-partial-fidelity alone.
+            true
+        };
         Ok(UniquePstCliArgs {
             paths,
             out: self.out,
@@ -396,6 +433,9 @@ impl UniquePstClapArgs {
             allow_crc_suspect_tier2: self.allow_crc_suspect_tier2,
             crc_log_limit: self.crc_log_limit,
             crc_log_interval_secs: self.crc_log_interval_secs,
+            fail_on_partial_fidelity,
+            allow_partial_fidelity: self.allow_partial_fidelity,
+            fail_on_export_risk: self.fail_on_export_risk,
         })
     }
 }
@@ -482,6 +522,17 @@ fn parse_dedupe_scope_arg(s: &str) -> std::result::Result<String, String> {
 fn parse_tier1_verify_arg(s: &str) -> std::result::Result<String, String> {
     crate::grouping_cli::parse_tier1_verify(s)?;
     Ok(s.to_string())
+}
+
+fn parse_fail_on_export_risk_arg(s: &str) -> std::result::Result<String, String> {
+    crate::export_outcome::RiskGate::parse(s)
+        .filter(|g| *g != crate::export_outcome::RiskGate::Off)
+        .map(|g| g.as_str().to_string())
+        .ok_or_else(|| {
+            format!(
+                "invalid --fail-on-export-risk '{s}': expected ok, re_export_recommended, or not_export_ready"
+            )
+        })
 }
 
 fn parse_rate_threshold_arg(s: &str) -> std::result::Result<f64, String> {
@@ -729,6 +780,148 @@ struct CancelledSummaryCtx<'a> {
     folder_layout: FolderLayoutArg,
     max_volume_bytes: Option<u64>,
     duration_ms: u64,
+    artifact_state: crate::export_outcome::ArtifactState,
+}
+
+/// Quarantine written volumes after cancel: rename each volume to
+/// `{filename}.cancelled-{unix_secs}.partial` (e.g. `unique.pst` →
+/// `unique.pst.cancelled-1720000000.partial`) so `--out` is free for retry.
+///
+/// Returns overall result for `artifact_state` (0078 §3.6).
+pub fn quarantine_cancelled_volumes(
+    out: &Path,
+    volume_count: u32,
+) -> crate::export_outcome::QuarantineResult {
+    quarantine_cancelled_volumes_with(out, volume_count, |from, to| fs::rename(from, to))
+}
+
+/// Testable quarantine: inject rename failures via `rename_fn`.
+pub fn quarantine_cancelled_volumes_with<F>(
+    out: &Path,
+    volume_count: u32,
+    rename_fn: F,
+) -> crate::export_outcome::QuarantineResult
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    let stamp = quarantine_utc_stamp();
+    quarantine_cancelled_volumes_with_stamp(out, volume_count, &stamp, rename_fn)
+}
+
+/// Quarantine with an injectable stamp (tests: same-second collision safety).
+pub fn quarantine_cancelled_volumes_with_stamp<F>(
+    out: &Path,
+    volume_count: u32,
+    stamp: &str,
+    mut rename_fn: F,
+) -> crate::export_outcome::QuarantineResult
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    use crate::export_outcome::QuarantineResult;
+    if volume_count == 0 {
+        // Still check primary out if present (mid-write may not have pushed a volume row).
+        if !out.exists() {
+            return QuarantineResult::NoVolumes;
+        }
+    }
+    let mut attempted = 0u32;
+    let mut any_fail = false;
+    let mut any_ok = false;
+    let max_idx = volume_count.max(1);
+    for idx in 1..=max_idx {
+        let path = volume_path_for(out, idx);
+        if !path.exists() {
+            continue;
+        }
+        attempted += 1;
+        let quarantined = cancelled_partial_path(&path, stamp);
+        match rename_fn(&path, &quarantined) {
+            Ok(()) => any_ok = true,
+            Err(e) => {
+                any_fail = true;
+                tracing::warn!(
+                    from = %path.display(),
+                    to = %quarantined.display(),
+                    "cancel quarantine rename failed: {e}"
+                );
+            }
+        }
+    }
+    if attempted == 0 {
+        QuarantineResult::NoVolumes
+    } else if any_fail {
+        QuarantineResult::Failed
+    } else if any_ok {
+        QuarantineResult::Succeeded
+    } else {
+        QuarantineResult::NoVolumes
+    }
+}
+
+/// Collision-resistant quarantine destination: never overwrites an existing partial.
+///
+/// Form: `{filename}.cancelled-{stamp}.partial`, then
+/// `{filename}.cancelled-{stamp}_2.partial`, `_3`, … if the name is taken.
+fn cancelled_partial_path(volume: &Path, stamp: &str) -> PathBuf {
+    let parent = volume.parent().unwrap_or_else(|| Path::new("."));
+    let name = volume
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unique.pst".into());
+    let primary = parent.join(format!("{name}.cancelled-{stamp}.partial"));
+    if !primary.exists() {
+        return primary;
+    }
+    let mut n = 2u32;
+    loop {
+        let alt = parent.join(format!("{name}.cancelled-{stamp}_{n}.partial"));
+        if !alt.exists() {
+            return alt;
+        }
+        n = n.saturating_add(1);
+        if n > 10_000 {
+            // Pathological: fall back to process-unique suffix so rename can still proceed.
+            let pid = std::process::id();
+            return parent.join(format!("{name}.cancelled-{stamp}_{n}_{pid}.partial"));
+        }
+    }
+}
+
+/// Stamp with sub-second resolution: `{unix_secs}-{millis}` (e.g. `1720000000-042`).
+fn quarantine_utc_stamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}-{:03}", d.as_secs(), d.subsec_millis())
+}
+
+fn cancelled_outcome(
+    report_dir: PathBuf,
+    summary_path: PathBuf,
+    out: PathBuf,
+    artifact_state: crate::export_outcome::ArtifactState,
+) -> UniquePstOutcome {
+    use crate::error::CliExit;
+    use crate::export_outcome::{reason, ExportFidelity};
+    UniquePstOutcome {
+        ok: false,
+        cancelled: true,
+        report_dir,
+        summary_path,
+        out,
+        messages_written_total: 0,
+        unique: 0,
+        volume_count: 0,
+        volumes: vec![],
+        error_message: Some("cancelled".into()),
+        export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
+        exit: CliExit::Cancelled,
+        fidelity: ExportFidelity::Failed,
+        exit_reasons: vec![reason::CANCELLED],
+        artifact_state,
+    }
 }
 
 /// Minimal cancelled `summary.json` when cancel hits after report-dir prepare but
@@ -802,9 +995,16 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
             attach_stream_crc_events: 0,
         },
     );
+    let summary_abs =
+        std::path::absolute(ctx.summary_path).unwrap_or_else(|_| ctx.summary_path.to_path_buf());
     let summary = UniqueExportSummary {
         schema: UNIQUE_EXPORT_REPORT_SCHEMA.to_string(),
         ok: false,
+        fidelity: crate::export_outcome::ExportFidelity::Failed,
+        exit_code: crate::error::CliExit::Cancelled.as_u8(),
+        exit_reason: vec![crate::export_outcome::reason::CANCELLED.to_string()],
+        artifact_state: ctx.artifact_state,
+        summary_path: summary_abs.display().to_string(),
         inputs: ctx.inputs.iter().map(|p| p.display().to_string()).collect(),
         policy: ctx.policy.as_str().to_string(),
         family_policy: ctx.family_policy.as_str().to_string(),
@@ -875,26 +1075,26 @@ impl Iterator for TakeWriteMsgs<'_> {
 
 /// Run unique-pst orchestration end-to-end (CLI entry).
 ///
-/// Defaults to stderr stage lines; maps structured outcome to [`Result<()>`].
-pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<()> {
+/// Defaults to stderr stage lines; returns classified [`CliExit`] (0078).
+pub fn run_unique_pst(args: UniquePstCliArgs) -> Result<crate::error::CliExit> {
+    let json = args.json;
+    let stderr_progress = true;
     let outcome = run_unique_pst_with_options(
         args,
         UniquePstRunOptions {
             cancel: None,
-            stderr_progress: true,
+            stderr_progress,
             on_progress: None,
             on_log: None,
         },
     )?;
-    if outcome.ok && !outcome.cancelled {
-        Ok(())
-    } else {
-        Err(CliError::Msg(
-            outcome
-                .error_message
-                .unwrap_or_else(|| "unique-pst failed".into()),
-        ))
+    // Human mode: point operators at the summary on any non-zero exit (0078).
+    if !json && outcome.exit != crate::error::CliExit::Success && stderr_progress {
+        let abs = std::path::absolute(&outcome.summary_path)
+            .unwrap_or_else(|_| outcome.summary_path.clone());
+        let _ = writeln!(std::io::stderr(), "summary: {}", abs.display());
     }
+    Ok(outcome.exit)
 }
 
 /// Library / GUI entry: same orchestration as CLI with cancel, progress, and log hooks.
@@ -1025,6 +1225,7 @@ pub fn run_unique_pst_with_options(
         // Report dir already prepared — write a minimal cancelled summary so
         // Open report / operators see ok=false rather than a missing summary.
         emit_log(stderr, &on_log, "cancelled before scan");
+        let artifact_state = crate::export_outcome::ArtifactState::Absent;
         write_cancelled_summary_json(&CancelledSummaryCtx {
             summary_path: &summary_path,
             inputs: &paths,
@@ -1036,20 +1237,14 @@ pub fn run_unique_pst_with_options(
             folder_layout: args.folder_layout,
             max_volume_bytes: args.max_volume_bytes,
             duration_ms: started.elapsed().as_millis() as u64,
+            artifact_state,
         });
-        return Ok(UniquePstOutcome {
-            ok: false,
-            cancelled: true,
+        return Ok(cancelled_outcome(
             report_dir,
             summary_path,
             out,
-            messages_written_total: 0,
-            unique: 0,
-            volume_count: 0,
-            volumes: vec![],
-            error_message: Some("cancelled".into()),
-            export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
-        });
+            artifact_state,
+        ));
     }
 
     let opts = ScanOptions {
@@ -1197,6 +1392,7 @@ pub fn run_unique_pst_with_options(
                 peer_probe_capped_groups: 0,
                 attach_probe_cancelled: true,
             });
+            let artifact_state = crate::export_outcome::ArtifactState::Absent;
             write_cancelled_summary_json(&CancelledSummaryCtx {
                 summary_path: &summary_path,
                 inputs: &paths,
@@ -1208,20 +1404,14 @@ pub fn run_unique_pst_with_options(
                 folder_layout: args.folder_layout,
                 max_volume_bytes: args.max_volume_bytes,
                 duration_ms: started.elapsed().as_millis() as u64,
+                artifact_state,
             });
-            return Ok(UniquePstOutcome {
-                ok: false,
-                cancelled: true,
+            return Ok(cancelled_outcome(
                 report_dir,
                 summary_path,
                 out,
-                messages_written_total: 0,
-                unique: 0,
-                volume_count: 0,
-                volumes: vec![],
-                error_message: Some("cancelled".into()),
-                export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
-            });
+                artifact_state,
+            ));
         }
 
         emit_log(stderr, &on_log, "stage=deep_attach_preflight");
@@ -1270,6 +1460,7 @@ pub fn run_unique_pst_with_options(
         // Cancel during probe must not resolve/materialize/write with partial integrity.
         if probe_summary.cancelled || cancel_requested(&cancel) {
             emit_log(stderr, &on_log, "cancelled during deep_attach_preflight");
+            let artifact_state = crate::export_outcome::ArtifactState::Absent;
             write_cancelled_summary_json(&CancelledSummaryCtx {
                 summary_path: &summary_path,
                 inputs: &paths,
@@ -1281,20 +1472,14 @@ pub fn run_unique_pst_with_options(
                 folder_layout: args.folder_layout,
                 max_volume_bytes: args.max_volume_bytes,
                 duration_ms: started.elapsed().as_millis() as u64,
+                artifact_state,
             });
-            return Ok(UniquePstOutcome {
-                ok: false,
-                cancelled: true,
+            return Ok(cancelled_outcome(
                 report_dir,
                 summary_path,
                 out,
-                messages_written_total: 0,
-                unique: 0,
-                volume_count: 0,
-                volumes: vec![],
-                error_message: Some("cancelled".into()),
-                export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
-            });
+                artifact_state,
+            ));
         }
 
         // Strict: probe fails must not win — remove from recoverable candidates (skip).
@@ -1944,16 +2129,12 @@ pub fn run_unique_pst_with_options(
         ));
     }
 
-    // Attachment stream failures: PST retained (not corrupt) but export is honesty-fail.
-    // Always emit_log so the GUI Log panel sees the warning (not only export_error).
+    // Attachment stream failures: PST retained (message-complete); fidelity is
+    // partial (exit 64) via attach_failed_total — do **not** set export_error
+    // (that would hard-fail as COUNT_MISMATCH / Generic). 0078 refinement.
     if attach_failed_total > 0 {
-        let msg = format!(
-            "attachment write failures: {attach_failed_total} (export incomplete fidelity)"
-        );
+        let msg = format!("attachment write failures: {attach_failed_total} (partial fidelity)");
         emit_log(stderr, &on_log, &format!("warning: {msg}"));
-        if export_error.is_none() {
-            export_error = Some(msg);
-        }
     }
 
     let messages_written_total: u64 = volumes.iter().map(|v| v.messages_written).sum();
@@ -2104,7 +2285,24 @@ pub fn run_unique_pst_with_options(
         ))
     };
 
-    let ok = compute_export_ok(ExportOkInput {
+    // ── 0078: cancel quarantine before classify (D7) ────────────────────────
+    let mut quarantine = crate::export_outcome::QuarantineResult::NotAttempted;
+    if cancelled {
+        let bytes_on_disk = volumes.iter().any(|v| Path::new(&v.path).exists()) || out.exists();
+        if bytes_on_disk {
+            let vol_count = volumes.len() as u32;
+            quarantine = quarantine_cancelled_volumes(&out, vol_count);
+            emit_log(
+                stderr,
+                &on_log,
+                &format!("cancel quarantine: {:?}", quarantine),
+            );
+        } else {
+            quarantine = crate::export_outcome::QuarantineResult::NoVolumes;
+        }
+    }
+
+    let export_ok_input = ExportOkInput {
         scan_ok: exit_err.is_none(),
         verify_ok: verify_err.is_none(),
         export_err_absent: export_err.is_none(),
@@ -2112,35 +2310,24 @@ pub fn run_unique_pst_with_options(
         messages_written_total,
         unique: keep_set.stats.unique,
         attach_failed_total,
+        body_soft_fail_total: 0,
         report_ok: report_write_errors.is_empty(),
-    }) && !cancelled;
-
-    let summary_error = if !ok {
-        let (code, message) = if cancelled {
-            ("cancelled", "cancelled".to_string())
-        } else if let Some(msg) = export_err.as_ref() {
-            ("export", msg.clone())
-        } else if let Some(msg) = report_err_msg.as_ref() {
-            ("report", msg.clone())
-        } else if let Some(msg) = verify_err.as_ref() {
-            ("verification", msg.clone())
-        } else if let Some(msg) = exit_err.as_ref() {
-            ("scan_integrity", msg.clone())
-        } else {
-            ("export", "unique-pst incomplete".to_string())
-        };
-        Some(SummaryError {
-            code: code.to_string(),
-            message,
-        })
-    } else {
-        None
     };
+    // Legacy bool (tests + ok field): complete fidelity only; cancel forces false.
+    let ok_export = compute_export_ok(export_ok_input) && !cancelled;
 
+    let risk_gate = args
+        .fail_on_export_risk
+        .as_deref()
+        .and_then(crate::export_outcome::RiskGate::parse)
+        .unwrap_or(crate::export_outcome::RiskGate::Off);
+    let fail_on_partial = args.fail_on_partial_fidelity && !args.allow_partial_fidelity;
+
+    // export_risk needs export_section.partial — build section first (provisional ok).
     let export_section = {
         let mut section = ExportSection {
             volumes: volumes.clone(),
-            partial: export_partial || !ok && messages_written_total < keep_set.stats.unique,
+            partial: export_partial || !ok_export && messages_written_total < keep_set.stats.unique,
             messages_written_total,
             attachments_written: attach_written_total,
             attachments_failed: attach_failed_total,
@@ -2158,8 +2345,6 @@ pub fn run_unique_pst_with_options(
         if let Some(finish) = attach_ledger_finish.as_ref() {
             finish.apply_to_export_section(&mut section);
         }
-        // Writer counter is ground truth for omit (ledger Off never tallies
-        // events; full/summary ledger omit should match but prefer writer).
         section.attachments_omitted_by_policy = Some(attach_omitted_total);
         section
     };
@@ -2184,9 +2369,60 @@ pub fn run_unique_pst_with_options(
         },
     );
 
-    let summary = UniqueExportSummary {
+    let classified = crate::export_outcome::classify_export(
+        export_ok_input,
+        export_risk.level,
+        risk_gate,
+        fail_on_partial,
+        cancelled,
+    );
+    let bytes_written =
+        messages_written_total > 0 || volumes.iter().any(|v| v.bytes > 0) || out.exists();
+    let artifact_state =
+        crate::export_outcome::artifact_state_for(&classified, bytes_written, quarantine);
+    // ok retained: complete fidelity only (non-cancelled success path).
+    let ok = classified.fidelity == crate::export_outcome::ExportFidelity::Complete && !cancelled;
+
+    let summary_error = if !ok || cancelled {
+        let (code, message) = if cancelled {
+            ("cancelled", "cancelled".to_string())
+        } else if let Some(msg) = export_err.as_ref() {
+            ("export", msg.clone())
+        } else if let Some(msg) = report_err_msg.as_ref() {
+            ("report", msg.clone())
+        } else if let Some(msg) = verify_err.as_ref() {
+            ("verification", msg.clone())
+        } else if let Some(msg) = exit_err.as_ref() {
+            ("scan_integrity", msg.clone())
+        } else if classified.fidelity == crate::export_outcome::ExportFidelity::Partial {
+            (
+                "partial_fidelity",
+                "unique-pst partial fidelity".to_string(),
+            )
+        } else {
+            ("export", "unique-pst incomplete".to_string())
+        };
+        Some(SummaryError {
+            code: code.to_string(),
+            message,
+        })
+    } else {
+        None
+    };
+
+    let summary_abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
+    let mut summary = UniqueExportSummary {
         schema: UNIQUE_EXPORT_REPORT_SCHEMA.to_string(),
         ok,
+        fidelity: classified.fidelity,
+        exit_code: classified.exit.as_u8(),
+        exit_reason: classified
+            .reasons
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        artifact_state,
+        summary_path: summary_abs.display().to_string(),
         inputs: paths.iter().map(|p| p.display().to_string()).collect(),
         policy: args.policy.as_str().to_string(),
         family_policy: args.family_policy.as_str().to_string(),
@@ -2215,7 +2451,39 @@ pub fn run_unique_pst_with_options(
         emit_log(stderr, &on_log, &format!("warning: {msg}"));
         summary_write_failed = Some(msg);
     }
-    let ok = ok && summary_write_failed.is_none();
+    let mut classified = classified;
+    let mut ok = ok;
+    let mut summary_error = summary_error;
+    if summary_write_failed.is_some() {
+        ok = false;
+        // Force hard-fail classify dimensions for report write.
+        let mut forced = export_ok_input;
+        forced.report_ok = false;
+        classified = crate::export_outcome::classify_export(
+            forced,
+            summary.export_risk.level,
+            risk_gate,
+            fail_on_partial,
+            cancelled,
+        );
+        summary.ok = false;
+        summary.fidelity = classified.fidelity;
+        summary.exit_code = classified.exit.as_u8();
+        summary.exit_reason = classified
+            .reasons
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        if let Some(msg) = summary_write_failed.clone() {
+            summary_error = Some(SummaryError {
+                code: "report".to_string(),
+                message: msg,
+            });
+            summary.error = summary_error.clone();
+        }
+        // Best-effort rewrite with corrected fields.
+        let _ = write_summary_json(&summary_path, &summary);
+    }
     let summary_error = match (ok, summary_write_failed, summary_error) {
         (false, Some(msg), None) => Some(SummaryError {
             code: "report".to_string(),
@@ -2247,13 +2515,18 @@ pub fn run_unique_pst_with_options(
                 }
             }),
         export_risk: summary.export_risk.level,
+        exit: classified.exit,
+        fidelity: classified.fidelity,
+        exit_reasons: classified.reasons.clone(),
+        artifact_state,
     };
 
     emit_log(
         stderr,
         &on_log,
         &format!(
-            "stage=done ok={ok} cancelled={cancelled} messages_written={messages_written_total}"
+            "stage=done ok={ok} cancelled={cancelled} exit={} messages_written={messages_written_total}",
+            classified.exit.as_u8()
         ),
     );
     emit_stage_progress(
@@ -2268,8 +2541,6 @@ pub fn run_unique_pst_with_options(
 
     // ── Phase 6: exit (CLI stdout) ──────────────────────────────────────────
     if args.json {
-        // If summary.json failed after we already built a true-ok summary, patch
-        // ok in the stdout JSON so operators never see a false success signal.
         let mut stdout_summary = summary;
         if !ok {
             stdout_summary.ok = false;
@@ -2277,14 +2548,17 @@ pub fn run_unique_pst_with_options(
                 stdout_summary.error = summary_error.clone();
             }
         }
+        // Keep exit_code aligned with process status.
+        stdout_summary.exit_code = classified.exit.as_u8();
         println!("{}", serde_json::to_string_pretty(&stdout_summary)?);
-        if !ok {
+        // Return outcome with classified exit; main maps Ok(CliExit) / AlreadyEmitted.
+        if classified.exit != crate::error::CliExit::Success {
             let msg = summary_error
                 .map(|e| e.message)
                 .unwrap_or_else(|| "unique-pst failed".into());
             return Err(CliError::AlreadyEmitted {
                 message: msg,
-                exit: crate::error::CliExit::Generic,
+                exit: classified.exit,
             });
         }
         return Ok(structured);
@@ -2312,6 +2586,12 @@ pub fn run_unique_pst_with_options(
         println!(
             "  partial:          {}  ok: {ok}  cancelled: {cancelled}",
             summary.export.partial
+        );
+        println!(
+            "  fidelity:         {}  exit: {}  artifact: {}",
+            classified.fidelity.as_str(),
+            classified.exit.as_u8(),
+            artifact_state.as_str()
         );
         // 0077 DoD-13: numbers/codes only — no PST-derived strings.
         println!("  export_risk:      {}", summary.export_risk.level.as_str());
@@ -2347,7 +2627,7 @@ pub fn run_unique_pst_with_options(
     }
 
     // Library/GUI path: return structured outcome even when !ok (caller maps).
-    // CLI `run_unique_pst` maps !ok to Err.
+    // CLI `run_unique_pst` maps outcome.exit.
     Ok(structured)
 }
 
@@ -2446,31 +2726,27 @@ fn path_collides_with_inputs(candidate: &Path, inputs: &[PathBuf]) -> bool {
         .any(|input| paths_equal_resolved(candidate, input) || paths_equal(candidate, input))
 }
 
-/// Inputs to the pure export-success gate (honesty).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ExportOkInput {
-    pub scan_ok: bool,
-    pub verify_ok: bool,
-    pub export_err_absent: bool,
-    pub export_partial: bool,
-    pub messages_written_total: u64,
-    pub unique: u64,
-    pub attach_failed_total: u64,
-    pub report_ok: bool,
-}
+// Re-export for existing tests / call sites that import from this module.
+pub use crate::export_outcome::ExportOkInput;
 
 /// Pure gate for export success (honesty). Extracted for unit tests.
+///
+/// Re-expressed via [`crate::export_outcome::classify_export`] so existing tests
+/// remain the back-compat guard for 0078 refinement (rule 4).
 ///
 /// `scan_ok` / `verify_ok` / `export_err_absent` / `report_ok` are positive flags
 /// (true = no failure in that dimension).
 pub(crate) fn compute_export_ok(i: ExportOkInput) -> bool {
-    i.scan_ok
-        && i.verify_ok
-        && i.export_err_absent
-        && !i.export_partial
-        && i.messages_written_total == i.unique
-        && i.attach_failed_total == 0
-        && i.report_ok
+    use crate::export_outcome::{classify_export, ExportFidelity, RiskGate};
+    classify_export(
+        i,
+        dedup_engine::integrity::PreflightRecommendation::Ok,
+        RiskGate::Off,
+        true,
+        false,
+    )
+    .fidelity
+        == ExportFidelity::Complete
 }
 
 fn prepare_report_dir(report_dir: &Path, overwrite: bool) -> Result<()> {
@@ -2843,6 +3119,7 @@ mod tests {
             messages_written_total: 5,
             unique: 5,
             attach_failed_total: 0,
+            body_soft_fail_total: 0,
             report_ok: true,
         }
     }
@@ -3004,6 +3281,9 @@ mod tests {
             allow_crc_suspect_tier2: false,
             crc_log_limit: 10,
             crc_log_interval_secs: 30,
+            fail_on_partial_fidelity: true,
+            allow_partial_fidelity: false,
+            fail_on_export_risk: None,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3100,6 +3380,9 @@ mod tests {
             allow_crc_suspect_tier2: false,
             crc_log_limit: 10,
             crc_log_interval_secs: 30,
+            fail_on_partial_fidelity: true,
+            allow_partial_fidelity: false,
+            fail_on_export_risk: None,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3203,6 +3486,9 @@ mod tests {
             allow_crc_suspect_tier2: false,
             crc_log_limit: 10,
             crc_log_interval_secs: 30,
+            fail_on_partial_fidelity: true,
+            allow_partial_fidelity: false,
+            fail_on_export_risk: None,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3297,6 +3583,9 @@ mod tests {
             allow_crc_suspect_tier2: false,
             crc_log_limit: 10,
             crc_log_interval_secs: 30,
+            fail_on_partial_fidelity: true,
+            allow_partial_fidelity: false,
+            fail_on_export_risk: None,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3325,5 +3614,109 @@ mod tests {
             outcome.summary_path.is_file(),
             "cancelled path must write summary.json"
         );
+        assert_eq!(outcome.exit, crate::error::CliExit::Cancelled);
+        assert_eq!(
+            outcome.exit_reasons,
+            vec![crate::export_outcome::reason::CANCELLED]
+        );
+    }
+
+    #[test]
+    fn quarantine_renames_primary_and_sibling() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let out = dir.path().join("unique.pst");
+        let vol2 = volume_path_for(&out, 2);
+        fs::write(&out, b"vol1").expect("write vol1");
+        fs::write(&vol2, b"vol2").expect("write vol2");
+        let q = quarantine_cancelled_volumes(&out, 2);
+        assert_eq!(q, crate::export_outcome::QuarantineResult::Succeeded);
+        assert!(!out.exists(), "--out must be free after quarantine");
+        assert!(!vol2.exists());
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .expect("rd")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries.len(), 2);
+        for name in &entries {
+            assert!(
+                name.contains("cancelled-") && name.ends_with(".partial"),
+                "unexpected name {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn quarantine_rename_failure_is_failed() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let out = dir.path().join("unique.pst");
+        fs::write(&out, b"x").expect("write");
+        let q = quarantine_cancelled_volumes_with(&out, 1, |_from, _to| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "simulated lock",
+            ))
+        });
+        assert_eq!(q, crate::export_outcome::QuarantineResult::Failed);
+        assert!(out.exists(), "file remains on rename fail");
+        let art = crate::export_outcome::artifact_state_for(
+            &crate::export_outcome::ExportOutcome {
+                fidelity: crate::export_outcome::ExportFidelity::Failed,
+                exit: crate::error::CliExit::Cancelled,
+                reasons: vec![crate::export_outcome::reason::CANCELLED],
+                cancelled: true,
+            },
+            true,
+            q,
+        );
+        assert_eq!(art, crate::export_outcome::ArtifactState::InvalidInPlace);
+    }
+
+    /// Same stamp twice must not overwrite; both partials retained and `--out` free.
+    #[test]
+    fn quarantine_same_stamp_collision_keeps_both_partials() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let out = dir.path().join("unique.pst");
+        let stamp = "1720000000-000";
+        fs::write(&out, b"first").expect("write v1");
+        let q1 = quarantine_cancelled_volumes_with_stamp(&out, 1, stamp, |from, to| {
+            fs::rename(from, to)
+        });
+        assert_eq!(q1, crate::export_outcome::QuarantineResult::Succeeded);
+        assert!(!out.exists(), "--out free after first quarantine");
+        let first_partial = dir
+            .path()
+            .join("unique.pst.cancelled-1720000000-000.partial");
+        assert!(first_partial.is_file(), "primary partial must exist");
+        let first_bytes = fs::read(&first_partial).expect("read first");
+        assert_eq!(first_bytes, b"first");
+
+        // Second cancel of a new write at the same stamp.
+        fs::write(&out, b"second").expect("write v2");
+        let q2 = quarantine_cancelled_volumes_with_stamp(&out, 1, stamp, |from, to| {
+            fs::rename(from, to)
+        });
+        assert_eq!(q2, crate::export_outcome::QuarantineResult::Succeeded);
+        assert!(!out.exists(), "--out free after second quarantine");
+        let second_partial = dir
+            .path()
+            .join("unique.pst.cancelled-1720000000-000_2.partial");
+        assert!(
+            second_partial.is_file(),
+            "collision suffix _2 partial must exist"
+        );
+        assert_eq!(fs::read(&second_partial).expect("read second"), b"second");
+        // First partial untouched (never overwrite).
+        assert_eq!(
+            fs::read(&first_partial).expect("read first again"),
+            b"first"
+        );
+        let partials: Vec<_> = fs::read_dir(dir.path())
+            .expect("rd")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("cancelled-") && n.ends_with(".partial"))
+            .collect();
+        assert_eq!(partials.len(), 2, "both partials retained: {partials:?}");
     }
 }
