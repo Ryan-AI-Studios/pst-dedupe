@@ -1166,3 +1166,245 @@ fn unique_pst_all_custodians_three_surface_parity() {
     }
     assert!(saw_cap, "expected at least one capped aggregate");
 }
+
+/// 0079: two baseline runs compare equal under the structural equivalence oracle.
+#[test]
+fn unique_pst_oracle_self_test_two_runs() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out_a = dir.path().join("a.pst");
+    let report_a = dir.path().join("report_a");
+    let out_b = dir.path().join("b.pst");
+    let report_b = dir.path().join("report_b");
+
+    for (out, report) in [(&out_a, &report_a), (&out_b, &report_b)] {
+        let result = run_unique_pst(&[
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--json",
+            "--no-attachments",
+        ]);
+        assert!(
+            result.status.success(),
+            "stderr={} stdout={}",
+            String::from_utf8_lossy(&result.stderr),
+            String::from_utf8_lossy(&result.stdout)
+        );
+    }
+
+    let diff =
+        pst_dedup_cli::export_oracle::compare_export_packs(&report_a, &out_a, &report_b, &out_b);
+    diff.assert_equivalent();
+}
+
+/// 0079 D1: every winner is materialized exactly once.
+#[test]
+fn unique_pst_messages_materialized_equals_unique() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+    let result = run_unique_pst(&[
+        "unique-pst",
+        sample.to_str().expect("utf8"),
+        "--out",
+        out.to_str().expect("utf8"),
+        "--report-dir",
+        report.to_str().expect("utf8"),
+        "--json",
+        "--no-attachments",
+    ]);
+    assert!(
+        result.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("json");
+    let unique = v["keep_set"]["stats"]["unique"].as_u64().unwrap_or(0);
+    let mat = v["messages_materialized"].as_u64().unwrap_or(u64::MAX);
+    assert_eq!(
+        mat, unique,
+        "messages_materialized must equal unique (single materialize)"
+    );
+    assert!(v["phase_timings"]["total_ms"].as_u64().unwrap_or(0) > 0 || unique == 0);
+    // Phase timings present.
+    assert!(v.get("phase_timings").is_some());
+    // Single-source fixture: shared handle cache opens the PST exactly once.
+    assert_eq!(
+        v["source_pst_opens"].as_u64(),
+        Some(1),
+        "single-source export must open the source PST once via shared LRU"
+    );
+    assert!(v.get("bytes_written_total").is_some());
+    assert!(v.get("prepared_bytes_peak").is_some());
+}
+
+/// 0079 D1 + DoD-7: attachments-on path also single-materializes and keeps
+/// oracle equivalence (structural; not byte-identical — D10).
+#[test]
+fn unique_pst_attachments_on_d1_and_oracle() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out_a = dir.path().join("a.pst");
+    let report_a = dir.path().join("report_a");
+    let out_b = dir.path().join("b.pst");
+    let report_b = dir.path().join("report_b");
+
+    for (out, report) in [(&out_a, &report_a), (&out_b, &report_b)] {
+        // Bypass run_unique_pst helper so --no-attachments is not forced.
+        let result = Command::new(bin())
+            .args([
+                "unique-pst",
+                sample.to_str().expect("utf8"),
+                "--out",
+                out.to_str().expect("utf8"),
+                "--report-dir",
+                report.to_str().expect("utf8"),
+                "--json",
+                "--allow-partial-fidelity",
+            ])
+            .output()
+            .expect("run unique-pst attachments-on");
+        assert!(
+            result.status.success(),
+            "stderr={} stdout={}",
+            String::from_utf8_lossy(&result.stderr),
+            String::from_utf8_lossy(&result.stdout)
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("json");
+        let unique = v["keep_set"]["stats"]["unique"].as_u64().unwrap_or(0);
+        let mat = v["messages_materialized"].as_u64().unwrap_or(u64::MAX);
+        assert_eq!(
+            mat, unique,
+            "attachments-on: messages_materialized == unique"
+        );
+        assert_eq!(
+            v["source_pst_opens"].as_u64(),
+            Some(1),
+            "attachments-on single-source still one shared open"
+        );
+    }
+
+    let diff =
+        pst_dedup_cli::export_oracle::compare_export_packs(&report_a, &out_a, &report_b, &out_b);
+    diff.assert_equivalent();
+}
+
+/// 0079 DoD-7: per-winner `degraded_reasons` are stable across two runs and match
+/// keepset integrity written at finalize (prepare path does not re-materialize).
+///
+/// Full pre-D1 binary compare of reason sets is not reconstructible on this
+/// branch (Phases 0–5 landed together). Regression catch: two post-D1 runs
+/// produce identical reason maps, and `messages_materialized == unique` proves
+/// finalize-only soft fidelity (no second materialize that could add reasons).
+#[test]
+fn unique_pst_degraded_reasons_stable_finalize_only() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out_a = dir.path().join("a.pst");
+    let report_a = dir.path().join("report_a");
+    let out_b = dir.path().join("b.pst");
+    let report_b = dir.path().join("report_b");
+
+    for (out, report) in [(&out_a, &report_a), (&out_b, &report_b)] {
+        let result = run_unique_pst(&[
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--json",
+            "--no-attachments",
+        ]);
+        assert!(
+            result.status.success(),
+            "stderr={} stdout={}",
+            String::from_utf8_lossy(&result.stderr),
+            String::from_utf8_lossy(&result.stdout)
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("json");
+        let unique = v["keep_set"]["stats"]["unique"].as_u64().unwrap_or(0);
+        let mat = v["messages_materialized"].as_u64().unwrap_or(u64::MAX);
+        assert_eq!(
+            mat, unique,
+            "DoD-7 structural: single materialize (no prepare re-materialize)"
+        );
+    }
+
+    let reasons_a =
+        pst_dedup_cli::export_oracle::degraded_reasons_by_winner(&report_a).expect("reasons run A");
+    let reasons_b =
+        pst_dedup_cli::export_oracle::degraded_reasons_by_winner(&report_b).expect("reasons run B");
+    assert_eq!(
+        reasons_a, reasons_b,
+        "per-winner degraded_reasons must be stable across two equivalent runs"
+    );
+    assert!(
+        !reasons_a.is_empty(),
+        "keepset must list winners (reason map non-empty keys)"
+    );
+
+    // Fixture is known to carry BODY_UNAVAILABLE degraded sole winners (keep_set tests).
+    let any_degraded = reasons_a.values().any(|r| !r.is_empty());
+    assert!(
+        any_degraded,
+        "aspose fixture should expose at least one degraded_reasons entry for DoD-7 coverage; map={reasons_a:?}"
+    );
+
+    // Integrity on keepset is what finalize wrote — prepare cannot re-merge fresh soft reasons.
+    let keepset: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report_a.join("keepset.json")).expect("keepset"))
+            .expect("keepset json");
+    let winners = keepset["winners"].as_array().expect("winners array");
+    for w in winners {
+        let path = w
+            .pointer("/locus/source_path")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let nid = w
+            .pointer("/locus/nid")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let key = format!("{path}|{nid}");
+        let mut from_json: Vec<String> = w
+            .pointer("/integrity/degraded_reasons")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        from_json.sort();
+        assert_eq!(
+            reasons_a.get(&key).cloned().unwrap_or_default(),
+            from_json,
+            "helper must match keepset integrity.degraded_reasons for {key}"
+        );
+    }
+}

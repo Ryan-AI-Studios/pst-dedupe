@@ -534,6 +534,8 @@ pub struct WritePstReport {
     pub sha256_hex: String,
     /// MD5 (hex, lowercase) of the same final bytes (legacy load-file interop).
     pub md5_hex: String,
+    /// Wall time of the final-hash pass (SHA-256 + MD5), milliseconds (0079).
+    pub hash_ms: u64,
     /// True when [`WriteProgressSink::should_stop_and_finalize`] ended the
     /// volume early (partial message batch).
     pub finalized_early: bool,
@@ -812,6 +814,58 @@ pub fn from_canonical_message(
         source_folder_path: Some(msg.locus.folder_path.clone()),
         source_path: Some(msg.locus.source_path.clone()),
         source_msg_nid: Some(msg.locus.nid),
+        attach_list_failed,
+    };
+    (write_msg, 0)
+}
+
+/// By-value conversion: **moves** bodies and buffered attach payloads (0079 D11).
+///
+/// Prefer this on the unique-pst hot path when the [`CanonicalMessage`] is dropped
+/// immediately afterward — avoids a full per-winner memcpy and the transient
+/// double-residency of body/attach buffers.
+pub fn from_canonical_message_owned(
+    msg: dedup_engine::keepset::CanonicalMessage,
+) -> (WriteMessage, u64) {
+    let source_path = msg.locus.source_path.clone();
+    let parent_nid = msg.locus.nid;
+    let folder_path = msg.locus.folder_path.clone();
+    let attach_list_failed = msg.attachments.is_empty()
+        && msg
+            .fidelity
+            .degraded_reasons
+            .contains(&dedup_engine::IntegrityReason::AttachMetaFailed);
+    let attachments: Vec<WriteAttachment> = msg
+        .attachments
+        .into_iter()
+        .map(|a| WriteAttachment {
+            filename: a.filename,
+            mime: a.mime,
+            size: a.size,
+            attach_method: a.attach_method,
+            data: a.data,
+            stream_available: a.stream_available,
+            attach_nid: a.attach_nid,
+            source_path: Some(source_path.clone()),
+            parent_nid: Some(parent_nid),
+            embedded_message: None,
+        })
+        .collect();
+    let write_msg = WriteMessage {
+        message_id: msg.message_id,
+        subject: msg.subject.unwrap_or_default(),
+        sender: msg.sender,
+        display_to: msg.display_to,
+        submit_time: msg.submit_time,
+        body_plain: msg.body_plain,
+        body_html: msg.body_html,
+        message_class: msg.message_class,
+        body_incomplete: msg.body_incomplete,
+        body_unavailable: msg.body_unavailable,
+        attachments,
+        source_folder_path: Some(folder_path),
+        source_path: Some(source_path),
+        source_msg_nid: Some(parent_nid),
         attach_list_failed,
     };
     (write_msg, 0)
@@ -1556,7 +1610,9 @@ pub fn write_unicode_pst_streaming(
     }
 
     // Hash complete finalized temp (all seeks done) before rename.
+    let hash_started = std::time::Instant::now();
     let (sha256_hex, md5_hex) = hash_file_hex(&tmp_path)?;
+    let hash_ms = hash_started.elapsed().as_millis() as u64;
     let bytes = fs::metadata(&tmp_path)
         .map(|m| m.len())
         .unwrap_or_else(|_| layout.file_size());
@@ -1596,6 +1652,7 @@ pub fn write_unicode_pst_streaming(
         attach_stream_crc_events: counters.attach_stream_crc_events,
         sha256_hex,
         md5_hex,
+        hash_ms,
         finalized_early,
     })
 }
@@ -1613,18 +1670,35 @@ fn digest_to_hex(bytes: impl AsRef<[u8]>) -> String {
 }
 
 /// SHA-256 + MD5 of the complete file on disk (lowercase hex).
+///
+/// **0079 D7:** when the pass is hash-bound (MD5 ~500 MB/s ceiling), running
+/// both digests concurrently over the same buffer is a pure CPU win with no
+/// new dependency. Buffer is 1 MiB (was 256 KiB) for sequential I/O.
+///
+/// Note: Windows `FILE_FLAG_SEQUENTIAL_SCAN` must be set at `CreateFile` time;
+/// std `File::open` does not expose that flag, so no sequential-scan hint is
+/// applied here (correctness unchanged; residual D-0079-seq-scan if measured).
 fn hash_file_hex(path: &Path) -> Result<(String, String)> {
     let mut file = File::open(path)?;
     let mut sha = Sha256::new();
     let mut md5 = Md5::new();
-    let mut buf = [0u8; 256 * 1024];
+    // 1 MiB buffer: sequential hash pass benefits from larger reads on multi-GB.
+    let mut buf = vec![0u8; 1024 * 1024];
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        sha.update(&buf[..n]);
-        md5.update(&buf[..n]);
+        let chunk = &buf[..n];
+        // Concurrent digests over the same buffer (0079 §3.7).
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                sha.update(chunk);
+            });
+            s.spawn(|| {
+                md5.update(chunk);
+            });
+        });
     }
     Ok((digest_to_hex(sha.finalize()), digest_to_hex(md5.finalize())))
 }
@@ -4540,5 +4614,39 @@ mod tests {
         assert_eq!(plan.roots[0].display_name, "All Mail");
         assert_eq!(nid, plan.roots[0].nid);
         assert_eq!(plan.folders_created, 1);
+    }
+
+    /// 0079: concurrent SHA-256 + MD5 over shared 1 MiB buffers equals sequential digests.
+    #[test]
+    fn concurrent_hash_file_hex_matches_sequential() {
+        use md5::Md5;
+        use sha2::{Digest, Sha256};
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "pst_writer_hash_unit_{}_{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        // Multi-chunk payload (>1 MiB buffer) + known short tail.
+        let mut content = vec![0xABu8; 1024 * 1024 + 4096];
+        content.extend_from_slice(b"0079-hash-known-tail");
+        fs::write(&path, &content).expect("write temp");
+
+        let (sha_conc, md5_conc) = hash_file_hex(&path).expect("concurrent hash");
+
+        let mut sha = Sha256::new();
+        sha.update(&content);
+        let mut md5 = Md5::new();
+        md5.update(&content);
+        let sha_seq = digest_to_hex(sha.finalize());
+        let md5_seq = digest_to_hex(md5.finalize());
+
+        let _ = fs::remove_file(&path);
+        assert_eq!(sha_conc, sha_seq, "SHA-256 concurrent == sequential");
+        assert_eq!(md5_conc, md5_seq, "MD5 concurrent == sequential");
     }
 }

@@ -2,7 +2,8 @@
 .ledgerful/
 .env
 *.log
-review.md
+# Root-level agent scratch only (track DoD reviews live under conductor/ and are force-added).
+/review.md
 .claude/
 *.html
 # Synthetic Teams HTML fixtures (track 0055) must be tracked for CI/tests.
@@ -12,7 +13,9 @@ review.md
 # Local scratch / generated
 output/
 
-# Conductor track docs (local / not published with this repo)
+# Conductor track docs: local by default. Already-tracked board/track files stay
+# versioned; new DoD artifacts (plan/spec/review/baseline/implementation-notes)
+# must be `git add -f` (same historical policy as prior tracks).
 /conductor/
 
 # Local matters / operator evidence (never commit client mail)

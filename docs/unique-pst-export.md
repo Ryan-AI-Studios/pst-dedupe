@@ -55,6 +55,7 @@ Source PSTs are **read-only**. The writer never mutates inputs.
 | `--deep-attach-max-peer-probes` | Max peers probed per keep-set group (default **3**) |
 | `--max-attach-fail-rate` | Preflight escalate when attach fail rate exceeds (default **0.05**) |
 | `--json` | Summary JSON on **stdout**; human progress on **stderr** |
+| `--max-open-psts <N>` | **0079** — max sticky source PST handles for materialize + attach stream (default **32**, LRU) |
 
 ### Deep attach preflight (0074) — honesty
 
@@ -109,6 +110,31 @@ If volume *k* fails fatally (disk full, path unwritable, layout hard fail):
   export_attachments.csv    # 0073 attach failure ledger (mode=full)
   integrity.csv             # optional / if requested
 ```
+
+### `summary.json` phase timings (0079)
+
+Additive fields (always present; older tools may ignore):
+
+| Field | Meaning |
+|---|---|
+| `phase_timings.scan_ms` | Integrity scan |
+| `phase_timings.deep_attach_preflight_ms` | Opt-in deep attach probe (0 when off) |
+| `phase_timings.resolve_ms` | Keep-set resolve / group bind |
+| `phase_timings.materialize_ms` | Winner materialize (+ promote) |
+| `phase_timings.prepare_ms` | Assemble prepared winners (no second materialize) |
+| `phase_timings.write_ms` | Streaming PST write (includes final-hash wall inside writer) |
+| `phase_timings.report_ms` | Report pack flush |
+| `phase_timings.verify_ms` | Phase 5 volume verify |
+| `phase_timings.quarantine_ms` | Cancel quarantine rename (0 when not cancelled) |
+| `phase_timings.unaccounted_ms` | `total_ms − Σ(phases)` — **computed, never fudged to 0** |
+| `phase_timings.total_ms` | Wall from orchestration start |
+| `source_pst_opens` | Successful `PstFile::open` count via shared LRU cache |
+| `messages_materialized` | Must equal `keep_set.stats.unique` (single materialize) |
+| `bytes_written_total` | Sum of completed volume sizes |
+| `prepared_bytes_peak` | Peak retained body + buffered-attach bytes in `prepared` |
+| `hash_ms` | Final-hash (SHA-256+MD5) wall across volumes |
+
+Soft warning when `prepared_bytes_peak` exceeds **1 GiB** (stability; see D-0079-stream-prepare).
 
 ### Sensitivity (handoff)
 
