@@ -664,7 +664,7 @@ const DECISION_CSV_PRE_0075_HEADER: &str = "SourcePath,SourcePst,Folder,IsOrphan
 
 /// Frozen unique-row **legacy** columns 1..18 (drop absolute SourcePath col 0 for path portability).
 /// Order: SourcePst,Folder,IsOrphaned,NID,MessageIdNorm,ContentHash,EdrmMih,Role,Tier,WinnerPst,WinnerFolder,WinnerNid,Policy,FamilyPolicy,Degraded,DegradedReasons,Size,PromotedFromFailure.
-/// Sorted by NID. Captured with defaults on aspose_outlook.pst (0075 flags off).
+/// Sorted by NID. Captured with defaults on aspose_outlook.pst (0075 flags off). 0077: dual-rate poly clears false-positive CRC_SUSPECT (Degraded=false); winner NIDs/hashes match pre-0077.
 const ASPOSE_LEGACY_UNIQUE_ROWS: &[&[&str]] = &[
     &[
         "aspose_outlook.pst",

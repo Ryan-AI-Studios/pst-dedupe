@@ -338,7 +338,7 @@ Third-party dependency licenses are permissive (MIT/Apache-2.0/Unlicense). No GP
 | SEC-03 | 🟡 MEDIUM | Correctness | Byte-index string truncation may panic on Unicode | `exporter.rs:64`, `results.rs:248` |
 | SEC-04 | 🟡 MEDIUM | Correctness | Body preview truncation may panic on multi-byte UTF-8 | `message.rs:48-50` |
 | SEC-05 | 🟡 MEDIUM | Security | EML filename allows spaces; weak path traversal defense | `exporter.rs:52-62` |
-| SEC-06 | 🟢 LOW | Security | CRC mismatches are warning-only (intentional but noted) | `page.rs:107-115` |
+| SEC-06 | 🟢 LOW | Security | CRC mismatches are warning-only **and counted per source** (0077: `integrity_telemetry` + scan report fields; still non-fatal by design — not closed) | `page.rs` / `block.rs` / `integrity_telemetry` |
 | SEC-07 | 🟢 LOW | Security | No max file size or message count limits | `lib.rs:76` |
 | QA-01 | 🟡 MEDIUM | Testing | No unit tests for XBLOCK/XXBLOCK assembly | `block.rs` |
 | QA-02 | 🟡 MEDIUM | Testing | No tests for CSV report or EML export | `report.rs`, `exporter.rs` |

@@ -261,7 +261,7 @@ pub fn run_scan(
                     .as_deref()
                     .map(|s| !s.trim().is_empty())
                     .unwrap_or(false);
-                let eligible = match hasher::tier2_eligibility(
+                let mut eligible = match hasher::tier2_eligibility(
                     props.body_incomplete,
                     props.body_unavailable,
                     has_body,
@@ -287,7 +287,14 @@ pub fn run_scan(
                             true
                         }
                     }
+                    Err(Tier2IneligibleReason::CrcSuspect) => true,
                 };
+                if props.crc_suspect && !index.context().allow_crc_suspect_tier2() {
+                    if eligible {
+                        index.record_tier2_block_crc_suspect();
+                    }
+                    eligible = false;
+                }
 
                 let result = index.check_and_insert_item(IndexItem {
                     message_id: keys.message_id.clone(),
@@ -308,10 +315,19 @@ pub fn run_scan(
                     total_savings += msg_ref.size as u64;
                 }
 
+                // 0077 F-GUI-3: report integrity must match CRC_SUSPECT (CLI parity).
+                let integrity = if props.crc_suspect {
+                    dedup_engine::integrity::RecoverableIntegrity::with_degraded(
+                        vec![dedup_engine::integrity::IntegrityReason::CrcSuspect],
+                        false,
+                    )
+                } else {
+                    dedup_engine::integrity::RecoverableIntegrity::clean()
+                };
                 all_rows.push(ReportRow {
                     message: msg_ref,
                     result,
-                    integrity: dedup_engine::integrity::RecoverableIntegrity::clean(),
+                    integrity,
                 });
 
                 file_messages += 1;

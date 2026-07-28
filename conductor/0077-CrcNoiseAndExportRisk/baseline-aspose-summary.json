@@ -1,0 +1,67 @@
+{
+  "degraded_by_reason": {},
+  "degraded_messages": 0,
+  "duplicates": 0,
+  "duration_secs": 0.0168261,
+  "failed_files": 0,
+  "files": [
+    {
+      "degraded_by_reason": {},
+      "degraded_messages": 0,
+      "duplicates": 0,
+      "error": null,
+      "error_code": null,
+      "folders": 27,
+      "messages": 17,
+      "name": "aspose_outlook.pst",
+      "path": "\\\\?\\C:\\dev\\Dedupe\\fixtures\\aspose_outlook.pst",
+      "recoverable_messages": 17,
+      "skipped": 0,
+      "skipped_by_reason": {},
+      "status": "opened"
+    }
+  ],
+  "grouping": {
+    "tier2_blocked_degenerate": 1
+  },
+  "mode": "best-effort",
+  "opened_files": 1,
+  "orphaned_messages": 0,
+  "partial_files": 0,
+  "preflight": {
+    "attach_probe": {
+      "attempted": 0,
+      "cancelled": false,
+      "coverage_note": "deep attach preflight disabled",
+      "enabled": false,
+      "fail_rate": 0.0,
+      "failed": 0,
+      "level": "off",
+      "max_attach_fail_rate": 0.05,
+      "peer_probe_capped_groups": 0,
+      "truncated": false
+    },
+    "crc_skip_rate": 0.0,
+    "failed_file_rate": 0.0,
+    "mode": "best-effort",
+    "reasons": [],
+    "recommendation": "ok",
+    "schema": "scan_integrity_v1",
+    "skip_rate": 0.0,
+    "thresholds": {
+      "max_attach_fail_rate": 0.05,
+      "max_crc_skip_rate": 0.01,
+      "max_failed_file_rate": 0.0,
+      "max_skip_rate": 0.05
+    }
+  },
+  "recoverable_messages": 17,
+  "savings_bytes": 0,
+  "schema": "scan_integrity_v1",
+  "skipped": 0,
+  "skipped_by_reason": {},
+  "tier1_hits": 0,
+  "tier2_hits": 0,
+  "total_messages": 17,
+  "unique": 17
+}

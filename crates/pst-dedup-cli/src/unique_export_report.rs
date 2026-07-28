@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
+use dedup_engine::integrity::PreflightRecommendation;
 use pst_writer::{AttachEventSeverity, AttachEventSink, AttachmentFidelityEvent};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{CliError, Result};
 
@@ -158,6 +159,205 @@ pub struct ExportSection {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_volume_index: Option<u32>,
+    /// Whether in-process attach event Vec was capped (0077).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_fidelity_events_truncated: Option<bool>,
+    /// Total attach events observed (may exceed Vec len when truncated; 0077).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_fidelity_events_total: Option<u64>,
+}
+
+/// Inputs for post-export risk evaluation (0077).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExportRiskInputs {
+    pub attach_fail_rate: f64,
+    pub block_crc_rate: f64,
+    pub block_crc_read_rate: f64,
+    pub degraded_winner_rate: f64,
+    pub partial: bool,
+    pub failed_volume_index: Option<u32>,
+    pub scan_recommendation: PreflightRecommendation,
+    /// Count of final-write `ATTACH_STREAM_CRC` Info events (0077; default 0).
+    /// Warning-only: does not raise `attachments_failed` / attach_fail_rate.
+    #[serde(default)]
+    pub attach_stream_crc_events: u64,
+}
+
+/// Visible thresholds for `export_risk` (serde-defaulted; 0077).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExportRiskThresholds {
+    pub max_attach_fail_rate: f64,
+    pub max_block_crc_read_rate: f64,
+    pub max_degraded_winner_rate: f64,
+    pub catastrophic_block_crc_read_rate: f64,
+    pub catastrophic_attach_fail_rate: f64,
+}
+
+impl Default for ExportRiskThresholds {
+    fn default() -> Self {
+        Self {
+            max_attach_fail_rate: 0.05,
+            max_block_crc_read_rate: 0.01,
+            max_degraded_winner_rate: 0.02,
+            catastrophic_block_crc_read_rate: 0.15,
+            catastrophic_attach_fail_rate: 0.50,
+        }
+    }
+}
+
+/// Post-export risk on the **existing** preflight vocabulary (no second enum).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExportRisk {
+    pub level: PreflightRecommendation,
+    /// Closed vocabulary, sorted (e.g. `attach_fail_rate=0.098>0.05`).
+    pub reasons: Vec<String>,
+    pub inputs: ExportRiskInputs,
+    pub thresholds: ExportRiskThresholds,
+}
+
+/// Compute `export_risk`: max(scan preflight, post-export evaluation).
+///
+/// Advisory thresholds → `re_export_recommended`. Catastrophic rates or hard
+/// failures → `not_export_ready`. Export never lowers scan risk.
+pub fn compute_export_risk(
+    scan_recommendation: &PreflightRecommendation,
+    inputs: &ExportRiskInputs,
+) -> ExportRisk {
+    compute_export_risk_with_thresholds(
+        scan_recommendation,
+        inputs,
+        &ExportRiskThresholds::default(),
+    )
+}
+
+/// Same as [`compute_export_risk`] with explicit thresholds (tests / overrides).
+pub fn compute_export_risk_with_thresholds(
+    scan_recommendation: &PreflightRecommendation,
+    inputs: &ExportRiskInputs,
+    thresholds: &ExportRiskThresholds,
+) -> ExportRisk {
+    let mut reasons: Vec<String> = Vec::new();
+    let mut post = PreflightRecommendation::Ok;
+
+    // Hard conditions → not_export_ready.
+    if inputs.failed_volume_index.is_some() {
+        post = PreflightRecommendation::NotExportReady;
+        reasons.push(format!(
+            "failed_volume_index={}",
+            inputs.failed_volume_index.unwrap_or(0)
+        ));
+    }
+    if inputs.partial && inputs.failed_volume_index.is_some() {
+        // already not_export_ready; keep reason specific
+        if !reasons
+            .iter()
+            .any(|r| r.starts_with("partial+failed_volume"))
+        {
+            reasons.push("partial+failed_volume".into());
+        }
+    }
+    if *scan_recommendation == PreflightRecommendation::NotExportReady {
+        // Carried forward via max(); still name it.
+        reasons.push("scan_recommendation=not_export_ready".into());
+    }
+    if *scan_recommendation == PreflightRecommendation::ReExportRecommended {
+        // When scan alone elevates and post is ok, reasons must not be empty.
+        reasons.push("scan_preflight=re_export_recommended".into());
+    }
+
+    // Catastrophic rates → not_export_ready (may fire without failed volume).
+    if inputs.block_crc_read_rate > thresholds.catastrophic_block_crc_read_rate {
+        post = PreflightRecommendation::NotExportReady;
+        reasons.push(format!(
+            "block_crc_read_rate={:.3}>{}",
+            inputs.block_crc_read_rate, thresholds.catastrophic_block_crc_read_rate
+        ));
+    }
+    if inputs.attach_fail_rate > thresholds.catastrophic_attach_fail_rate {
+        post = PreflightRecommendation::NotExportReady;
+        reasons.push(format!(
+            "attach_fail_rate={:.3}>{}",
+            inputs.attach_fail_rate, thresholds.catastrophic_attach_fail_rate
+        ));
+    }
+
+    // Advisory thresholds → re_export_recommended (cannot alone reach not_export_ready).
+    if post == PreflightRecommendation::Ok {
+        if inputs.attach_fail_rate > thresholds.max_attach_fail_rate {
+            post = PreflightRecommendation::ReExportRecommended;
+            reasons.push(format!(
+                "attach_fail_rate={:.3}>{}",
+                inputs.attach_fail_rate, thresholds.max_attach_fail_rate
+            ));
+        }
+        if inputs.block_crc_read_rate > thresholds.max_block_crc_read_rate {
+            post = PreflightRecommendation::ReExportRecommended;
+            reasons.push(format!(
+                "block_crc_read_rate={:.3}>{}",
+                inputs.block_crc_read_rate, thresholds.max_block_crc_read_rate
+            ));
+        }
+        if inputs.degraded_winner_rate > thresholds.max_degraded_winner_rate {
+            post = PreflightRecommendation::ReExportRecommended;
+            reasons.push(format!(
+                "degraded_winner_rate={:.3}>{}",
+                inputs.degraded_winner_rate, thresholds.max_degraded_winner_rate
+            ));
+        }
+        // Final attach stream CRC is warning-only (not attach_fail_rate) but still
+        // elevates export_risk so operators re-export rather than trust the bytes.
+        if inputs.attach_stream_crc_events > 0 {
+            post = PreflightRecommendation::ReExportRecommended;
+            reasons.push(format!(
+                "attach_stream_crc_events={}>0",
+                inputs.attach_stream_crc_events
+            ));
+        }
+    } else {
+        // Still surface advisory crossings for operator detail when already catastrophic.
+        if inputs.attach_fail_rate > thresholds.max_attach_fail_rate
+            && !reasons.iter().any(|r| r.starts_with("attach_fail_rate="))
+        {
+            reasons.push(format!(
+                "attach_fail_rate={:.3}>{}",
+                inputs.attach_fail_rate, thresholds.max_attach_fail_rate
+            ));
+        }
+        if inputs.block_crc_read_rate > thresholds.max_block_crc_read_rate
+            && !reasons
+                .iter()
+                .any(|r| r.starts_with("block_crc_read_rate="))
+        {
+            reasons.push(format!(
+                "block_crc_read_rate={:.3}>{}",
+                inputs.block_crc_read_rate, thresholds.max_block_crc_read_rate
+            ));
+        }
+        if inputs.attach_stream_crc_events > 0
+            && !reasons
+                .iter()
+                .any(|r| r.starts_with("attach_stream_crc_events="))
+        {
+            reasons.push(format!(
+                "attach_stream_crc_events={}>0",
+                inputs.attach_stream_crc_events
+            ));
+        }
+    }
+
+    reasons.sort();
+    reasons.dedup();
+
+    let level = scan_recommendation.max(post);
+    let mut inputs_out = inputs.clone();
+    inputs_out.scan_recommendation = *scan_recommendation;
+
+    ExportRisk {
+        level,
+        reasons,
+        inputs: inputs_out,
+        thresholds: thresholds.clone(),
+    }
 }
 
 /// Top-level `summary.json` payload (`unique_export_report_v1`).
@@ -185,6 +385,8 @@ pub struct UniqueExportSummary {
     pub keep_set_json: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<SummaryError>,
+    /// Post-export risk (0077); same vocabulary as preflight.
+    pub export_risk: ExportRisk,
 }
 
 /// Structured error on the summary / JSON stdout.
@@ -1041,6 +1243,8 @@ mod tests {
             attachment_ledger_rows_written: None,
             error: None,
             failed_volume_index: None,
+            attachment_fidelity_events_truncated: None,
+            attachment_fidelity_events_total: None,
         };
         finish.apply_to_export_section(&mut export);
         assert!(export.attachment_ledger.is_none());
@@ -1127,10 +1331,131 @@ mod tests {
             attachment_ledger_rows_written: None,
             error: None,
             failed_volume_index: None,
+            attachment_fidelity_events_truncated: None,
+            attachment_fidelity_events_total: None,
         };
         finish.apply_to_export_section(&mut export);
         assert!(export.attachments_failed_by_reason.is_none());
         assert_eq!(export.attachments_omitted_by_policy, Some(9));
+    }
+
+    #[test]
+    fn export_risk_monotone_composition() {
+        let inputs = ExportRiskInputs {
+            attach_fail_rate: 0.0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            degraded_winner_rate: 0.0,
+            partial: false,
+            failed_volume_index: None,
+            scan_recommendation: PreflightRecommendation::ReExportRecommended,
+            attach_stream_crc_events: 0,
+        };
+        let risk = compute_export_risk(&PreflightRecommendation::ReExportRecommended, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::ReExportRecommended);
+        assert!(risk.level.rank() >= PreflightRecommendation::ReExportRecommended.rank());
+        // F7: scan-only elevation must name the scan preflight in reasons.
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r == "scan_preflight=re_export_recommended"),
+            "reasons={:?}",
+            risk.reasons
+        );
+    }
+
+    #[test]
+    fn export_risk_advisory_cannot_reach_not_export_ready() {
+        let inputs = ExportRiskInputs {
+            attach_fail_rate: 0.06, // above 0.05 advisory, well below 0.50 catastrophic
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            degraded_winner_rate: 0.0,
+            partial: false,
+            failed_volume_index: None,
+            scan_recommendation: PreflightRecommendation::Ok,
+            attach_stream_crc_events: 0,
+        };
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::ReExportRecommended);
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r.starts_with("attach_fail_rate=")),
+            "reasons={:?}",
+            risk.reasons
+        );
+    }
+
+    #[test]
+    fn export_risk_catastrophic_read_rate_without_failed_volume() {
+        let inputs = ExportRiskInputs {
+            attach_fail_rate: 0.0,
+            block_crc_rate: 1.0,
+            block_crc_read_rate: 0.20,
+            degraded_winner_rate: 0.0,
+            partial: false,
+            failed_volume_index: None,
+            scan_recommendation: PreflightRecommendation::Ok,
+            attach_stream_crc_events: 0,
+        };
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::NotExportReady);
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r.contains("block_crc_read_rate=") && r.contains("0.15")),
+            "reasons={:?}",
+            risk.reasons
+        );
+    }
+
+    /// 0077 P1-2: final attach stream CRC Info events elevate export_risk only.
+    #[test]
+    fn export_risk_attach_stream_crc_events_recommend_reexport() {
+        let inputs = ExportRiskInputs {
+            attach_fail_rate: 0.0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            degraded_winner_rate: 0.0,
+            partial: false,
+            failed_volume_index: None,
+            scan_recommendation: PreflightRecommendation::Ok,
+            attach_stream_crc_events: 1,
+        };
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::ReExportRecommended);
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r == "attach_stream_crc_events=1>0"),
+            "reasons={:?}",
+            risk.reasons
+        );
+        // Warning-only: must not look like attach_fail_rate elevation.
+        assert!(
+            !risk
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("attach_fail_rate=")),
+            "reasons={:?}",
+            risk.reasons
+        );
+    }
+
+    #[test]
+    fn no_competing_risk_enum_vocabulary() {
+        // DoD-6: export_risk reuses PreflightRecommendation; no low|elevated|high.
+        let level = PreflightRecommendation::Ok;
+        assert_eq!(level.as_str(), "ok");
+        assert_eq!(
+            PreflightRecommendation::ReExportRecommended.as_str(),
+            "re_export_recommended"
+        );
+        assert_eq!(
+            PreflightRecommendation::NotExportReady.as_str(),
+            "not_export_ready"
+        );
     }
 
     #[test]

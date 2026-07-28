@@ -727,11 +727,17 @@ pub fn probe_attach_stream(
     }
 
     if level == ProbeLevel::Open {
-        // Drop without reading.
+        // Open may already have set crc_suspect (attach PC / first block).
+        let crc = reader.crc_suspect();
         drop(reader);
         return ProbeOutcome {
             ok: true,
-            reason: None,
+            // Warning-only: stream still openable; message gets CRC_SUSPECT (0077 DoD-19).
+            reason: if crc {
+                Some(IntegrityReason::CrcSuspect)
+            } else {
+                None
+            },
             bytes_read: 0,
             timed_out: false,
             level,
@@ -791,6 +797,8 @@ pub fn probe_attach_stream(
             }
             Err(e) => {
                 // Read path: prefer READ_FAILED; sniff CRC/truncation from io message.
+                // (Successful completion path below applies CRC_SUSPECT when the reader
+                // flagged block CRC without hard IO failure — warning-only D7.)
                 let reason = reason_from_io_read_error(&e);
                 return ProbeOutcome {
                     ok: false,
@@ -803,9 +811,15 @@ pub fn probe_attach_stream(
         }
     }
 
+    // 0077: consume AttachmentDataReader::crc_suspect after stream read.
+    let crc = reader.crc_suspect();
     ProbeOutcome {
         ok: true,
-        reason: None,
+        reason: if crc {
+            Some(IntegrityReason::CrcSuspect)
+        } else {
+            None
+        },
         bytes_read,
         timed_out: false,
         level,
@@ -1099,6 +1113,9 @@ pub fn probe_scan_items(
             if let Some(r) = outcome.reason {
                 if r.is_attach_probe_fail() {
                     let _ = apply_probe_fail(item, r, mode);
+                } else if r == IntegrityReason::CrcSuspect {
+                    // Warning-only attach-stream CRC → message CRC_SUSPECT (DoD-19 / D7).
+                    push_degraded(item, IntegrityReason::CrcSuspect);
                 }
             }
         }
@@ -1263,10 +1280,13 @@ pub fn probe_keep_set_groups(
                     break;
                 }
                 // any_fail only for real attach probe fails — not truncation / peer-cap info.
+                // CRC_SUSPECT degrades fidelity but is not an attach-fail rate signal.
                 if let Some(r) = outcome.reason {
                     if r.is_attach_probe_fail() {
                         any_fail = true;
                         let _ = apply_probe_fail(&mut items[idx], r, mode);
+                    } else if r == IntegrityReason::CrcSuspect {
+                        push_degraded(&mut items[idx], IntegrityReason::CrcSuspect);
                     }
                 } else if !outcome.ok {
                     any_fail = true;

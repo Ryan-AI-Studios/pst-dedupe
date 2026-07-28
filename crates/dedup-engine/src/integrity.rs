@@ -105,6 +105,9 @@ pub enum IntegrityReason {
     UnsupportedCrypt,
     FolderWalkFailed,
     CrcMismatch,
+    /// Message kept after page/block CRC or BID mismatch during its read (0077).
+    /// Distinct from [`Self::CrcMismatch`] (skipped-for-CRC).
+    CrcSuspect,
     BlockNotFound,
     NodeNotFound,
     DataTruncated,
@@ -147,6 +150,7 @@ impl IntegrityReason {
             Self::UnsupportedCrypt => "UNSUPPORTED_CRYPT",
             Self::FolderWalkFailed => "FOLDER_WALK_FAILED",
             Self::CrcMismatch => "CRC_MISMATCH",
+            Self::CrcSuspect => "CRC_SUSPECT",
             Self::BlockNotFound => "BLOCK_NOT_FOUND",
             Self::NodeNotFound => "NODE_NOT_FOUND",
             Self::DataTruncated => "DATA_TRUNCATED",
@@ -211,6 +215,7 @@ impl<'de> Deserialize<'de> for IntegrityReason {
             "UNSUPPORTED_CRYPT" => Ok(Self::UnsupportedCrypt),
             "FOLDER_WALK_FAILED" => Ok(Self::FolderWalkFailed),
             "CRC_MISMATCH" => Ok(Self::CrcMismatch),
+            "CRC_SUSPECT" => Ok(Self::CrcSuspect),
             "BLOCK_NOT_FOUND" => Ok(Self::BlockNotFound),
             "NODE_NOT_FOUND" => Ok(Self::NodeNotFound),
             "DATA_TRUNCATED" => Ok(Self::DataTruncated),
@@ -475,6 +480,24 @@ impl PreflightRecommendation {
             Self::Ok => "ok",
             Self::ReExportRecommended => "re_export_recommended",
             Self::NotExportReady => "not_export_ready",
+        }
+    }
+
+    /// Severity rank for monotone composition (higher is worse).
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Ok => 0,
+            Self::ReExportRecommended => 1,
+            Self::NotExportReady => 2,
+        }
+    }
+
+    /// Max of two recommendations (export risk never lowers scan risk).
+    pub fn max(self, other: Self) -> Self {
+        if self.rank() >= other.rank() {
+            self
+        } else {
+            other
         }
     }
 }
@@ -989,6 +1012,7 @@ mod tests {
     #[test]
     fn reason_codes_are_stable_strings() {
         assert_eq!(IntegrityReason::CrcMismatch.as_str(), "CRC_MISMATCH");
+        assert_eq!(IntegrityReason::CrcSuspect.as_str(), "CRC_SUSPECT");
         assert_eq!(IntegrityReason::BodyTruncated.as_str(), "BODY_TRUNCATED");
         assert_eq!(
             IntegrityReason::BodyUnavailable.as_str(),

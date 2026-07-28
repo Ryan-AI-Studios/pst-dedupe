@@ -56,12 +56,15 @@
 
 pub mod crypto;
 pub mod header;
+pub mod integrity_telemetry;
 pub mod ltp;
 pub mod messaging;
 pub mod ndb;
 
 mod error;
 pub use error::{PstError, Result};
+pub use integrity_telemetry::{IntegritySnapshot, MessageScope};
+// `with_crc_scope` / `message_scope_enter` live on the `integrity_telemetry` module.
 pub use messaging::attachment::{AttachmentDataReader, AttachmentInfo, AttachmentMeta};
 pub use messaging::folder::FolderInfo;
 pub use messaging::message::{

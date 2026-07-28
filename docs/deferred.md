@@ -764,7 +764,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0073-eml | P2 | unique-eml attach skip ledger parity | unique-pst has full ledger; unique-eml soft-skips with counts/tracing only | residual |
 | D-0073-gui | P3 | GUI wizard attach-ledger mode / summary UI | CLI flags default full; GUI uses defaults via UniquePstCliArgs | residual polish |
 | D-0073-basename | P3 | `--ledger-path-mode=full\|basename` handoff redaction | source_id remains join key; must apply to both export_messages + export_attachments if shipped | residual / 0081 |
-| D-0073-vec-events | P3 | Writer still accumulates `attachment_fidelity_events` Vec | CLI uses AttachEventSink for CSV; large fail storms grow Vec until 0079 channel-only path | residual polish |
+| D-0073-vec-events | P3 | Writer still accumulates `attachment_fidelity_events` Vec | **Closed in 0077**: first-N cap 1000 + `attachment_fidelity_events_truncated` / `_total`. 0079 may still redesign to channel-only (no Vec). | **closed / 0077** |
 
 ## From track 0074-DeepAttachPreflightFidelity
 
@@ -773,7 +773,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0074-gui | P3 | GUI wizard checkbox / summary for deep-attach preflight | CLI `--deep-attach-preflight` works; wizard defaults off via UniquePstCliArgs | residual polish |
 | D-0074-mat-lru | P3 | Bound materializer/export sticky PST handle map to `max_open_psts` LRU | Probe path has LRU (default 32); materializer/export still HashMap | residual / 0079 |
 | D-0074-cache-share | P3 | Cross-process or durable scan→unique probe result cache | In-process level/mtime/size cache only for phase 1b→materialize | residual polish |
-| D-0074-crc-fixture | P3 | Synthetic corrupt-attach PST E2E for CRC/open/read | Unit mapping + mock readers cover codes; no committed corrupt PST fixture | residual polish |
+| D-0074-crc-fixture | P3 | Synthetic corrupt-attach PST E2E for CRC/open/read | **Closed in 0077**: generate-at-test-time via `pst-writer` + byte flips (`crc_integrity_0077` tests); never real-file derived. | **closed / 0077** |
 | D-0074-timeout-join | P3 | Join/cancel timed-out per-attach probe worker | `recv_timeout` returns ATTACH_PROBE_TIMEOUT; worker may finish in background; budget charged | residual polish |
 | D-0074-e2e-fixture | P3 | Full production-path §3.11 fixture matrix (scan JSON/CSV + unique-pst) | Locked unit matrix green; multi-file fixture E2E residual | residual polish |
 
@@ -801,6 +801,17 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0075-storeids | — | Store-EntryID special-folder detection (`PidTagIpmWastebasketEntryId`, …) | Keyword ladder + `--folder-rank` sufficient for P0 | residual |
 | D-0075-locale | — | Localized folder-name packs (zh/de/fr/ja) | Segment globs are workaround only | residual |
 | (soft-close) | — | D-0066-fine-fidelity | **Closed in 0075** via opt-in `--fidelity-rank graded` | **closed / 0075** |
+
+## From track 0077-CrcNoiseAndExportRisk
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0077-tracing-layer | P3 | Optional `tracing` rate-limit Layer for third-party consumers of `pst-reader` | Primary mechanism is data-path counters (Desk has no subscriber); Layer is residual | residual |
+| D-0077-parallel-attrib | P3 | Per-source CRC attribution under parallel materialize (0079) | Sequential snapshot/delta is exact today; comment at scan snapshot names this residual. Sequential path correct; residual is parallel materialize only | residual / **0079** |
+| D-0077-desk-subscriber | P3 | Install a tracing subscriber in release Desk builds | Counters already reach `summary.json` without a subscriber; log lines remain CLI-centric | residual polish |
+| D-0077-gui | P3 | Desk per-source CRC counter tables / distinct-bad-BID drill-down | Banner + export_risk stats row shipped; richer UI residual | residual polish |
+| D-0077-repair-diff | P3 | `pst-dedup compare-counts` wrapper for ScanPST before/after | Runbook documents two-command `scan --json` workflow; product decision | residual / **0081** |
+| D-0077-systematic-poly | P3 | True poly fingerprint/allowlist vs dual-rate heuristic | **Policy (final-gate P1):** dual-rate (`page≥0.50` AND `block≥0.50`) **clears** false-positive `CRC_SUSPECT` from candidates/integrity (reclassify, not keep-taint + auto-allow Tier-2). Raw `page_crc_*`/`block_crc_*` + `poly_class_crc` telemetry retained for reporting/`export_risk`. High block alone keeps taint **and** blocks Tier-2. Residual: true poly fingerprint/allowlist; streaming unique may under-merge until keep-set rebuild | residual / product |
 
 ## From track 0062-ReleaseHardeningRc
 

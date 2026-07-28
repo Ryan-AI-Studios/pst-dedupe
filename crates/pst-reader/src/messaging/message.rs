@@ -59,6 +59,13 @@ pub struct MessageProperties {
     pub body_sha256: Option<[u8; 32]>,
     /// Full normalized body char length when digest was requested.
     pub body_char_len: Option<u64>,
+    /// True when any **block** CRC or BID mismatch was counted while reading
+    /// this message (0077 `CRC_SUSPECT`). Page CRC is deliberately excluded
+    /// (poly-class fixtures; see `integrity_telemetry::tls_block_mismatch_total`).
+    /// Bytes were still returned (warning-only). Attachment meta/stream reads
+    /// performed under a separate message scope may also set this when ORed by
+    /// the caller (scan/extract).
+    pub crc_suspect: bool,
 }
 
 /// Full extract-oriented message properties (Desk / `extract-pst`).
@@ -111,6 +118,9 @@ pub struct ExtractedMessage {
     pub end_date: Option<i64>,
     /// PidTagLocation string when present (standard tag; named-prop residual).
     pub location: Option<String>,
+    /// True when any **block** CRC or BID mismatch was counted while reading
+    /// this message (0077 `CRC_SUSPECT`). Page CRC is excluded (poly-class).
+    pub crc_suspect: bool,
 }
 
 /// Whether a body property error is truncation/CRC corruption (BODY_TRUNCATED path).
@@ -197,6 +207,8 @@ impl PstFile {
         message_nid: NodeId,
         opts: MessageReadOpts,
     ) -> Result<MessageProperties> {
+        // 0077: message-scope CRC taint via thread-local mismatch delta.
+        let scope = crate::integrity_telemetry::message_scope_enter();
         let crypt = self.header.crypt_method;
         let prop_ctx = pc::load_pc(&mut self.reader, &self.nbt, &self.bbt, message_nid, crypt)?;
 
@@ -256,6 +268,7 @@ impl PstFile {
         let display_to = prop_ctx.get_string(nid::PID_TAG_DISPLAY_TO)?;
         let message_size = prop_ctx.get_i32(nid::PID_TAG_MESSAGE_SIZE)?;
         let has_attachments = prop_ctx.get_bool(nid::PID_TAG_HAS_ATTACHMENTS)?;
+        let crc_suspect = scope.exit();
 
         Ok(MessageProperties {
             nid: message_nid,
@@ -274,11 +287,13 @@ impl PstFile {
             body_unavailable,
             body_sha256,
             body_char_len,
+            crc_suspect,
         })
     }
 
     /// Extract full message properties for Desk / `extract-pst` (no body truncate).
     pub fn read_message_extract(&mut self, message_nid: NodeId) -> Result<ExtractedMessage> {
+        let scope = crate::integrity_telemetry::message_scope_enter();
         let crypt = self.header.crypt_method;
         let prop_ctx = pc::load_pc(&mut self.reader, &self.nbt, &self.bbt, message_nid, crypt)?;
 
@@ -320,6 +335,7 @@ impl PstFile {
         let end_date = prop_ctx.get_time(nid::PID_TAG_END_DATE)?;
         // Best-effort standard location tag; PidLidLocation is residual when absent.
         let location = prop_ctx.get_string(nid::PID_TAG_LOCATION)?;
+        let crc_suspect = scope.exit();
 
         Ok(ExtractedMessage {
             nid: message_nid,
@@ -344,6 +360,7 @@ impl PstFile {
             start_date,
             end_date,
             location,
+            crc_suspect,
         })
     }
 }

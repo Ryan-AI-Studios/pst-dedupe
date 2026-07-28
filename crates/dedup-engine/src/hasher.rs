@@ -405,6 +405,8 @@ pub fn normalize_subject(subject: &str) -> String {
 pub enum Tier2IneligibleReason {
     UnreadableBody,
     Degenerate,
+    /// Kept-despite-CRC taint (0077); Tier-2 blocked unless `--allow-crc-suspect-tier2`.
+    CrcSuspect,
 }
 
 /// Assess Tier-2 eligibility from integrity + weak-field presence.

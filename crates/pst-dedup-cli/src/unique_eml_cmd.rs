@@ -65,6 +65,9 @@ pub struct UniqueEmlCliArgs {
     pub identity_ignore_inline_attachments: bool,
     pub allow_cross_mid_tier2: bool,
     pub allow_degenerate_tier2: bool,
+    pub allow_crc_suspect_tier2: bool,
+    pub crc_log_limit: u64,
+    pub crc_log_interval_secs: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,6 +138,11 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
     // Prepare out dir: create if missing; refuse non-empty unless --overwrite.
     prepare_out_dir(&out, args.overwrite)?;
 
+    pst_reader::integrity_telemetry::set_log_limit(
+        args.crc_log_limit,
+        std::time::Duration::from_secs(args.crc_log_interval_secs),
+    );
+
     let grouping = grouping_context_from_cli(
         args.no_tier2,
         &args.strong_content_hash,
@@ -142,6 +150,7 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
         &args.tier1_verify,
         args.allow_cross_mid_tier2,
         args.allow_degenerate_tier2,
+        args.allow_crc_suspect_tier2,
         args.tier1_backfill,
         args.identity_ignore_inline_attachments,
     )
@@ -169,6 +178,8 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
     };
 
     // Phase 1: integrity-aware scan collecting candidates.
+    // Dual-rate poly sources reclassify (clear) false-positive CRC_SUSPECT in
+    // run_scan so keep-set sees clean identity without Tier-2 auto-allow.
     let outcome = run_scan(&paths, &opts)?;
 
     let provenance = KeepSetProvenance {

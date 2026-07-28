@@ -75,14 +75,10 @@ fn validate_block_trailer(raw: &[u8], data_len: usize) -> Result<BlockId> {
     let stored_crc = LittleEndian::read_u32(&trailer[0..4]);
     let bid = LittleEndian::read_u64(&trailer[4..12]);
 
+    // 0077: count + rate-limit via integrity_telemetry (still non-fatal).
     let computed = crc32fast::hash(&raw[..data_len]);
     if computed != stored_crc {
-        tracing::warn!(
-            "Block CRC mismatch at bid=0x{:016X}: computed={:08X}, stored={:08X}",
-            bid,
-            computed,
-            stored_crc
-        );
+        crate::integrity_telemetry::note_block_crc(bid, computed, stored_crc);
     }
 
     Ok(BlockId(bid))
@@ -96,13 +92,13 @@ fn read_raw_block<R: Read + Seek>(reader: &mut R, bbt: &BbtIndex, bid: BlockId) 
     let mut raw = vec![0u8; raw_size];
     reader.read_exact(&mut raw)?;
 
+    crate::integrity_telemetry::note_block_read();
     let trailer_bid = validate_block_trailer(&raw, bbt_entry.cb as usize)?;
     if trailer_bid != bid {
-        tracing::warn!(
-            "Block BID mismatch at ib=0x{:X}: BBT says 0x{:016X}, trailer says 0x{:016X}",
+        crate::integrity_telemetry::note_block_bid_mismatch(
             bbt_entry.bref.ib,
             bid.0,
-            trailer_bid.0
+            trailer_bid.0,
         );
     }
 

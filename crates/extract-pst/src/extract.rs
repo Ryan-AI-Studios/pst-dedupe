@@ -1310,6 +1310,7 @@ mod tests {
             start_date: None,
             end_date: None,
             location: None,
+            crc_suspect: false,
         };
         let (irt, refs, topic, ci) = thread_header_fields(&msg);
         assert_eq!(irt.as_deref(), Some("parent@ex.com"));
@@ -1351,6 +1352,7 @@ mod tests {
             start_date: None,
             end_date: None,
             location: None,
+            crc_suspect: false,
         };
         let (a, b, c, d) = thread_header_fields(&msg);
         assert!(a.is_none() && b.is_none() && c.is_none() && d.is_none());
@@ -1381,6 +1383,7 @@ mod tests {
             start_date: None,
             end_date: None,
             location: Some("Room 1".into()),
+            crc_suspect: false,
         };
         let (text, truncated) = synthesize_calendar_review_text(
             &msg,
@@ -1425,6 +1428,7 @@ mod tests {
             start_date: None,
             end_date: None,
             location: None,
+            crc_suspect: false,
         };
         let (text, truncated) = synthesize_calendar_review_text(&msg, &[], None, None);
         assert!(truncated, "large body must set truncated");
@@ -1563,6 +1567,7 @@ mod tests {
             start_date: None,
             end_date: None,
             location: None,
+            crc_suspect: false,
         };
         refresh_thread_headers(&matter, &parent.id, &extracted).expect("refresh");
 

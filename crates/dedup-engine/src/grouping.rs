@@ -212,6 +212,8 @@ pub struct GroupingContext {
     pub tier1_verify: Tier1Verify,
     /// Restore pre-0076 degenerate binding (`--allow-degenerate-tier2`).
     pub allow_degenerate_tier2: bool,
+    /// Restore pre-0077 Tier-2 eligibility for `CRC_SUSPECT` items.
+    pub allow_crc_suspect_tier2: bool,
     /// Restore pre-0076 cross-MID Tier-2 merges (`--allow-cross-mid-tier2`).
     pub allow_cross_mid_tier2: bool,
     /// Opt-in merge of groups that share a MID discovered late (default off).
@@ -231,6 +233,7 @@ impl Default for GroupingContext {
             identity: IdentityLevel::Off,
             tier1_verify: Tier1Verify::Off,
             allow_degenerate_tier2: false,
+            allow_crc_suspect_tier2: false,
             allow_cross_mid_tier2: false,
             tier1_backfill: false,
             ignore_inline_attachments: false,
@@ -248,6 +251,21 @@ impl GroupingContext {
             allow_cross_mid_tier2: true,
             ..Self::default()
         }
+    }
+
+    /// Whether `CRC_SUSPECT` items may bind via Tier-2 (global operator flag).
+    pub fn allow_crc_suspect_tier2(&self) -> bool {
+        self.allow_crc_suspect_tier2
+    }
+
+    /// Tier-2 CRC gate for one item (operator `--allow-crc-suspect-tier2` only).
+    ///
+    /// Dual-rate poly-class sources **clear** false-positive `CRC_SUSPECT` at
+    /// end-of-source (scan reclassify) rather than auto-allowing Tier-2 while
+    /// keeping taint. Sparse real corruption keeps taint and blocks Tier-2.
+    /// `path_key` is retained for call-site stability; poly no longer keys off it.
+    pub fn allow_crc_suspect_tier2_for(&self, _path_key: &str) -> bool {
+        self.allow_crc_suspect_tier2
     }
 
     /// Convenience: Tier-2 on/off with otherwise-default 0076 guards.
@@ -276,6 +294,8 @@ pub struct GroupingStats {
     pub tier2_blocked_unreadable_body: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub tier2_blocked_degenerate: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub tier2_blocked_crc_suspect: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub cross_mid_blocked: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
@@ -315,6 +335,7 @@ impl GroupingStats {
     pub fn merge_from(&mut self, other: &GroupingStats) {
         self.tier2_blocked_unreadable_body += other.tier2_blocked_unreadable_body;
         self.tier2_blocked_degenerate += other.tier2_blocked_degenerate;
+        self.tier2_blocked_crc_suspect += other.tier2_blocked_crc_suspect;
         self.cross_mid_blocked += other.cross_mid_blocked;
         self.cross_mid_blocked_groups += other.cross_mid_blocked_groups;
         self.cross_mid_blocked_max_group = self
@@ -337,6 +358,7 @@ impl GroupingStats {
     pub fn any_guard_fired(&self) -> bool {
         self.tier2_blocked_unreadable_body > 0
             || self.tier2_blocked_degenerate > 0
+            || self.tier2_blocked_crc_suspect > 0
             || self.cross_mid_blocked > 0
             || self.tier2_preview_bytes_over_budget > 0
             || self.tier1_divergent_body > 0

@@ -49,8 +49,14 @@ pub struct AttachmentInfo {
 /// Small heap-resident payloads are served from an in-memory buffer. Larger
 /// payloads stream leaf data blocks via an independent file handle so the
 /// owning [`PstFile`] can continue other reads after this reader is dropped.
+///
+/// **0077:** block CRC/BID hits during open or subsequent leaf reads set
+/// [`Self::crc_suspect`]. Page CRC never contributes (poly-class exclusion).
 pub struct AttachmentDataReader {
     inner: AttachReaderInner,
+    /// True when a block CRC or BID mismatch was counted while opening or
+    /// streaming this attachment (0077 `CRC_SUSPECT` surface).
+    crc_suspect: bool,
 }
 
 enum AttachReaderInner {
@@ -95,8 +101,13 @@ impl Read for AttachmentDataReader {
                     }
                     let bid = leaf_bids[*leaf_index];
                     *leaf_index += 1;
+                    // 0077: attribute leaf-block CRC/BID to this attach stream.
+                    let before = crate::integrity_telemetry::tls_block_mismatch_total();
                     *chunk = block::read_leaf_block_data(reader, bbt, bid, *crypt)
                         .map_err(|e| io::Error::other(e.to_string()))?;
+                    if crate::integrity_telemetry::tls_block_mismatch_total() > before {
+                        self.crc_suspect = true;
+                    }
                     *chunk_pos = 0;
                     if chunk.is_empty() {
                         // Skip empty leaf; recurse once via tail call pattern.
@@ -117,6 +128,11 @@ impl AttachmentDataReader {
     pub fn is_buffered(&self) -> bool {
         matches!(self.inner, AttachReaderInner::Memory { .. })
     }
+
+    /// True when block CRC/BID mismatch was counted during open or stream read.
+    pub fn crc_suspect(&self) -> bool {
+        self.crc_suspect
+    }
 }
 
 impl PstFile {
@@ -124,6 +140,10 @@ impl PstFile {
     ///
     /// Returns an empty vec if the message has no attachments or the
     /// attachment table can't be read.
+    ///
+    /// Block CRC/BID during this walk is counted under a message scope so
+    /// callers can OR taint via [`crate::integrity_telemetry::with_crc_scope`]
+    /// (nested scopes remain correct).
     pub fn read_attachment_metadata(&mut self, message_nid: NodeId) -> Result<Vec<AttachmentMeta>> {
         let infos = self.list_attachments(message_nid)?;
         Ok(infos
@@ -137,7 +157,21 @@ impl PstFile {
     }
 
     /// List attachments with NID + filename + size + optional mime/method + inline flags.
+    ///
+    /// **0077:** block reads for attach PCs run under a message CRC scope so an
+    /// outer [`crate::integrity_telemetry::with_crc_scope`] (or nested enter/exit)
+    /// attributes attach-meta CRC to the message. Page CRC is excluded from taint.
     pub fn list_attachments(&mut self, message_nid: NodeId) -> Result<Vec<AttachmentInfo>> {
+        // Scope so standalone callers (and outer scan scopes) attribute attach-PC
+        // block CRC to this message path.
+        let scope = crate::integrity_telemetry::message_scope_enter();
+        let result = self.list_attachments_inner(message_nid);
+        // Drop scope: delta is visible to any outer scope via TLS totals.
+        let _ = scope.exit();
+        result
+    }
+
+    fn list_attachments_inner(&mut self, message_nid: NodeId) -> Result<Vec<AttachmentInfo>> {
         let nbt_entry = match self.nbt.get(message_nid) {
             Some(e) => e.clone(),
             None => return Ok(Vec::new()),
@@ -209,7 +243,29 @@ impl PstFile {
     ///
     /// Returns [`PstError::PropertyNotFound`] when no binary payload is available
     /// (e.g. reference attachments, embedded messages without binary).
+    ///
+    /// **0077:** open runs under a message CRC scope; [`AttachmentDataReader::crc_suspect`]
+    /// is set when block CRC/BID fires during open or later leaf stream reads.
     pub fn open_attachment_data(
+        &mut self,
+        message_nid: NodeId,
+        attach_nid: NodeId,
+    ) -> Result<AttachmentDataReader> {
+        let scope = crate::integrity_telemetry::message_scope_enter();
+        let result = self.open_attachment_data_inner(message_nid, attach_nid);
+        let open_suspect = scope.exit();
+        match result {
+            Ok(mut reader) => {
+                if open_suspect {
+                    reader.crc_suspect = true;
+                }
+                Ok(reader)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn open_attachment_data_inner(
         &mut self,
         message_nid: NodeId,
         attach_nid: NodeId,
@@ -239,6 +295,7 @@ impl PstFile {
                     data: bytes,
                     pos: 0,
                 },
+                crc_suspect: false,
             });
         }
 
@@ -263,6 +320,7 @@ impl PstFile {
                         if data.len() <= 16 * 1024 * 1024 {
                             return Ok(AttachmentDataReader {
                                 inner: AttachReaderInner::Memory { data, pos: 0 },
+                                crc_suspect: false,
                             });
                         }
                         // Fall through to leaf stream via subnode bid_data.
@@ -324,6 +382,7 @@ impl PstFile {
                     data: Vec::new(),
                     pos: 0,
                 },
+                crc_suspect: false,
             });
         }
 
@@ -334,6 +393,7 @@ impl PstFile {
             if data.len() <= 1024 * 1024 {
                 return Ok(AttachmentDataReader {
                     inner: AttachReaderInner::Memory { data, pos: 0 },
+                    crc_suspect: false,
                 });
             }
         }
@@ -358,6 +418,7 @@ impl PstFile {
                 chunk: Vec::new(),
                 chunk_pos: 0,
             },
+            crc_suspect: false,
         })
     }
 }

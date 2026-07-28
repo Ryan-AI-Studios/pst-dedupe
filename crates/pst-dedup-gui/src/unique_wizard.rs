@@ -397,6 +397,9 @@ impl UniqueWizardForm {
             identity_ignore_inline_attachments: false,
             allow_cross_mid_tier2: false,
             allow_degenerate_tier2: false,
+            allow_crc_suspect_tier2: false,
+            crc_log_limit: 10,
+            crc_log_interval_secs: 30,
         })
     }
 

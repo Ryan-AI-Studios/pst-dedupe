@@ -133,6 +133,15 @@ enum Commands {
         /// Allow Tier-2 bind on unreadable/degenerate preimages (restores pre-0076; default off) (0076).
         #[arg(long = "allow-degenerate-tier2")]
         allow_degenerate_tier2: bool,
+        /// Allow Tier-2 bind for CRC_SUSPECT items (restores pre-0077; default off) (0077).
+        #[arg(long = "allow-crc-suspect-tier2")]
+        allow_crc_suspect_tier2: bool,
+        /// First-N detail CRC warn lines per category before aggregation (0=totals only; huge=firehose) (0077).
+        #[arg(long = "crc-log-limit", default_value_t = 10)]
+        crc_log_limit: u64,
+        /// Seconds between aggregate CRC summary lines after first-N (0077).
+        #[arg(long = "crc-log-interval-secs", default_value_t = 30)]
+        crc_log_interval_secs: u64,
     },
 
     /// Inspect PST structure: encryption, folder tree, message counts.
@@ -184,6 +193,15 @@ enum Commands {
         allow_cross_mid_tier2: bool,
         #[arg(long = "allow-degenerate-tier2")]
         allow_degenerate_tier2: bool,
+        /// Allow Tier-2 bind for CRC_SUSPECT items (restores pre-0077; default off) (0077).
+        #[arg(long = "allow-crc-suspect-tier2")]
+        allow_crc_suspect_tier2: bool,
+        /// First-N detail CRC warn lines per category before aggregation (0077).
+        #[arg(long = "crc-log-limit", default_value_t = 10)]
+        crc_log_limit: u64,
+        /// Seconds between aggregate CRC summary lines after first-N (0077).
+        #[arg(long = "crc-log-interval-secs", default_value_t = 30)]
+        crc_log_interval_secs: u64,
     },
 
     /// Build export keep-set (`keep_set_v1`): policy resolve, decision CSV, winners JSON.
@@ -269,6 +287,15 @@ enum Commands {
         allow_cross_mid_tier2: bool,
         #[arg(long = "allow-degenerate-tier2")]
         allow_degenerate_tier2: bool,
+        /// Allow Tier-2 bind for CRC_SUSPECT items (restores pre-0077; default off) (0077).
+        #[arg(long = "allow-crc-suspect-tier2")]
+        allow_crc_suspect_tier2: bool,
+        /// First-N detail CRC warn lines per category before aggregation (0077).
+        #[arg(long = "crc-log-limit", default_value_t = 10)]
+        crc_log_limit: u64,
+        /// Seconds between aggregate CRC summary lines after first-N (0077).
+        #[arg(long = "crc-log-interval-secs", default_value_t = 30)]
+        crc_log_interval_secs: u64,
     },
 
     /// Export unique messages as a volume-batched EML pack (`eml_pack_v1`).
@@ -366,6 +393,15 @@ enum Commands {
         allow_cross_mid_tier2: bool,
         #[arg(long = "allow-degenerate-tier2")]
         allow_degenerate_tier2: bool,
+        /// Allow Tier-2 bind for CRC_SUSPECT items (restores pre-0077; default off) (0077).
+        #[arg(long = "allow-crc-suspect-tier2")]
+        allow_crc_suspect_tier2: bool,
+        /// First-N detail CRC warn lines per category before aggregation (0077).
+        #[arg(long = "crc-log-limit", default_value_t = 10)]
+        crc_log_limit: u64,
+        /// Seconds between aggregate CRC summary lines after first-N (0077).
+        #[arg(long = "crc-log-interval-secs", default_value_t = 30)]
+        crc_log_interval_secs: u64,
     },
 
     /// Export unique messages as streaming PST volume(s) + report pack (`unique_export_report_v1`).
@@ -914,6 +950,9 @@ fn run(cli: Cli) -> Result<()> {
             identity_ignore_inline_attachments,
             allow_cross_mid_tier2,
             allow_degenerate_tier2,
+            allow_crc_suspect_tier2,
+            crc_log_limit,
+            crc_log_interval_secs,
         } => cmd_scan(ScanCliArgs {
             paths,
             no_tier2,
@@ -945,6 +984,9 @@ fn run(cli: Cli) -> Result<()> {
             identity_ignore_inline_attachments,
             allow_cross_mid_tier2,
             allow_degenerate_tier2,
+            allow_crc_suspect_tier2,
+            crc_log_limit,
+            crc_log_interval_secs,
         }),
         Commands::Inspect { path, top, json } => cmd_inspect(path, top, json),
         Commands::Dups {
@@ -966,6 +1008,9 @@ fn run(cli: Cli) -> Result<()> {
             identity_ignore_inline_attachments,
             allow_cross_mid_tier2,
             allow_degenerate_tier2,
+            allow_crc_suspect_tier2,
+            crc_log_limit,
+            crc_log_interval_secs,
         } => cmd_dups(ScanCliArgs {
             paths,
             no_tier2,
@@ -991,6 +1036,9 @@ fn run(cli: Cli) -> Result<()> {
             identity_ignore_inline_attachments,
             allow_cross_mid_tier2,
             allow_degenerate_tier2,
+            allow_crc_suspect_tier2,
+            crc_log_limit,
+            crc_log_interval_secs,
             deep_attach_max_attaches: 50_000,
             deep_attach_max_probe_bytes: 268_435_456,
             deep_attach_per_attach_max_bytes: 1_048_576,
@@ -1031,6 +1079,9 @@ fn run(cli: Cli) -> Result<()> {
             identity_ignore_inline_attachments,
             allow_cross_mid_tier2,
             allow_degenerate_tier2,
+            allow_crc_suspect_tier2,
+            crc_log_limit,
+            crc_log_interval_secs,
         } => {
             let mut all = paths;
             all.extend(input);
@@ -1070,6 +1121,9 @@ fn run(cli: Cli) -> Result<()> {
                 identity_ignore_inline_attachments,
                 allow_cross_mid_tier2,
                 allow_degenerate_tier2,
+                allow_crc_suspect_tier2,
+                crc_log_limit,
+                crc_log_interval_secs,
             })
         }
         Commands::UniqueEml {
@@ -1108,6 +1162,9 @@ fn run(cli: Cli) -> Result<()> {
             identity_ignore_inline_attachments,
             allow_cross_mid_tier2,
             allow_degenerate_tier2,
+            allow_crc_suspect_tier2,
+            crc_log_limit,
+            crc_log_interval_secs,
         } => {
             let mut all = paths;
             all.extend(input);
@@ -1151,6 +1208,9 @@ fn run(cli: Cli) -> Result<()> {
                 identity_ignore_inline_attachments,
                 allow_cross_mid_tier2,
                 allow_degenerate_tier2,
+                allow_crc_suspect_tier2,
+                crc_log_limit,
+                crc_log_interval_secs,
             })
         }
         Commands::UniquePst(clap_args) => {
@@ -1404,6 +1464,16 @@ struct ScanCliArgs {
     identity_ignore_inline_attachments: bool,
     allow_cross_mid_tier2: bool,
     allow_degenerate_tier2: bool,
+    allow_crc_suspect_tier2: bool,
+    crc_log_limit: u64,
+    crc_log_interval_secs: u64,
+}
+
+fn apply_crc_log_limits(first_n: u64, interval_secs: u64) {
+    pst_reader::integrity_telemetry::set_log_limit(
+        first_n,
+        std::time::Duration::from_secs(interval_secs),
+    );
 }
 
 fn cmd_scan(args: ScanCliArgs) -> Result<()> {
@@ -1416,6 +1486,7 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
                 .into(),
         ));
     }
+    apply_crc_log_limits(args.crc_log_limit, args.crc_log_interval_secs);
     let grouping = pst_dedup_cli::grouping_cli::grouping_context_from_cli(
         args.no_tier2,
         &args.strong_content_hash,
@@ -1423,6 +1494,7 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
         &args.tier1_verify,
         args.allow_cross_mid_tier2,
         args.allow_degenerate_tier2,
+        args.allow_crc_suspect_tier2,
         false, // tier1_backfill rejected above for streaming scan
         args.identity_ignore_inline_attachments,
     )
@@ -1562,6 +1634,7 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
                 .into(),
         ));
     }
+    apply_crc_log_limits(args.crc_log_limit, args.crc_log_interval_secs);
     let grouping = pst_dedup_cli::grouping_cli::grouping_context_from_cli(
         args.no_tier2,
         &args.strong_content_hash,
@@ -1569,6 +1642,7 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
         &args.tier1_verify,
         args.allow_cross_mid_tier2,
         args.allow_degenerate_tier2,
+        args.allow_crc_suspect_tier2,
         false, // tier1_backfill rejected above for streaming dups
         args.identity_ignore_inline_attachments,
     )
@@ -1680,6 +1754,17 @@ fn print_summary_text(s: &ScanSummary) {
     if !s.degraded_by_reason.is_empty() {
         println!("  degraded_by_reason: {:?}", s.degraded_by_reason);
     }
+    // 0077: numbers only — no subjects/paths on new lines.
+    println!(
+        "  crc: page={} block={} bid={} distinct_bids={} exact={} suspect_msgs={} read_rate={:.4}",
+        s.page_crc_mismatches,
+        s.block_crc_mismatches,
+        s.block_bid_mismatches,
+        s.distinct_bad_bids,
+        s.distinct_bad_bids_exact,
+        s.crc_suspect_messages,
+        s.block_crc_read_rate
+    );
     println!("  orphaned:      {}", s.orphaned_messages);
     println!(
         "  files:         opened={} partial={} failed={}",
