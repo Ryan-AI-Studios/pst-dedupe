@@ -25,6 +25,10 @@ pub struct MessageProperties {
     pub subject: Option<String>,
     /// PidTagClientSubmitTime as raw FILETIME (100ns since 1601-01-01).
     pub submit_time: Option<i64>,
+    /// PidTagMessageDeliveryTime as raw FILETIME (received). Never invent.
+    pub delivery_time: Option<i64>,
+    /// PidTagDisplayBcc (absent when unknown — do not fabricate).
+    pub display_bcc: Option<String>,
     /// PidTagSenderEmailAddress (or PidTagSenderSmtpAddress fallback).
     pub sender_email: Option<String>,
     /// First 4096 **chars** of PidTagBody (for Tier 2 content hash).
@@ -174,6 +178,16 @@ impl PstFile {
         let message_id = prop_ctx.get_string(nid::PID_TAG_INTERNET_MESSAGE_ID)?;
         let subject = prop_ctx.get_string(nid::PID_TAG_SUBJECT)?;
         let submit_time = prop_ctx.get_time(nid::PID_TAG_CLIENT_SUBMIT_TIME)?;
+        // Optional 0075 props: best-effort only. Decode errors become None so a
+        // corrupt delivery-time / BCC heap does not fail the whole message
+        // (zero-silent-change for keep-set ranking inputs).
+        // `unwrap_or_default` on Result<Option<_>> → None on Err (not a panic path).
+        let delivery_time: Option<i64> = prop_ctx
+            .get_time(nid::PID_TAG_MESSAGE_DELIVERY_TIME)
+            .unwrap_or_default();
+        let display_bcc: Option<String> = prop_ctx
+            .get_string(nid::PID_TAG_DISPLAY_BCC)
+            .unwrap_or_default();
 
         let sender_email = prop_ctx
             .get_string(nid::PID_TAG_SENDER_EMAIL_ADDRESS)?
@@ -205,6 +219,8 @@ impl PstFile {
             message_id,
             subject,
             submit_time,
+            delivery_time,
+            display_bcc,
             sender_email,
             body_preview,
             display_to,
@@ -337,6 +353,36 @@ mod tests {
         let body_unavailable = false;
         assert!(!body_incomplete);
         assert!(!body_unavailable);
+    }
+
+    /// Soft-opt contract for optional 0075 props in `read_message_properties`:
+    /// `Result<Option<T>>::unwrap_or_default()` → value on Ok, `None` on Err (never panics).
+    #[test]
+    fn optional_0075_props_fail_soft_on_decode_error() {
+        fn soft_opt_i64(r: Result<Option<i64>>) -> Option<i64> {
+            r.unwrap_or_default()
+        }
+        fn soft_opt_str(r: Result<Option<String>>) -> Option<String> {
+            r.unwrap_or_default()
+        }
+        // Ok paths preserve value / None.
+        assert_eq!(soft_opt_i64(Ok(Some(42))), Some(42));
+        assert_eq!(soft_opt_i64(Ok(None)), None);
+        // Decode errors (same variants body soft-path uses) become None — do not fail message.
+        assert_eq!(
+            soft_opt_i64(Err(PstError::DataTruncated {
+                needed: 8,
+                available: 0
+            })),
+            None
+        );
+        assert_eq!(
+            soft_opt_str(Err(PstError::CrcMismatch {
+                computed: 1,
+                stored: 2
+            })),
+            None
+        );
     }
 
     #[test]

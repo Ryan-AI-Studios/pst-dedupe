@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use dedup_engine::integrity::{attach_reason_from_pst_error, IntegrityReason, ScanMode};
 use dedup_engine::keepset::{
-    group_candidates, rank_key, FamilyPolicy, KeepPolicy, RecoverableScanItem,
+    group_candidates, rank_key, FamilyPolicy, KeepPolicy, RankContext, RecoverableScanItem,
 };
 use pst_reader::{NodeId, PstFile};
 
@@ -1176,10 +1176,10 @@ pub fn probe_keep_set_groups(
         }
 
         // Rank members within group (lower key = better).
+        let rank_ctx = RankContext::from_policy_and_prefer(policy, prefer_path);
         let mut ranked: Vec<usize> = group.clone();
-        ranked.sort_by(|&a, &b| {
-            rank_key(&items[a], policy, prefer_path).cmp(&rank_key(&items[b], policy, prefer_path))
-        });
+        ranked
+            .sort_by(|&a, &b| rank_key(&items[a], &rank_ctx).cmp(&rank_key(&items[b], &rank_ctx)));
 
         let mut probed_peers = 0u64;
         let mut found_clean = false;
@@ -1489,6 +1489,9 @@ mod tests {
             size: 100,
             integrity: RecoverableIntegrity::clean(),
             scan_order: 0,
+            submit_time: None,
+            delivery_time: None,
+            has_bcc: false,
         }];
         let (summary, _cache) = probe_keep_set_groups(
             &mut items,
@@ -1526,6 +1529,9 @@ mod tests {
                 size: 100,
                 integrity: RecoverableIntegrity::clean(),
                 scan_order: i as u64,
+                submit_time: None,
+                delivery_time: None,
+                has_bcc: false,
             })
             .collect();
         let budgets = ProbeBudgets {
@@ -1584,6 +1590,9 @@ mod tests {
                 size: 100,
                 integrity: RecoverableIntegrity::clean(),
                 scan_order: i,
+                submit_time: None,
+                delivery_time: None,
+                has_bcc: false,
             })
             .collect();
         let budgets = ProbeBudgets {
@@ -1630,6 +1639,9 @@ mod tests {
                 size: 100,
                 integrity: RecoverableIntegrity::clean(),
                 scan_order: i,
+                submit_time: None,
+                delivery_time: None,
+                has_bcc: false,
             })
             .collect();
         let budgets = ProbeBudgets {
@@ -1673,6 +1685,9 @@ mod tests {
                 size: 10,
                 integrity: RecoverableIntegrity::clean(),
                 scan_order: i as u64,
+                submit_time: None,
+                delivery_time: None,
+                has_bcc: false,
             })
             .collect();
         let budgets = ProbeBudgets {
@@ -1716,6 +1731,9 @@ mod tests {
                 size: 10,
                 integrity: RecoverableIntegrity::clean(),
                 scan_order: i as u64,
+                submit_time: None,
+                delivery_time: None,
+                has_bcc: false,
             })
             .collect();
         let (summary, _cache) = probe_scan_items(
@@ -1776,6 +1794,9 @@ mod tests {
             size: 10,
             integrity: RecoverableIntegrity::clean(),
             scan_order: 0,
+            submit_time: None,
+            delivery_time: None,
+            has_bcc: false,
         }];
         let (summary, _cache) = probe_scan_items(
             &mut items,
@@ -1815,6 +1836,9 @@ mod tests {
                 false,
             ),
             scan_order: 0,
+            submit_time: None,
+            delivery_time: None,
+            has_bcc: false,
         };
         let clean = RecoverableScanItem {
             locus: MessageLocus {
@@ -1829,10 +1853,14 @@ mod tests {
             size: 100,
             integrity: RecoverableIntegrity::clean(),
             scan_order: 1,
+            submit_time: None,
+            delivery_time: None,
+            has_bcc: false,
         };
         assert!(fidelity_rank(&clean) < fidelity_rank(&dirty));
-        let key_clean = rank_key(&clean, KeepPolicy::FirstSeen, &[]);
-        let key_dirty = rank_key(&dirty, KeepPolicy::FirstSeen, &[]);
+        let ctx = RankContext::new(KeepPolicy::FirstSeen);
+        let key_clean = rank_key(&clean, &ctx);
+        let key_dirty = rank_key(&dirty, &ctx);
         assert!(key_clean < key_dirty);
     }
 
@@ -1961,6 +1989,9 @@ mod tests {
                 size: 10,
                 integrity: RecoverableIntegrity::clean(),
                 scan_order: 0,
+                submit_time: None,
+                delivery_time: None,
+                has_bcc: false,
             },
             RecoverableScanItem {
                 locus: MessageLocus {
@@ -1975,6 +2006,9 @@ mod tests {
                 size: 20,
                 integrity: RecoverableIntegrity::clean(),
                 scan_order: 1,
+                submit_time: None,
+                delivery_time: None,
+                has_bcc: false,
             },
         ];
         let (_summary, _cache) = probe_scan_items(

@@ -22,8 +22,11 @@ use crate::error::{CliError, Result};
 /// Schema id for the unique-export summary JSON.
 pub const UNIQUE_EXPORT_REPORT_SCHEMA: &str = "unique_export_report_v1";
 
-/// Fixed header for mandatory `export_messages.csv` (prefix locked; 0073 appends).
-pub const EXPORT_MESSAGES_CSV_HEADER: &str = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count";
+/// Fixed header for mandatory `export_messages.csv` (prefix locked; 0073/0075 append).
+pub const EXPORT_MESSAGES_CSV_HEADER: &str = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources";
+
+/// Pre-0075 export_messages header prefix (10 columns).
+pub const EXPORT_MESSAGES_CSV_HEADER_V1: &str = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count";
 
 /// Fixed header for `volumes.csv`.
 pub const VOLUMES_CSV_HEADER: &str =
@@ -96,6 +99,10 @@ pub struct ExportMessageRow {
     pub export_message_index: u64,
     /// Fail-severity attach count for this message (0073).
     pub attachments_failed_count: u64,
+    /// Distinct other sources that held a suppressed copy (0075; basename).
+    pub duplicate_source_count: u64,
+    /// `|`-delimited basenames, capped at 8 (0075).
+    pub duplicate_sources: String,
     /// In-memory only: used for sample verification when MID is empty.
     /// Not written to `export_messages.csv` (header locked).
     #[serde(skip)]
@@ -715,7 +722,7 @@ pub fn write_export_messages_csv(path: &Path, rows: &[ExportMessageRow]) -> Resu
     for r in rows {
         writeln!(
             w,
-            "{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{}",
             csv_escape_cell(&r.source_path),
             csv_escape_cell(&r.folder_path),
             r.nid,
@@ -726,6 +733,8 @@ pub fn write_export_messages_csv(path: &Path, rows: &[ExportMessageRow]) -> Resu
             r.volume_index,
             r.export_message_index,
             r.attachments_failed_count,
+            r.duplicate_source_count,
+            csv_escape_cell(&r.duplicate_sources),
         )
         .map_err(|e| CliError::CsvWrite {
             path: path.to_path_buf(),
@@ -862,12 +871,56 @@ mod tests {
     #[test]
     fn export_messages_header_order_locked_with_attach_fail_column() {
         assert_eq!(
-            EXPORT_MESSAGES_CSV_HEADER,
+            EXPORT_MESSAGES_CSV_HEADER_V1,
             "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count"
         );
-        // Prefix of pre-0073 header remains stable.
-        assert!(EXPORT_MESSAGES_CSV_HEADER
-            .starts_with("source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index"));
+        // Append-only: full header starts with pre-0075 prefix.
+        assert!(
+            EXPORT_MESSAGES_CSV_HEADER.starts_with(EXPORT_MESSAGES_CSV_HEADER_V1),
+            "export_messages header must keep pre-0075 columns as prefix"
+        );
+        assert!(EXPORT_MESSAGES_CSV_HEADER.contains("duplicate_source_count"));
+        assert!(EXPORT_MESSAGES_CSV_HEADER.contains("duplicate_sources"));
+    }
+
+    #[test]
+    fn export_messages_all_custodians_fields_match_keep_entry_fill() {
+        // Same fill pattern as unique_pst_cmd: KeepEntry aggregate → ExportMessageRow.
+        let dup_count = 3u64;
+        let joined = ["cust0.pst", "cust1.pst", "cust2.pst"].join("|");
+        let row = ExportMessageRow {
+            source_path: r"C:\mail\winner.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 0x2001,
+            message_id_norm: "<m@x>".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: "ab".repeat(32),
+            volume_path: r"C:\out\unique.pst".into(),
+            volume_index: 1,
+            export_message_index: 0,
+            attachments_failed_count: 0,
+            duplicate_source_count: dup_count,
+            duplicate_sources: joined.clone(),
+            subject: String::new(),
+        };
+        assert_eq!(row.duplicate_source_count, dup_count);
+        assert_eq!(row.duplicate_sources, joined);
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("export_messages.csv");
+        write_export_messages_csv(&path, &[row]).expect("write");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let mut lines = text.lines();
+        let header = lines.next().expect("header");
+        assert_eq!(header, EXPORT_MESSAGES_CSV_HEADER);
+        let data = lines.next().expect("data");
+        assert!(
+            data.ends_with(&format!(",{dup_count},{joined}"))
+                || data.contains(&format!(",{dup_count},\"{joined}\""))
+                || data.contains(&format!(",{dup_count},{joined}")),
+            "export row must carry All-Custodians columns; got {data}"
+        );
+        assert!(data.contains("cust0.pst") && data.contains("cust2.pst"));
     }
 
     #[test]

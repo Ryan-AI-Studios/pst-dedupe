@@ -15,15 +15,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::keep_set_cmd::rank_context_from_cli;
 use clap::Args;
 use dedup_engine::integrity::{
     compute_preflight, IntegrityReason, IntegrityThresholds, PreflightInputs, ScanMode,
     SCAN_INTEGRITY_SCHEMA,
 };
 use dedup_engine::keepset::{
-    finalize_with_materialize, resolve_groups, sort_input_paths, write_keep_set_json,
-    DecisionCsvWriter, FamilyPolicy, KeepEntry, KeepPolicy, KeepSet, KeepSetProvenance,
-    KeepSetStats, MessageMaterializer, KEEP_SET_SCHEMA,
+    finalize_with_materialize, recoverable_items_hint, resolve_groups_with_ctx, sort_input_paths,
+    write_keep_set_json, DecisionCsvWriter, FamilyPolicy, KeepEntry, KeepPolicy, KeepSet,
+    KeepSetProvenance, KeepSetStats, MessageMaterializer, KEEP_SET_SCHEMA,
 };
 use pst_reader::PstFile;
 use pst_writer::{
@@ -69,7 +70,8 @@ pub struct UniquePstClapArgs {
     /// Report pack directory (default: sibling of `--out` stem + `_report`).
     #[arg(long)]
     pub report_dir: Option<PathBuf>,
-    /// Winner policy after fidelity: first_seen (default), keep_largest, prefer_path.
+    /// Winner policy after fidelity: first_seen (default), keep_largest, prefer_path, earliest_date.
+    /// Note: first_seen = sorted input-path order, not chronological send time.
     #[arg(long, default_value = "first_seen", value_parser = parse_keep_policy_arg)]
     pub policy: KeepPolicy,
     /// Parent+attach family: keep_attachments_with_parent (default) or parents_only.
@@ -78,6 +80,24 @@ pub struct UniquePstClapArgs {
     /// Path/folder substring preferred under prefer_path (repeatable).
     #[arg(long = "prefer-path-contains")]
     pub prefer_path_contains: Vec<String>,
+    /// Prefer BCC-bearing copy (sender-copy completeness; opt-in).
+    #[arg(long = "prefer-bcc-copy")]
+    pub prefer_bcc_copy: bool,
+    /// Enable built-in folder-class ladder.
+    #[arg(long = "prefer-folder-class")]
+    pub prefer_folder_class: bool,
+    /// Custom folder-rank pattern (repeatable, worst-last; replaces built-in).
+    #[arg(long = "folder-rank", action = clap::ArgAction::Append)]
+    pub folder_rank: Vec<String>,
+    /// Ordered source preference (repeatable, best-first).
+    #[arg(long = "source-rank", action = clap::ArgAction::Append)]
+    pub source_rank: Vec<String>,
+    /// Swap source_rank and folder_class rungs.
+    #[arg(long = "rank-folder-class-first")]
+    pub rank_folder_class_first: bool,
+    /// Fidelity ranking: binary (default) or graded.
+    #[arg(long = "fidelity-rank", default_value = "binary", value_parser = parse_fidelity_rank_arg)]
+    pub fidelity_rank: String,
     /// Streaming decision CSV (default: `{report-dir}/decisions.csv`).
     #[arg(long)]
     pub decision_csv: Option<PathBuf>,
@@ -158,6 +178,12 @@ pub struct UniquePstCliArgs {
     pub policy: KeepPolicy,
     pub family_policy: FamilyPolicy,
     pub prefer_path_contains: Vec<String>,
+    pub prefer_bcc_copy: bool,
+    pub prefer_folder_class: bool,
+    pub folder_rank: Vec<String>,
+    pub source_rank: Vec<String>,
+    pub rank_folder_class_first: bool,
+    pub fidelity_rank: String,
     pub decision_csv: Option<PathBuf>,
     pub keep_set_json: Option<PathBuf>,
     pub folder_layout: FolderLayoutArg,
@@ -288,6 +314,12 @@ impl UniquePstClapArgs {
             policy: self.policy,
             family_policy: self.family_policy,
             prefer_path_contains: self.prefer_path_contains,
+            prefer_bcc_copy: self.prefer_bcc_copy,
+            prefer_folder_class: self.prefer_folder_class,
+            folder_rank: self.folder_rank,
+            source_rank: self.source_rank,
+            rank_folder_class_first: self.rank_folder_class_first,
+            fidelity_rank: self.fidelity_rank,
             decision_csv: self.decision_csv,
             keep_set_json: self.keep_set_json,
             folder_layout: self.folder_layout,
@@ -348,8 +380,19 @@ fn parse_folder_layout_arg(s: &str) -> std::result::Result<FolderLayoutArg, Stri
 
 fn parse_keep_policy_arg(s: &str) -> std::result::Result<KeepPolicy, String> {
     KeepPolicy::parse(s).ok_or_else(|| {
-        format!("invalid policy '{s}': expected first_seen, keep_largest, or prefer_path")
+        format!(
+            "invalid policy '{s}': expected first_seen, keep_largest, prefer_path, or earliest_date"
+        )
     })
+}
+
+fn parse_fidelity_rank_arg(s: &str) -> std::result::Result<String, String> {
+    match s {
+        "binary" | "graded" => Ok(s.to_string()),
+        _ => Err(format!(
+            "invalid fidelity-rank '{s}': expected binary or graded"
+        )),
+    }
 }
 
 fn parse_family_policy_arg(s: &str) -> std::result::Result<FamilyPolicy, String> {
@@ -1264,11 +1307,20 @@ pub fn run_unique_pst_with_options(
     // ── Phase 2 / 2b: resolve + promote ─────────────────────────────────────
     emit_log(stderr, &on_log, "stage=resolve");
     emit_stage_progress(&on_progress, "resolve", 0, 0, 0, 0, None);
-    let mut resolved = resolve_groups(
-        outcome.candidates,
+    let rank_ctx = rank_context_from_cli(
         args.policy,
-        args.family_policy,
         &args.prefer_path_contains,
+        args.prefer_bcc_copy,
+        args.prefer_folder_class,
+        &args.folder_rank,
+        &args.source_rank,
+        args.rank_folder_class_first,
+        &args.fidelity_rank,
+    );
+    let mut resolved = resolve_groups_with_ctx(
+        outcome.candidates,
+        args.family_policy,
+        &rank_ctx,
         !args.no_tier2,
         Some(provenance),
     );
@@ -1325,6 +1377,9 @@ pub fn run_unique_pst_with_options(
     }
 
     let keep_set = resolved.to_keep_set();
+    if let Some(hint) = recoverable_items_hint(keep_set.stats.winners_from_recoverable_items) {
+        emit_log(stderr, &on_log, &format!("note: {hint}"));
+    }
     let winners_total = Some(keep_set.stats.unique);
 
     // Prepare winners for write (keep_set order).
@@ -1592,6 +1647,23 @@ pub fn run_unique_pst_with_options(
                         .as_ref()
                         .map(|l| l.fail_count_for(&p.source_path, p.nid))
                         .unwrap_or(0);
+                    // Match keep-set winner for 0075 All-Custodians aggregate.
+                    let (dup_count, dup_sources) = keep_set
+                        .winners
+                        .iter()
+                        .find(|w| {
+                            w.locus.nid == p.nid
+                                && (w.locus.source_path == p.source_path
+                                    || w.locus.source_pst == p.source_path
+                                    || Path::new(&w.locus.source_path)
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        == Path::new(&p.source_path)
+                                            .file_name()
+                                            .and_then(|n| n.to_str()))
+                        })
+                        .map(|w| (w.duplicate_source_count, w.duplicate_sources.join("|")))
+                        .unwrap_or((0, String::new()));
                     export_rows.push(ExportMessageRow {
                         source_path: p.source_path.clone(),
                         folder_path: p.folder_path.clone(),
@@ -1603,6 +1675,8 @@ pub fn run_unique_pst_with_options(
                         volume_index,
                         export_message_index,
                         attachments_failed_count: attach_fails,
+                        duplicate_source_count: dup_count,
+                        duplicate_sources: dup_sources,
                         subject: p.subject.clone(),
                     });
                 }
@@ -2041,6 +2115,19 @@ pub fn run_unique_pst_with_options(
         println!(
             "  partial:          {}  ok: {ok}  cancelled: {cancelled}",
             summary.export.partial
+        );
+        // 0075 honesty counters (always printed, including when 0).
+        println!(
+            "  winners_from_recoverable_items: {}",
+            keep_set.stats.winners_from_recoverable_items
+        );
+        println!(
+            "  winners_without_bcc_peer_had_bcc: {}",
+            keep_set.stats.winners_without_bcc_peer_had_bcc
+        );
+        println!(
+            "  groups_date_source_mixed: {}",
+            keep_set.stats.groups_date_source_mixed
         );
         for v in &volumes {
             println!(
@@ -2670,6 +2757,12 @@ mod tests {
             policy: KeepPolicy::FirstSeen,
             family_policy: FamilyPolicy::KeepAttachmentsWithParent,
             prefer_path_contains: vec![],
+            prefer_bcc_copy: false,
+            prefer_folder_class: false,
+            folder_rank: vec![],
+            source_rank: vec![],
+            rank_folder_class_first: false,
+            fidelity_rank: "binary".into(),
             decision_csv: None,
             keep_set_json: None,
             folder_layout: FolderLayoutArg::Preserve,
@@ -2751,6 +2844,12 @@ mod tests {
             policy: KeepPolicy::FirstSeen,
             family_policy: FamilyPolicy::KeepAttachmentsWithParent,
             prefer_path_contains: vec![],
+            prefer_bcc_copy: false,
+            prefer_folder_class: false,
+            folder_rank: vec![],
+            source_rank: vec![],
+            rank_folder_class_first: false,
+            fidelity_rank: "binary".into(),
             decision_csv: None,
             keep_set_json: None,
             folder_layout: FolderLayoutArg::Preserve,
@@ -2838,6 +2937,12 @@ mod tests {
             policy: KeepPolicy::FirstSeen,
             family_policy: FamilyPolicy::KeepAttachmentsWithParent,
             prefer_path_contains: vec![],
+            prefer_bcc_copy: false,
+            prefer_folder_class: false,
+            folder_rank: vec![],
+            source_rank: vec![],
+            rank_folder_class_first: false,
+            fidelity_rank: "binary".into(),
             decision_csv: None,
             keep_set_json: None,
             folder_layout: FolderLayoutArg::Preserve,
@@ -2916,6 +3021,12 @@ mod tests {
             policy: KeepPolicy::FirstSeen,
             family_policy: FamilyPolicy::KeepAttachmentsWithParent,
             prefer_path_contains: vec![],
+            prefer_bcc_copy: false,
+            prefer_folder_class: false,
+            folder_rank: vec![],
+            source_rank: vec![],
+            rank_folder_class_first: false,
+            fidelity_rank: "binary".into(),
             decision_csv: None,
             keep_set_json: None,
             folder_layout: FolderLayoutArg::Preserve,

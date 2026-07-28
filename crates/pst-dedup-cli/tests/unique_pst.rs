@@ -171,9 +171,14 @@ fn unique_pst_report_pack_and_export_messages_rows() {
     let csv = fs::read_to_string(report.join("export_messages.csv")).expect("export_messages");
     let mut lines = csv.lines();
     let header = lines.next().expect("header");
-    assert_eq!(
-        header,
-        "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count"
+    let v1_prefix = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count";
+    assert!(
+        header.starts_with(v1_prefix),
+        "export_messages header must keep pre-0075 prefix; got {header}"
+    );
+    assert!(
+        header.contains("duplicate_source_count") && header.contains("duplicate_sources"),
+        "0075 All-Custodians columns required; got {header}"
     );
     let rows: Vec<_> = lines.filter(|l| !l.is_empty()).collect();
     assert_eq!(rows.len() as u64, written);
@@ -971,4 +976,173 @@ fn unique_pst_integrity_force_skip_flushes_report() {
             );
         }
     }
+}
+
+/// Production three-surface All-Custodians parity (DoD-6): decision CSV unique rows,
+/// keepset.json winners, and export_messages.csv must carry identical
+/// duplicate_source_count / duplicate_sources for multi-source groups.
+#[test]
+fn unique_pst_all_custodians_three_surface_parity() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    // 9 copies → each winner has 8 other sources (cap edge); +1 more for truncate.
+    let mut inputs: Vec<PathBuf> = Vec::new();
+    let mut hashes_before = Vec::new();
+    for i in 0..10u32 {
+        let p = dir.path().join(format!("cust{i}.pst"));
+        fs::copy(&sample, &p).expect("copy fixture");
+        hashes_before.push(sha256_file(&p));
+        inputs.push(p);
+    }
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+    let mut args: Vec<String> = vec!["unique-pst".into()];
+    for p in &inputs {
+        args.push(p.to_str().expect("utf8").to_string());
+    }
+    args.extend([
+        "--out".into(),
+        out.to_str().expect("utf8").to_string(),
+        "--report-dir".into(),
+        report.to_str().expect("utf8").to_string(),
+        "--json".into(),
+        "--no-attachments".into(),
+    ]);
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let result = Command::new(bin()).args(&arg_refs).output().expect("run");
+    assert!(
+        result.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+
+    // Source immutability
+    for (i, p) in inputs.iter().enumerate() {
+        assert_eq!(
+            hashes_before[i],
+            sha256_file(p),
+            "source cust{i}.pst mutated"
+        );
+    }
+
+    let ks: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report.join("keepset.json")).expect("ks"))
+            .expect("ks json");
+    let winners = ks["winners"].as_array().expect("winners");
+    assert!(!winners.is_empty());
+
+    // Parse decision CSV unique rows: need Role + duplicate_source_count + duplicate_sources.
+    // Header-driven indices.
+    let dec_text = fs::read_to_string(report.join("decisions.csv")).expect("dec");
+    let mut dec_lines = dec_text.lines();
+    let dec_header: Vec<&str> = dec_lines.next().expect("h").split(',').collect();
+    let role_i = dec_header.iter().position(|h| *h == "Role").expect("Role");
+    let nid_i = dec_header.iter().position(|h| *h == "NID").expect("NID");
+    let pst_i = dec_header
+        .iter()
+        .position(|h| *h == "SourcePst")
+        .expect("SourcePst");
+    let dsc_i = dec_header
+        .iter()
+        .position(|h| *h == "duplicate_source_count")
+        .expect("dsc");
+    let dss_i = dec_header
+        .iter()
+        .position(|h| *h == "duplicate_sources")
+        .expect("dss");
+    let mut dec_unique: std::collections::HashMap<(String, u64), (u64, String)> =
+        std::collections::HashMap::new();
+    for line in dec_lines {
+        let cols: Vec<&str> = line.split(',').collect();
+        if cols.len() <= dsc_i || cols.get(role_i) != Some(&"unique") {
+            continue;
+        }
+        let nid: u64 = cols[nid_i].parse().unwrap_or(0);
+        let pst = cols[pst_i].to_string();
+        let count: u64 = cols[dsc_i].parse().unwrap_or(0);
+        let sources = cols[dss_i].trim_matches('"').to_string();
+        dec_unique.insert((pst, nid), (count, sources));
+    }
+
+    // export_messages.csv
+    let exp_text = fs::read_to_string(report.join("export_messages.csv")).expect("exp");
+    let mut exp_lines = exp_text.lines();
+    let exp_header: Vec<&str> = exp_lines.next().expect("eh").split(',').collect();
+    let e_nid = exp_header.iter().position(|h| *h == "nid").expect("nid");
+    let e_src = exp_header
+        .iter()
+        .position(|h| *h == "source_path")
+        .expect("source_path");
+    let e_dsc = exp_header
+        .iter()
+        .position(|h| *h == "duplicate_source_count")
+        .expect("edsc");
+    let e_dss = exp_header
+        .iter()
+        .position(|h| *h == "duplicate_sources")
+        .expect("edss");
+    let mut exp_map: std::collections::HashMap<u64, (u64, String, String)> =
+        std::collections::HashMap::new();
+    for line in exp_lines {
+        let cols: Vec<&str> = line.split(',').collect();
+        if cols.len() <= e_dss {
+            continue;
+        }
+        let nid: u64 = cols[e_nid].parse().unwrap_or(0);
+        let count: u64 = cols[e_dsc].parse().unwrap_or(0);
+        let sources = cols[e_dss].trim_matches('"').to_string();
+        let sp = cols[e_src].to_string();
+        exp_map.insert(nid, (count, sources, sp));
+    }
+
+    // Every JSON winner must match decision unique row and export_messages row.
+    let mut saw_cap = false;
+    for w in winners {
+        let nid = w["locus"]["nid"].as_u64().expect("nid");
+        let pst = w["locus"]["source_pst"].as_str().unwrap_or("").to_string();
+        let j_count = w["duplicate_source_count"].as_u64().unwrap_or(0);
+        let j_sources: Vec<String> = w["duplicate_sources"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let j_joined = j_sources.join("|");
+        let j_trunc = w["duplicate_sources_truncated"].as_bool().unwrap_or(false);
+
+        // 10 peer sources (other cust*.pst) for each message identity → count 9, cap 8.
+        assert_eq!(
+            j_count, 9,
+            "winner {pst}/{nid} should have 9 duplicate sources (10 files total)"
+        );
+        assert_eq!(j_sources.len(), 8, "cap 8 basenames");
+        assert!(j_trunc, "truncated must be true when count > cap");
+        saw_cap = true;
+        for s in &j_sources {
+            assert!(!s.contains('\\') && !s.contains('/'), "basename only: {s}");
+            assert!(s.starts_with("cust") && s.ends_with(".pst"), "name={s}");
+        }
+
+        let (d_count, d_sources) = dec_unique
+            .get(&(pst.clone(), nid))
+            .cloned()
+            .unwrap_or_else(|| panic!("decision missing unique {pst}/{nid}"));
+        assert_eq!(d_count, j_count, "decision vs JSON count {pst}/{nid}");
+        assert_eq!(d_sources, j_joined, "decision vs JSON sources {pst}/{nid}");
+
+        let (e_count, e_sources, _) = exp_map
+            .get(&nid)
+            .cloned()
+            .unwrap_or_else(|| panic!("export missing nid {nid}"));
+        assert_eq!(e_count, j_count, "export vs JSON count nid={nid}");
+        assert_eq!(e_sources, j_joined, "export vs JSON sources nid={nid}");
+    }
+    assert!(saw_cap, "expected at least one capped aggregate");
 }

@@ -28,17 +28,22 @@ pub const KEEP_SET_SCHEMA: &str = "keep_set_v1";
 
 // ─── Policy / role enums ────────────────────────────────────────────────────
 
-/// Winner selection policy (applied after fidelity preference).
+/// Winner selection policy (applied after fidelity / evidence rungs).
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum KeepPolicy {
     /// Earliest by deterministic scan order among remaining candidates.
+    ///
+    /// **Note:** `first_seen` means sorted input-path order (then scan index),
+    /// not chronological send time. Use [`Self::EarliestDate`] for dates.
     #[default]
     FirstSeen,
     /// Prefer largest `message_size` (0/missing last).
     KeepLargest,
     /// Prefer sources whose path/folder matches prefer-path patterns.
     PreferPath,
+    /// Prefer earliest message date (submit primary, delivery fallback; missing last).
+    EarliestDate,
 }
 
 impl KeepPolicy {
@@ -47,6 +52,7 @@ impl KeepPolicy {
             Self::FirstSeen => "first_seen",
             Self::KeepLargest => "keep_largest",
             Self::PreferPath => "prefer_path",
+            Self::EarliestDate => "earliest_date",
         }
     }
 
@@ -55,6 +61,7 @@ impl KeepPolicy {
             "first_seen" => Some(Self::FirstSeen),
             "keep_largest" => Some(Self::KeepLargest),
             "prefer_path" => Some(Self::PreferPath),
+            "earliest_date" => Some(Self::EarliestDate),
             _ => None,
         }
     }
@@ -63,6 +70,231 @@ impl KeepPolicy {
 impl fmt::Display for KeepPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+// ─── Rank context / ladder types (0075) ─────────────────────────────────────
+
+/// Fidelity ranking mode. Default [`Self::Binary`] preserves pre-0075 winners.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FidelityMode {
+    /// Clean = 0; any degraded/orphaned = 1 (pre-0075).
+    #[default]
+    Binary,
+    /// Multi-tier: clean < soft attach meta < attach payload < body < structural.
+    Graded,
+}
+
+impl FidelityMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Binary => "binary",
+            Self::Graded => "graded",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "binary" => Some(Self::Binary),
+            "graded" => Some(Self::Graded),
+            _ => None,
+        }
+    }
+}
+
+/// Folder-class ranking mode.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum FolderRankMode {
+    /// Ladder off — every item rank 0, class label `primary`.
+    #[default]
+    Off,
+    /// Built-in ladder (§3.4).
+    Builtin,
+    /// Custom ordered patterns (worst-last); unmatched = 0 (best). Replaces builtin.
+    Custom(Vec<String>),
+}
+
+/// Closed vocabulary for folder class labels (decision CSV / keep JSON).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FolderClass {
+    SentItems,
+    Primary,
+    Archive,
+    JunkEmail,
+    Drafts,
+    Outbox,
+    DeletedItems,
+    RecoverableDeletions,
+    RecoverableHolds,
+    RecoverablePurges,
+    RecoverableVersions,
+    RecoverableOps,
+    RecoverableOther,
+}
+
+impl FolderClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SentItems => "sent_items",
+            Self::Primary => "primary",
+            Self::Archive => "archive",
+            Self::JunkEmail => "junk_email",
+            Self::Drafts => "drafts",
+            Self::Outbox => "outbox",
+            Self::DeletedItems => "deleted_items",
+            Self::RecoverableDeletions => "recoverable_deletions",
+            Self::RecoverableHolds => "recoverable_holds",
+            Self::RecoverablePurges => "recoverable_purges",
+            Self::RecoverableVersions => "recoverable_versions",
+            Self::RecoverableOps => "recoverable_ops",
+            Self::RecoverableOther => "recoverable_other",
+        }
+    }
+
+    /// Built-in ladder rank (lower is better).
+    pub fn builtin_rank(self) -> u32 {
+        match self {
+            Self::SentItems => 0,
+            Self::Primary => 1,
+            Self::Archive => 2,
+            Self::JunkEmail => 3,
+            Self::Drafts => 4,
+            Self::Outbox => 5,
+            Self::DeletedItems => 6,
+            Self::RecoverableDeletions => 7,
+            Self::RecoverableHolds => 8,
+            Self::RecoverablePurges => 9,
+            Self::RecoverableVersions => 10,
+            Self::RecoverableOps => 11,
+            Self::RecoverableOther => 12,
+        }
+    }
+
+    /// True when this class is under Recoverable Items.
+    pub fn is_recoverable_items(self) -> bool {
+        matches!(
+            self,
+            Self::RecoverableDeletions
+                | Self::RecoverableHolds
+                | Self::RecoverablePurges
+                | Self::RecoverableVersions
+                | Self::RecoverableOps
+                | Self::RecoverableOther
+        )
+    }
+}
+
+impl fmt::Display for FolderClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Where the winner date came from (or none).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DateSource {
+    Submit,
+    Delivery,
+    #[default]
+    None,
+}
+
+impl DateSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Submit => "submit",
+            Self::Delivery => "delivery",
+            Self::None => "none",
+        }
+    }
+}
+
+/// Cap on distinct duplicate source names recorded on a winner.
+pub const DUPLICATE_SOURCES_CAP: usize = 8;
+
+/// Ranking context for keep-set winner selection (0075).
+///
+/// All new rungs default inert (0) so pre-0075 winners are preserved.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RankContext {
+    pub policy: KeepPolicy,
+    pub prefer_path: Vec<String>,
+    /// `--prefer-bcc-copy`: BCC-bearing copy ranks better.
+    pub prefer_bcc_copy: bool,
+    /// `--source-rank` patterns, best-first; unmatched = len (worst).
+    pub source_rank_patterns: Vec<String>,
+    pub folder_rank: FolderRankMode,
+    /// Swap source_rank and folder_class_rank rungs.
+    pub folder_class_first: bool,
+    pub fidelity_mode: FidelityMode,
+}
+
+impl RankContext {
+    pub fn new(policy: KeepPolicy) -> Self {
+        Self {
+            policy,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_prefer_path(mut self, prefer_path: impl IntoIterator<Item = String>) -> Self {
+        self.prefer_path = prefer_path.into_iter().collect();
+        self
+    }
+
+    pub fn from_policy_and_prefer(policy: KeepPolicy, prefer_path: &[String]) -> Self {
+        Self {
+            policy,
+            prefer_path: prefer_path.to_vec(),
+            ..Self::default()
+        }
+    }
+}
+
+/// Comparable ranking key. Lower is better at every component.
+///
+/// Order: fidelity → bcc → (source|folder per flag) → policy → path_key → nid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RankKey {
+    pub fidelity: u8,
+    pub bcc: u8,
+    pub source: u32,
+    pub folder: u32,
+    /// 0 = has usable policy value; 1 = missing (earliest_date undated).
+    pub policy_missing: u8,
+    pub policy_value: i64,
+    pub path_key: String,
+    pub nid: u64,
+    /// When true, folder is compared before source (does not participate in Eq of values).
+    pub folder_class_first: bool,
+}
+
+impl PartialOrd for RankKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let mid = if self.folder_class_first {
+            self.folder
+                .cmp(&other.folder)
+                .then(self.source.cmp(&other.source))
+        } else {
+            self.source
+                .cmp(&other.source)
+                .then(self.folder.cmp(&other.folder))
+        };
+        self.fidelity
+            .cmp(&other.fidelity)
+            .then(self.bcc.cmp(&other.bcc))
+            .then(mid)
+            .then(self.policy_missing.cmp(&other.policy_missing))
+            .then(self.policy_value.cmp(&other.policy_value))
+            .then(self.path_key.cmp(&other.path_key))
+            .then(self.nid.cmp(&other.nid))
     }
 }
 
@@ -157,6 +389,15 @@ pub struct RecoverableScanItem {
     pub integrity: RecoverableIntegrity,
     /// Stable scan order index (after path sort).
     pub scan_order: u64,
+    /// PidTagClientSubmitTime FILETIME (sent). Never invent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit_time: Option<i64>,
+    /// PidTagMessageDeliveryTime FILETIME (received). Never invent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_time: Option<i64>,
+    /// True iff PidTagDisplayBcc present and non-empty after trim.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_bcc: bool,
 }
 
 impl RecoverableScanItem {
@@ -190,6 +431,25 @@ pub struct KeepEntry {
     /// True when this unique won only after prior winner(s) failed materialize.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub promoted_from_failure: bool,
+    /// Folder class label (0075; `primary` when ladder off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_class: Option<String>,
+    /// Rung that decided this winner (0075).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+    /// Distinct other sources that held a suppressed copy (basename).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub duplicate_source_count: u64,
+    /// Sorted distinct source basenames, capped at [`DUPLICATE_SOURCES_CAP`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duplicate_sources: Vec<String>,
+    /// True when more than [`DUPLICATE_SOURCES_CAP`] distinct sources existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub duplicate_sources_truncated: bool,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 /// Aggregate stats for a keep-set.
@@ -205,6 +465,15 @@ pub struct KeepSetStats {
     pub promoted_from_failure: u64,
     pub groups_dropped_materialize: u64,
     pub groups: u64,
+    /// Groups whose members resolved dates from mixed submit/delivery sources.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub groups_date_source_mixed: u64,
+    /// Groups where winner lacked BCC but a peer had BCC (always computed).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub winners_without_bcc_peer_had_bcc: u64,
+    /// Winners whose folder class is under Recoverable Items (signal only).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub winners_from_recoverable_items: u64,
 }
 
 /// Provenance of the scan that produced candidates.
@@ -250,6 +519,19 @@ pub struct DecisionRecord {
     pub degraded_reasons: Vec<String>,
     pub size: u32,
     pub promoted_from_failure: bool,
+    // ─── 0075 append-only columns ───────────────────────────────────────────
+    pub folder_class: String,
+    pub folder_class_rank: u32,
+    pub source_rank: u32,
+    pub has_bcc: bool,
+    /// ISO-8601 UTC when date present; empty when missing.
+    pub date_filetime_utc: String,
+    pub date_source: String,
+    pub decided_by: String,
+    /// Unique rows only: distinct other sources with a suppressed copy.
+    pub duplicate_source_count: u64,
+    /// Unique rows only: `|`-delimited basenames (capped).
+    pub duplicate_sources: String,
 }
 
 // ─── Materialization ────────────────────────────────────────────────────────
@@ -500,52 +782,503 @@ fn member_tier(
 
 // ─── Ranking / resolve ──────────────────────────────────────────────────────
 
-/// Fidelity rank: lower is better. P0 minimum — non-degraded beats degraded.
+/// Graded fidelity tier for one [`IntegrityReason`] (0075 §3.6).
 ///
-/// 0 = clean (not degraded, not orphaned)
-/// 1 = degraded / orphaned
-pub fn fidelity_rank(item: &RecoverableScanItem) -> u8 {
-    if item.integrity.degraded || item.integrity.is_orphaned {
-        1
-    } else {
-        0
+/// Unmapped reasons default to tier 3 (fail-worse). Exhaustive match so new
+/// variants are a compile error until classified.
+pub fn reason_fidelity_tier(reason: crate::integrity::IntegrityReason) -> u8 {
+    use crate::integrity::IntegrityReason::*;
+    match reason {
+        // tier 1 — soft / metadata only
+        AttachMetaFailed | AttachProbeTruncated | AttachPeerProbeCap | AttachProbeTimeout => 1,
+        // tier 2 — attachment payload loss
+        AttachStreamOpenFailed
+        | AttachStreamReadFailed
+        | AttachStreamCrc
+        | AttachBlockNotFound
+        | AttachDataTruncated
+        | AttachMethodUnsupported => 2,
+        // tier 3 — body / data loss
+        BodyTruncated | BodyUnavailable | DataTruncated | CrcMismatch | BlockNotFound => 3,
+        // tier 4 — structural / provenance
+        OrphanedNode | InvalidStructure | MessageReadFailed | PropertyError | NodeNotFound => 4,
+        // File-level / open failures on a recoverable item are structural-class.
+        OpenFailed | AnsiUnsupported | UnsupportedCrypt | FolderWalkFailed | PathNotFound
+        | NotPst | ReadError => 4,
     }
 }
 
-/// Ranking key: lower is better winner.
-/// `(fidelity, policy_key, path_key, nid)`
-pub fn rank_key(
-    item: &RecoverableScanItem,
-    policy: KeepPolicy,
-    prefer_path: &[String],
-) -> (u8, i64, String, u64) {
-    let fid = fidelity_rank(item);
-    let policy_key = match policy {
-        KeepPolicy::FirstSeen => item.scan_order as i64,
-        KeepPolicy::KeepLargest => {
-            // Larger size better → negate. Size 0/missing ranks last among sizes.
-            -(item.size as i64)
-        }
-        KeepPolicy::PreferPath => {
-            let path_hay = format!("{}|{}", item.locus.source_path, item.locus.folder_path);
-            let matches = prefer_path.iter().any(|p| {
-                if p.is_empty() {
-                    return false;
-                }
-                if cfg!(windows) {
-                    path_hay.to_lowercase().contains(&p.to_lowercase())
-                } else {
-                    path_hay.contains(p.as_str())
-                }
-            });
-            if matches {
+/// Fidelity rank: lower is better.
+///
+/// Binary (default): 0 = clean, 1 = degraded/orphaned (pre-0075).
+/// Graded: worst tier across reasons (0..4); binary maps `{0}→0`, `{1..4}→1`.
+pub fn fidelity_rank(item: &RecoverableScanItem) -> u8 {
+    fidelity_rank_with_mode(item, FidelityMode::Binary)
+}
+
+/// Fidelity rank under an explicit mode.
+pub fn fidelity_rank_with_mode(item: &RecoverableScanItem, mode: FidelityMode) -> u8 {
+    let graded = graded_fidelity_rank(item);
+    match mode {
+        FidelityMode::Binary => {
+            if graded == 0 {
                 0
             } else {
                 1
             }
         }
+        FidelityMode::Graded => graded,
+    }
+}
+
+fn graded_fidelity_rank(item: &RecoverableScanItem) -> u8 {
+    if !item.integrity.degraded && !item.integrity.is_orphaned {
+        return 0;
+    }
+    let mut worst: u8 = 0;
+    if item.integrity.is_orphaned {
+        worst = worst.max(4);
+    }
+    for r in &item.integrity.degraded_reasons {
+        worst = worst.max(reason_fidelity_tier(*r));
+    }
+    // Degraded flag with no reasons → fail-worse tier 3.
+    if worst == 0 {
+        3
+    } else {
+        worst
+    }
+}
+
+/// Resolve usable date for ranking / CSV. Submit preferred; delivery fallback.
+/// FILETIME `<= 0` is missing. Never invents a date.
+pub fn resolve_item_date(item: &RecoverableScanItem) -> (Option<i64>, DateSource) {
+    if let Some(t) = item.submit_time {
+        if t > 0 {
+            return (Some(t), DateSource::Submit);
+        }
+    }
+    if let Some(t) = item.delivery_time {
+        if t > 0 {
+            return (Some(t), DateSource::Delivery);
+        }
+    }
+    (None, DateSource::None)
+}
+
+/// Format FILETIME as RFC3339 UTC (second resolution), empty when missing.
+///
+/// Accepts any `ft > 0` (same gate as [`resolve_item_date`]), including pre-1970
+/// civil dates (FILETIME epoch is 1601). Negative Unix seconds are formatted via
+/// a signed Howard Hinnant civil-date algorithm — no chrono dep.
+pub fn format_date_filetime_utc(ft: Option<i64>) -> String {
+    let Some(ft) = ft else {
+        return String::new();
     };
-    (fid, policy_key, item.path_key(), item.locus.nid)
+    if ft <= 0 {
+        return String::new();
+    }
+    // FILETIME → Unix seconds (same formula as pst-reader / resolve_item_date).
+    let unix = (ft / 10_000_000) - 11_644_473_600;
+    format_unix_secs_rfc3339_i64(unix)
+}
+
+/// Civil date from signed Unix seconds (UTC) — Howard Hinnant algorithm.
+fn format_unix_secs_rfc3339_i64(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400) as u64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    let hh = tod / 3600;
+    let mm = (tod % 3600) / 60;
+    let ss = tod % 60;
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Classify a folder path with the built-in ladder (pure string; no PST I/O).
+///
+/// Whole-segment, case-insensitive; Recoverable Items subfolders are parent-qualified.
+/// When **any** classes match (recoverable and/or non-recoverable segments), the class with
+/// the **lowest** [`FolderClass::builtin_rank`] wins (best/preferable class). That keeps
+/// e.g. `Sent Items` (rank 0) ahead of a co-present recoverable class on a pathological path.
+pub fn classify_folder(folder_path: &str) -> FolderClass {
+    let segs: Vec<String> = folder_path
+        .split('/')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segs.is_empty() {
+        return FolderClass::Primary;
+    }
+
+    let mut best: Option<FolderClass> = None;
+
+    // Recoverable Items children (parent-qualified) — candidates only; do not short-circuit.
+    if let Some(class) = classify_recoverable(&segs) {
+        best = Some(min_rank_class(best, class));
+    }
+
+    // Non-recoverable class matches on any segment.
+    for seg in &segs {
+        if let Some(c) = match_non_recoverable_segment(seg) {
+            best = Some(min_rank_class(best, c));
+        }
+    }
+    best.unwrap_or(FolderClass::Primary)
+}
+
+/// Match a single path segment to a non-recoverable folder class (if any).
+fn match_non_recoverable_segment(seg: &str) -> Option<FolderClass> {
+    if seg_eq(seg, "Sent Items") || seg_eq(seg, "Sent Mail") {
+        return Some(FolderClass::SentItems);
+    }
+    if seg_eq(seg, "Deleted Items") {
+        return Some(FolderClass::DeletedItems);
+    }
+    if seg_eq(seg, "Outbox") {
+        return Some(FolderClass::Outbox);
+    }
+    if seg_eq(seg, "Drafts") {
+        return Some(FolderClass::Drafts);
+    }
+    if seg_eq(seg, "Junk Email") || seg_eq(seg, "Junk E-mail") || seg_eq(seg, "Spam") {
+        return Some(FolderClass::JunkEmail);
+    }
+    if seg_eq(seg, "Archive")
+        || seg_eq(seg, "Online Archive")
+        || segment_glob_match(seg, "In-Place Archive*")
+    {
+        return Some(FolderClass::Archive);
+    }
+    None
+}
+
+fn min_rank_class(current: Option<FolderClass>, candidate: FolderClass) -> FolderClass {
+    match current {
+        None => candidate,
+        Some(c) if candidate.builtin_rank() < c.builtin_rank() => candidate,
+        Some(c) => c,
+    }
+}
+
+fn classify_recoverable(segs: &[String]) -> Option<FolderClass> {
+    let ri = segs.iter().position(|s| seg_eq(s, "Recoverable Items"))?;
+    // Child under Recoverable Items (any descendant segment after RI).
+    let after = &segs[ri + 1..];
+    if after.is_empty() {
+        return Some(FolderClass::RecoverableOther);
+    }
+    // Min rank among known recoverable subfolder matches (paths may nest).
+    let mut best: Option<FolderClass> = None;
+    for seg in after {
+        if let Some(c) = match_recoverable_segment(seg) {
+            best = Some(min_rank_class(best, c));
+        }
+    }
+    Some(best.unwrap_or(FolderClass::RecoverableOther))
+}
+
+fn match_recoverable_segment(seg: &str) -> Option<FolderClass> {
+    if seg_eq(seg, "Deletions") {
+        return Some(FolderClass::RecoverableDeletions);
+    }
+    if seg_eq(seg, "DiscoveryHolds") || seg_eq(seg, "SubstrateHolds") {
+        return Some(FolderClass::RecoverableHolds);
+    }
+    if seg_eq(seg, "Purges") {
+        return Some(FolderClass::RecoverablePurges);
+    }
+    if seg_eq(seg, "Versions") {
+        return Some(FolderClass::RecoverableVersions);
+    }
+    if seg_eq(seg, "Audits") || seg_eq(seg, "Calendar Logging") {
+        return Some(FolderClass::RecoverableOps);
+    }
+    None
+}
+
+fn seg_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// Segment glob: `*` only at start and/or end of the *pattern segment*.
+/// Does not cross `/`. No regex.
+pub fn segment_glob_match(segment: &str, pattern: &str) -> bool {
+    let seg = segment.to_ascii_lowercase();
+    let pat = pattern.to_ascii_lowercase();
+    if !pat.contains('*') {
+        return seg == pat;
+    }
+    // Only leading and/or trailing * supported within one segment.
+    let leading = pat.starts_with('*');
+    let trailing = pat.ends_with('*');
+    let core = pat.trim_matches('*');
+    if core.is_empty() {
+        return true; // "*" alone
+    }
+    if leading && trailing {
+        return seg.contains(core);
+    }
+    if leading {
+        return seg.ends_with(core);
+    }
+    if trailing {
+        return seg.starts_with(core);
+    }
+    // Internal * not supported → exact after stripping nothing useful.
+    seg == pat
+}
+
+/// Multi-segment pattern match: consecutive segments; last pattern segment is
+/// ancestor-or-self of the message folder (pattern may be shorter than path).
+fn path_matches_folder_pattern(folder_segments: &[String], pattern: &str) -> bool {
+    let pat_segs: Vec<&str> = pattern
+        .split('/')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if pat_segs.is_empty() {
+        return false;
+    }
+    if pat_segs.len() > folder_segments.len() {
+        return false;
+    }
+    // Sliding window of consecutive segments.
+    let n = folder_segments.len();
+    let m = pat_segs.len();
+    for start in 0..=(n - m) {
+        let mut ok = true;
+        for i in 0..m {
+            if !segment_glob_match(&folder_segments[start + i], pat_segs[i]) {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// Folder class + rank for an item under the given mode.
+pub fn folder_class_and_rank(folder_path: &str, mode: &FolderRankMode) -> (FolderClass, u32) {
+    let class = classify_folder(folder_path);
+    match mode {
+        FolderRankMode::Off => (FolderClass::Primary, 0),
+        FolderRankMode::Builtin => (class, class.builtin_rank()),
+        FolderRankMode::Custom(patterns) => {
+            let segs: Vec<String> = folder_path
+                .split('/')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            for (i, pat) in patterns.iter().enumerate() {
+                if path_matches_folder_pattern(&segs, pat) {
+                    return (class, 1 + i as u32);
+                }
+            }
+            // Unmatched = best (0). Keep classified label for explainability.
+            (class, 0)
+        }
+    }
+}
+
+/// Source rank: index of first matching pattern on path_compare_key; unmatched = len.
+pub fn source_rank_of(item: &RecoverableScanItem, patterns: &[String]) -> u32 {
+    if patterns.is_empty() {
+        return 0;
+    }
+    let key = item.path_key();
+    for (i, pat) in patterns.iter().enumerate() {
+        if pat.is_empty() {
+            continue;
+        }
+        // path_compare_key is already lowercased on Windows; patterns match case-insensitively.
+        let needle = if cfg!(windows) {
+            pat.to_ascii_lowercase()
+        } else {
+            pat.clone()
+        };
+        if key.contains(&needle) {
+            return i as u32;
+        }
+    }
+    patterns.len() as u32
+}
+
+fn prefer_path_policy_key(item: &RecoverableScanItem, prefer_path: &[String]) -> i64 {
+    let path_hay = format!("{}|{}", item.locus.source_path, item.locus.folder_path);
+    let matches = prefer_path.iter().any(|p| {
+        if p.is_empty() {
+            return false;
+        }
+        if cfg!(windows) {
+            path_hay.to_lowercase().contains(&p.to_lowercase())
+        } else {
+            path_hay.contains(p.as_str())
+        }
+    });
+    if matches {
+        0
+    } else {
+        1
+    }
+}
+
+/// Ranking key: lower is better winner.
+///
+/// Ladder: fidelity → bcc → source → folder (or folder→source) → policy → path → nid.
+/// New rungs are 0 when their flags are absent (pre-0075 winners preserved).
+pub fn rank_key(item: &RecoverableScanItem, ctx: &RankContext) -> RankKey {
+    let fidelity = fidelity_rank_with_mode(item, ctx.fidelity_mode);
+    let bcc = if ctx.prefer_bcc_copy {
+        if item.has_bcc {
+            0
+        } else {
+            1
+        }
+    } else {
+        0
+    };
+    let source = source_rank_of(item, &ctx.source_rank_patterns);
+    let (_class, folder) = folder_class_and_rank(&item.locus.folder_path, &ctx.folder_rank);
+
+    let (policy_missing, policy_value) = match ctx.policy {
+        KeepPolicy::FirstSeen => (0u8, item.scan_order as i64),
+        KeepPolicy::KeepLargest => (0u8, -(item.size as i64)),
+        KeepPolicy::PreferPath => (0u8, prefer_path_policy_key(item, &ctx.prefer_path)),
+        KeepPolicy::EarliestDate => {
+            let (date, _) = resolve_item_date(item);
+            match date {
+                Some(ft) => (0u8, ft),
+                None => (1u8, 0i64),
+            }
+        }
+    };
+
+    RankKey {
+        fidelity,
+        bcc,
+        source,
+        folder,
+        policy_missing,
+        policy_value,
+        path_key: item.path_key(),
+        nid: item.locus.nid,
+        folder_class_first: ctx.folder_class_first,
+    }
+}
+
+/// Compute `decided_by` vocabulary token by comparing two rank keys.
+///
+/// `self_is_winner`: when true, report the rung that beat the rival; when false,
+/// report the rung at which `self_key` lost to `other_key` (the winner).
+pub fn decided_by_rung(
+    self_key: &RankKey,
+    other_key: &RankKey,
+    policy: KeepPolicy,
+    self_is_winner: bool,
+) -> &'static str {
+    let (a, b) = if self_is_winner {
+        (self_key, other_key)
+    } else {
+        // For losers, still find first component where self is worse than winner.
+        (self_key, other_key)
+    };
+    if a.fidelity != b.fidelity {
+        return "fidelity";
+    }
+    if a.bcc != b.bcc {
+        return "bcc_completeness";
+    }
+    if a.folder_class_first {
+        if a.folder != b.folder {
+            return "folder_class";
+        }
+        if a.source != b.source {
+            return "source_rank";
+        }
+    } else {
+        if a.source != b.source {
+            return "source_rank";
+        }
+        if a.folder != b.folder {
+            return "folder_class";
+        }
+    }
+    if a.policy_missing != b.policy_missing || a.policy_value != b.policy_value {
+        return match policy {
+            KeepPolicy::FirstSeen => "policy_first_seen",
+            KeepPolicy::KeepLargest => "policy_keep_largest",
+            KeepPolicy::PreferPath => "policy_prefer_path",
+            KeepPolicy::EarliestDate => "policy_earliest_date",
+        };
+    }
+    if a.path_key != b.path_key {
+        return "path_order";
+    }
+    if a.nid != b.nid {
+        return "nid";
+    }
+    // Keys equal (should be rare for distinct items) — fall through to path_order.
+    "path_order"
+}
+
+/// Human-summary hint when any winner came from Recoverable Items (signal only).
+pub fn recoverable_items_hint(winners_from_recoverable_items: u64) -> Option<String> {
+    if winners_from_recoverable_items == 0 {
+        return None;
+    }
+    Some(format!(
+        "{winners_from_recoverable_items} winner(s) came from Recoverable Items folders; \
+         consider re-running with --prefer-folder-class to prefer live-mailbox copies"
+    ))
+}
+
+/// Aggregate distinct other source basenames for a winner (cap [`DUPLICATE_SOURCES_CAP`]).
+pub fn duplicate_source_aggregate(
+    items: &[RecoverableScanItem],
+    group: &[usize],
+    winner_idx: usize,
+) -> (u64, Vec<String>, bool) {
+    let winner_pst = items[winner_idx].locus.source_pst.as_str();
+    let mut names: Vec<String> = Vec::new();
+    for &idx in group {
+        if idx == winner_idx {
+            continue;
+        }
+        let base = source_basename(&items[idx].locus.source_pst);
+        // Exclude winner's own source name from the "other sources" set.
+        if base == source_basename(winner_pst) {
+            // Same source file holding another copy — still a distinct row but
+            // "All Custodians" is about other sources; skip same basename.
+            continue;
+        }
+        if !names.iter().any(|n| n == &base) {
+            names.push(base);
+        }
+    }
+    names.sort();
+    let total = names.len() as u64;
+    let truncated = names.len() > DUPLICATE_SOURCES_CAP;
+    names.truncate(DUPLICATE_SOURCES_CAP);
+    (total, names, truncated)
+}
+
+fn source_basename(source_pst: &str) -> String {
+    Path::new(source_pst)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| source_pst.to_string())
 }
 
 /// Provisional resolve state before materialize promotion.
@@ -554,6 +1287,8 @@ pub struct ResolvedKeepSet {
     pub policy: KeepPolicy,
     pub family_policy: FamilyPolicy,
     pub prefer_path: Vec<String>,
+    /// Full ranking context (0075); prefer_path mirrored for back-compat fields.
+    pub rank_ctx: RankContext,
     pub tier2_enabled: bool,
     pub items: Vec<RecoverableScanItem>,
     /// Groups of indices into `items`.
@@ -584,6 +1319,36 @@ impl ResolvedKeepSet {
             ..KeepSetStats::default()
         };
 
+        // Honesty stats always computed (even when flags off).
+        for group in &self.groups {
+            if group.is_empty() {
+                continue;
+            }
+            // Mixed date sources.
+            let mut saw_submit = false;
+            let mut saw_delivery = false;
+            for &idx in group {
+                match resolve_item_date(&self.items[idx]).1 {
+                    DateSource::Submit => saw_submit = true,
+                    DateSource::Delivery => saw_delivery = true,
+                    DateSource::None => {}
+                }
+            }
+            if saw_submit && saw_delivery {
+                stats.groups_date_source_mixed += 1;
+            }
+            // BCC loss: winner without BCC, peer had BCC.
+            let winner_idx = group
+                .iter()
+                .copied()
+                .find(|&i| self.roles[i] == DecisionRole::Unique);
+            if let Some(wi) = winner_idx {
+                if !self.items[wi].has_bcc && group.iter().any(|&i| self.items[i].has_bcc) {
+                    stats.winners_without_bcc_peer_had_bcc += 1;
+                }
+            }
+        }
+
         for (i, item) in self.items.iter().enumerate() {
             match self.roles[i] {
                 DecisionRole::Unique => {
@@ -594,6 +1359,17 @@ impl ResolvedKeepSet {
                     if self.promoted_from_failure[i] {
                         stats.promoted_from_failure += 1;
                     }
+                    let (class, _) =
+                        folder_class_and_rank(&item.locus.folder_path, &self.rank_ctx.folder_rank);
+                    // Always classify for recoverable-items signal (even when ladder off).
+                    let true_class = classify_folder(&item.locus.folder_path);
+                    if true_class.is_recoverable_items() {
+                        stats.winners_from_recoverable_items += 1;
+                    }
+                    let group = self.group_containing(i);
+                    let (dup_count, dup_sources, dup_trunc) =
+                        duplicate_source_aggregate(&self.items, &group, i);
+                    let decided = self.decided_by_for(i);
                     winners.push(KeepEntry {
                         locus: item.locus.clone(),
                         message_id_norm: item.message_id_norm.clone(),
@@ -602,6 +1378,11 @@ impl ResolvedKeepSet {
                         integrity: item.integrity.clone(),
                         size: item.size,
                         promoted_from_failure: self.promoted_from_failure[i],
+                        folder_class: Some(class.as_str().to_string()),
+                        decided_by: Some(decided.to_string()),
+                        duplicate_source_count: dup_count,
+                        duplicate_sources: dup_sources,
+                        duplicate_sources_truncated: dup_trunc,
                     });
                 }
                 DecisionRole::DupOf => {
@@ -635,6 +1416,69 @@ impl ResolvedKeepSet {
         }
     }
 
+    fn group_containing(&self, item_idx: usize) -> Vec<usize> {
+        for g in &self.groups {
+            if g.contains(&item_idx) {
+                return g.clone();
+            }
+        }
+        vec![item_idx]
+    }
+
+    /// `decided_by` token for item `i`.
+    fn decided_by_for(&self, i: usize) -> &'static str {
+        if self.promoted_from_failure[i] && self.roles[i] == DecisionRole::Unique {
+            return "promoted_after_materialize_fail";
+        }
+        let group = self.group_containing(i);
+        if group.len() == 1 {
+            return "sole_member";
+        }
+        let self_key = rank_key(&self.items[i], &self.rank_ctx);
+        match self.roles[i] {
+            DecisionRole::Unique => {
+                // Closest rival = best among non-self.
+                let mut best_rival: Option<RankKey> = None;
+                for &j in &group {
+                    if j == i {
+                        continue;
+                    }
+                    let k = rank_key(&self.items[j], &self.rank_ctx);
+                    best_rival = Some(match best_rival {
+                        None => k,
+                        Some(prev) => {
+                            if k < prev {
+                                k
+                            } else {
+                                prev
+                            }
+                        }
+                    });
+                }
+                if let Some(rival) = best_rival {
+                    decided_by_rung(&self_key, &rival, self.policy, true)
+                } else {
+                    "sole_member"
+                }
+            }
+            DecisionRole::DupOf => {
+                if let Some(wi) = self.winner_of[i] {
+                    let w_key = rank_key(&self.items[wi], &self.rank_ctx);
+                    decided_by_rung(&self_key, &w_key, self.policy, false)
+                } else {
+                    "path_order"
+                }
+            }
+            DecisionRole::MaterializeFailed => {
+                if self.promoted_from_failure.get(i).copied().unwrap_or(false) {
+                    "promoted_after_materialize_fail"
+                } else {
+                    "path_order"
+                }
+            }
+        }
+    }
+
     /// Build one decision record for item index `i` (scan-order index into `items`).
     fn decision_at(&self, i: usize) -> DecisionRecord {
         let item = &self.items[i];
@@ -661,6 +1505,20 @@ impl ResolvedKeepSet {
             .map(|r| r.as_str().to_string())
             .collect();
 
+        let (class, folder_rank) =
+            folder_class_and_rank(&item.locus.folder_path, &self.rank_ctx.folder_rank);
+        let source_rank = source_rank_of(item, &self.rank_ctx.source_rank_patterns);
+        let (date_ft, date_src) = resolve_item_date(item);
+        let decided = self.decided_by_for(i);
+
+        let (dup_count, dup_sources_str) = if self.roles[i] == DecisionRole::Unique {
+            let group = self.group_containing(i);
+            let (count, names, _) = duplicate_source_aggregate(&self.items, &group, i);
+            (count, names.join("|"))
+        } else {
+            (0, String::new())
+        };
+
         DecisionRecord {
             source_path: item.locus.source_path.clone(),
             source_pst: item.locus.source_pst.clone(),
@@ -681,6 +1539,15 @@ impl ResolvedKeepSet {
             degraded_reasons,
             size: item.size,
             promoted_from_failure: self.promoted_from_failure[i],
+            folder_class: class.as_str().to_string(),
+            folder_class_rank: folder_rank,
+            source_rank,
+            has_bcc: item.has_bcc,
+            date_filetime_utc: format_date_filetime_utc(date_ft),
+            date_source: date_src.as_str().to_string(),
+            decided_by: decided.to_string(),
+            duplicate_source_count: dup_count,
+            duplicate_sources: dup_sources_str,
         }
     }
 
@@ -717,12 +1584,27 @@ impl ResolvedKeepSet {
     }
 }
 
-/// Resolve provisional winners: fidelity → policy → deterministic order.
+/// Resolve provisional winners: fidelity → evidence rungs → policy → path/nid.
+///
+/// Prefer [`resolve_groups_with_ctx`]. This wrapper builds a default
+/// [`RankContext`] from policy + prefer_path (pre-0075 behavior).
 pub fn resolve_groups(
     items: Vec<RecoverableScanItem>,
     policy: KeepPolicy,
     family_policy: FamilyPolicy,
     prefer_path: &[String],
+    tier2_enabled: bool,
+    created_from: Option<KeepSetProvenance>,
+) -> ResolvedKeepSet {
+    let ctx = RankContext::from_policy_and_prefer(policy, prefer_path);
+    resolve_groups_with_ctx(items, family_policy, &ctx, tier2_enabled, created_from)
+}
+
+/// Resolve provisional winners with a full [`RankContext`] (0075).
+pub fn resolve_groups_with_ctx(
+    items: Vec<RecoverableScanItem>,
+    family_policy: FamilyPolicy,
+    rank_ctx: &RankContext,
     tier2_enabled: bool,
     created_from: Option<KeepSetProvenance>,
 ) -> ResolvedKeepSet {
@@ -742,9 +1624,7 @@ pub fn resolve_groups(
         }
         // Rank members; lowest key wins.
         let mut ranked = group.clone();
-        ranked.sort_by(|&a, &b| {
-            rank_key(&items[a], policy, prefer_path).cmp(&rank_key(&items[b], policy, prefer_path))
-        });
+        ranked.sort_by(|&a, &b| rank_key(&items[a], rank_ctx).cmp(&rank_key(&items[b], rank_ctx)));
         let winner = ranked[0];
         provisional_winners.push(Some(winner));
 
@@ -773,9 +1653,10 @@ pub fn resolve_groups(
     }
 
     ResolvedKeepSet {
-        policy,
+        policy: rank_ctx.policy,
         family_policy,
-        prefer_path: prefer_path.to_vec(),
+        prefer_path: rank_ctx.prefer_path.clone(),
+        rank_ctx: rank_ctx.clone(),
         tier2_enabled,
         items,
         groups,
@@ -809,6 +1690,18 @@ pub fn build_keep_set(
     Ok((resolved.to_keep_set(), resolved.to_decisions()))
 }
 
+/// Pure keep-set build with full [`RankContext`].
+pub fn build_keep_set_with_ctx(
+    recoverable: impl IntoIterator<Item = RecoverableScanItem>,
+    family_policy: FamilyPolicy,
+    rank_ctx: &RankContext,
+    tier2_enabled: bool,
+) -> Result<(KeepSet, Vec<DecisionRecord>), KeepSetError> {
+    let items: Vec<_> = recoverable.into_iter().collect();
+    let resolved = resolve_groups_with_ctx(items, family_policy, rank_ctx, tier2_enabled, None);
+    Ok((resolved.to_keep_set(), resolved.to_decisions()))
+}
+
 /// Options for [`build_keep_set_materialized`].
 pub struct MaterializeBuildOpts<'a> {
     pub policy: KeepPolicy,
@@ -816,6 +1709,8 @@ pub struct MaterializeBuildOpts<'a> {
     pub prefer_path: &'a [String],
     pub tier2_enabled: bool,
     pub created_from: Option<KeepSetProvenance>,
+    /// Optional full rank context; when set, overrides policy/prefer_path for ranking.
+    pub rank_ctx: Option<&'a RankContext>,
 }
 
 /// Build keep-set then finalize winners via materialize + promotion.
@@ -832,11 +1727,17 @@ where
     F: FnMut(CanonicalMessage) -> Result<(), KeepSetError>,
 {
     let items: Vec<_> = recoverable.into_iter().collect();
-    let mut resolved = resolve_groups(
+    let owned_ctx;
+    let ctx_ref = if let Some(c) = opts.rank_ctx {
+        c
+    } else {
+        owned_ctx = RankContext::from_policy_and_prefer(opts.policy, opts.prefer_path);
+        &owned_ctx
+    };
+    let mut resolved = resolve_groups_with_ctx(
         items,
-        opts.policy,
         opts.family_policy,
-        opts.prefer_path,
+        ctx_ref,
         opts.tier2_enabled,
         opts.created_from,
     );
@@ -885,8 +1786,7 @@ where
     F: FnMut(CanonicalMessage) -> Result<(), KeepSetError>,
 {
     let mut materialized_count = 0u64;
-    let policy = resolved.policy;
-    let prefer = resolved.prefer_path.clone();
+    let rank_ctx = resolved.rank_ctx.clone();
     let tier2 = resolved.tier2_enabled;
 
     for (g_idx, group) in resolved.groups.clone().into_iter().enumerate() {
@@ -897,11 +1797,7 @@ where
         // Rank full group once.
         let mut ranked = group.clone();
         ranked.sort_by(|&a, &b| {
-            rank_key(&resolved.items[a], policy, &prefer).cmp(&rank_key(
-                &resolved.items[b],
-                policy,
-                &prefer,
-            ))
+            rank_key(&resolved.items[a], &rank_ctx).cmp(&rank_key(&resolved.items[b], &rank_ctx))
         });
 
         let mut final_winner: Option<usize> = None;
@@ -985,7 +1881,8 @@ where
 
 // ─── Decision CSV + KeepSet JSON ────────────────────────────────────────────
 
-const DECISION_CSV_HEADER: [&str; 19] = [
+/// Pre-0075 decision CSV header (19 columns). New columns append only.
+pub const DECISION_CSV_HEADER_V1: [&str; 19] = [
     "SourcePath",
     "SourcePst",
     "Folder",
@@ -1005,6 +1902,39 @@ const DECISION_CSV_HEADER: [&str; 19] = [
     "DegradedReasons",
     "Size",
     "PromotedFromFailure",
+];
+
+/// Full decision CSV header (pre-0075 + 0075 append columns).
+pub const DECISION_CSV_HEADER: [&str; 28] = [
+    "SourcePath",
+    "SourcePst",
+    "Folder",
+    "IsOrphaned",
+    "NID",
+    "MessageIdNorm",
+    "ContentHash",
+    "EdrmMih",
+    "Role",
+    "Tier",
+    "WinnerPst",
+    "WinnerFolder",
+    "WinnerNid",
+    "Policy",
+    "FamilyPolicy",
+    "Degraded",
+    "DegradedReasons",
+    "Size",
+    "PromotedFromFailure",
+    // 0075 append-only
+    "folder_class",
+    "folder_class_rank",
+    "source_rank",
+    "has_bcc",
+    "date_filetime_utc",
+    "date_source",
+    "decided_by",
+    "duplicate_source_count",
+    "duplicate_sources",
 ];
 
 /// Streaming decision CSV writer (Phase 3 only — after resolve).
@@ -1047,6 +1977,23 @@ impl DecisionCsvWriter {
         let size = row.size.to_string();
         let winner_nid = row.winner_nid.map(|n| n.to_string()).unwrap_or_default();
         let reasons = row.degraded_reasons.join(";");
+        let folder_rank = row.folder_class_rank.to_string();
+        let source_rank = row.source_rank.to_string();
+        let dup_count = if row.role == DecisionRole::Unique {
+            row.duplicate_source_count.to_string()
+        } else {
+            String::new()
+        };
+        // Free-text folder path / sources go through csv crate quoting; formula
+        // neutralization is applied to user-influenced text fields (0073).
+        let folder_class = neutralize_csv_formula(&row.folder_class);
+        let decided_by = neutralize_csv_formula(&row.decided_by);
+        let dup_sources = if row.role == DecisionRole::Unique {
+            neutralize_csv_formula(&row.duplicate_sources)
+        } else {
+            String::new()
+        };
+        let date_utc = neutralize_csv_formula(&row.date_filetime_utc);
         self.wtr
             .write_record([
                 row.source_path.as_str(),
@@ -1072,6 +2019,15 @@ impl DecisionCsvWriter {
                 } else {
                     "false"
                 },
+                folder_class.as_str(),
+                folder_rank.as_str(),
+                source_rank.as_str(),
+                if row.has_bcc { "true" } else { "false" },
+                date_utc.as_str(),
+                row.date_source.as_str(),
+                decided_by.as_str(),
+                dup_count.as_str(),
+                dup_sources.as_str(),
             ])
             .map_err(|e| KeepSetError::Csv(e.to_string()))?;
         self.rows_written += 1;
@@ -1113,6 +2069,20 @@ pub fn write_keep_set_json(path: impl AsRef<Path>, keep_set: &KeepSet) -> Result
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/// Prefix `'` when cell (leading whitespace stripped) starts with `=+\-@` (0073).
+fn neutralize_csv_formula(s: &str) -> String {
+    let check = s.trim_start();
+    if check.starts_with('=')
+        || check.starts_with('+')
+        || check.starts_with('-')
+        || check.starts_with('@')
+    {
+        format!("'{s}")
+    } else {
+        s.to_string()
+    }
+}
 
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -1191,7 +2161,34 @@ mod tests {
             size,
             integrity,
             scan_order,
+            submit_time: None,
+            delivery_time: None,
+            has_bcc: false,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn item_dated(
+        path: &str,
+        pst: &str,
+        folder: &str,
+        nid: u64,
+        mid: Option<&str>,
+        hash: [u8; 32],
+        size: u32,
+        scan_order: u64,
+        degraded: bool,
+        submit_time: Option<i64>,
+        delivery_time: Option<i64>,
+        has_bcc: bool,
+    ) -> RecoverableScanItem {
+        let mut it = item(
+            path, pst, folder, nid, mid, hash, size, scan_order, degraded,
+        );
+        it.submit_time = submit_time;
+        it.delivery_time = delivery_time;
+        it.has_bcc = has_bcc;
+        it
     }
 
     #[test]
@@ -1630,6 +2627,7 @@ mod tests {
                 prefer_path: &[],
                 tier2_enabled: true,
                 created_from: None,
+                rank_ctx: None,
             },
             &mut mat,
             |msg| {
@@ -1668,6 +2666,7 @@ mod tests {
                 prefer_path: &[],
                 tier2_enabled: true,
                 created_from: None,
+                rank_ctx: None,
             },
             &mut mat,
             |msg| {
@@ -1699,6 +2698,7 @@ mod tests {
                 prefer_path: &[],
                 tier2_enabled: true,
                 created_from: None,
+                rank_ctx: None,
             },
             &mut mat,
             |_| Ok(()),
@@ -1713,6 +2713,11 @@ mod tests {
         let uniq = dec.iter().find(|d| d.nid == 2).expect("b");
         assert_eq!(uniq.role, DecisionRole::Unique);
         assert!(uniq.promoted_from_failure);
+        assert_eq!(uniq.decided_by, "promoted_after_materialize_fail");
+        assert_eq!(
+            ks.winners[0].decided_by.as_deref(),
+            Some("promoted_after_materialize_fail")
+        );
     }
 
     #[test]
@@ -1732,6 +2737,7 @@ mod tests {
                 prefer_path: &[],
                 tier2_enabled: true,
                 created_from: None,
+                rank_ctx: None,
             },
             &mut mat,
             |_| Ok(()),
@@ -1797,6 +2803,7 @@ mod tests {
                 prefer_path: &[],
                 tier2_enabled: true,
                 created_from: None,
+                rank_ctx: None,
             },
             &mut mat,
             |_| Ok(()),
@@ -1872,6 +2879,7 @@ mod tests {
                 prefer_path: &[],
                 tier2_enabled: true,
                 created_from: None,
+                rank_ctx: None,
             },
             &mut mat,
             |_| Ok(()),
@@ -2069,6 +3077,7 @@ mod tests {
                 prefer_path: &[],
                 tier2_enabled: true,
                 created_from: None,
+                rank_ctx: None,
             },
             &mut mat,
             |msg| {
@@ -2091,6 +3100,995 @@ mod tests {
             finalize_order.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
             ks.winners.iter().map(|w| w.locus.nid).collect::<Vec<_>>(),
             "finalize on_winner order must differ from keep_set winner order in this fixture"
+        );
+    }
+
+    // ─── 0075 winner policies ─────────────────────────────────────────────
+
+    #[test]
+    fn decision_csv_header_starts_with_v1_prefix() {
+        for (i, col) in DECISION_CSV_HEADER_V1.iter().enumerate() {
+            assert_eq!(DECISION_CSV_HEADER[i], *col, "column {i} must remain {col}");
+        }
+        assert_eq!(DECISION_CSV_HEADER.len(), 28);
+        assert_eq!(DECISION_CSV_HEADER_V1.len(), 19);
+    }
+
+    #[test]
+    fn earliest_date_earlier_submit_wins() {
+        let mid = Some("d@x");
+        let later = item_dated(
+            "C:/a.pst",
+            "a.pst",
+            "Inbox",
+            1,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+            Some(200),
+            None,
+            false,
+        );
+        let earlier = item_dated(
+            "C:/b.pst",
+            "b.pst",
+            "Inbox",
+            2,
+            mid,
+            [1; 32],
+            100,
+            1,
+            false,
+            Some(100),
+            None,
+            false,
+        );
+        let ctx = RankContext::new(KeepPolicy::EarliestDate);
+        let (ks, _) =
+            build_keep_set_with_ctx(vec![later, earlier], FamilyPolicy::default(), &ctx, true)
+                .expect("build");
+        assert_eq!(ks.winners[0].locus.nid, 2);
+    }
+
+    #[test]
+    fn earliest_date_equal_dates_fall_through_to_path_key() {
+        let mid = Some("eq@x");
+        // Same submit time; later path_key (b.pst) should lose to a.pst.
+        let a = item_dated(
+            "C:/a.pst",
+            "a.pst",
+            "Inbox",
+            2,
+            mid,
+            [1; 32],
+            100,
+            1,
+            false,
+            Some(100),
+            None,
+            false,
+        );
+        let b = item_dated(
+            "C:/b.pst",
+            "b.pst",
+            "Inbox",
+            1,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+            Some(100),
+            None,
+            false,
+        );
+        let ctx = RankContext::new(KeepPolicy::EarliestDate);
+        let (ks, dec) = build_keep_set_with_ctx(vec![b, a], FamilyPolicy::default(), &ctx, true)
+            .expect("build");
+        assert_eq!(ks.winners[0].locus.nid, 2);
+        assert_eq!(ks.winners[0].locus.source_pst, "a.pst");
+        let win = dec
+            .iter()
+            .find(|d| d.role == DecisionRole::Unique)
+            .expect("u");
+        assert!(
+            win.decided_by == "path_order" || win.decided_by == "nid",
+            "equal dates should fall through, got {}",
+            win.decided_by
+        );
+    }
+
+    #[test]
+    fn earliest_date_missing_sorts_last() {
+        let mid = Some("m@x");
+        let dated = item_dated(
+            "C:/a.pst",
+            "a.pst",
+            "Inbox",
+            1,
+            mid,
+            [1; 32],
+            100,
+            1,
+            false,
+            Some(50),
+            None,
+            false,
+        );
+        let undated = item_dated(
+            "C:/b.pst", "b.pst", "Inbox", 2, mid, [1; 32], 100, 0, false, None, None, false,
+        );
+        let ctx = RankContext::new(KeepPolicy::EarliestDate);
+        let (ks, _) =
+            build_keep_set_with_ctx(vec![undated, dated], FamilyPolicy::default(), &ctx, true)
+                .expect("build");
+        assert_eq!(ks.winners[0].locus.nid, 1);
+    }
+
+    #[test]
+    fn earliest_date_delivery_fallback_when_submit_absent() {
+        let mid = Some("f@x");
+        let via_delivery = item_dated(
+            "C:/a.pst",
+            "a.pst",
+            "Inbox",
+            1,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+            None,
+            Some(10),
+            false,
+        );
+        let via_submit = item_dated(
+            "C:/b.pst",
+            "b.pst",
+            "Inbox",
+            2,
+            mid,
+            [1; 32],
+            100,
+            1,
+            false,
+            Some(20),
+            None,
+            false,
+        );
+        let ctx = RankContext::new(KeepPolicy::EarliestDate);
+        let (ks, dec) = build_keep_set_with_ctx(
+            vec![via_delivery, via_submit],
+            FamilyPolicy::default(),
+            &ctx,
+            true,
+        )
+        .expect("build");
+        // delivery=10 beats submit=20
+        assert_eq!(ks.winners[0].locus.nid, 1);
+        assert_eq!(ks.stats.groups_date_source_mixed, 1);
+        let w = dec
+            .iter()
+            .find(|d| d.role == DecisionRole::Unique)
+            .expect("u");
+        assert_eq!(w.date_source, "delivery");
+    }
+
+    #[test]
+    fn folder_class_purges_loses_to_inbox() {
+        let mid = Some("p@x");
+        let purge = item(
+            "C:/a.pst",
+            "a.pst",
+            "Top of Personal Folders/Recoverable Items/Purges",
+            1,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+        );
+        let inbox = item(
+            "C:/b.pst",
+            "b.pst",
+            "Top of Personal Folders/Inbox",
+            2,
+            mid,
+            [1; 32],
+            100,
+            1,
+            false,
+        );
+        let mut ctx = RankContext::new(KeepPolicy::FirstSeen);
+        ctx.folder_rank = FolderRankMode::Builtin;
+        let (ks, dec) =
+            build_keep_set_with_ctx(vec![purge, inbox], FamilyPolicy::default(), &ctx, true)
+                .expect("build");
+        assert_eq!(ks.winners[0].locus.nid, 2);
+        let loser = dec.iter().find(|d| d.nid == 1).expect("purge");
+        assert_eq!(loser.folder_class, "recoverable_purges");
+        assert_eq!(loser.decided_by, "folder_class");
+    }
+
+    #[test]
+    fn folder_class_user_purges_not_demoted() {
+        let mid = Some("u@x");
+        // User folder literally named Purges without Recoverable Items ancestor.
+        let user_purges = item(
+            "C:/a.pst",
+            "a.pst",
+            "Top of Personal Folders/Purges",
+            1,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+        );
+        let inbox = item(
+            "C:/b.pst",
+            "b.pst",
+            "Top of Personal Folders/Inbox",
+            2,
+            mid,
+            [1; 32],
+            100,
+            1,
+            false,
+        );
+        let mut ctx = RankContext::new(KeepPolicy::FirstSeen);
+        ctx.folder_rank = FolderRankMode::Builtin;
+        let (ks, _) = build_keep_set_with_ctx(
+            vec![user_purges, inbox],
+            FamilyPolicy::default(),
+            &ctx,
+            true,
+        )
+        .expect("build");
+        // Both primary rank → first_seen by scan_order (user_purges scan 0 wins).
+        assert_eq!(ks.winners[0].locus.nid, 1);
+        assert_eq!(
+            classify_folder("Top of Personal Folders/Purges"),
+            FolderClass::Primary
+        );
+    }
+
+    #[test]
+    fn folder_class_segment_rejects_myversions() {
+        assert_eq!(classify_folder("Top/MyVersions"), FolderClass::Primary);
+        assert_eq!(
+            classify_folder("Top/Recoverable Items/Versions"),
+            FolderClass::RecoverableVersions
+        );
+    }
+
+    #[test]
+    fn folder_class_min_rank_among_multi_segment_matches() {
+        // Archive (2) beats Junk Email (3) even when Junk is checked first in old code.
+        assert_eq!(classify_folder("Archive/Junk Email"), FolderClass::Archive);
+        assert_eq!(
+            classify_folder("Top/Archive/Junk E-mail"),
+            FolderClass::Archive
+        );
+        // Drafts (4) is the only special segment; Inbox is primary by default.
+        assert_eq!(classify_folder("Inbox/Drafts"), FolderClass::Drafts);
+        // Sent (0) beats Archive (2).
+        assert_eq!(
+            classify_folder("Archive/Sent Items"),
+            FolderClass::SentItems
+        );
+        // Recoverable: Purges (9) beats Versions (10) when both present.
+        assert_eq!(
+            classify_folder("Top/Recoverable Items/Purges/Versions"),
+            FolderClass::RecoverablePurges
+        );
+        // Versions under Recoverable Items still qualifies (parent-qualified).
+        assert_eq!(
+            classify_folder("Top/Recoverable Items/Versions"),
+            FolderClass::RecoverableVersions
+        );
+        // User folder Purges (no RI ancestor) stays primary.
+        assert_eq!(
+            classify_folder("Top of Personal Folders/Purges"),
+            FolderClass::Primary
+        );
+        // Global min-rank: Sent Items (0) beats co-present recoverable_purges (9).
+        assert_eq!(
+            classify_folder("Recoverable Items/Purges/Sent Items"),
+            FolderClass::SentItems
+        );
+        // Pure dumpster still demotes (no better non-recoverable class).
+        assert_eq!(
+            classify_folder("Top/Recoverable Items/Purges"),
+            FolderClass::RecoverablePurges
+        );
+    }
+
+    #[test]
+    fn pre1970_filetime_formats_and_resolves() {
+        // 1960-01-01T00:00:00Z → unix ≈ -315619200
+        let unix_1960 = -315_619_200i64;
+        let ft = (unix_1960 + 11_644_473_600) * 10_000_000;
+        assert!(ft > 0, "pre-1970 FILETIME must still be positive");
+        let iso = format_date_filetime_utc(Some(ft));
+        assert_eq!(iso, "1960-01-01T00:00:00Z");
+        // resolve_item_date accepts any ft > 0 (delivery fallback).
+        let mut it = item("C:/a.pst", "a.pst", "Inbox", 1, None, [0; 32], 1, 0, false);
+        it.submit_time = None;
+        it.delivery_time = Some(ft);
+        let (resolved, src) = resolve_item_date(&it);
+        assert_eq!(resolved, Some(ft));
+        assert_eq!(src, DateSource::Delivery);
+        // Epoch boundary still works.
+        let ft_epoch = 11_644_473_600i64 * 10_000_000;
+        assert_eq!(
+            format_date_filetime_utc(Some(ft_epoch)),
+            "1970-01-01T00:00:00Z"
+        );
+        // Missing / non-positive stay empty.
+        assert_eq!(format_date_filetime_utc(None), "");
+        assert_eq!(format_date_filetime_utc(Some(0)), "");
+        assert_eq!(format_date_filetime_utc(Some(-1)), "");
+    }
+
+    #[test]
+    fn folder_class_sent_items_beats_inbox() {
+        let mid = Some("s@x");
+        let sent = item(
+            "C:/a.pst",
+            "a.pst",
+            "Top/Sent Items",
+            1,
+            mid,
+            [1; 32],
+            100,
+            1,
+            false,
+        );
+        let inbox = item(
+            "C:/b.pst",
+            "b.pst",
+            "Top/Inbox",
+            2,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+        );
+        let mut ctx = RankContext::new(KeepPolicy::FirstSeen);
+        ctx.folder_rank = FolderRankMode::Builtin;
+        let (ks, _) =
+            build_keep_set_with_ctx(vec![inbox, sent], FamilyPolicy::default(), &ctx, true)
+                .expect("build");
+        assert_eq!(ks.winners[0].locus.nid, 1);
+        assert_eq!(ks.winners[0].folder_class.as_deref(), Some("sent_items"));
+    }
+
+    #[test]
+    fn folder_class_drafts_outbox_lose_to_junk() {
+        assert!(FolderClass::JunkEmail.builtin_rank() < FolderClass::Drafts.builtin_rank());
+        assert!(FolderClass::JunkEmail.builtin_rank() < FolderClass::Outbox.builtin_rank());
+        assert!(FolderClass::Primary.builtin_rank() < FolderClass::JunkEmail.builtin_rank());
+        assert!(FolderClass::SentItems.builtin_rank() < FolderClass::Primary.builtin_rank());
+        assert!(
+            FolderClass::RecoverablePurges.builtin_rank()
+                < FolderClass::RecoverableVersions.builtin_rank()
+        );
+    }
+
+    #[test]
+    fn prefer_bcc_copy_sent_beats_inbox() {
+        let mid = Some("bcc@x");
+        let sent_bcc = item_dated(
+            "C:/a.pst",
+            "a.pst",
+            "Sent Items",
+            1,
+            mid,
+            [1; 32],
+            100,
+            1,
+            false,
+            Some(100),
+            None,
+            true,
+        );
+        let inbox_no = item_dated(
+            "C:/b.pst",
+            "b.pst",
+            "Inbox",
+            2,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+            Some(100),
+            None,
+            false,
+        );
+        let mut ctx = RankContext::new(KeepPolicy::FirstSeen);
+        ctx.prefer_bcc_copy = true;
+        let (ks, _) = build_keep_set_with_ctx(
+            vec![inbox_no, sent_bcc],
+            FamilyPolicy::default(),
+            &ctx,
+            true,
+        )
+        .expect("build");
+        assert_eq!(ks.winners[0].locus.nid, 1);
+        assert_eq!(
+            ks.winners[0].decided_by.as_deref(),
+            Some("bcc_completeness")
+        );
+    }
+
+    #[test]
+    fn prefer_bcc_off_preserves_first_seen() {
+        let mid = Some("bcc2@x");
+        let sent_bcc = item_dated(
+            "C:/z.pst",
+            "z.pst",
+            "Sent Items",
+            1,
+            mid,
+            [1; 32],
+            100,
+            1,
+            false,
+            None,
+            None,
+            true,
+        );
+        let inbox_no = item_dated(
+            "C:/a.pst", "a.pst", "Inbox", 2, mid, [1; 32], 100, 0, false, None, None, false,
+        );
+        // Flag off: scan_order 0 (inbox) wins; BCC peer loss is still counted.
+        let ctx = RankContext::new(KeepPolicy::FirstSeen);
+        let (ks, _) = build_keep_set_with_ctx(
+            vec![inbox_no, sent_bcc],
+            FamilyPolicy::default(),
+            &ctx,
+            true,
+        )
+        .expect("build");
+        assert_eq!(ks.winners[0].locus.nid, 2);
+        assert_eq!(ks.stats.winners_without_bcc_peer_had_bcc, 1);
+    }
+
+    #[test]
+    fn whitespace_bcc_counts_as_absent() {
+        // Mirror scan.rs: only non-empty trim sets has_bcc.
+        let display_bcc = Some("   \t  ".to_string());
+        let has_bcc = display_bcc
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        assert!(!has_bcc);
+
+        let mid = Some("ws@x");
+        let with_flag_false = item_dated(
+            "C:/a.pst",
+            "a.pst",
+            "Sent Items",
+            1,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+            None,
+            None,
+            false, // whitespace-equivalent: no BCC
+        );
+        let peer = item_dated(
+            "C:/b.pst", "b.pst", "Inbox", 2, mid, [1; 32], 100, 1, false, None, None, false,
+        );
+        let mut ctx = RankContext::new(KeepPolicy::FirstSeen);
+        ctx.prefer_bcc_copy = true;
+        let (ks, _) = build_keep_set_with_ctx(
+            vec![with_flag_false, peer],
+            FamilyPolicy::default(),
+            &ctx,
+            true,
+        )
+        .expect("build");
+        // Neither has BCC → first_seen (scan_order 0) wins; BCC rung is a no-op.
+        assert_eq!(ks.winners[0].locus.nid, 1);
+    }
+
+    #[test]
+    fn custom_folder_rank_unmatched_is_best() {
+        let mid = Some("cf@x");
+        let demoted = item(
+            "C:/a.pst",
+            "a.pst",
+            "Top/Recoverable Items/Purges",
+            1,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+        );
+        let primary = item(
+            "C:/b.pst",
+            "b.pst",
+            "Top/Inbox",
+            2,
+            mid,
+            [1; 32],
+            100,
+            1,
+            false,
+        );
+        let mut ctx = RankContext::new(KeepPolicy::FirstSeen);
+        ctx.folder_rank = FolderRankMode::Custom(vec!["*/Purges".into()]);
+        let (ks, _) =
+            build_keep_set_with_ctx(vec![demoted, primary], FamilyPolicy::default(), &ctx, true)
+                .expect("build");
+        assert_eq!(ks.winners[0].locus.nid, 2);
+    }
+
+    #[test]
+    fn segment_glob_leading_trailing_only() {
+        assert!(segment_glob_match("Purges", "*Purges"));
+        assert!(segment_glob_match("SoftPurges", "*Purges"));
+        assert!(segment_glob_match("ElementX", "Element*"));
+        assert!(segment_glob_match("xxElementyy", "*Element*"));
+        // Internal `*` (not only leading/trailing) is not a wildcard.
+        assert!(!segment_glob_match("axxb", "a*b"));
+        assert!(!segment_glob_match("PurgesExtra", "*Purges")); // leading * = ends_with
+                                                                // Multi-segment patterns use path_matches_folder_pattern, not this helper alone.
+        assert!(path_matches_folder_pattern(
+            &["Top".into(), "Recoverable Items".into(), "Purges".into()],
+            "*/Purges"
+        ));
+        assert!(!path_matches_folder_pattern(
+            &["Top".into(), "Purges".into()],
+            "Recoverable Items/Purges"
+        ));
+    }
+
+    #[test]
+    fn source_rank_ordered_primary_beats_dash2() {
+        let mid = Some("inc@x");
+        // path_key lexicographically prefers -2 on Windows lowercased paths...
+        let dash2 = item(
+            r"C:\matter\INC0102784-2.pst",
+            "INC0102784-2.pst",
+            "Inbox",
+            1,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+        );
+        let primary = item(
+            r"C:\matter\INC0102784.pst",
+            "INC0102784.pst",
+            "Inbox",
+            2,
+            mid,
+            [1; 32],
+            100,
+            1,
+            false,
+        );
+        // Without source-rank: first_seen by scan_order (dash2 wins).
+        let (ks0, _) = build_keep_set(
+            vec![dash2.clone(), primary.clone()],
+            KeepPolicy::FirstSeen,
+            FamilyPolicy::default(),
+            &[],
+            true,
+        )
+        .expect("build");
+        assert_eq!(ks0.winners[0].locus.source_pst, "INC0102784-2.pst");
+
+        let mut ctx = RankContext::new(KeepPolicy::FirstSeen);
+        ctx.source_rank_patterns = vec!["INC0102784.pst".into(), "INC0102784-2.pst".into()];
+        let (ks1, dec) =
+            build_keep_set_with_ctx(vec![dash2, primary], FamilyPolicy::default(), &ctx, true)
+                .expect("build");
+        assert_eq!(ks1.winners[0].locus.source_pst, "INC0102784.pst");
+        let w = dec
+            .iter()
+            .find(|d| d.role == DecisionRole::Unique)
+            .expect("u");
+        assert_eq!(w.decided_by, "source_rank");
+    }
+
+    #[test]
+    fn ladder_source_outranks_folder_ceo_archive_vs_junior_inbox() {
+        let mid = Some("ceo@x");
+        let ceo_archive = item(
+            r"C:\cust\CEO.pst",
+            "CEO.pst",
+            "Top/Archive",
+            1,
+            mid,
+            [1; 32],
+            100,
+            1,
+            false,
+        );
+        let junior_inbox = item(
+            r"C:\cust\junior.pst",
+            "junior.pst",
+            "Top/Inbox",
+            2,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+        );
+        let mut ctx = RankContext::new(KeepPolicy::FirstSeen);
+        ctx.source_rank_patterns = vec!["CEO.pst".into()];
+        ctx.folder_rank = FolderRankMode::Builtin;
+        let (ks, _) = build_keep_set_with_ctx(
+            vec![junior_inbox.clone(), ceo_archive.clone()],
+            FamilyPolicy::default(),
+            &ctx,
+            true,
+        )
+        .expect("build");
+        assert_eq!(ks.winners[0].locus.source_pst, "CEO.pst");
+
+        // Invert: folder_class first → Inbox (primary) beats Archive.
+        ctx.folder_class_first = true;
+        let (ks2, _) = build_keep_set_with_ctx(
+            vec![junior_inbox, ceo_archive],
+            FamilyPolicy::default(),
+            &ctx,
+            true,
+        )
+        .expect("build");
+        assert_eq!(ks2.winners[0].locus.source_pst, "junior.pst");
+    }
+
+    #[test]
+    fn decided_by_sole_member() {
+        let a = item(
+            "C:/a.pst",
+            "a.pst",
+            "Inbox",
+            1,
+            Some("solo@x"),
+            [9; 32],
+            10,
+            0,
+            false,
+        );
+        let (ks, dec) = build_keep_set(
+            vec![a],
+            KeepPolicy::FirstSeen,
+            FamilyPolicy::default(),
+            &[],
+            true,
+        )
+        .expect("build");
+        assert_eq!(ks.stats.unique, 1);
+        assert_eq!(dec[0].decided_by, "sole_member");
+        assert_eq!(ks.winners[0].decided_by.as_deref(), Some("sole_member"));
+    }
+
+    #[test]
+    fn graded_vs_binary_fidelity() {
+        let mid = Some("g@x");
+        let attach_loss = {
+            let mut it = item("C:/a.pst", "a.pst", "Inbox", 1, mid, [1; 32], 100, 0, false);
+            it.integrity = RecoverableIntegrity::with_degraded(
+                vec![IntegrityReason::AttachStreamReadFailed],
+                false,
+            );
+            it
+        };
+        let body_loss = {
+            let mut it = item("C:/b.pst", "b.pst", "Inbox", 2, mid, [1; 32], 100, 1, false);
+            it.integrity =
+                RecoverableIntegrity::with_degraded(vec![IntegrityReason::BodyTruncated], false);
+            it
+        };
+        // Binary: both degraded → first_seen (scan 0 attach_loss wins).
+        let bin = RankContext {
+            fidelity_mode: FidelityMode::Binary,
+            ..RankContext::new(KeepPolicy::FirstSeen)
+        };
+        let (ks_bin, _) = build_keep_set_with_ctx(
+            vec![attach_loss.clone(), body_loss.clone()],
+            FamilyPolicy::default(),
+            &bin,
+            true,
+        )
+        .expect("build");
+        assert_eq!(ks_bin.winners[0].locus.nid, 1);
+
+        // Graded: attach tier 2 beats body tier 3.
+        let graded = RankContext {
+            fidelity_mode: FidelityMode::Graded,
+            ..RankContext::new(KeepPolicy::FirstSeen)
+        };
+        let (ks_g, dec) = build_keep_set_with_ctx(
+            vec![body_loss, attach_loss],
+            FamilyPolicy::default(),
+            &graded,
+            true,
+        )
+        .expect("build");
+        assert_eq!(ks_g.winners[0].locus.nid, 1);
+        assert_eq!(
+            dec.iter()
+                .find(|d| d.role == DecisionRole::Unique)
+                .map(|d| d.decided_by.as_str()),
+            Some("fidelity")
+        );
+    }
+
+    #[test]
+    fn reason_fidelity_tier_exhaustive_and_binary_map() {
+        use IntegrityReason::*;
+        let soft = [
+            AttachMetaFailed,
+            AttachProbeTruncated,
+            AttachPeerProbeCap,
+            AttachProbeTimeout,
+        ];
+        for r in soft {
+            assert_eq!(reason_fidelity_tier(r), 1);
+        }
+        let attach = [
+            AttachStreamOpenFailed,
+            AttachStreamReadFailed,
+            AttachStreamCrc,
+            AttachBlockNotFound,
+            AttachDataTruncated,
+            AttachMethodUnsupported,
+        ];
+        for r in attach {
+            assert_eq!(reason_fidelity_tier(r), 2);
+        }
+        let body = [
+            BodyTruncated,
+            BodyUnavailable,
+            DataTruncated,
+            CrcMismatch,
+            BlockNotFound,
+        ];
+        for r in body {
+            assert_eq!(reason_fidelity_tier(r), 3);
+        }
+        // Binary map: graded 0 → 0; 1..4 → 1
+        let clean = item("C:/a.pst", "a.pst", "Inbox", 1, None, [0; 32], 1, 0, false);
+        assert_eq!(fidelity_rank_with_mode(&clean, FidelityMode::Binary), 0);
+        assert_eq!(fidelity_rank_with_mode(&clean, FidelityMode::Graded), 0);
+        let mut deg = clean.clone();
+        deg.integrity =
+            RecoverableIntegrity::with_degraded(vec![IntegrityReason::AttachMetaFailed], false);
+        assert_eq!(fidelity_rank_with_mode(&deg, FidelityMode::Graded), 1);
+        assert_eq!(fidelity_rank_with_mode(&deg, FidelityMode::Binary), 1);
+        deg.integrity =
+            RecoverableIntegrity::with_degraded(vec![IntegrityReason::BodyTruncated], false);
+        assert_eq!(fidelity_rank_with_mode(&deg, FidelityMode::Graded), 3);
+        assert_eq!(fidelity_rank_with_mode(&deg, FidelityMode::Binary), 1);
+    }
+
+    #[test]
+    fn duplicate_source_aggregate_cap_and_basename() {
+        let mid = Some("dup@x");
+        let mut items = vec![item(
+            r"C:\mail\winner.pst",
+            "winner.pst",
+            "Inbox",
+            1,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+        )];
+        for i in 0..10u64 {
+            items.push(item(
+                &format!(r"C:\mail\cust{i}.pst"),
+                &format!("cust{i}.pst"),
+                "Inbox",
+                10 + i,
+                mid,
+                [1; 32],
+                100,
+                i + 1,
+                false,
+            ));
+        }
+        let (ks, dec) = build_keep_set(
+            items,
+            KeepPolicy::FirstSeen,
+            FamilyPolicy::default(),
+            &[],
+            true,
+        )
+        .expect("build");
+        let w = &ks.winners[0];
+        assert_eq!(w.duplicate_source_count, 10);
+        assert_eq!(w.duplicate_sources.len(), DUPLICATE_SOURCES_CAP);
+        assert!(w.duplicate_sources_truncated);
+        assert!(w
+            .duplicate_sources
+            .iter()
+            .all(|s| !s.contains('\\') && !s.contains('/')));
+        let row = dec
+            .iter()
+            .find(|d| d.role == DecisionRole::Unique)
+            .expect("u");
+        assert_eq!(row.duplicate_source_count, 10);
+        assert_eq!(
+            row.duplicate_sources.split('|').count(),
+            DUPLICATE_SOURCES_CAP
+        );
+        // Three-surface All-Custodians parity:
+        // 1) KeepEntry JSON fields
+        // 2) DecisionRecord unique-row CSV fields
+        // 3) export_messages fill pattern used by unique_pst_cmd
+        //    (duplicate_source_count + join("|") on keep winner basenames)
+        assert_eq!(w.duplicate_source_count, row.duplicate_source_count);
+        assert_eq!(w.duplicate_sources.join("|"), row.duplicate_sources);
+        let export_dup_count = w.duplicate_source_count;
+        let export_dup_sources = w.duplicate_sources.join("|");
+        assert_eq!(export_dup_count, row.duplicate_source_count);
+        assert_eq!(export_dup_sources, row.duplicate_sources);
+        assert_eq!(export_dup_sources.split('|').count(), DUPLICATE_SOURCES_CAP);
+        assert!(w.duplicate_sources_truncated);
+        // Basename-only: no absolute path separators in any surface string.
+        assert!(!export_dup_sources.contains('\\') && !export_dup_sources.contains('/'));
+        assert!(!row.duplicate_sources.contains('\\') && !row.duplicate_sources.contains('/'));
+    }
+
+    #[test]
+    fn winners_from_recoverable_signal_only() {
+        let mid = Some("ri@x");
+        let purge = item(
+            "C:/a.pst",
+            "a.pst",
+            "Top/Recoverable Items/Purges",
+            1,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+        );
+        // Sole member in recoverable — still wins; stat fires; hint non-empty.
+        let (ks, _) = build_keep_set(
+            vec![purge.clone()],
+            KeepPolicy::FirstSeen,
+            FamilyPolicy::default(),
+            &[],
+            true,
+        )
+        .expect("build");
+        assert_eq!(ks.stats.winners_from_recoverable_items, 1);
+        assert!(recoverable_items_hint(ks.stats.winners_from_recoverable_items).is_some());
+        assert_eq!(ks.winners[0].locus.nid, 1);
+
+        // With ladder on, same sole member still wins (nothing to demote against).
+        let mut ctx = RankContext::new(KeepPolicy::FirstSeen);
+        ctx.folder_rank = FolderRankMode::Builtin;
+        let (ks2, _) = build_keep_set_with_ctx(vec![purge], FamilyPolicy::default(), &ctx, true)
+            .expect("build");
+        assert_eq!(ks2.winners[0].locus.nid, 1);
+        assert_eq!(ks2.stats.winners_from_recoverable_items, 1);
+    }
+
+    #[test]
+    fn shuffled_input_identical_winners() {
+        let mid = Some("sh@x");
+        let a = item(
+            "C:/a.pst", "a.pst", "Inbox", 10, mid, [1; 32], 100, 0, false,
+        );
+        let b = item(
+            "C:/b.pst", "b.pst", "Inbox", 20, mid, [1; 32], 200, 1, false,
+        );
+        let c = item("C:/c.pst", "c.pst", "Inbox", 30, mid, [2; 32], 50, 2, false); // different hash
+        let (ks1, _) = build_keep_set(
+            vec![a.clone(), b.clone(), c.clone()],
+            KeepPolicy::KeepLargest,
+            FamilyPolicy::default(),
+            &[],
+            true,
+        )
+        .expect("b1");
+        let (ks2, _) = build_keep_set(
+            vec![c, b, a],
+            KeepPolicy::KeepLargest,
+            FamilyPolicy::default(),
+            &[],
+            true,
+        )
+        .expect("b2");
+        let nids1: Vec<_> = ks1.winners.iter().map(|w| w.locus.nid).collect();
+        let nids2: Vec<_> = ks2.winners.iter().map(|w| w.locus.nid).collect();
+        assert_eq!(nids1, nids2);
+    }
+
+    #[test]
+    fn pre_0075_keep_set_json_deserializes() {
+        // Minimal keep_set_v1 without 0075 winner fields.
+        let json = r#"{
+            "schema": "keep_set_v1",
+            "policy": "first_seen",
+            "family_policy": "keep_attachments_with_parent",
+            "winners": [{
+                "locus": {
+                    "source_path": "C:/a.pst",
+                    "source_pst": "a.pst",
+                    "folder_path": "Inbox",
+                    "nid": 1,
+                    "is_orphaned": false
+                },
+                "message_id_norm": "m@x",
+                "content_hash": "0101010101010101010101010101010101010101010101010101010101010101",
+                "edrm_mih_hex": null,
+                "integrity": {
+                    "degraded": false,
+                    "degraded_reasons": [],
+                    "is_orphaned": false
+                },
+                "size": 10
+            }],
+            "stats": {
+                "recoverable": 1,
+                "unique": 1,
+                "duplicates": 0,
+                "tier1_dups": 0,
+                "tier2_dups": 0,
+                "degraded_winners": 0,
+                "materialize_failed": 0,
+                "promoted_from_failure": 0,
+                "groups_dropped_materialize": 0,
+                "groups": 1
+            }
+        }"#;
+        let ks: KeepSet = serde_json::from_str(json).expect("deserialize pre-0075");
+        assert_eq!(ks.schema, KEEP_SET_SCHEMA);
+        assert_eq!(ks.winners.len(), 1);
+        assert!(ks.winners[0].folder_class.is_none());
+        assert_eq!(ks.stats.winners_from_recoverable_items, 0);
+    }
+
+    #[test]
+    fn default_flags_golden_first_seen_winners() {
+        // Golden: two same-MID, first_seen → lower scan_order / path wins.
+        let mid = Some("golden@x");
+        let a = item("C:/a.pst", "a.pst", "Inbox", 1, mid, [1; 32], 100, 0, false);
+        let b = item("C:/b.pst", "b.pst", "Inbox", 2, mid, [1; 32], 100, 1, false);
+        let (ks, dec) = build_keep_set(
+            vec![a, b],
+            KeepPolicy::FirstSeen,
+            FamilyPolicy::default(),
+            &[],
+            true,
+        )
+        .expect("build");
+        assert_eq!(ks.winners.len(), 1);
+        assert_eq!(ks.winners[0].locus.nid, 1);
+        assert_eq!(ks.winners[0].locus.source_pst, "a.pst");
+        // Pre-0075 role/tier columns still meaningful.
+        assert_eq!(
+            dec.iter()
+                .filter(|d| d.role == DecisionRole::Unique)
+                .count(),
+            1
+        );
+        assert_eq!(
+            dec.iter()
+                .find(|d| d.role == DecisionRole::DupOf)
+                .map(|d| d.tier.as_deref()),
+            Some(Some("message_id"))
         );
     }
 }

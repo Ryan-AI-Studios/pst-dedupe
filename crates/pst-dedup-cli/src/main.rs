@@ -161,7 +161,8 @@ enum Commands {
         /// PST path(s) via repeated `--input` (spec-style; merge with positionals).
         #[arg(long = "input", action = clap::ArgAction::Append)]
         input: Vec<PathBuf>,
-        /// Winner policy after fidelity: first_seen (default), keep_largest, prefer_path.
+        /// Winner policy after fidelity: first_seen (default), keep_largest, prefer_path, earliest_date.
+        /// Note: first_seen = sorted input-path order, not chronological send time.
         #[arg(long, default_value = "first_seen", value_parser = parse_keep_policy)]
         policy: KeepPolicy,
         /// Parent+attach family: keep_attachments_with_parent (default) or parents_only.
@@ -170,6 +171,24 @@ enum Commands {
         /// Path/folder substring preferred under prefer_path (repeatable).
         #[arg(long = "prefer-path-contains")]
         prefer_path_contains: Vec<String>,
+        /// Prefer BCC-bearing copy (sender-copy completeness; opt-in).
+        #[arg(long = "prefer-bcc-copy")]
+        prefer_bcc_copy: bool,
+        /// Enable built-in folder-class ladder (Sent Items > live > … > Recoverable Items).
+        #[arg(long = "prefer-folder-class")]
+        prefer_folder_class: bool,
+        /// Custom folder-rank pattern (repeatable, worst-last; segment globs; replaces built-in).
+        #[arg(long = "folder-rank", action = clap::ArgAction::Append)]
+        folder_rank: Vec<String>,
+        /// Ordered source preference substring (repeatable, best-first; unmatched worst).
+        #[arg(long = "source-rank", action = clap::ArgAction::Append)]
+        source_rank: Vec<String>,
+        /// Swap source_rank and folder_class rungs (folder before source).
+        #[arg(long = "rank-folder-class-first")]
+        rank_folder_class_first: bool,
+        /// Fidelity ranking: binary (default, pre-0075) or graded.
+        #[arg(long = "fidelity-rank", default_value = "binary", value_parser = parse_fidelity_rank)]
+        fidelity_rank: String,
         /// Streaming decision CSV (emitted only after resolve; every recoverable row).
         #[arg(long)]
         decision_csv: Option<PathBuf>,
@@ -216,7 +235,8 @@ enum Commands {
         /// Pack root directory (required). Created if missing; refuse non-empty unless `--overwrite`.
         #[arg(long)]
         out: PathBuf,
-        /// Winner policy after fidelity: first_seen (default), keep_largest, prefer_path.
+        /// Winner policy after fidelity: first_seen (default), keep_largest, prefer_path, earliest_date.
+        /// Note: first_seen = sorted input-path order, not chronological send time.
         #[arg(long, default_value = "first_seen", value_parser = parse_keep_policy)]
         policy: KeepPolicy,
         /// Parent+attach family: keep_attachments_with_parent (default) or parents_only.
@@ -225,6 +245,24 @@ enum Commands {
         /// Path/folder substring preferred under prefer_path (repeatable).
         #[arg(long = "prefer-path-contains")]
         prefer_path_contains: Vec<String>,
+        /// Prefer BCC-bearing copy (sender-copy completeness; opt-in).
+        #[arg(long = "prefer-bcc-copy")]
+        prefer_bcc_copy: bool,
+        /// Enable built-in folder-class ladder.
+        #[arg(long = "prefer-folder-class")]
+        prefer_folder_class: bool,
+        /// Custom folder-rank pattern (repeatable, worst-last; replaces built-in).
+        #[arg(long = "folder-rank", action = clap::ArgAction::Append)]
+        folder_rank: Vec<String>,
+        /// Ordered source preference (repeatable, best-first).
+        #[arg(long = "source-rank", action = clap::ArgAction::Append)]
+        source_rank: Vec<String>,
+        /// Swap source_rank and folder_class rungs.
+        #[arg(long = "rank-folder-class-first")]
+        rank_folder_class_first: bool,
+        /// Fidelity ranking: binary (default) or graded.
+        #[arg(long = "fidelity-rank", default_value = "binary", value_parser = parse_fidelity_rank)]
+        fidelity_rank: String,
         /// Streaming decision CSV (post-promotion roles).
         #[arg(long)]
         decision_csv: Option<PathBuf>,
@@ -873,6 +911,12 @@ fn run(cli: Cli) -> Result<()> {
             policy,
             family_policy,
             prefer_path_contains,
+            prefer_bcc_copy,
+            prefer_folder_class,
+            folder_rank,
+            source_rank,
+            rank_folder_class_first,
+            fidelity_rank,
             decision_csv,
             keep_set_json,
             materialize,
@@ -899,6 +943,12 @@ fn run(cli: Cli) -> Result<()> {
                 policy,
                 family_policy,
                 prefer_path_contains,
+                prefer_bcc_copy,
+                prefer_folder_class,
+                folder_rank,
+                source_rank,
+                rank_folder_class_first,
+                fidelity_rank,
                 decision_csv,
                 keep_set_json,
                 materialize,
@@ -921,6 +971,12 @@ fn run(cli: Cli) -> Result<()> {
             policy,
             family_policy,
             prefer_path_contains,
+            prefer_bcc_copy,
+            prefer_folder_class,
+            folder_rank,
+            source_rank,
+            rank_folder_class_first,
+            fidelity_rank,
             decision_csv,
             keep_set_json,
             manifest_json,
@@ -951,6 +1007,12 @@ fn run(cli: Cli) -> Result<()> {
                 policy,
                 family_policy,
                 prefer_path_contains,
+                prefer_bcc_copy,
+                prefer_folder_class,
+                folder_rank,
+                source_rank,
+                rank_folder_class_first,
+                fidelity_rank,
                 decision_csv,
                 keep_set_json,
                 manifest_json,
@@ -1150,8 +1212,19 @@ fn parse_deep_attach_level(s: &str) -> std::result::Result<String, String> {
 
 fn parse_keep_policy(s: &str) -> std::result::Result<KeepPolicy, String> {
     KeepPolicy::parse(s).ok_or_else(|| {
-        format!("invalid policy '{s}': expected first_seen, keep_largest, or prefer_path")
+        format!(
+            "invalid policy '{s}': expected first_seen, keep_largest, prefer_path, or earliest_date"
+        )
     })
+}
+
+fn parse_fidelity_rank(s: &str) -> std::result::Result<String, String> {
+    match s {
+        "binary" | "graded" => Ok(s.to_string()),
+        _ => Err(format!(
+            "invalid fidelity-rank '{s}': expected binary or graded"
+        )),
+    }
 }
 
 fn parse_family_policy(s: &str) -> std::result::Result<FamilyPolicy, String> {

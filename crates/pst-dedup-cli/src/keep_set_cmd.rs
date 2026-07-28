@@ -7,8 +7,9 @@ use std::path::PathBuf;
 
 use dedup_engine::integrity::{IntegrityThresholds, ScanMode, SCAN_INTEGRITY_SCHEMA};
 use dedup_engine::keepset::{
-    finalize_with_materialize, resolve_groups, sort_input_paths, write_keep_set_json,
-    DecisionCsvWriter, FamilyPolicy, KeepPolicy, KeepSetProvenance,
+    finalize_with_materialize, recoverable_items_hint, resolve_groups_with_ctx, sort_input_paths,
+    write_keep_set_json, DecisionCsvWriter, FamilyPolicy, FidelityMode, FolderRankMode, KeepPolicy,
+    KeepSetProvenance, RankContext,
 };
 use serde::Serialize;
 
@@ -22,6 +23,12 @@ pub struct KeepSetCliArgs {
     pub policy: KeepPolicy,
     pub family_policy: FamilyPolicy,
     pub prefer_path_contains: Vec<String>,
+    pub prefer_bcc_copy: bool,
+    pub prefer_folder_class: bool,
+    pub folder_rank: Vec<String>,
+    pub source_rank: Vec<String>,
+    pub rank_folder_class_first: bool,
+    pub fidelity_rank: String,
     pub decision_csv: Option<PathBuf>,
     pub keep_set_json: Option<PathBuf>,
     pub materialize: bool,
@@ -35,6 +42,37 @@ pub struct KeepSetCliArgs {
     pub allow_failed_files: bool,
     pub integrity_csv: Option<PathBuf>,
     pub skip_limit: usize,
+}
+
+/// Build [`RankContext`] from CLI keep-set / unique-* flags (0075).
+#[allow(clippy::too_many_arguments)]
+pub fn rank_context_from_cli(
+    policy: KeepPolicy,
+    prefer_path_contains: &[String],
+    prefer_bcc_copy: bool,
+    prefer_folder_class: bool,
+    folder_rank: &[String],
+    source_rank: &[String],
+    rank_folder_class_first: bool,
+    fidelity_rank: &str,
+) -> RankContext {
+    let folder_rank_mode = if !folder_rank.is_empty() {
+        FolderRankMode::Custom(folder_rank.to_vec())
+    } else if prefer_folder_class {
+        FolderRankMode::Builtin
+    } else {
+        FolderRankMode::Off
+    };
+    let fidelity_mode = FidelityMode::parse(fidelity_rank).unwrap_or(FidelityMode::Binary);
+    RankContext {
+        policy,
+        prefer_path: prefer_path_contains.to_vec(),
+        prefer_bcc_copy,
+        source_rank_patterns: source_rank.to_vec(),
+        folder_rank: folder_rank_mode,
+        folder_class_first: rank_folder_class_first,
+        fidelity_mode,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -84,12 +122,21 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
         input_files: paths.iter().map(|p| p.display().to_string()).collect(),
     };
 
-    // Phase 2: resolve (fidelity → policy → deterministic order).
-    let mut resolved = resolve_groups(
-        outcome.candidates,
+    // Phase 2: resolve (fidelity → evidence rungs → policy → path/nid).
+    let rank_ctx = rank_context_from_cli(
         args.policy,
-        args.family_policy,
         &args.prefer_path_contains,
+        args.prefer_bcc_copy,
+        args.prefer_folder_class,
+        &args.folder_rank,
+        &args.source_rank,
+        args.rank_folder_class_first,
+        &args.fidelity_rank,
+    );
+    let mut resolved = resolve_groups_with_ctx(
+        outcome.candidates,
+        args.family_policy,
+        &rank_ctx,
         !args.no_tier2,
         Some(provenance),
     );
@@ -105,6 +152,11 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
 
     // Phase 3: stream decision CSV + keep-set JSON from finalized roles.
     let keep_set = resolved.to_keep_set();
+    if let Some(hint) = recoverable_items_hint(keep_set.stats.winners_from_recoverable_items) {
+        if !args.json {
+            eprintln!("note: {hint}");
+        }
+    }
 
     let mut decision_csv_out: Option<String> = None;
     if let Some(path) = &args.decision_csv {
@@ -189,6 +241,19 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
         keep_set.stats.materialize_failed,
         keep_set.stats.promoted_from_failure,
         keep_set.stats.groups_dropped_materialize
+    );
+    // 0075 honesty counters (always printed, including when 0).
+    println!(
+        "  winners_from_recoverable_items: {}",
+        keep_set.stats.winners_from_recoverable_items
+    );
+    println!(
+        "  winners_without_bcc_peer_had_bcc: {}",
+        keep_set.stats.winners_without_bcc_peer_had_bcc
+    );
+    println!(
+        "  groups_date_source_mixed: {}",
+        keep_set.stats.groups_date_source_mixed
     );
     println!(
         "  scan: skipped={} failed_files={} preflight={}",

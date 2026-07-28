@@ -695,7 +695,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0066-disk-groups | — | Disk-backed group/candidate store for multi-million message runs | P0 holds O(n) candidate metadata in RAM; streaming outputs only | residual / scale |
 | D-0066-materialize-dir | — | Optional `--materialize-dir` smoke export of winner bodies | **Closed by 0067** — product surface is `pst-dedup unique-eml --out` (volume-batched EML pack) | **closed / 0067** |
 | D-0066-soft-body | P3 | Soft partial body bytes on materialize when extract returns incomplete | P0 surfaces `BODY_UNAVAILABLE` / scan degraded flags; no partial-byte recovery | residual (D-0065-soft-body) |
-| D-0066-fine-fidelity | — | Multi-level fidelity rank (soft reasons vs body/attach loss) | P0: non-degraded beats degraded only | residual polish |
+| D-0066-fine-fidelity | — | Multi-level fidelity rank (soft reasons vs body/attach loss) | **Closed in 0075** (`--fidelity-rank graded`; binary remains default) | **closed / 0075** |
 
 ## From track 0067-UniqueEmlPackCli (residuals)
 
@@ -776,6 +776,16 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0074-crc-fixture | P3 | Synthetic corrupt-attach PST E2E for CRC/open/read | Unit mapping + mock readers cover codes; no committed corrupt PST fixture | residual polish |
 | D-0074-timeout-join | P3 | Join/cancel timed-out per-attach probe worker | `recv_timeout` returns ATTACH_PROBE_TIMEOUT; worker may finish in background; budget charged | residual polish |
 | D-0074-e2e-fixture | P3 | Full production-path §3.11 fixture matrix (scan JSON/CSV + unique-pst) | Locked unit matrix green; multi-file fixture E2E residual | residual polish |
+
+## From track 0075-KeepSetWinnerPolicies
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0075-scope | — | Custodial / vertical dedupe (`--dedupe-scope per-source`) | Grouping change, not winner change; out of 0075 | residual / propose track |
+| D-0075-gui | P3 | Desk free-text `--folder-rank` / `--source-rank` lists | Wizard has earliest_date + Prefer folder class + Prefer BCC; ordered lists CLI-only | residual polish |
+| D-0075-storeids | — | Store-EntryID special-folder detection (`PidTagIpmWastebasketEntryId`, …) | Keyword ladder + `--folder-rank` sufficient for P0 | residual |
+| D-0075-locale | — | Localized folder-name packs (zh/de/fr/ja) | Segment globs are workaround only | residual |
+| (soft-close) | — | D-0066-fine-fidelity | **Closed in 0075** via opt-in `--fidelity-rank graded` | **closed / 0075** |
 
 ## From track 0062-ReleaseHardeningRc
 
