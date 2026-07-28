@@ -9,10 +9,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::keep_set_cmd::rank_context_from_cli;
 use dedup_engine::integrity::{IntegrityThresholds, ScanMode, SCAN_INTEGRITY_SCHEMA};
 use dedup_engine::keepset::{
-    finalize_with_materialize, resolve_groups, sort_input_paths, write_keep_set_json,
-    DecisionCsvWriter, FamilyPolicy, KeepPolicy, KeepSetProvenance, MessageMaterializer,
+    finalize_with_materialize, recoverable_items_hint, resolve_groups_with_ctx, sort_input_paths,
+    write_keep_set_json, DecisionCsvWriter, FamilyPolicy, KeepPolicy, KeepSetProvenance,
+    MessageMaterializer,
 };
 use dedup_engine::{
     clamp_files_per_volume, merge_pack_degraded, validate_volume_prefix, write_canonical_eml,
@@ -33,6 +35,12 @@ pub struct UniqueEmlCliArgs {
     pub policy: KeepPolicy,
     pub family_policy: FamilyPolicy,
     pub prefer_path_contains: Vec<String>,
+    pub prefer_bcc_copy: bool,
+    pub prefer_folder_class: bool,
+    pub folder_rank: Vec<String>,
+    pub source_rank: Vec<String>,
+    pub rank_folder_class_first: bool,
+    pub fidelity_rank: String,
     pub decision_csv: Option<PathBuf>,
     pub keep_set_json: Option<PathBuf>,
     pub manifest_json: Option<PathBuf>,
@@ -148,12 +156,21 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
         input_files: paths.iter().map(|p| p.display().to_string()).collect(),
     };
 
-    // Phase 2: resolve (fidelity → policy → deterministic order).
-    let mut resolved = resolve_groups(
-        outcome.candidates,
+    // Phase 2: resolve (fidelity → evidence rungs → policy → path/nid).
+    let rank_ctx = rank_context_from_cli(
         args.policy,
-        args.family_policy,
         &args.prefer_path_contains,
+        args.prefer_bcc_copy,
+        args.prefer_folder_class,
+        &args.folder_rank,
+        &args.source_rank,
+        args.rank_folder_class_first,
+        &args.fidelity_rank,
+    );
+    let mut resolved = resolve_groups_with_ctx(
+        outcome.candidates,
+        args.family_policy,
+        &rank_ctx,
         !args.no_tier2,
         Some(provenance),
     );
@@ -171,6 +188,11 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
         .map_err(|e| CliError::Msg(format!("materialize/promote: {e}")))?;
 
     let keep_set = resolved.to_keep_set();
+    if let Some(hint) = recoverable_items_hint(keep_set.stats.winners_from_recoverable_items) {
+        if !args.json {
+            eprintln!("note: {hint}");
+        }
+    }
 
     // Phase 2c: write EMLs in keep_set.winners order (path+nid), re-materializing each
     // winner once so export counters match keep_set.json stability without holding all bodies.
@@ -380,6 +402,19 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<()> {
         "  degraded winners: {}  files_per_volume: {files_per_volume}",
         keep_set.stats.degraded_winners
     );
+    // 0075 honesty counters (always printed, including when 0).
+    println!(
+        "  winners_from_recoverable_items: {}",
+        keep_set.stats.winners_from_recoverable_items
+    );
+    println!(
+        "  winners_without_bcc_peer_had_bcc: {}",
+        keep_set.stats.winners_without_bcc_peer_had_bcc
+    );
+    println!(
+        "  groups_date_source_mixed: {}",
+        keep_set.stats.groups_date_source_mixed
+    );
     println!("  manifest:      {}", manifest_path.display());
     if let Some(p) = &decision_csv_out {
         println!("  decision_csv:  {p}");
@@ -583,6 +618,11 @@ mod tests {
             integrity: RecoverableIntegrity::clean(),
             size: 100,
             promoted_from_failure: false,
+            folder_class: None,
+            decided_by: None,
+            duplicate_source_count: 0,
+            duplicate_sources: vec![],
+            duplicate_sources_truncated: false,
         };
         let ks = KeepSet {
             schema: "keep_set_v1".into(),
@@ -601,6 +641,7 @@ mod tests {
                 promoted_from_failure: 0,
                 groups_dropped_materialize: 0,
                 groups: 1,
+                ..KeepSetStats::default()
             },
         };
         // Export loop is `for entry in &keep_set.winners` — count matches unique.

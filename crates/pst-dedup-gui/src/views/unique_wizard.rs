@@ -102,6 +102,7 @@ pub fn show_options(ui: &mut egui::Ui, app: &mut PstDedupApp) {
                 ui.selectable_value(&mut policy, KeepPolicy::FirstSeen, "first_seen");
                 ui.selectable_value(&mut policy, KeepPolicy::KeepLargest, "keep_largest");
                 ui.selectable_value(&mut policy, KeepPolicy::PreferPath, "prefer_path");
+                ui.selectable_value(&mut policy, KeepPolicy::EarliestDate, "earliest_date");
             });
         app.unique_form_mut().policy = policy;
     });
@@ -120,6 +121,33 @@ pub fn show_options(ui: &mut egui::Ui, app: &mut PstDedupApp) {
             "Winners prefer source/folder paths matching any substring (case-insensitive).",
         );
     }
+    if app.unique_form().policy == KeepPolicy::EarliestDate {
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "earliest_date uses submit time (delivery fallback). Duplicates often share the same sent time — ties fall through to path order. Missing dates sort last.",
+        );
+    }
+    if app.unique_form().policy == KeepPolicy::FirstSeen {
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "first_seen = sorted input-path order (not chronological). Use source-rank / folder-class flags on CLI for custodian priority.",
+        );
+    }
+
+    ui.horizontal(|ui| {
+        ui.checkbox(
+            &mut app.unique_form_mut().prefer_folder_class,
+            "Prefer folder class",
+        );
+        ui.checkbox(
+            &mut app.unique_form_mut().prefer_bcc_copy,
+            "Prefer BCC copy",
+        );
+    });
+    ui.colored_label(
+        egui::Color32::GRAY,
+        "Folder class prefers Sent Items / live mail over Recoverable Items. BCC prefers the sender's complete copy.",
+    );
 
     ui.horizontal(|ui| {
         ui.label("Family:");

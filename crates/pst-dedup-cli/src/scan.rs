@@ -733,6 +733,11 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                         // Deep attach preflight needs loci even when keep-set candidates
                         // are not otherwise retained (0074).
                         if opts.retain_candidates || opts.deep_attach_preflight {
+                            let has_bcc = props
+                                .display_bcc
+                                .as_deref()
+                                .map(|s| !s.trim().is_empty())
+                                .unwrap_or(false);
                             candidates.push(RecoverableScanItem {
                                 locus: MessageLocus {
                                     source_path: path_str.clone(),
@@ -746,6 +751,9 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                                 size: msg_ref.size,
                                 integrity: integrity.clone(),
                                 scan_order,
+                                submit_time: props.submit_time,
+                                delivery_time: props.delivery_time,
+                                has_bcc,
                             });
                             scan_order += 1;
                         }
@@ -1365,6 +1373,9 @@ mod tests {
             size: 100,
             integrity: RecoverableIntegrity::clean(),
             scan_order: 1,
+            submit_time: None,
+            delivery_time: None,
+            has_bcc: false,
         };
         let mut refs = HashMap::new();
         refs.insert(("a.pst".into(), 2u64), dup_ref);
@@ -1397,6 +1408,9 @@ mod tests {
             size: 50,
             integrity: RecoverableIntegrity::clean(),
             scan_order: 0,
+            submit_time: None,
+            delivery_time: None,
+            has_bcc: false,
         };
         let c2 = RecoverableScanItem {
             locus: MessageLocus {
@@ -1411,6 +1425,9 @@ mod tests {
             size: 50,
             integrity: RecoverableIntegrity::clean(),
             scan_order: 1,
+            submit_time: None,
+            delivery_time: None,
+            has_bcc: false,
         };
         // Pass in reverse order; scan_order must still make nid=10 the winner.
         let rebuild = rebuild_dedup_results(&[c2, c1], &HashMap::new(), true);
@@ -1527,6 +1544,9 @@ mod tests {
                 false,
             ),
             scan_order: 1,
+            submit_time: None,
+            delivery_time: None,
+            has_bcc: false,
         };
         recompute_per_file_degraded_from_candidates(&mut files, &[cand]);
         assert_eq!(files[0].degraded_messages, 1);

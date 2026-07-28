@@ -144,6 +144,10 @@ pub struct UniqueWizardForm {
     pub folder_layout: FolderLayoutArg,
     /// Comma-separated path substrings for `prefer_path` policy.
     pub prefer_path_text: String,
+    /// Prefer BCC-bearing copy (0075).
+    pub prefer_bcc_copy: bool,
+    /// Prefer built-in folder-class ladder (0075).
+    pub prefer_folder_class: bool,
     /// When true, max-volume soft limit is enabled (default 10 GiB when enabled).
     pub max_volume_enabled: bool,
     pub max_volume_text: String,
@@ -165,6 +169,8 @@ impl Default for UniqueWizardForm {
             family_policy: FamilyPolicy::KeepAttachmentsWithParent,
             folder_layout: FolderLayoutArg::Preserve,
             prefer_path_text: String::new(),
+            prefer_bcc_copy: false,
+            prefer_folder_class: false,
             max_volume_enabled: false,
             max_volume_text: "10737418240".into(), // 10 GiB
             mode: ScanMode::BestEffort,
@@ -342,6 +348,12 @@ impl UniqueWizardForm {
             policy: self.policy,
             family_policy: self.family_policy,
             prefer_path_contains: self.prefer_path_contains(),
+            prefer_bcc_copy: self.prefer_bcc_copy,
+            prefer_folder_class: self.prefer_folder_class,
+            folder_rank: vec![],
+            source_rank: vec![],
+            rank_folder_class_first: false,
+            fidelity_rank: "binary".into(),
             decision_csv: None,
             keep_set_json: None,
             folder_layout: self.folder_layout,
@@ -506,6 +518,27 @@ mod tests {
             args.prefer_path_contains,
             vec!["Primary".to_string(), "Archive".to_string()]
         );
+        assert!(!args.prefer_bcc_copy);
+        assert!(!args.prefer_folder_class);
+        assert_eq!(args.fidelity_rank, "binary");
+    }
+
+    #[test]
+    fn args_mapping_0075_flags() {
+        let form = UniqueWizardForm {
+            inputs: vec![PathBuf::from(r"C:\data\a.pst")],
+            out: Some(PathBuf::from(r"C:\export\unique.pst")),
+            policy: KeepPolicy::EarliestDate,
+            prefer_bcc_copy: true,
+            prefer_folder_class: true,
+            ..Default::default()
+        };
+        let args = form.to_cli_args().expect("map");
+        assert_eq!(args.policy, KeepPolicy::EarliestDate);
+        assert!(args.prefer_bcc_copy);
+        assert!(args.prefer_folder_class);
+        assert!(args.folder_rank.is_empty());
+        assert!(args.source_rank.is_empty());
     }
 
     #[test]

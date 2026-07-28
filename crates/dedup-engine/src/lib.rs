@@ -37,11 +37,17 @@ pub use integrity::{
     PreflightRecommendation, PreflightReport, ScanMode, SkipRecord, SCAN_INTEGRITY_SCHEMA,
 };
 pub use keepset::{
-    build_keep_set, build_keep_set_materialized, edrm_mih_hex, finalize_with_materialize,
-    group_candidates, sort_input_paths, write_keep_set_json, CanonicalAttachment, CanonicalMessage,
-    DecisionCsvWriter, DecisionRecord, DecisionRole, FamilyPolicy, KeepEntry, KeepPolicy, KeepSet,
-    KeepSetError, KeepSetProvenance, KeepSetStats, MaterializeBuildOpts, MaterializeError,
-    MessageLocus, MessageMaterializer, RecoverableScanItem, ResolvedKeepSet, KEEP_SET_SCHEMA,
+    build_keep_set, build_keep_set_materialized, build_keep_set_with_ctx, classify_folder,
+    decided_by_rung, duplicate_source_aggregate, edrm_mih_hex, fidelity_rank,
+    fidelity_rank_with_mode, finalize_with_materialize, folder_class_and_rank,
+    format_date_filetime_utc, group_candidates, rank_key, reason_fidelity_tier,
+    recoverable_items_hint, resolve_groups, resolve_groups_with_ctx, resolve_item_date,
+    segment_glob_match, sort_input_paths, source_rank_of, write_keep_set_json, CanonicalAttachment,
+    CanonicalMessage, DateSource, DecisionCsvWriter, DecisionRecord, DecisionRole, FamilyPolicy,
+    FidelityMode, FolderClass, FolderRankMode, KeepEntry, KeepPolicy, KeepSet, KeepSetError,
+    KeepSetProvenance, KeepSetStats, MaterializeBuildOpts, MaterializeError, MessageLocus,
+    MessageMaterializer, RankContext, RankKey, RecoverableScanItem, ResolvedKeepSet,
+    DECISION_CSV_HEADER, DECISION_CSV_HEADER_V1, DUPLICATE_SOURCES_CAP, KEEP_SET_SCHEMA,
 };
 pub use report::{write_csv_report, StreamingCsvReportWriter};
 pub use util::{filetime_to_unix, format_bytes, truncate_utf8};

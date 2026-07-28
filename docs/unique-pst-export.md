@@ -31,6 +31,13 @@ Source PSTs are **read-only**. The writer never mutates inputs.
 | `--report-dir <dir>` | Default: sibling of `--out` stem + `_report` (e.g. `unique.pst` → `unique_report`) |
 | `--input` / positionals | One or more source PSTs |
 | Keep-set / integrity | Same family as `unique-eml` (`--policy`, `--family-policy`, `--mode`, thresholds, …) |
+| `--policy earliest_date` | Prefer earliest submit time (delivery fallback; missing last). See [Winner policies](#winner-policies). |
+| `--prefer-bcc-copy` | Prefer copy with non-empty PidTagDisplayBcc (sender-copy completeness) |
+| `--prefer-folder-class` | Built-in folder ladder (Sent Items > live > … > Recoverable Items) |
+| `--folder-rank <PATTERN>` | Custom folder demotion ladder (repeatable, worst-last; segment globs; replaces built-in) |
+| `--source-rank <SUBSTRING>` | Ordered source preference (repeatable, best-first; unmatched worst) |
+| `--rank-folder-class-first` | Swap source_rank ↔ folder_class rungs |
+| `--fidelity-rank binary\|graded` | Binary (default, pre-0075) or multi-tier graded fidelity |
 | `--folder-layout` | `preserve` (default) or `flat` |
 | `--max-volume-bytes` | Soft physical-size ceiling; **off** = single volume |
 | `--overwrite` | Required to replace existing `--out` / non-empty report-dir |
@@ -113,15 +120,93 @@ Free-text cells in `export_attachments.csv` and `export_messages.csv` neutralize
 
 ### `export_messages.csv` (mandatory)
 
-Fixed columns (prefix locked; **0073** appends one column at the end):
+Fixed columns (prefix locked; **0073**/**0075** append only):
 
 ```text
-source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count
+source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources
 ```
 
 One row per **successfully written** unique winner. **No body text** columns.
 
 `attachments_failed_count` is the number of **fail-severity** attach outcomes for that message on the write path (left-join alternative: count fail rows in `export_attachments.csv` for the same `source_path` + `msg_nid`).
+
+`duplicate_source_count` / `duplicate_sources` (**0075**): “All Custodians” aggregate — distinct **source PST basenames** (not absolute paths) that held a suppressed copy of this winner, `|`-delimited, capped at 8 (same values as decision CSV unique rows and `keep_set_v1` JSON).
+
+## Winner policies
+
+Keep-set chooses one exportable copy per identity group. With **no** 0075 flags, winners match pre-0075 behavior.
+
+### Rank ladder (lower is better)
+
+```text
+fidelity → bcc_completeness → source_rank → folder_class → policy → path_key → nid
+```
+
+- New rungs are **constant 0** when their flags are off (zero silent change).
+- `--source-rank` outranks `folder_class` by default (explicit custodian/file preference beats a folder heuristic).
+- `--rank-folder-class-first` swaps only those two adjacent rungs.
+- Every comparison terminates in `(path_key, nid)` for determinism.
+
+### Policies (`--policy`)
+
+| Policy | Meaning |
+|---|---|
+| `first_seen` (**default**) | **Sorted input-path order**, then scan index — **not** chronological send time. Matches Relativity’s “first published copy is master”. |
+| `keep_largest` | Prefer largest message size |
+| `prefer_path` | Prefer paths matching `--prefer-path-contains` (unordered boolean) |
+| `earliest_date` | Prefer earliest **submit** FILETIME; **delivery** only if submit missing on that item; missing/≤0 sorts **last** |
+
+**Honesty — `first_seen`:** if `INC0102784-2.pst` sorts before `INC0102784.pst` by absolute path, the `-2` file can crown winners even when the primary file is preferred operationally. Remedy: `--source-rank INC0102784.pst --source-rank INC0102784-2.pst`.
+
+**Honesty — `earliest_date`:** duplicate copies usually share the same sent time, so this policy often ties and falls through to path order. Real effects: demoting undated dumpster/Versions copies, and Tier-1 groups whose members genuinely differ. **Tier-2 groups cannot differ on submit time** (submit is already in the content hash) — `earliest_date` is a no-op inside a pure Tier-2 group. Never invent dates from mtime / LastModificationTime / wall clock.
+
+### Sender-copy / BCC (`--prefer-bcc-copy`)
+
+In a Message-ID group, the sender’s Sent Items copy is often the only one carrying BCC (stripped in transport). Enable **`--prefer-bcc-copy`** with **`--prefer-folder-class`** together when BCC evidence matters. Empty/whitespace BCC counts as absent (never fabricated). Stats always include `winners_without_bcc_peer_had_bcc` so silent BCC loss is visible even when the flag is off.
+
+### Folder-class ladder (`--prefer-folder-class`)
+
+Whole-segment, case-insensitive matching. Recoverable Items children are **parent-qualified** (`Purges` alone does not demote a user folder named Purges).
+
+| Rank | Class | Matches |
+|---|---|---|
+| 0 | `sent_items` | Sent Items, Sent Mail |
+| 1 | `primary` | Inbox / user folders (default when ladder off) |
+| 2 | `archive` | Archive, Online Archive, In-Place Archive* |
+| 3 | `junk_email` | Junk Email, Junk E-mail, Spam |
+| 4 | `drafts` | Drafts |
+| 5 | `outbox` | Outbox |
+| 6 | `deleted_items` | Deleted Items |
+| 7–12 | `recoverable_*` | Under Recoverable Items: Deletions, holds, Purges, Versions, ops, other |
+
+**Judgments:** sent_items above primary (richest evidence); drafts/outbox below junk (non-transmitted); recoverable_versions **below** purges (copy-on-write **modified** originals may be structurally altered — subject/body/attachments/participants/dates — yet still tie on submit_time; the folder ladder separates them, not `earliest_date`).
+
+When any winner is from Recoverable Items, the run reports `winners_from_recoverable_items` and a human hint recommending `--prefer-folder-class` — **signal only** (winners unchanged unless the flag is on).
+
+**Custom `--folder-rank`:** ordered **worst-last**; rank = `1 + first match index`; unmatched = **best** (0). Segment globs: `*` at start and/or end of a segment only (`*Purges`, `*Element*`). No regex. Supplying any `--folder-rank` **replaces** the built-in ladder.
+
+### Source rank (`--source-rank`)
+
+Ordered **best-first** substrings against the absolute source path (Windows lowercased). Unmatched = **worst** (`patterns.len()`). Documented asymmetry vs folder-rank:
+
+| Flag | Enumerates | Unmatched |
+|---|---|---|
+| `--folder-rank` | Bad places | Best |
+| `--source-rank` | Preferred files/custodians | Worst |
+
+### Graded fidelity (`--fidelity-rank graded`)
+
+Default remains **binary** (clean=0, any degraded/orphaned=1). Graded uses worst tier across integrity reasons: soft attach meta (1) < attach payload (2) < body (3) < structural (4).
+
+### Explainability columns
+
+Decision CSV appends (end of row): `folder_class`, `folder_class_rank`, `source_rank`, `has_bcc`, `date_filetime_utc`, `date_source`, `decided_by`, `duplicate_source_count`, `duplicate_sources`.
+
+**`decided_by` vocabulary:** `sole_member`, `fidelity`, `bcc_completeness`, `source_rank`, `folder_class`, `policy_first_seen`, `policy_keep_largest`, `policy_prefer_path`, `policy_earliest_date`, `path_order`, `nid`, `promoted_after_materialize_fail`.
+
+**`date_source`:** `submit` | `delivery` | `none`.
+
+Cross-links: **0080** QC sampling by `folder_class`; **0081** operator runbook (which policy for which collection).
 
 ### `export_attachments.csv` (0073; `--attach-ledger=full`)
 
