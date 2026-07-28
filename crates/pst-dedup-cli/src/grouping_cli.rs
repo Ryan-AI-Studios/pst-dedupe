@@ -39,6 +39,7 @@ pub fn grouping_context_from_cli(
     tier1_verify: &str,
     allow_cross_mid_tier2: bool,
     allow_degenerate_tier2: bool,
+    allow_crc_suspect_tier2: bool,
     tier1_backfill: bool,
     ignore_inline_attachments: bool,
 ) -> Result<GroupingContext, String> {
@@ -54,6 +55,7 @@ pub fn grouping_context_from_cli(
         identity,
         tier1_verify,
         allow_degenerate_tier2,
+        allow_crc_suspect_tier2,
         allow_cross_mid_tier2,
         tier1_backfill,
         ignore_inline_attachments,
@@ -73,6 +75,12 @@ pub fn format_grouping_stats_human(stats: &GroupingStats) -> Vec<String> {
         lines.push(format!(
             "  tier2 blocked (degenerate preimage): {}",
             stats.tier2_blocked_degenerate
+        ));
+    }
+    if stats.tier2_blocked_crc_suspect > 0 {
+        lines.push(format!(
+            "  tier2 blocked (CRC_SUSPECT): {}",
+            stats.tier2_blocked_crc_suspect
         ));
     }
     if stats.cross_mid_blocked > 0 {

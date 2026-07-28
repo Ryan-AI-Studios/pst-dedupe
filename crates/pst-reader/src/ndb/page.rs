@@ -104,14 +104,11 @@ impl RawPage {
         // NOTE: CRC validation is currently warning-only because some fixtures/
         // implementations use a non-standard CRC polynomial. MS-PST §2.2.2.7.1.1
         // implies standard CRC32, but real-world PSTs often deviate.
+        // 0077: count + rate-limit via integrity_telemetry (still non-fatal).
+        crate::integrity_telemetry::note_page_read();
         let computed = compute_crc32(&self.data[..PAGE_DATA_SIZE]);
         if computed != trailer.dw_crc {
-            tracing::warn!(
-                "Page CRC mismatch at bid=0x{:016X}: computed={:08X}, stored={:08X}",
-                trailer.bid,
-                computed,
-                trailer.dw_crc
-            );
+            crate::integrity_telemetry::note_page_crc(trailer.bid, computed, trailer.dw_crc);
         }
 
         Ok(())

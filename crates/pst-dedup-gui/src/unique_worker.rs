@@ -72,6 +72,8 @@ pub struct UniqueOutcomeView {
     pub volume_count: usize,
     pub volumes: Vec<VolumeDigestView>,
     pub error_message: Option<String>,
+    /// Post-export risk (0077); qualifies the Done banner.
+    pub export_risk: dedup_engine::integrity::PreflightRecommendation,
 }
 
 impl From<UniquePstOutcome> for UniqueOutcomeView {
@@ -87,7 +89,39 @@ impl From<UniquePstOutcome> for UniqueOutcomeView {
             volume_count: o.volume_count,
             volumes: o.volumes.into_iter().map(VolumeDigestView::from).collect(),
             error_message: o.error_message,
+            export_risk: o.export_risk,
         }
+    }
+}
+
+/// Banner kind for the unique-wizard Done screen (0077 DoD-23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UniqueDoneBanner {
+    /// Green "Export completed successfully." — only when ok and risk is Ok.
+    SuccessOk,
+    /// Yellow — re_export_recommended.
+    RiskReExport,
+    /// Red — not_export_ready.
+    RiskNotReady,
+    /// Cancelled path.
+    Cancelled,
+    /// Hard failure / errors.
+    Error,
+}
+
+/// Map outcome → banner (unit-testable; no egui).
+pub fn unique_done_banner(outcome: &UniqueOutcomeView) -> UniqueDoneBanner {
+    use dedup_engine::integrity::PreflightRecommendation;
+    if outcome.cancelled {
+        return UniqueDoneBanner::Cancelled;
+    }
+    if !outcome.ok {
+        return UniqueDoneBanner::Error;
+    }
+    match outcome.export_risk {
+        PreflightRecommendation::Ok => UniqueDoneBanner::SuccessOk,
+        PreflightRecommendation::ReExportRecommended => UniqueDoneBanner::RiskReExport,
+        PreflightRecommendation::NotExportReady => UniqueDoneBanner::RiskNotReady,
     }
 }
 
@@ -266,6 +300,7 @@ pub fn run_unique_pst_worker(
             volume_count: 0,
             volumes: vec![],
             error_message: Some(e.to_string()),
+            export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
         },
     };
 
@@ -290,7 +325,60 @@ pub fn run_unique_pst_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dedup_engine::integrity::PreflightRecommendation;
     use std::sync::atomic::AtomicU64;
+
+    fn sample_outcome(
+        ok: bool,
+        cancelled: bool,
+        risk: PreflightRecommendation,
+    ) -> UniqueOutcomeView {
+        UniqueOutcomeView {
+            ok,
+            cancelled,
+            report_dir: std::path::PathBuf::from("r"),
+            summary_path: std::path::PathBuf::from("s"),
+            out: std::path::PathBuf::from("o"),
+            messages_written_total: 1,
+            unique: 1,
+            volume_count: 1,
+            volumes: vec![],
+            error_message: None,
+            export_risk: risk,
+        }
+    }
+
+    #[test]
+    fn unique_done_banner_mapping() {
+        assert_eq!(
+            unique_done_banner(&sample_outcome(true, false, PreflightRecommendation::Ok)),
+            UniqueDoneBanner::SuccessOk
+        );
+        assert_eq!(
+            unique_done_banner(&sample_outcome(
+                true,
+                false,
+                PreflightRecommendation::ReExportRecommended
+            )),
+            UniqueDoneBanner::RiskReExport
+        );
+        assert_eq!(
+            unique_done_banner(&sample_outcome(
+                true,
+                false,
+                PreflightRecommendation::NotExportReady
+            )),
+            UniqueDoneBanner::RiskNotReady
+        );
+        assert_eq!(
+            unique_done_banner(&sample_outcome(true, true, PreflightRecommendation::Ok)),
+            UniqueDoneBanner::Cancelled
+        );
+        assert_eq!(
+            unique_done_banner(&sample_outcome(false, false, PreflightRecommendation::Ok)),
+            UniqueDoneBanner::Error
+        );
+    }
 
     #[test]
     fn repaint_throttle_first_call_allows_then_rapid_blocked() {

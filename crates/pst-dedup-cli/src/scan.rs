@@ -20,7 +20,7 @@ use dedup_engine::{
     DedupIndex, DedupResult, GroupingContext, GroupingStats, IndexItem, MessageRef,
 };
 use pst_reader::PstFile;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{CliError, Result};
 
@@ -95,7 +95,7 @@ fn scan_cancel_requested(cancel: &Option<Arc<AtomicBool>>) -> bool {
 }
 
 /// Per-file outcome with integrity status.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileScanStats {
     pub path: String,
     pub name: String,
@@ -110,10 +110,37 @@ pub struct FileScanStats {
     pub degraded_by_reason: BTreeMap<String, u64>,
     pub error_code: Option<IntegrityReason>,
     pub error: Option<String>,
+    /// Page CRC mismatches observed while reading this source (0077).
+    #[serde(default)]
+    pub page_crc_mismatches: u64,
+    /// Block CRC mismatches observed while reading this source (0077).
+    #[serde(default)]
+    pub block_crc_mismatches: u64,
+    /// Block BID mismatches observed while reading this source (0077).
+    #[serde(default)]
+    pub block_bid_mismatches: u64,
+    /// Distinct bad BIDs observed while this source was open (0077; source-local).
+    #[serde(default)]
+    pub distinct_bad_bids: u64,
+    /// Messages that saw block CRC/BID mismatch during read (0077; pre-poly-clear).
+    #[serde(default)]
+    pub crc_suspect_messages: u64,
+    /// Page validate paths while reading this source (0077 rate denominator).
+    #[serde(default)]
+    pub page_reads: u64,
+    /// Block read paths while reading this source (0077 rate denominator).
+    #[serde(default)]
+    pub block_reads: u64,
+    /// Dual-rate poly-class CRC for this source (page+block rate ≥ 0.50).
+    ///
+    /// When true, identity `CRC_SUSPECT` was cleared as poly false-positive;
+    /// raw page/block CRC counters are retained for reporting / `export_risk`.
+    #[serde(default)]
+    pub poly_class_crc: bool,
 }
 
 /// Full scan outcome (schema `scan_integrity_v1`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanSummary {
     pub schema: String,
     pub mode: ScanMode,
@@ -136,14 +163,41 @@ pub struct ScanSummary {
     pub duration_secs: f64,
     pub preflight: PreflightReport,
     /// Capped skip sample for JSON (not the legal ledger).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skips: Vec<SkipRecord>,
     /// Path of streaming integrity CSV if written.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integrity_csv: Option<String>,
     /// 0076 identity-binding honesty counters.
     #[serde(default, skip_serializing_if = "grouping_stats_empty")]
     pub grouping: GroupingStats,
+    /// Totals of page CRC mismatches across sources (0077).
+    #[serde(default)]
+    pub page_crc_mismatches: u64,
+    #[serde(default)]
+    pub block_crc_mismatches: u64,
+    #[serde(default)]
+    pub block_bid_mismatches: u64,
+    #[serde(default)]
+    pub distinct_bad_bids: u64,
+    /// Whether `distinct_bad_bids` is exact (false past the 1024 cap).
+    #[serde(default)]
+    pub distinct_bad_bids_exact: bool,
+    #[serde(default)]
+    pub crc_suspect_messages: u64,
+    #[serde(default)]
+    pub page_reads: u64,
+    #[serde(default)]
+    pub block_reads: u64,
+    /// `(page_crc + block_crc) / max(1, recoverable_messages)` — corruption per document.
+    #[serde(default)]
+    pub block_crc_rate: f64,
+    /// `(page_crc + block_crc) / max(1, page_reads + block_reads)` — fraction of reads; ∈ [0,1].
+    #[serde(default)]
+    pub block_crc_read_rate: f64,
+    /// Count of sources classified dual-rate poly-class (`poly_class_crc`) (0077).
+    #[serde(default)]
+    pub poly_class_crc_sources: u64,
 }
 
 fn grouping_stats_empty(s: &GroupingStats) -> bool {
@@ -252,6 +306,14 @@ pub fn rebuild_dedup_results_with_ctx(
                     false
                 } else {
                     true
+                }
+            }
+            Err(Tier2IneligibleReason::CrcSuspect) => {
+                if ctx.allow_crc_suspect_tier2_for(&c.path_key()) {
+                    true
+                } else {
+                    index.record_tier2_block_crc_suspect();
+                    false
                 }
             }
         };
@@ -467,6 +529,9 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     };
     let csv_streamed = dedup_wtr.is_some();
 
+    // D-0077-parallel-attrib: per-source deltas are exact only while sources are
+    // processed sequentially on one thread. When 0079 parallelizes materialize,
+    // read thread-local counters on the worker that did the work before merge.
     for (file_idx, path) in paths.iter().enumerate() {
         // Safe boundary: before each file open.
         if scan_cancel_requested(&opts.cancel) {
@@ -478,6 +543,10 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| format!("file_{file_idx}"));
         let path_str = path.display().to_string();
+
+        // Snapshot integrity telemetry before this source (0077 attribution).
+        // begin_source clears per-source distinct BID set so deltas are local.
+        let telemetry_before = pst_reader::integrity_telemetry::begin_source();
 
         let mut pst = match PstFile::open(path) {
             Ok(p) => p,
@@ -505,6 +574,7 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                         }
                     }
                 };
+                let tel = pst_reader::integrity_telemetry::end_source_delta(&telemetry_before);
                 file_stats.push(FileScanStats {
                     path: path_str,
                     name: name.clone(),
@@ -519,6 +589,14 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                     degraded_by_reason: BTreeMap::new(),
                     error_code: Some(code),
                     error: Some(source.to_string()),
+                    page_crc_mismatches: tel.page_crc_mismatches,
+                    block_crc_mismatches: tel.block_crc_mismatches,
+                    block_bid_mismatches: tel.block_bid_mismatches,
+                    distinct_bad_bids: tel.distinct_bad_bids,
+                    crc_suspect_messages: 0,
+                    page_reads: tel.page_reads,
+                    block_reads: tel.block_reads,
+                    poly_class_crc: false,
                 });
                 continue;
             }
@@ -528,6 +606,7 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             Ok(f) => f,
             Err(source) => {
                 let code = IntegrityReason::FolderWalkFailed;
+                let tel = pst_reader::integrity_telemetry::end_source_delta(&telemetry_before);
                 file_stats.push(FileScanStats {
                     path: path_str,
                     name: name.clone(),
@@ -542,6 +621,14 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                     degraded_by_reason: BTreeMap::new(),
                     error_code: Some(code),
                     error: Some(source.to_string()),
+                    page_crc_mismatches: tel.page_crc_mismatches,
+                    block_crc_mismatches: tel.block_crc_mismatches,
+                    block_bid_mismatches: tel.block_bid_mismatches,
+                    distinct_bad_bids: tel.distinct_bad_bids,
+                    crc_suspect_messages: 0,
+                    page_reads: tel.page_reads,
+                    block_reads: tel.block_reads,
+                    poly_class_crc: false,
                 });
                 continue;
             }
@@ -551,8 +638,12 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         let mut file_duplicates = 0u64;
         let mut file_skipped = 0u64;
         let mut file_degraded = 0u64;
+        let mut file_crc_suspect = 0u64;
         let mut file_skipped_by_reason: BTreeMap<String, u64> = BTreeMap::new();
         let mut file_degraded_by_reason: BTreeMap<String, u64> = BTreeMap::new();
+        // Buffer degraded integrity rows until end-of-source so poly-class identity
+        // strip can reconcile integrity.csv with candidates (0077 r2 P2-2).
+        let mut file_integrity_degraded: Vec<SkipRecord> = Vec::new();
         let folder_count = folders.len() as u64;
         // Progress: emit at most every N messages or once per folder (§3.11).
         const PROGRESS_EVERY_MSGS: u64 = 500;
@@ -677,12 +768,16 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                     }
                 };
 
-                // Attachments.
+                // Attachments — 0077: attach-meta block CRC ORs into message CRC_SUSPECT
+                // (props scope already exited; wrap meta walk so attach PC reads taint).
                 let mut attach_cls = MessageClassification::Recoverable {
                     integrity: RecoverableIntegrity::clean(),
                 };
-                let attachments =
-                    if opts.include_attachments && props.has_attachments.unwrap_or(false) {
+                let mut msg_crc_suspect = props.crc_suspect;
+                let attachments = if opts.include_attachments
+                    && props.has_attachments.unwrap_or(false)
+                {
+                    pst_reader::integrity_telemetry::with_crc_scope(&mut msg_crc_suspect, || {
                         match pst.read_attachment_metadata(msg_nid) {
                             Ok(atts) => {
                                 let mut out = Vec::with_capacity(atts.len());
@@ -701,9 +796,10 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                                 Vec::new()
                             }
                         }
-                    } else {
-                        Vec::new()
-                    };
+                    })
+                } else {
+                    Vec::new()
+                };
 
                 let classification = merge_recoverable([body_cls, orphan_cls, attach_cls]);
 
@@ -733,7 +829,18 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                         )?;
                         continue;
                     }
-                    MessageClassification::Recoverable { integrity } => {
+                    MessageClassification::Recoverable { mut integrity } => {
+                        // 0077: CRC_SUSPECT from props scope and/or attach-meta scope.
+                        if msg_crc_suspect {
+                            if !integrity
+                                .degraded_reasons
+                                .contains(&IntegrityReason::CrcSuspect)
+                            {
+                                integrity.degraded_reasons.push(IntegrityReason::CrcSuspect);
+                            }
+                            integrity.degraded = true;
+                            file_crc_suspect = file_crc_suspect.saturating_add(1);
+                        }
                         if integrity.degraded {
                             file_degraded += 1;
                             total_degraded += 1;
@@ -744,28 +851,19 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                             if integrity.is_orphaned {
                                 total_orphaned += 1;
                             }
-                            // Stream degraded ledger rows (one per reason for operator clarity).
-                            if let Some(wtr) = integrity_wtr.as_mut() {
-                                for r in &integrity.degraded_reasons {
-                                    let row = SkipRecord {
-                                        source_path: path_str.clone(),
-                                        source_pst: name.clone(),
-                                        folder_path: folder_path.clone(),
-                                        is_orphaned: integrity.is_orphaned,
-                                        nid: msg_nid.0,
-                                        reason: *r,
-                                        detail: format!("degraded: {}", r.as_str()),
-                                        mode: opts.mode,
-                                    };
-                                    wtr.write_degraded(&row).map_err(|source| {
-                                        CliError::CsvWrite {
-                                            path: integrity_path
-                                                .clone()
-                                                .unwrap_or_else(|| PathBuf::from("integrity.csv")),
-                                            source: Box::new(source),
-                                        }
-                                    })?;
-                                }
+                            // Buffer degraded ledger rows (one per reason). Flushed after
+                            // poly-class strip so integrity.csv matches keep-set identity.
+                            for r in &integrity.degraded_reasons {
+                                file_integrity_degraded.push(SkipRecord {
+                                    source_path: path_str.clone(),
+                                    source_pst: name.clone(),
+                                    folder_path: folder_path.clone(),
+                                    is_orphaned: integrity.is_orphaned,
+                                    nid: msg_nid.0,
+                                    reason: *r,
+                                    detail: format!("degraded: {}", r.as_str()),
+                                    mode: opts.mode,
+                                });
                             }
                         }
 
@@ -830,7 +928,7 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                             .as_deref()
                             .map(|s| !s.trim().is_empty())
                             .unwrap_or(false);
-                        let eligible = match hasher::tier2_eligibility(
+                        let mut eligible = match hasher::tier2_eligibility(
                             props.body_incomplete,
                             props.body_unavailable,
                             has_body,
@@ -856,7 +954,25 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                                     true
                                 }
                             }
+                            Err(Tier2IneligibleReason::CrcSuspect) => {
+                                // Not produced by tier2_eligibility(); handled below.
+                                true
+                            }
                         };
+                        // 0077: CRC_SUSPECT is Tier-2 ineligible by default (split-only).
+                        // Dual-rate poly reclassifies (clears) false-positive taint at
+                        // end-of-source so keep-set rebuild binds without an auto-allow.
+                        // Sparse corruption keeps taint; operator flag restores Tier-2.
+                        if msg_crc_suspect
+                            && !grouping.allow_crc_suspect_tier2_for(
+                                &dedup_engine::keepset::path_compare_key(Path::new(&path_str)),
+                            )
+                        {
+                            if eligible {
+                                index.record_tier2_block_crc_suspect();
+                            }
+                            eligible = false;
+                        }
 
                         let source_key = {
                             let p = std::path::Path::new(&path_str);
@@ -943,29 +1059,97 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                             integrity,
                         };
 
-                        if defer_dedup_rows {
-                            buffered_rows.push(report_row);
-                        } else {
-                            if let Some(wtr) = dedup_wtr.as_mut() {
-                                wtr.write_row(&report_row).map_err(|source| {
-                                    CliError::CsvWrite {
-                                        path: opts
-                                            .csv
-                                            .clone()
-                                            .unwrap_or_else(|| PathBuf::from("report.csv")),
-                                        source,
-                                    }
-                                })?;
-                            }
-
-                            if opts.retain_rows {
-                                all_rows.push(report_row);
-                            }
-                        }
+                        // Always buffer until end-of-source so poly reclassification
+                        // clears false-positive CRC_SUSPECT before CSV write (0077).
+                        // Deep-attach path still flushes after probe; otherwise flush
+                        // at end of this source (after poly clear).
+                        buffered_rows.push(report_row);
                         file_messages += 1;
                     }
                 }
             }
+        }
+
+        // End-of-source flush so per-source deltas include all TLS counts (0077).
+        pst_reader::integrity_telemetry::flush_summary();
+        let tel = pst_reader::integrity_telemetry::end_source_delta(&telemetry_before);
+
+        // Poly-class dual-rate gate (D-0077-systematic-poly / DoD-12 aspose):
+        // Non-standard poly (aspose) hits **both** page and block CRC at high rate.
+        // Dual-rate gate only:
+        //   poly_class = (block_crc/block_reads ≥ 0.50) AND (page_crc/page_reads ≥ 0.50)
+        //
+        // Honest poly handling (final-gate P1):
+        // - Dual-rate means computed≠stored is **not** evidence of corrupt bytes.
+        // - **Clear** false-positive `CRC_SUSPECT` from candidates / integrity rows
+        //   for this source (reclassify) so identity proceeds without taint and
+        //   without a Tier-2 auto-allow exception (rule 10).
+        // - High block alone (sparse / real data-block corruption) keeps taint and
+        //   **blocks** Tier-2.
+        // - `crc_suspect_messages` stays the pre-clear hit count (read evidence).
+        // - Raw page/block/BID counters and rates are never zeroed.
+        // - `export_risk` still sees raw `block_crc_read_rate`.
+        // - Streaming unique may under-merge until keep-set rebuild (poly residual).
+        let poly_class = is_poly_class_crc(
+            tel.page_crc_mismatches,
+            tel.page_reads,
+            tel.block_crc_mismatches,
+            tel.block_reads,
+        );
+        let crc_suspect_reported = file_crc_suspect;
+        if poly_class {
+            clear_poly_false_positive_crc_suspect(
+                file_idx,
+                &path_str,
+                &mut candidates,
+                &mut all_rows,
+                &mut buffered_rows,
+                &mut file_integrity_degraded,
+                &mut PolyClearTallies {
+                    file_degraded: &mut file_degraded,
+                    total_degraded: &mut total_degraded,
+                    file_degraded_by_reason: &mut file_degraded_by_reason,
+                    degraded_by_reason: &mut degraded_by_reason,
+                },
+            );
+        }
+
+        // Flush buffered degraded integrity rows (CRC_SUSPECT filtered when poly).
+        if let Some(wtr) = integrity_wtr.as_mut() {
+            for row in &file_integrity_degraded {
+                wtr.write_degraded(row)
+                    .map_err(|source| CliError::CsvWrite {
+                        path: integrity_path
+                            .clone()
+                            .unwrap_or_else(|| PathBuf::from("integrity.csv")),
+                        source: Box::new(source),
+                    })?;
+            }
+        }
+
+        // Without deep-attach deferral, flush this source's report rows now
+        // (after poly clear) so CSV matches candidates.
+        if !defer_dedup_rows {
+            let mut keep = Vec::new();
+            for row in buffered_rows.drain(..) {
+                if row.message.pst_index != file_idx {
+                    keep.push(row);
+                    continue;
+                }
+                if let Some(wtr) = dedup_wtr.as_mut() {
+                    wtr.write_row(&row).map_err(|source| CliError::CsvWrite {
+                        path: opts
+                            .csv
+                            .clone()
+                            .unwrap_or_else(|| PathBuf::from("report.csv")),
+                        source,
+                    })?;
+                }
+                if opts.retain_rows {
+                    all_rows.push(row);
+                }
+            }
+            buffered_rows = keep;
         }
 
         // Cancel mid-file still yields Partial so operators see incomplete coverage.
@@ -989,6 +1173,14 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             degraded_by_reason: file_degraded_by_reason,
             error_code: None,
             error: None,
+            page_crc_mismatches: tel.page_crc_mismatches,
+            block_crc_mismatches: tel.block_crc_mismatches,
+            block_bid_mismatches: tel.block_bid_mismatches,
+            distinct_bad_bids: tel.distinct_bad_bids,
+            crc_suspect_messages: crc_suspect_reported,
+            page_reads: tel.page_reads,
+            block_reads: tel.block_reads,
+            poly_class_crc: poly_class,
         });
 
         if cancelled_this_file || scan_cancel_requested(&opts.cancel) {
@@ -1345,6 +1537,19 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         attach_probe_cancelled: attach_cancelled,
     });
 
+    let page_crc_total: u64 = file_stats.iter().map(|f| f.page_crc_mismatches).sum();
+    let block_crc_total: u64 = file_stats.iter().map(|f| f.block_crc_mismatches).sum();
+    let block_bid_total: u64 = file_stats.iter().map(|f| f.block_bid_mismatches).sum();
+    let page_reads_total: u64 = file_stats.iter().map(|f| f.page_reads).sum();
+    let block_reads_total: u64 = file_stats.iter().map(|f| f.block_reads).sum();
+    let crc_suspect_total: u64 = file_stats.iter().map(|f| f.crc_suspect_messages).sum();
+    let poly_class_crc_sources = file_stats.iter().filter(|f| f.poly_class_crc).count() as u64;
+    let end_tel = pst_reader::integrity_telemetry::snapshot();
+    let crc_sum = page_crc_total.saturating_add(block_crc_total);
+    let block_crc_rate = crc_sum as f64 / (recoverable_messages.max(1) as f64);
+    let read_denom = page_reads_total.saturating_add(block_reads_total).max(1) as f64;
+    let block_crc_read_rate = (crc_sum as f64 / read_denom).clamp(0.0, 1.0);
+
     let summary = ScanSummary {
         schema: SCAN_INTEGRITY_SCHEMA.to_string(),
         mode: opts.mode,
@@ -1369,6 +1574,17 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         skips: skip_sample,
         integrity_csv: integrity_path.map(|p| p.display().to_string()),
         grouping: grouping_stats,
+        page_crc_mismatches: page_crc_total,
+        block_crc_mismatches: block_crc_total,
+        block_bid_mismatches: block_bid_total,
+        distinct_bad_bids: end_tel.distinct_bad_bids,
+        distinct_bad_bids_exact: end_tel.distinct_bad_bids_exact,
+        crc_suspect_messages: crc_suspect_total,
+        page_reads: page_reads_total,
+        block_reads: block_reads_total,
+        block_crc_rate,
+        block_crc_read_rate,
+        poly_class_crc_sources,
     };
 
     Ok(ScanOutcome {
@@ -1377,6 +1593,134 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         candidates,
         csv_streamed,
     })
+}
+
+/// Poly-class CRC dual-rate gate (D-0077-systematic-poly / DoD-12 aspose).
+///
+/// Aspose-style non-standard CRC hits **both** page and block trails at high rate
+/// (≥ 0.50). Real localized data-block corruption elevates block rate without a
+/// matching page rate — those stores keep `CRC_SUSPECT` **and** block Tier-2.
+///
+/// When dual-rate fires, scan **clears** false-positive `CRC_SUSPECT` identity
+/// taint (reclassify) so Tier-2 proceeds without an auto-allow exception. Raw
+/// CRC counters remain for reporting and `export_risk`. Residual: true poly
+/// fingerprint/allowlist vs dual-rate heuristic.
+///
+/// ```text
+/// poly_class = (block_crc/block_reads ≥ 0.50) AND (page_crc/page_reads ≥ 0.50)
+/// ```
+pub(crate) fn is_poly_class_crc(
+    page_crc: u64,
+    page_reads: u64,
+    block_crc: u64,
+    block_reads: u64,
+) -> bool {
+    const POLY_RATE: f64 = 0.50;
+    let page_rate = page_crc as f64 / (page_reads.max(1) as f64);
+    let block_rate = block_crc as f64 / (block_reads.max(1) as f64);
+    page_rate >= POLY_RATE && block_rate >= POLY_RATE
+}
+
+/// Mutable degraded tallies adjusted when poly clears false-positive CRC_SUSPECT.
+struct PolyClearTallies<'a> {
+    file_degraded: &'a mut u64,
+    total_degraded: &'a mut u64,
+    file_degraded_by_reason: &'a mut BTreeMap<String, u64>,
+    degraded_by_reason: &'a mut BTreeMap<String, u64>,
+}
+
+/// Clear poly false-positive `CRC_SUSPECT` from identity surfaces for one source.
+///
+/// Non-standard CRC poly: computed≠stored is not evidence of corrupt bytes.
+/// Identity proceeds without `CRC_SUSPECT`; raw page/block counters are untouched
+/// (caller keeps them on `FileScanStats`). Sparse real corruption (not dual-rate)
+/// never calls this helper and still taints / blocks Tier-2.
+fn clear_poly_false_positive_crc_suspect(
+    file_idx: usize,
+    path_str: &str,
+    candidates: &mut [RecoverableScanItem],
+    all_rows: &mut [ReportRow],
+    buffered_rows: &mut [ReportRow],
+    file_integrity_degraded: &mut Vec<SkipRecord>,
+    tallies: &mut PolyClearTallies<'_>,
+) {
+    let path_key = dedup_engine::keepset::path_compare_key(Path::new(path_str));
+    let matches_source = |source_path: &str| {
+        source_path == path_str
+            || dedup_engine::keepset::path_compare_key(Path::new(source_path)) == path_key
+    };
+
+    fn strip_crc_suspect(integrity: &mut RecoverableIntegrity) -> bool {
+        if !integrity
+            .degraded_reasons
+            .contains(&IntegrityReason::CrcSuspect)
+        {
+            return false;
+        }
+        integrity
+            .degraded_reasons
+            .retain(|r| *r != IntegrityReason::CrcSuspect);
+        if integrity.degraded_reasons.is_empty() && !integrity.is_orphaned {
+            integrity.degraded = false;
+            true // fully cleared
+        } else {
+            integrity.degraded = !integrity.degraded_reasons.is_empty() || integrity.is_orphaned;
+            false
+        }
+    }
+
+    let mut fully_cleared = 0u64;
+    let mut any_candidate = false;
+    for c in candidates.iter_mut() {
+        if !matches_source(&c.locus.source_path) {
+            continue;
+        }
+        any_candidate = true;
+        if strip_crc_suspect(&mut c.integrity) {
+            fully_cleared = fully_cleared.saturating_add(1);
+        }
+    }
+
+    // Report rows: match by pst_index (stable; never basename alone).
+    for row in all_rows.iter_mut().chain(buffered_rows.iter_mut()) {
+        if row.message.pst_index == file_idx {
+            let _ = strip_crc_suspect(&mut row.integrity);
+        }
+    }
+
+    // integrity.csv buffer: NIDs that had CRC_SUSPECT, then drop those rows.
+    let nids_with_crc: HashSet<u64> = file_integrity_degraded
+        .iter()
+        .filter(|r| r.reason == IntegrityReason::CrcSuspect)
+        .map(|r| r.nid)
+        .collect();
+    let crc_reason_cleared = nids_with_crc.len() as u64;
+    file_integrity_degraded.retain(|r| r.reason != IntegrityReason::CrcSuspect);
+    let nids_still_degraded: HashSet<u64> = file_integrity_degraded.iter().map(|r| r.nid).collect();
+    if !any_candidate {
+        // No retained candidates: derive fully-cleared from integrity buffer.
+        fully_cleared = nids_with_crc
+            .iter()
+            .filter(|nid| !nids_still_degraded.contains(nid))
+            .count() as u64;
+    }
+
+    *tallies.file_degraded = tallies.file_degraded.saturating_sub(fully_cleared);
+    *tallies.total_degraded = tallies.total_degraded.saturating_sub(fully_cleared);
+
+    let crc_key = IntegrityReason::CrcSuspect.as_str();
+    if let Some(n) = tallies.file_degraded_by_reason.get_mut(crc_key) {
+        *n = n.saturating_sub(crc_reason_cleared);
+        if *n == 0 {
+            tallies.file_degraded_by_reason.remove(crc_key);
+        }
+    }
+    if let Some(n) = tallies.degraded_by_reason.get_mut(crc_key) {
+        *n = n.saturating_sub(crc_reason_cleared);
+        if *n == 0 {
+            tallies.degraded_by_reason.remove(crc_key);
+        }
+    }
 }
 
 /// Mutable tallies updated on each skip (keeps `record_skip` arg count clippy-friendly).
@@ -1508,6 +1852,96 @@ mod tests {
         MessageClassification, ScanMode,
     };
     use dedup_engine::keepset::MessageLocus;
+
+    /// Dual-rate poly gate: high block alone keeps taint; both high → poly reclassify.
+    #[test]
+    fn poly_class_requires_dual_high_rate() {
+        // Both ≥ 0.50 → poly-class (aspose): clear false-positive CRC_SUSPECT.
+        assert!(is_poly_class_crc(50, 100, 50, 100));
+        assert!(is_poly_class_crc(1, 1, 1, 1));
+        // High block, low page → real data-block corruption; keep CRC_SUSPECT + block Tier-2.
+        assert!(!is_poly_class_crc(1, 100, 50, 100));
+        assert!(!is_poly_class_crc(0, 100, 100, 100));
+        // High page, low block → not poly reclassify.
+        assert!(!is_poly_class_crc(50, 100, 1, 100));
+        // Both sparse.
+        assert!(!is_poly_class_crc(1, 100, 1, 100));
+        assert!(!is_poly_class_crc(0, 0, 0, 0));
+    }
+
+    /// DoD-4: pre-0077 scan JSON (missing new CRC fields) still deserializes with defaults.
+    #[test]
+    fn pre_0077_scan_json_deserializes_with_defaults() {
+        // Minimal pre-0077 shape: no page_crc_* / block_crc_* / crc_suspect_* fields.
+        let json = r#"{
+            "schema": "scan_integrity_v1",
+            "mode": "best-effort",
+            "files": [{
+                "path": "C:\\mail\\a.pst",
+                "name": "a.pst",
+                "status": "opened",
+                "folders": 1,
+                "messages": 2,
+                "recoverable_messages": 2,
+                "duplicates": 0,
+                "skipped": 0,
+                "skipped_by_reason": {},
+                "degraded_messages": 0,
+                "degraded_by_reason": {},
+                "error_code": null,
+                "error": null
+            }],
+            "total_messages": 2,
+            "unique": 2,
+            "duplicates": 0,
+            "tier1_hits": 0,
+            "tier2_hits": 0,
+            "savings_bytes": 0,
+            "skipped": 0,
+            "skipped_by_reason": {},
+            "recoverable_messages": 2,
+            "degraded_messages": 0,
+            "degraded_by_reason": {},
+            "orphaned_messages": 0,
+            "failed_files": 0,
+            "partial_files": 0,
+            "opened_files": 1,
+            "duration_secs": 0.01,
+            "preflight": {
+                "schema": "preflight_v1",
+                "mode": "best-effort",
+                "skip_rate": 0.0,
+                "crc_skip_rate": 0.0,
+                "failed_file_rate": 0.0,
+                "recommendation": "ok",
+                "reasons": [],
+                "thresholds": {
+                    "max_skip_rate": 0.05,
+                    "max_crc_skip_rate": 0.01,
+                    "max_failed_file_rate": 0.0
+                }
+            }
+        }"#;
+        let summary: ScanSummary =
+            serde_json::from_str(json).expect("pre-0077 JSON should deserialize");
+        assert_eq!(summary.total_messages, 2);
+        assert_eq!(summary.page_crc_mismatches, 0);
+        assert_eq!(summary.block_crc_mismatches, 0);
+        assert_eq!(summary.block_bid_mismatches, 0);
+        assert_eq!(summary.distinct_bad_bids, 0);
+        // #[serde(default)] on bool → false when absent.
+        assert!(!summary.distinct_bad_bids_exact);
+        assert_eq!(summary.crc_suspect_messages, 0);
+        assert_eq!(summary.page_reads, 0);
+        assert_eq!(summary.block_reads, 0);
+        assert!((summary.block_crc_rate - 0.0).abs() < f64::EPSILON);
+        assert!((summary.block_crc_read_rate - 0.0).abs() < f64::EPSILON);
+        assert_eq!(summary.files.len(), 1);
+        assert_eq!(summary.files[0].page_crc_mismatches, 0);
+        assert_eq!(summary.files[0].distinct_bad_bids, 0);
+        assert!(!summary.files[0].poly_class_crc);
+        assert_eq!(summary.poly_class_crc_sources, 0);
+    }
 
     /// Winner skipped by strict probe: surviving duplicate must become Unique (P1-1).
     #[test]
@@ -1691,6 +2125,14 @@ mod tests {
             degraded_by_reason: BTreeMap::new(),
             error_code: None,
             error: None,
+            page_crc_mismatches: 0,
+            block_crc_mismatches: 0,
+            block_bid_mismatches: 0,
+            distinct_bad_bids: 0,
+            crc_suspect_messages: 0,
+            page_reads: 0,
+            block_reads: 0,
+            poly_class_crc: false,
         }];
         let skips = vec![SkipRecord {
             source_path: r"C:\mail\a.pst".into(),
@@ -1735,6 +2177,14 @@ mod tests {
             degraded_by_reason: BTreeMap::new(),
             error_code: None,
             error: None,
+            page_crc_mismatches: 0,
+            block_crc_mismatches: 0,
+            block_bid_mismatches: 0,
+            distinct_bad_bids: 0,
+            crc_suspect_messages: 0,
+            page_reads: 0,
+            block_reads: 0,
+            poly_class_crc: false,
         }];
         let mut results = HashMap::new();
         results.insert(("a.pst".into(), 1u64), DedupResult::Unique);
@@ -1921,6 +2371,17 @@ mod tests {
             skips: vec![],
             integrity_csv: None,
             grouping: Default::default(),
+            page_crc_mismatches: 0,
+            block_crc_mismatches: 0,
+            block_bid_mismatches: 0,
+            distinct_bad_bids: 0,
+            distinct_bad_bids_exact: true,
+            crc_suspect_messages: 0,
+            page_reads: 0,
+            block_reads: 0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            poly_class_crc_sources: 0,
         };
         let mut opts = ScanOptions::default();
         assert!(evaluate_exit_policy(&summary, &opts).is_err());
@@ -1964,6 +2425,17 @@ mod tests {
             skips: vec![],
             integrity_csv: None,
             grouping: Default::default(),
+            page_crc_mismatches: 0,
+            block_crc_mismatches: 0,
+            block_bid_mismatches: 0,
+            distinct_bad_bids: 0,
+            distinct_bad_bids_exact: true,
+            crc_suspect_messages: 0,
+            page_reads: 0,
+            block_reads: 0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            poly_class_crc_sources: 0,
         };
         let opts = ScanOptions {
             mode: ScanMode::Strict,

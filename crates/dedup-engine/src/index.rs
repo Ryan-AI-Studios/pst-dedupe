@@ -395,6 +395,10 @@ impl DedupIndex {
         self.stats.tier2_blocked_degenerate += 1;
     }
 
+    pub fn record_tier2_block_crc_suspect(&mut self) {
+        self.stats.tier2_blocked_crc_suspect += 1;
+    }
+
     pub fn record_preview_over_budget(&mut self) {
         self.stats.tier2_preview_bytes_over_budget += 1;
     }

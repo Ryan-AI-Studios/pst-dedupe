@@ -477,7 +477,17 @@ impl RecoverableScanItem {
     }
 
     /// Tier-2 eligibility under §3.3 (ignores escape-hatch flags).
+    ///
+    /// `CRC_SUSPECT` is checked first (0077): kept-despite-CRC bytes must not
+    /// form Tier-2 identity unless the operator opts in.
     pub fn assess_tier2_eligibility(&self) -> Result<(), Tier2IneligibleReason> {
+        if self
+            .integrity
+            .degraded_reasons
+            .contains(&crate::integrity::IntegrityReason::CrcSuspect)
+        {
+            return Err(Tier2IneligibleReason::CrcSuspect);
+        }
         let incomplete = self
             .integrity
             .degraded_reasons
@@ -852,6 +862,16 @@ pub fn group_candidates_with_stats(
                     false
                 } else {
                     true
+                }
+            }
+            Err(Tier2IneligibleReason::CrcSuspect) => {
+                // Operator flag only (0077). Poly dual-rate clears false-positive
+                // CRC_SUSPECT before keep-set; sparse corruption still blocks.
+                if ctx.allow_crc_suspect_tier2_for(&item.path_key()) {
+                    true
+                } else {
+                    stats.tier2_blocked_crc_suspect += 1;
+                    false
                 }
             }
         };
@@ -1293,7 +1313,8 @@ pub fn reason_fidelity_tier(reason: crate::integrity::IntegrityReason) -> u8 {
         | AttachDataTruncated
         | AttachMethodUnsupported => 2,
         // tier 3 — body / data loss
-        BodyTruncated | BodyUnavailable | DataTruncated | CrcMismatch | BlockNotFound => 3,
+        BodyTruncated | BodyUnavailable | DataTruncated | CrcMismatch | CrcSuspect
+        | BlockNotFound => 3,
         // tier 4 — structural / provenance
         OrphanedNode | InvalidStructure | MessageReadFailed | PropertyError | NodeNotFound => 4,
         // File-level / open failures on a recoverable item are structural-class.
@@ -4426,6 +4447,7 @@ mod tests {
             BodyUnavailable,
             DataTruncated,
             CrcMismatch,
+            CrcSuspect,
             BlockNotFound,
         ];
         for r in body {
@@ -4444,6 +4466,116 @@ mod tests {
             RecoverableIntegrity::with_degraded(vec![IntegrityReason::BodyTruncated], false);
         assert_eq!(fidelity_rank_with_mode(&deg, FidelityMode::Graded), 3);
         assert_eq!(fidelity_rank_with_mode(&deg, FidelityMode::Binary), 1);
+        // 0077 DoD-21: clean outranks CRC_SUSPECT under graded and binary.
+        let mut suspect = clean.clone();
+        suspect.integrity =
+            RecoverableIntegrity::with_degraded(vec![IntegrityReason::CrcSuspect], false);
+        assert_eq!(reason_fidelity_tier(IntegrityReason::CrcSuspect), 3);
+        assert_eq!(fidelity_rank_with_mode(&suspect, FidelityMode::Graded), 3);
+        assert_eq!(fidelity_rank_with_mode(&suspect, FidelityMode::Binary), 1);
+        assert!(
+            fidelity_rank_with_mode(&clean, FidelityMode::Graded)
+                < fidelity_rank_with_mode(&suspect, FidelityMode::Graded)
+        );
+        assert!(
+            fidelity_rank_with_mode(&clean, FidelityMode::Binary)
+                < fidelity_rank_with_mode(&suspect, FidelityMode::Binary)
+        );
+    }
+
+    /// 0077 DoD-20: CRC_SUSPECT is Tier-2 ineligible by default.
+    #[test]
+    fn crc_suspect_tier2_ineligible_by_default() {
+        let mut suspect = item(
+            "C:/a.pst", "a.pst", "Inbox", 1, None, [7; 32], 100, 0, false,
+        );
+        suspect.integrity =
+            RecoverableIntegrity::with_degraded(vec![IntegrityReason::CrcSuspect], false);
+        assert_eq!(
+            suspect.assess_tier2_eligibility(),
+            Err(Tier2IneligibleReason::CrcSuspect)
+        );
+        let outcome = group_candidates_with_stats(&[suspect], &GroupingContext::default());
+        assert_eq!(outcome.stats.tier2_blocked_crc_suspect, 1);
+        assert!(!outcome.tier2_eligible[0]);
+    }
+
+    /// 0077 DoD-20: MID Tier-1 still merges suspect + clean twins with same Message-ID.
+    #[test]
+    fn crc_suspect_mid_still_groups_with_clean_twin() {
+        let mid = Some("same-mid@ex.com");
+        let clean = item(
+            "C:/clean.pst",
+            "clean.pst",
+            "Inbox",
+            1,
+            mid,
+            [1; 32],
+            100,
+            0,
+            false,
+        );
+        let mut suspect = item(
+            "C:/bad.pst",
+            "bad.pst",
+            "Inbox",
+            2,
+            mid,
+            [2; 32],
+            100,
+            1,
+            false,
+        );
+        suspect.integrity =
+            RecoverableIntegrity::with_degraded(vec![IntegrityReason::CrcSuspect], false);
+        let (ks, dec) = build_keep_set(
+            vec![clean, suspect],
+            KeepPolicy::FirstSeen,
+            FamilyPolicy::default(),
+            &[],
+            true,
+        )
+        .expect("build");
+        assert_eq!(
+            ks.stats.unique, 1,
+            "MID must bind suspect+clean into one group"
+        );
+        assert_eq!(ks.stats.duplicates, 1);
+        assert_eq!(ks.stats.tier1_dups, 1);
+        let dup = dec
+            .iter()
+            .find(|d| d.role == DecisionRole::DupOf)
+            .expect("dup");
+        assert_eq!(dup.tier.as_deref(), Some("message_id"));
+    }
+
+    /// 0077 DoD-20: `--allow-crc-suspect-tier2` restores Tier-2 eligibility exactly.
+    #[test]
+    fn allow_crc_suspect_tier2_restores_eligibility() {
+        let h = [99u8; 32];
+        let mut a = item("C:/a.pst", "a.pst", "Inbox", 1, None, h, 50, 0, false);
+        let mut b = item("C:/b.pst", "b.pst", "Inbox", 2, None, h, 50, 1, false);
+        a.integrity = RecoverableIntegrity::with_degraded(vec![IntegrityReason::CrcSuspect], false);
+        b.integrity = RecoverableIntegrity::with_degraded(vec![IntegrityReason::CrcSuspect], false);
+
+        let blocked =
+            group_candidates_with_stats(&[a.clone(), b.clone()], &GroupingContext::default());
+        assert_eq!(blocked.stats.tier2_blocked_crc_suspect, 2);
+        // No Tier-2 merge: each seeds its own group (two uniques).
+        assert_eq!(blocked.groups.len(), 2);
+
+        let allow = GroupingContext {
+            allow_crc_suspect_tier2: true,
+            ..GroupingContext::default()
+        };
+        let allowed = group_candidates_with_stats(&[a, b], &allow);
+        assert_eq!(allowed.stats.tier2_blocked_crc_suspect, 0);
+        assert_eq!(
+            allowed.groups.len(),
+            1,
+            "allow flag must restore pre-0077 Tier-2 merge on shared content hash"
+        );
+        assert!(allowed.tier2_eligible.iter().all(|&e| e));
     }
 
     #[test]

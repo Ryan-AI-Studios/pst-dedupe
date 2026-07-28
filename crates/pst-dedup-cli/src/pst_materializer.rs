@@ -187,6 +187,12 @@ impl MessageMaterializer for PstMaterializer {
                 if body_unavailable {
                     soft_reasons.push(dedup_engine::IntegrityReason::BodyUnavailable);
                 }
+                // 0077: body/props block CRC → message CRC_SUSPECT (fidelity + Tier-2).
+                if extracted.crc_suspect
+                    && !soft_reasons.contains(&dedup_engine::IntegrityReason::CrcSuspect)
+                {
+                    soft_reasons.push(dedup_engine::IntegrityReason::CrcSuspect);
+                }
                 (
                     extracted.message_id,
                     extracted.subject,
@@ -223,6 +229,12 @@ impl MessageMaterializer for PstMaterializer {
                         }
                         if !soft_reasons.contains(&reason) {
                             soft_reasons.push(reason);
+                        }
+                        // 0077: props-path block CRC → message CRC_SUSPECT.
+                        if props.crc_suspect
+                            && !soft_reasons.contains(&dedup_engine::IntegrityReason::CrcSuspect)
+                        {
+                            soft_reasons.push(dedup_engine::IntegrityReason::CrcSuspect);
                         }
                         (
                             props.message_id,
@@ -312,6 +324,10 @@ impl MessageMaterializer for PstMaterializer {
                                     if !soft_reasons.contains(&reason) {
                                         soft_reasons.push(reason);
                                     }
+                                } else if outcome.reason == Some(IntegrityReason::CrcSuspect)
+                                    && !soft_reasons.contains(&IntegrityReason::CrcSuspect)
+                                {
+                                    soft_reasons.push(IntegrityReason::CrcSuspect);
                                 }
                             }
                         }
@@ -355,6 +371,12 @@ impl MessageMaterializer for PstMaterializer {
                                     if !soft_reasons.contains(&reason) {
                                         soft_reasons.push(reason);
                                     }
+                                } else if outcome.reason == Some(IntegrityReason::CrcSuspect) {
+                                    // 0077: attach stream block CRC is warning-only but
+                                    // message-level CRC_SUSPECT so Tier-2 / fidelity guards fire.
+                                    if !soft_reasons.contains(&IntegrityReason::CrcSuspect) {
+                                        soft_reasons.push(IntegrityReason::CrcSuspect);
+                                    }
                                 }
                             }
                         }
@@ -368,7 +390,16 @@ impl MessageMaterializer for PstMaterializer {
                             Ok(mut reader) => {
                                 let mut buf = Vec::new();
                                 match reader.read_to_end(&mut buf) {
-                                    Ok(_) => data = Some(buf),
+                                    Ok(_) => {
+                                        data = Some(buf);
+                                        // 0077: consume AttachmentDataReader::crc_suspect
+                                        // into message integrity (DoD-19 attach stream).
+                                        if reader.crc_suspect()
+                                            && !soft_reasons.contains(&IntegrityReason::CrcSuspect)
+                                        {
+                                            soft_reasons.push(IntegrityReason::CrcSuspect);
+                                        }
+                                    }
                                     Err(e) => {
                                         emit_soft(format!(
                                             "open/read attachment payload failed (soft ATTACH_STREAM_READ_FAILED) nid={:#x} attach_nid={:#x}: {e}",
@@ -377,6 +408,12 @@ impl MessageMaterializer for PstMaterializer {
                                         let reason = IntegrityReason::AttachStreamReadFailed;
                                         if !soft_reasons.contains(&reason) {
                                             soft_reasons.push(reason);
+                                        }
+                                        // CRC during partial stream read still taints.
+                                        if reader.crc_suspect()
+                                            && !soft_reasons.contains(&IntegrityReason::CrcSuspect)
+                                        {
+                                            soft_reasons.push(IntegrityReason::CrcSuspect);
                                         }
                                         stream_available = false;
                                     }
@@ -483,6 +520,27 @@ impl Default for PstAttachStreamSource {
     }
 }
 
+impl PstAttachStreamSource {
+    /// Open a concrete [`pst_reader::AttachmentDataReader`] (preserves `crc_suspect`).
+    ///
+    /// Prefer this over [`AttachStreamSource::open_attach`] when the consumer must
+    /// observe late warning-only CRC after stream complete (unique-pst writer path).
+    pub fn open_attachment_data_reader(
+        &mut self,
+        parent: &MessageLocus,
+        attach_nid: u64,
+    ) -> Result<pst_reader::AttachmentDataReader, EmlWriteError> {
+        let pst = self.open_pst(&parent.source_path)?;
+        pst.open_attachment_data(NodeId(parent.nid), NodeId(attach_nid))
+            .map_err(|e| {
+                EmlWriteError::Other(format!(
+                    "open_attachment_data parent={:#x} attach={attach_nid:#x}: {e}",
+                    parent.nid
+                ))
+            })
+    }
+}
+
 impl AttachStreamSource for PstAttachStreamSource {
     /// Open attachment binary stream (including embedded ATTACH_EMBEDDED_MSG when
     /// `open_attachment_data` can yield bytes).
@@ -495,15 +553,7 @@ impl AttachStreamSource for PstAttachStreamSource {
         parent: &MessageLocus,
         attach_nid: u64,
     ) -> Result<Box<dyn Read>, EmlWriteError> {
-        let pst = self.open_pst(&parent.source_path)?;
-        let reader = pst
-            .open_attachment_data(NodeId(parent.nid), NodeId(attach_nid))
-            .map_err(|e| {
-                EmlWriteError::Other(format!(
-                    "open_attachment_data parent={:#x} attach={attach_nid:#x}: {e}",
-                    parent.nid
-                ))
-            })?;
+        let reader = self.open_attachment_data_reader(parent, attach_nid)?;
         Ok(Box::new(reader))
     }
 }

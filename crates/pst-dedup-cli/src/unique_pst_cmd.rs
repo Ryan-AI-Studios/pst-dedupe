@@ -184,6 +184,15 @@ pub struct UniquePstClapArgs {
     pub allow_cross_mid_tier2: bool,
     #[arg(long = "allow-degenerate-tier2")]
     pub allow_degenerate_tier2: bool,
+    /// Allow Tier-2 bind for CRC_SUSPECT items (restores pre-0077; default off) (0077).
+    #[arg(long = "allow-crc-suspect-tier2")]
+    pub allow_crc_suspect_tier2: bool,
+    /// First-N detail CRC warn lines per category before aggregation (0077).
+    #[arg(long = "crc-log-limit", default_value_t = 10)]
+    pub crc_log_limit: u64,
+    /// Seconds between aggregate CRC summary lines after first-N (0077).
+    #[arg(long = "crc-log-interval-secs", default_value_t = 30)]
+    pub crc_log_interval_secs: u64,
 }
 
 /// Runtime options for `unique-pst` orchestration.
@@ -240,6 +249,9 @@ pub struct UniquePstCliArgs {
     pub identity_ignore_inline_attachments: bool,
     pub allow_cross_mid_tier2: bool,
     pub allow_degenerate_tier2: bool,
+    pub allow_crc_suspect_tier2: bool,
+    pub crc_log_limit: u64,
+    pub crc_log_interval_secs: u64,
 }
 
 /// Run options / hooks for GUI and library callers (0072).
@@ -319,6 +331,8 @@ pub struct UniquePstOutcome {
     /// Completed volumes with digests (empty on pre-write cancel).
     pub volumes: Vec<UniqueVolumeDigest>,
     pub error_message: Option<String>,
+    /// Post-export risk level (0077); Desk wizard qualifies success banner.
+    pub export_risk: dedup_engine::integrity::PreflightRecommendation,
 }
 
 impl UniquePstClapArgs {
@@ -379,6 +393,9 @@ impl UniquePstClapArgs {
             identity_ignore_inline_attachments: self.identity_ignore_inline_attachments,
             allow_cross_mid_tier2: self.allow_cross_mid_tier2,
             allow_degenerate_tier2: self.allow_degenerate_tier2,
+            allow_crc_suspect_tier2: self.allow_crc_suspect_tier2,
+            crc_log_limit: self.crc_log_limit,
+            crc_log_interval_secs: self.crc_log_interval_secs,
         })
     }
 }
@@ -494,6 +511,24 @@ struct WriterAttachAdapter<'a> {
     inner: &'a mut PstAttachStreamSource,
 }
 
+/// Forwards `Read` and ORs [`pst_reader::AttachmentDataReader::crc_suspect`] into a
+/// shared flag so the production writer can emit `ATTACH_STREAM_CRC` after a
+/// successful stream (0077 DoD-19 — warning-only CRC must not be type-erased away).
+struct CrcFlaggingAttachReader {
+    inner: pst_reader::AttachmentDataReader,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Read for CrcFlaggingAttachReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if self.inner.crc_suspect() {
+            self.flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(n)
+    }
+}
+
 impl AttachStreamSource for WriterAttachAdapter<'_> {
     fn open_attach(
         &mut self,
@@ -535,10 +570,20 @@ impl AttachStreamSource for WriterAttachAdapter<'_> {
             nid: parent,
             is_orphaned: false,
         };
-        match dedup_engine::AttachStreamSource::open_attach(self.inner, &locus, attach) {
-            Ok(reader) => Ok(Some(AttachRead::from_reader(reader))),
-            Err(e) => Err(e.to_string()),
-        }
+        // Open concrete AttachmentDataReader so late CRC taint survives type erasure.
+        let reader = self
+            .inner
+            .open_attachment_data_reader(&locus, attach)
+            .map_err(|e| e.to_string())?;
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(reader.crc_suspect()));
+        let wrapped = CrcFlaggingAttachReader {
+            inner: reader,
+            flag: Arc::clone(&flag),
+        };
+        Ok(Some(AttachRead::from_reader_with_crc(
+            Box::new(wrapped),
+            flag,
+        )))
     }
 }
 
@@ -722,6 +767,17 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
         skips: vec![],
         integrity_csv: None,
         grouping: Default::default(),
+        page_crc_mismatches: 0,
+        block_crc_mismatches: 0,
+        block_bid_mismatches: 0,
+        distinct_bad_bids: 0,
+        distinct_bad_bids_exact: true,
+        crc_suspect_messages: 0,
+        page_reads: 0,
+        block_reads: 0,
+        block_crc_rate: 0.0,
+        block_crc_read_rate: 0.0,
+        poly_class_crc_sources: 0,
     };
     let keep_set = KeepSet {
         schema: KEEP_SET_SCHEMA.to_string(),
@@ -733,6 +789,19 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
         winners: vec![],
         stats: KeepSetStats::default(),
     };
+    let export_risk = crate::unique_export_report::compute_export_risk(
+        &scan.preflight.recommendation,
+        &crate::unique_export_report::ExportRiskInputs {
+            attach_fail_rate: 0.0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            degraded_winner_rate: 0.0,
+            partial: true,
+            failed_volume_index: None,
+            scan_recommendation: scan.preflight.recommendation,
+            attach_stream_crc_events: 0,
+        },
+    );
     let summary = UniqueExportSummary {
         schema: UNIQUE_EXPORT_REPORT_SCHEMA.to_string(),
         ok: false,
@@ -759,6 +828,8 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
             attachment_ledger_rows_written: None,
             error: Some("cancelled".into()),
             failed_volume_index: None,
+            attachment_fidelity_events_truncated: None,
+            attachment_fidelity_events_total: None,
         },
         verification: VerificationReport {
             ok: false,
@@ -773,6 +844,7 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
             code: "cancelled".into(),
             message: "cancelled".into(),
         }),
+        export_risk,
     };
     if let Err(e) = write_summary_json(ctx.summary_path, &summary) {
         tracing::warn!(
@@ -841,6 +913,11 @@ pub fn run_unique_pst_with_options(
     let stderr = run_opts.stderr_progress;
     let on_progress = run_opts.on_progress.map(|f| Arc::new(Mutex::new(f)));
     let on_log = run_opts.on_log.map(|f| Arc::new(Mutex::new(f)));
+
+    pst_reader::integrity_telemetry::set_log_limit(
+        args.crc_log_limit,
+        std::time::Duration::from_secs(args.crc_log_interval_secs),
+    );
 
     // ── Phase 0: resolve paths, guards, prepare report-dir ──────────────────
     let mut paths = resolve_pst_paths(&args.paths)?;
@@ -971,6 +1048,7 @@ pub fn run_unique_pst_with_options(
             volume_count: 0,
             volumes: vec![],
             error_message: Some("cancelled".into()),
+            export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
         });
     }
 
@@ -1008,6 +1086,7 @@ pub fn run_unique_pst_with_options(
             &args.tier1_verify,
             args.allow_cross_mid_tier2,
             args.allow_degenerate_tier2,
+            args.allow_crc_suspect_tier2,
             args.tier1_backfill,
             args.identity_ignore_inline_attachments,
         )
@@ -1015,6 +1094,8 @@ pub fn run_unique_pst_with_options(
     };
 
     // ── Phase 1: integrity scan ─────────────────────────────────────────────
+    // Dual-rate poly sources reclassify (clear) false-positive CRC_SUSPECT in
+    // run_scan so keep-set sees clean identity without Tier-2 auto-allow.
     let mut outcome = run_scan(&paths, &opts)?;
 
     // Scan-level integrity warnings must reach on_log (GUI Log panel), not only tracing.
@@ -1139,6 +1220,7 @@ pub fn run_unique_pst_with_options(
                 volume_count: 0,
                 volumes: vec![],
                 error_message: Some("cancelled".into()),
+                export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
             });
         }
 
@@ -1211,6 +1293,7 @@ pub fn run_unique_pst_with_options(
                 volume_count: 0,
                 volumes: vec![],
                 error_message: Some("cancelled".into()),
+                export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
             });
         }
 
@@ -1388,6 +1471,7 @@ pub fn run_unique_pst_with_options(
         &args.tier1_verify,
         args.allow_cross_mid_tier2,
         args.allow_degenerate_tier2,
+        args.allow_crc_suspect_tier2,
         args.tier1_backfill,
         args.identity_ignore_inline_attachments,
     )
@@ -1525,6 +1609,11 @@ pub fn run_unique_pst_with_options(
     let mut attach_written_total: u64 = 0;
     let mut attach_failed_total: u64 = 0;
     let mut attach_omitted_total: u64 = 0;
+    // 0077 DoD-11: surface writer attach-event cap totals on ExportSection.
+    let mut attach_fidelity_events_total: u64 = 0;
+    let mut attach_fidelity_events_truncated = false;
+    // 0077 P1-2: final-write ATTACH_STREAM_CRC Info events → export_risk only.
+    let mut attach_stream_crc_events: u64 = 0;
     let mut export_partial = false;
     let mut export_error: Option<String> = None;
     let mut failed_volume_index: Option<u32> = None;
@@ -1771,6 +1860,13 @@ pub fn run_unique_pst_with_options(
                 attach_failed_total = attach_failed_total.saturating_add(report.attachments_failed);
                 attach_omitted_total =
                     attach_omitted_total.saturating_add(report.attachments_omitted_by_policy);
+                attach_fidelity_events_total = attach_fidelity_events_total
+                    .saturating_add(report.attachment_fidelity_events_total);
+                attach_fidelity_events_truncated =
+                    attach_fidelity_events_truncated || report.attachment_fidelity_events_truncated;
+                // Uncapped counter (not the first-N Vec) so export_risk sees CRC past the cap.
+                attach_stream_crc_events =
+                    attach_stream_crc_events.saturating_add(report.attach_stream_crc_events);
 
                 cursor = start_cursor + written;
                 messages_written_prior =
@@ -2041,6 +2137,53 @@ pub fn run_unique_pst_with_options(
         None
     };
 
+    let export_section = {
+        let mut section = ExportSection {
+            volumes: volumes.clone(),
+            partial: export_partial || !ok && messages_written_total < keep_set.stats.unique,
+            messages_written_total,
+            attachments_written: attach_written_total,
+            attachments_failed: attach_failed_total,
+            attachments_omitted_by_policy: Some(attach_omitted_total),
+            attachments_failed_by_reason: None,
+            attachment_ledger: None,
+            attachment_ledger_mode: Some(args.attach_ledger.as_str().to_string()),
+            attachment_ledger_truncated: None,
+            attachment_ledger_rows_written: None,
+            error: export_error.clone(),
+            failed_volume_index,
+            attachment_fidelity_events_truncated: Some(attach_fidelity_events_truncated),
+            attachment_fidelity_events_total: Some(attach_fidelity_events_total),
+        };
+        if let Some(finish) = attach_ledger_finish.as_ref() {
+            finish.apply_to_export_section(&mut section);
+        }
+        // Writer counter is ground truth for omit (ledger Off never tallies
+        // events; full/summary ledger omit should match but prefer writer).
+        section.attachments_omitted_by_policy = Some(attach_omitted_total);
+        section
+    };
+    let attach_attempts = attach_written_total.saturating_add(attach_failed_total);
+    let attach_fail_rate = attach_failed_total as f64 / (attach_attempts.max(1) as f64);
+    let degraded_winner_rate = if keep_set.stats.unique > 0 {
+        keep_set.stats.degraded_winners as f64 / keep_set.stats.unique as f64
+    } else {
+        0.0
+    };
+    let export_risk = crate::unique_export_report::compute_export_risk(
+        &outcome.summary.preflight.recommendation,
+        &crate::unique_export_report::ExportRiskInputs {
+            attach_fail_rate,
+            block_crc_rate: outcome.summary.block_crc_rate,
+            block_crc_read_rate: outcome.summary.block_crc_read_rate,
+            degraded_winner_rate,
+            partial: export_section.partial,
+            failed_volume_index: export_section.failed_volume_index,
+            scan_recommendation: outcome.summary.preflight.recommendation,
+            attach_stream_crc_events,
+        },
+    );
+
     let summary = UniqueExportSummary {
         schema: UNIQUE_EXPORT_REPORT_SCHEMA.to_string(),
         ok,
@@ -2053,36 +2196,14 @@ pub fn run_unique_pst_with_options(
         report_dir: report_dir.display().to_string(),
         keep_set: keep_set.clone(),
         scan: outcome.summary,
-        export: {
-            let mut section = ExportSection {
-                volumes: volumes.clone(),
-                partial: export_partial || !ok && messages_written_total < keep_set.stats.unique,
-                messages_written_total,
-                attachments_written: attach_written_total,
-                attachments_failed: attach_failed_total,
-                attachments_omitted_by_policy: Some(attach_omitted_total),
-                attachments_failed_by_reason: None,
-                attachment_ledger: None,
-                attachment_ledger_mode: Some(args.attach_ledger.as_str().to_string()),
-                attachment_ledger_truncated: None,
-                attachment_ledger_rows_written: None,
-                error: export_error.clone(),
-                failed_volume_index,
-            };
-            if let Some(finish) = attach_ledger_finish.as_ref() {
-                finish.apply_to_export_section(&mut section);
-            }
-            // Writer counter is ground truth for omit (ledger Off never tallies
-            // events; full/summary ledger omit should match but prefer writer).
-            section.attachments_omitted_by_policy = Some(attach_omitted_total);
-            section
-        },
+        export: export_section,
         verification,
         duration_ms,
         max_volume_bytes: args.max_volume_bytes,
         decision_csv: decision_csv_out.clone(),
         keep_set_json: keep_set_json_out.clone(),
         error: summary_error.clone(),
+        export_risk,
     };
 
     // Fail-closed: if summary.json itself fails, force non-success exit even if
@@ -2125,6 +2246,7 @@ pub fn run_unique_pst_with_options(
                     None
                 }
             }),
+        export_risk: summary.export_risk.level,
     };
 
     emit_log(
@@ -2191,6 +2313,8 @@ pub fn run_unique_pst_with_options(
             "  partial:          {}  ok: {ok}  cancelled: {cancelled}",
             summary.export.partial
         );
+        // 0077 DoD-13: numbers/codes only — no PST-derived strings.
+        println!("  export_risk:      {}", summary.export_risk.level.as_str());
         // 0075 honesty counters (always printed, including when 0).
         println!(
             "  winners_from_recoverable_items: {}",
@@ -2877,6 +3001,9 @@ mod tests {
             identity_ignore_inline_attachments: false,
             allow_cross_mid_tier2: false,
             allow_degenerate_tier2: false,
+            allow_crc_suspect_tier2: false,
+            crc_log_limit: 10,
+            crc_log_interval_secs: 30,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -2970,6 +3097,9 @@ mod tests {
             identity_ignore_inline_attachments: false,
             allow_cross_mid_tier2: false,
             allow_degenerate_tier2: false,
+            allow_crc_suspect_tier2: false,
+            crc_log_limit: 10,
+            crc_log_interval_secs: 30,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3070,6 +3200,9 @@ mod tests {
             identity_ignore_inline_attachments: false,
             allow_cross_mid_tier2: false,
             allow_degenerate_tier2: false,
+            allow_crc_suspect_tier2: false,
+            crc_log_limit: 10,
+            crc_log_interval_secs: 30,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3161,6 +3294,9 @@ mod tests {
             identity_ignore_inline_attachments: false,
             allow_cross_mid_tier2: false,
             allow_degenerate_tier2: false,
+            allow_crc_suspect_tier2: false,
+            crc_log_limit: 10,
+            crc_log_interval_secs: 30,
         };
         let outcome = run_unique_pst_with_options(
             args,

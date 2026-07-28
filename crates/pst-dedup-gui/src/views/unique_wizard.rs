@@ -364,24 +364,44 @@ pub fn show_done(ui: &mut egui::Ui, app: &mut PstDedupApp) {
     ui.add_space(8.0);
 
     match &outcome {
-        Some(o) if o.cancelled => {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "Cancelled (partial report may be available).",
-            );
-        }
-        Some(o) if o.ok => {
-            ui.colored_label(egui::Color32::GREEN, "Export completed successfully.");
-        }
-        Some(o) => {
-            ui.colored_label(
-                egui::Color32::from_rgb(220, 120, 50),
-                format!(
-                    "Export finished with errors: {}",
-                    o.error_message.as_deref().unwrap_or("see report")
-                ),
-            );
-        }
+        Some(o) => match crate::unique_worker::unique_done_banner(o) {
+            crate::unique_worker::UniqueDoneBanner::Cancelled => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Cancelled (partial report may be available).",
+                );
+            }
+            crate::unique_worker::UniqueDoneBanner::SuccessOk => {
+                ui.colored_label(egui::Color32::GREEN, "Export completed successfully.");
+            }
+            crate::unique_worker::UniqueDoneBanner::RiskReExport => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!(
+                        "Export completed — re_export_recommended (see summary.json export_risk). Level: {}",
+                        o.export_risk.as_str()
+                    ),
+                );
+            }
+            crate::unique_worker::UniqueDoneBanner::RiskNotReady => {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    format!(
+                        "Export completed — not_export_ready (see summary.json export_risk). Level: {}",
+                        o.export_risk.as_str()
+                    ),
+                );
+            }
+            crate::unique_worker::UniqueDoneBanner::Error => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 120, 50),
+                    format!(
+                        "Export finished with errors: {}",
+                        o.error_message.as_deref().unwrap_or("see report")
+                    ),
+                );
+            }
+        },
         None => {
             ui.colored_label(
                 egui::Color32::RED,
@@ -404,6 +424,9 @@ pub fn show_done(ui: &mut egui::Ui, app: &mut PstDedupApp) {
                 ui.end_row();
                 ui.strong("Volumes:");
                 ui.label(format!("{}", o.volume_count));
+                ui.end_row();
+                ui.strong("Export risk:");
+                ui.label(o.export_risk.as_str());
                 ui.end_row();
                 ui.strong("Output:");
                 ui.label(o.out.display().to_string());

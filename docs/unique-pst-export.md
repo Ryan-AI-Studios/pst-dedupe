@@ -196,7 +196,43 @@ Ordered **best-first** substrings against the absolute source path (Windows lowe
 
 ### Graded fidelity (`--fidelity-rank graded`)
 
-Default remains **binary** (clean=0, any degraded/orphaned=1). Graded uses worst tier across integrity reasons: soft attach meta (1) < attach payload (2) < body (3) < structural (4).
+Default remains **binary** (clean=0, any degraded/orphaned=1). Graded uses worst tier across integrity reasons: soft attach meta (1) < attach payload (2) < body (3) < structural (4). `CRC_SUSPECT` is graded tier 3 (body/data class) so a clean twin outranks a suspect copy.
+
+### CRC integrity & export risk (0077)
+
+Scan and unique-pst report page/block CRC and BID mismatch counters **per source** (data path — not dependent on a log subscriber). CRC remains **warning-only and non-fatal**; `crc_skip_rate` still means message-level CRC *skips* only.
+
+| Signal | Read it as | Action |
+|---|---|---|
+| `distinct_bad_bids` small, `page_crc_mismatches` huge | a few bad blocks re-read many times | usually proceed; check attach fail rate |
+| `distinct_bad_bids` large / `exact=false` | widespread block corruption | re-export before trusting the unique set |
+| `crc_suspect_messages` > 0 | documents **kept with possibly-wrong bytes**; held out of Tier 2 by default | higher unique count expected; flagged, not lost |
+| `block_crc_read_rate` ≥ 0.15 | the medium is failing, not the mailbox | `export_risk = not_export_ready` — re-image or re-export |
+| `attach_fail_rate` over threshold | attachment payloads unreadable | re-export; the 0073 ledger names which |
+| `export_risk = not_export_ready` | failed volume, catastrophic rate, or scan already said so | do not hand off |
+
+**CLI:** `--crc-log-limit` (default 10), `--crc-log-interval-secs` (default 30), `--allow-crc-suspect-tier2` (default off).
+
+**`export_risk`** reuses `PreflightRecommendation` (`ok` | `re_export_recommended` | `not_export_ready`) and is the **max** of scan preflight and post-export evaluation (export never lowers risk). Exit-code mapping is **0078**.
+
+#### ScanPST
+
+- **`SCANPST.EXE` modifies the file it repairs** (writes a `.bak` first — Microsoft documentation). Run it on a **copy**, never on operator evidence. Repairing evidence in place is a chain-of-custody event.
+- **ScanPST repairs by discarding what it cannot recover.** "Repair complete" means structural consistency, not "nothing was lost."
+- **Always diff the counts:** `pst-dedup scan <original> --json` before, `pst-dedup scan <repaired-copy> --json` after; compare `total_messages` and per-folder counts. Log any drop as disclosed data loss with the delta stated.
+- ScanPST ships with **classic** Outlook (Microsoft 365 / 2024 / 2021 / 2019 / 2016). Do not assume it exists on a "new Outlook" machine.
+
+#### Purview
+
+- Before concluding a Purview export is corrupt: re-export with *"Also include items that have an unrecognized format, are encrypted, or weren't indexed"* and read the **unindexed items report**.
+- **Unindexed ≠ corrupted.** CRC block errors are *physical* byte corruption (remedy: re-download / re-export). Purview unindexed items are *logical* indexing exceptions in a byte-perfect file — password-protected, unsupported format, oversized (remedy: decrypt, different extractor, or documented exclusion). Wrong remedy wastes days.
+- Purview PSTs have been reported opening empty or without `Top of Information Store` at a correct byte size — **check folder and message counts, not file size**.
+
+#### This tool
+
+- Never repairs a source. Remediation is re-export or a repaired **copy** (new evidence item with its own count delta).
+
+Cross-links: **0078** exit codes from `export_risk`; **0081** operator runbook.
 
 ### Explainability columns
 

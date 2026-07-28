@@ -52,6 +52,8 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use md5::{Digest as Md5Digest, Md5};
@@ -199,8 +201,15 @@ pub struct WriteAttachment {
 /// Prefer constructing via [`AttachRead::from_reader`] for true multi-GB
 /// streams. [`AttachRead::from_vec`] exists only for the default
 /// [`AttachStreamSource::open_attach_stream`] compatibility shim.
+///
+/// **0077:** optional shared [`Self::crc_suspect`] flag — a reader wrapper around
+/// `AttachmentDataReader` may set it when warning-only block CRC/BID fires during
+/// a successful stream. The production writer records `ATTACH_STREAM_CRC` (info)
+/// after a successful read so taint is not lost when the concrete reader type is
+/// erased to `Box<dyn Read>`.
 pub struct AttachRead {
     inner: AttachReadInner,
+    crc_suspect: Arc<AtomicBool>,
 }
 
 enum AttachReadInner {
@@ -213,6 +222,7 @@ impl AttachRead {
     pub fn from_vec(data: Vec<u8>) -> Self {
         Self {
             inner: AttachReadInner::Cursor(Cursor::new(data)),
+            crc_suspect: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -220,7 +230,23 @@ impl AttachRead {
     pub fn from_reader(reader: Box<dyn Read>) -> Self {
         Self {
             inner: AttachReadInner::Dyn(reader),
+            crc_suspect: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Wrap a reader with a shared CRC-suspect flag set by the caller's wrapper.
+    ///
+    /// After the stream is fully consumed, check [`Self::crc_suspect`].
+    pub fn from_reader_with_crc(reader: Box<dyn Read>, crc_suspect: Arc<AtomicBool>) -> Self {
+        Self {
+            inner: AttachReadInner::Dyn(reader),
+            crc_suspect,
+        }
+    }
+
+    /// True when a warning-only CRC/BID hit was recorded on this stream (0077).
+    pub fn crc_suspect(&self) -> bool {
+        self.crc_suspect.load(Ordering::Relaxed)
     }
 }
 
@@ -493,7 +519,14 @@ pub struct WritePstReport {
     /// contained `..` (routed to residual or altered segments).
     pub folder_paths_degraded: u64,
     /// Per-attachment fidelity events (DoD-8 surface for depth/unparsed embeds).
+    /// Capped at [`ATTACHMENT_FIDELITY_EVENTS_CAP`] (first-N); see total/truncated.
     pub attachment_fidelity_events: Vec<AttachmentFidelityEvent>,
+    /// Total attach events observed (may exceed Vec len when capped; 0077).
+    pub attachment_fidelity_events_total: u64,
+    /// True when events past the first-N cap were dropped from the Vec (0077).
+    pub attachment_fidelity_events_truncated: bool,
+    /// Exact count of successful attach streams that hit warning-only CRC (uncapped; 0077).
+    pub attach_stream_crc_events: u64,
     /// SHA-256 (hex, lowercase) of the final PST file bytes after all seeks
     /// and before rename. Strategy: hash the complete temp file after NDB
     /// finalize (header/BBT/NBT/AMaps written); matches on-disk bytes after
@@ -588,9 +621,14 @@ impl AttachmentFidelityKind {
     }
 
     /// Default severity for this kind (omit / ledger marker → Info; else Fail).
+    ///
+    /// `StreamCrc` is **Info** (0077): CRC stays warning-only; successful bytes
+    /// are still written, and the event must not increment `attachments_failed`.
     pub fn default_severity(self) -> AttachEventSeverity {
         match self {
-            Self::OmittedByPolicy | Self::LedgerTruncated => AttachEventSeverity::Info,
+            Self::OmittedByPolicy | Self::LedgerTruncated | Self::StreamCrc => {
+                AttachEventSeverity::Info
+            }
             _ => AttachEventSeverity::Fail,
         }
     }
@@ -647,7 +685,16 @@ struct WriteCounters {
     folder_paths_residual: u64,
     folder_paths_degraded: u64,
     attachment_fidelity_events: Vec<AttachmentFidelityEvent>,
+    /// Total attach events observed (including those past the Vec cap).
+    attachment_fidelity_events_total: u64,
+    /// True when events beyond the first-N cap were dropped from the Vec.
+    attachment_fidelity_events_truncated: bool,
+    /// Exact count of [`AttachmentFidelityKind::StreamCrc`] events (uncapped; 0077 export_risk).
+    attach_stream_crc_events: u64,
 }
+
+/// Cap on in-process `attachment_fidelity_events` (0077 / D-0073-vec-events).
+pub const ATTACHMENT_FIDELITY_EVENTS_CAP: usize = 1000;
 
 /// Build a locus-bearing attach event from message + attachment DTOs.
 fn make_attach_event(
@@ -683,8 +730,8 @@ fn make_attach_event(
     }
 }
 
-/// Record an attach event: always push to the Vec; Fail severity increments
-/// `attachments_failed`; optional sink receives a clone-free borrow.
+/// Record an attach event: count always; first-N kept in Vec (cap 1000); Fail
+/// severity increments `attachments_failed`; optional sink receives a borrow.
 fn record_attach_event(
     counters: &mut WriteCounters,
     event: AttachmentFidelityEvent,
@@ -696,7 +743,17 @@ fn record_attach_event(
     if let Some(s) = sink.as_mut() {
         s.on_attach_event(&event);
     }
-    counters.attachment_fidelity_events.push(event);
+    counters.attachment_fidelity_events_total =
+        counters.attachment_fidelity_events_total.saturating_add(1);
+    if event.kind == AttachmentFidelityKind::StreamCrc {
+        // Uncapped: export_risk must not lose CRC evidence past the Vec cap (0077).
+        counters.attach_stream_crc_events = counters.attach_stream_crc_events.saturating_add(1);
+    }
+    if counters.attachment_fidelity_events.len() < ATTACHMENT_FIDELITY_EVENTS_CAP {
+        counters.attachment_fidelity_events.push(event);
+    } else {
+        counters.attachment_fidelity_events_truncated = true;
+    }
 }
 
 /// Map a `CanonicalMessage` (0066 keep-set winner) to the plain `WriteMessage`
@@ -1534,6 +1591,9 @@ pub fn write_unicode_pst_streaming(
         folder_paths_residual: counters.folder_paths_residual,
         folder_paths_degraded: counters.folder_paths_degraded,
         attachment_fidelity_events: counters.attachment_fidelity_events,
+        attachment_fidelity_events_total: counters.attachment_fidelity_events_total,
+        attachment_fidelity_events_truncated: counters.attachment_fidelity_events_truncated,
+        attach_stream_crc_events: counters.attach_stream_crc_events,
         sha256_hex,
         md5_hex,
         finalized_early,
@@ -2573,16 +2633,16 @@ fn write_one_attachment(
 
     // Write binary: heap-inline when small `Bytes`; otherwise subnode data chain
     // (chunked from `Stream` without a full multi-GB Vec).
-    let (actual_len, diverted, data_prop) = match payload {
+    let (actual_len, diverted, data_prop, stream_crc_suspect) = match payload {
         ResolvedAttach::Bytes(data) => {
             let actual_len = data.len() as u64;
             if data.len() > MAX_HEAP_VALUE_SIZE {
                 let sub_nid = next_subnode_nid(&mut body_counter);
                 let bid = layout.write_data_chain(data)?;
                 attach_sub_entries.push((sub_nid, bid, 0));
-                (actual_len, true, PcValue::SubnodeBinary(sub_nid))
+                (actual_len, true, PcValue::SubnodeBinary(sub_nid), false)
             } else {
-                (actual_len, false, PcValue::Binary(data))
+                (actual_len, false, PcValue::Binary(data), false)
             }
         }
         ResolvedAttach::Stream(mut reader) => {
@@ -2608,20 +2668,38 @@ fn write_one_attachment(
                     return Ok(None);
                 }
             };
+            // 0077: warning-only CRC that still returned Ok(bytes) must taint.
+            // Check after full stream consume; flag is set by reader wrapper.
+            let crc_hit = reader.crc_suspect();
             if total_len == 0 {
                 // Valid zero-byte attach via stream.
-                (0, false, PcValue::Binary(Vec::new()))
+                (0, false, PcValue::Binary(Vec::new()), crc_hit)
             } else if total_len as usize <= MAX_HEAP_VALUE_SIZE && bid != 0 {
                 // Small stream result still lives as a data chain (subnode).
                 // Prefer subnode for stream path to avoid re-buffering.
                 attach_sub_entries.push((sub_nid, bid, 0));
-                (total_len, true, PcValue::SubnodeBinary(sub_nid))
+                (total_len, true, PcValue::SubnodeBinary(sub_nid), crc_hit)
             } else {
                 attach_sub_entries.push((sub_nid, bid, 0));
-                (total_len, true, PcValue::SubnodeBinary(sub_nid))
+                (total_len, true, PcValue::SubnodeBinary(sub_nid), crc_hit)
             }
         }
     };
+
+    // Successful write with late CRC taint: fidelity event only (not a fail).
+    if stream_crc_suspect {
+        record_attach_event(
+            counters,
+            make_attach_event(
+                msg,
+                attach,
+                attach_index,
+                AttachmentFidelityKind::StreamCrc,
+                AttachEventSeverity::Info,
+            ),
+            attach_event_sink,
+        );
+    }
 
     let size_i32 = i32::try_from(actual_len.min(i32::MAX as u64)).unwrap_or(i32::MAX);
     let attach_size = size_i32 as u32;

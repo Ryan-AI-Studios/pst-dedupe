@@ -4,13 +4,15 @@
 use std::fs;
 use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use md5::{Digest as Md5Digest, Md5};
 use pst_writer::{
     is_amap_page_offset, temp_sibling_path, write_unicode_pst, write_unicode_pst_streaming,
-    write_unicode_pst_with_streams, AttachRead, AttachStreamSource, WriteAttachment, WriteMessage,
-    WriteProgress, WriteProgressSink, WritePstOpts, WriteStage, WriterError, AMAP_FIRST_OFFSET,
-    AMAP_INTERVAL,
+    write_unicode_pst_with_streams, AttachRead, AttachStreamSource, AttachmentFidelityKind,
+    WriteAttachment, WriteMessage, WriteProgress, WriteProgressSink, WritePstOpts, WriteStage,
+    WriterError, AMAP_FIRST_OFFSET, AMAP_INTERVAL,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 
@@ -692,6 +694,94 @@ fn soft_attach_fail_mid_stream_keeps_message() {
     assert_eq!(report.attachments_written, 0);
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
     let _ = pst.folders().expect("folders");
+    cleanup(&path);
+}
+
+/// 0077 DoD-19: successful stream with `crc_suspect` flag records ATTACH_STREAM_CRC
+/// (info) without failing the attach write.
+struct CrcSuspectStream {
+    flag: Arc<AtomicBool>,
+}
+
+impl AttachStreamSource for CrcSuspectStream {
+    fn open_attach(
+        &mut self,
+        _source_path: Option<&str>,
+        _parent_nid: Option<u64>,
+        _attach_nid: Option<u64>,
+        _filename: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        Err("must use open_attach_stream".into())
+    }
+
+    fn open_attach_stream(
+        &mut self,
+        _source_path: Option<&str>,
+        _parent_nid: Option<u64>,
+        _attach_nid: Option<u64>,
+        _filename: &str,
+    ) -> Result<Option<AttachRead>, String> {
+        // Set flag as if a leaf-block CRC fired mid-stream (warning-only).
+        self.flag.store(true, Ordering::Relaxed);
+        let payload = b"crc-suspect-payload".to_vec();
+        Ok(Some(AttachRead::from_reader_with_crc(
+            Box::new(Cursor::new(payload)),
+            Arc::clone(&self.flag),
+        )))
+    }
+}
+
+#[test]
+fn stream_crc_suspect_emits_fidelity_event_not_fail() {
+    let path = scratch("crc_suspect_stream");
+    cleanup(&path);
+    let mut msg = base_msg("<crc-stream@ex.com>", "CRC stream taint");
+    msg.attachments.push(WriteAttachment {
+        filename: "suspect.bin".into(),
+        size: 19,
+        data: None,
+        stream_available: true,
+        ..WriteAttachment::default()
+    });
+    let mut src = CrcSuspectStream {
+        flag: Arc::new(AtomicBool::new(false)),
+    };
+    let report = write_unicode_pst_with_streams(
+        &path,
+        vec![msg],
+        &[],
+        &WritePstOpts::default(),
+        Some(&mut src),
+    )
+    .expect("write");
+    assert_eq!(report.messages_written, 1);
+    assert_eq!(
+        report.attachments_written, 1,
+        "CRC is warning-only: attach still written"
+    );
+    assert_eq!(
+        report.attachments_failed, 0,
+        "StreamCrc must not increment attachments_failed"
+    );
+    let crc_events: Vec<_> = report
+        .attachment_fidelity_events
+        .iter()
+        .filter(|e| e.kind == AttachmentFidelityKind::StreamCrc)
+        .collect();
+    assert_eq!(
+        crc_events.len(),
+        1,
+        "expected one ATTACH_STREAM_CRC event; events={:?}",
+        report
+            .attachment_fidelity_events
+            .iter()
+            .map(|e| e.kind.as_code())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        report.attach_stream_crc_events, 1,
+        "uncapped StreamCrc counter must count past Vec cap for export_risk"
+    );
     cleanup(&path);
 }
 
