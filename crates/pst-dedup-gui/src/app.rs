@@ -29,8 +29,6 @@ pub enum AppState {
 pub struct DedupConfig {
     /// Enable Tier 2 (content hash) fallback.
     pub enable_tier2: bool,
-    /// Body preview length for Tier 2 hash (bytes).
-    pub body_hash_len: usize,
     /// Include attachment metadata in Tier 2 hash.
     pub include_attachments: bool,
     /// Output directory for reports and exports.
@@ -41,7 +39,6 @@ impl Default for DedupConfig {
     fn default() -> Self {
         Self {
             enable_tier2: true,
-            body_hash_len: 4096,
             include_attachments: true,
             output_dir: None,
         }

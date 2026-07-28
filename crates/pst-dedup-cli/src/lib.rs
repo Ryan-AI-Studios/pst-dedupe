@@ -7,6 +7,7 @@
 pub mod attach_probe;
 pub mod convenience;
 pub mod error;
+pub mod grouping_cli;
 pub mod inspect;
 pub mod job_cmd;
 pub mod json_io;

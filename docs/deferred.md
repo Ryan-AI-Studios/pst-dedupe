@@ -781,7 +781,22 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0075-scope | — | Custodial / vertical dedupe (`--dedupe-scope per-source`) | Grouping change, not winner change; out of 0075 | residual / propose track |
+| (soft-close) | — | D-0075-scope custodial / vertical dedupe | **Closed in 0076** via `--dedupe-scope per-source` | **closed / 0076** |
+
+## From track 0076-ContentHashTierHardening
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0076-default-v2 | — | Switch default identity to v2 strong hash | Would change every stored `content_hash_hex` | product |
+| D-0076-attach-content | P2 | `--strong-content-hash body-recip-attach` over 0074 probe | **CLI rejects** the value with a clear error pointing here; live levels are `off\|body\|body-recip` only. Enum variant retained for future wire-up. | residual |
+| D-0076-recipient-table | P2 | Recipient table (SMTP + PidTagRecipientType) instead of display strings | Real fix for X.500 / display-name variance; `x500_recipient_items` + `tier2_5_splits_recipients_only` measure the failure mode | residual / pst-reader |
+| D-0076-inline-attach | P3 | Residual edge cases for inline detection | **Shipped** MAPI flags on attach PC (`0x3712` / `attRenderedInBody` / hidden) + `inline_attachments_ignored`; residual only for stores that omit those tags | residual |
+| D-0076-bulk-class | — | Template / Newsletter class for large MID-distinct clusters | Stats surface cluster; classification is product | residual |
+| D-0076-custodian-map | — | Many PSTs → one custodian map | Needs operator-supplied mapping surface | residual |
+| D-0076-gui | P3 | Desk surfaces for scope / identity enums | Checkbox for body only (consistent with D-0075-gui) | residual polish |
+| D-0076-operator-perf | — | Multi-GB performance proof for default / body levels | Fixture-scale: aspose scan ~51 ms default / ~66 ms `--strong-content-hash body` (debug); multi-GB residual | operator-local |
+| D-0076-fixture-baseline | P3 | Checked-in fixture-wide pre-0076 grouping baseline matrix | Synthetic refinement + ASPOSE winner golden green; full aspose/promotions group baselines residual | residual polish |
+| D-0076-normalize-parity | — | Full body normalization parity with Relativity (strip spaces) | Changing v1 normalization is a hash change | residual |
 | D-0075-gui | P3 | Desk free-text `--folder-rank` / `--source-rank` lists | Wizard has earliest_date + Prefer folder class + Prefer BCC; ordered lists CLI-only | residual polish |
 | D-0075-storeids | — | Store-EntryID special-folder detection (`PidTagIpmWastebasketEntryId`, …) | Keyword ladder + `--folder-rank` sufficient for P0 | residual |
 | D-0075-locale | — | Localized folder-name packs (zh/de/fr/ja) | Segment globs are workaround only | residual |

@@ -206,6 +206,10 @@ pub fn show_options(ui: &mut egui::Ui, app: &mut PstDedupApp) {
             &mut form.no_attachments,
             "No attachments (parents only write)",
         );
+        ui.checkbox(
+            &mut form.strong_content_hash,
+            "Strong content hash (full body identity)",
+        );
         ui.checkbox(&mut form.overwrite, "Overwrite existing out / report dir");
     }
 

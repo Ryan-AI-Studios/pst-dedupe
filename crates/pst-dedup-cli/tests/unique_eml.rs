@@ -422,6 +422,11 @@ fn unique_eml_integrity_csv_refuses_equal_input_pst() {
 }
 
 /// Dual identical inputs: keep-set collapses dups; eml_written == unique ≈ single-file unique.
+///
+/// Default 0076 guards (degenerate / cross-MID) can leave no-MID sparse items unique per
+/// source, so dual default unique can exceed single (observed aspose: single=17, dual=18).
+/// Collapse is asserted under the same flags including `--allow-degenerate-tier2` so
+/// content-hash can still bind those copies across files — not a hardcoded unique count.
 #[test]
 fn unique_eml_dual_identical_inputs_collapses_to_single_unique_count() {
     let sample = fixture_sample();
@@ -437,13 +442,21 @@ fn unique_eml_dual_identical_inputs_collapses_to_single_unique_count() {
     let out_single = dir.path().join("pack_single");
     let out_dual = dir.path().join("pack_dual");
 
+    // Same flags for both runs. allow-degenerate restores Tier-2 bind for sparse no-MID
+    // items so identical PST copies collapse; cross-MID escape covers template collisions.
+    let common = [
+        "unique-eml",
+        "--json",
+        "--allow-degenerate-tier2",
+        "--allow-cross-mid-tier2",
+    ];
+
     let single = Command::new(bin())
+        .args(common)
         .args([
-            "unique-eml",
             a.to_str().expect("utf8"),
             "--out",
             out_single.to_str().expect("utf8"),
-            "--json",
         ])
         .output()
         .expect("run single");
@@ -458,13 +471,12 @@ fn unique_eml_dual_identical_inputs_collapses_to_single_unique_count() {
     assert!(single_unique > 0);
 
     let dual = Command::new(bin())
+        .args(common)
         .args([
-            "unique-eml",
             a.to_str().expect("utf8"),
             b.to_str().expect("utf8"),
             "--out",
             out_dual.to_str().expect("utf8"),
-            "--json",
         ])
         .output()
         .expect("run dual");
@@ -479,10 +491,10 @@ fn unique_eml_dual_identical_inputs_collapses_to_single_unique_count() {
     let eml_written = dual_v["eml_written"].as_u64().expect("eml_written");
     let unique = dual_v["unique"].as_u64().expect("unique");
     assert_eq!(eml_written, unique, "eml_written must equal unique");
-    // Identical copies: unique must collapse to single-file unique (not ~2×).
     assert_eq!(
         unique, single_unique,
-        "dual identical inputs must collapse to single-file unique count"
+        "dual identical inputs must collapse to single-file unique count under same flags \
+         (single={single_unique}, dual={unique})"
     );
     assert!(
         unique < single_unique.saturating_mul(2) || single_unique == 0,

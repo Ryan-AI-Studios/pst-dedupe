@@ -144,7 +144,7 @@
 | 2b | **0077** CRC noise + risk | Parallel with 0074 |
 | 2c | **0078** Exit codes | Parallel; small CLI contract |
 | 3 | **0075** Winner policies | **Completed** — ladder fidelity→bcc→source→folder→policy + `decided_by` + All Custodians; D-0075-* residual |
-| 4 | **0076** Tier-2 hardening | After 0065 semantics solid |
+| 4 | **0076** Tier-2 hardening | **Completed** — char-clamp, split-only guards, BoundBy, Tier 2.5 body/body-recip, `--dedupe-scope` (closes D-0075-scope); Codex luna PASS WITH DEFERRED P3 |
 | 5 | **0079** Performance | After fidelity/report stable preferred |
 | 6 | **0080** Outlook QC | After unique-pst stable |
 | 7 | **0081** Deps + runbook | Can draft early; finalize after 0073/0077 |

@@ -66,7 +66,7 @@ pub use messaging::attachment::{AttachmentDataReader, AttachmentInfo, Attachment
 pub use messaging::folder::FolderInfo;
 pub use messaging::message::{
     filetime_to_rfc3339, filetime_to_unix, is_calendar_message_class, ExtractedMessage,
-    MessageProperties,
+    MessageProperties, MessageReadOpts,
 };
 pub use ndb::NodeId;
 

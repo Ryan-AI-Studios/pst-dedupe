@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use dedup_engine::{
-    hasher::{self, AttachmentInfo},
+    hasher::{self, AttachmentInfo, StrongHashInput, Tier2IneligibleReason},
     integrity::{
         classify_attach_meta_fail, classify_body_flags, classify_orphaned, compute_preflight,
         integrity_sidecar_path, merge_recoverable, reason_from_pst_error, tally_reason,
@@ -17,7 +17,7 @@ use dedup_engine::{
     },
     keepset::{MessageLocus, RecoverableScanItem},
     report::{write_summary_report, ReportRow, StreamingCsvReportWriter},
-    DedupIndex, DedupResult, MessageRef,
+    DedupIndex, DedupResult, GroupingContext, GroupingStats, IndexItem, MessageRef,
 };
 use pst_reader::PstFile;
 use serde::Serialize;
@@ -56,6 +56,8 @@ pub struct ScanOptions {
     pub deep_attach_max_probe_time_ms: u64,
     pub deep_attach_max_open_psts: usize,
     pub deep_attach_max_peer_probes_per_group: u64,
+    /// 0076 identity-binding context (guards, scope, strong hash level).
+    pub grouping: GroupingContext,
 }
 
 impl Default for ScanOptions {
@@ -80,6 +82,7 @@ impl Default for ScanOptions {
             deep_attach_max_probe_time_ms: 2000,
             deep_attach_max_open_psts: 32,
             deep_attach_max_peer_probes_per_group: 3,
+            grouping: GroupingContext::default(),
         }
     }
 }
@@ -138,6 +141,13 @@ pub struct ScanSummary {
     /// Path of streaming integrity CSV if written.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integrity_csv: Option<String>,
+    /// 0076 identity-binding honesty counters.
+    #[serde(default, skip_serializing_if = "grouping_stats_empty")]
+    pub grouping: GroupingStats,
+}
+
+fn grouping_stats_empty(s: &GroupingStats) -> bool {
+    s == &GroupingStats::default()
 }
 
 /// One duplicate pair for listing.
@@ -174,6 +184,8 @@ pub struct RebuildDedupOutcome {
     pub tier1_hits: u64,
     pub tier2_hits: u64,
     pub total_savings: u64,
+    /// Identity-binding counters from the rebuild index (0076 honesty).
+    pub grouping_stats: GroupingStats,
 }
 
 /// Rebuild `DedupResult` for remaining candidates in `scan_order`.
@@ -189,10 +201,23 @@ pub fn rebuild_dedup_results(
     message_refs: &HashMap<(String, u64), MessageRef>,
     enable_tier2: bool,
 ) -> RebuildDedupOutcome {
+    rebuild_dedup_results_with_ctx(
+        candidates,
+        message_refs,
+        &GroupingContext::with_tier2(enable_tier2),
+    )
+}
+
+/// Rebuild streaming index under an explicit [`GroupingContext`] (0076).
+pub fn rebuild_dedup_results_with_ctx(
+    candidates: &[RecoverableScanItem],
+    message_refs: &HashMap<(String, u64), MessageRef>,
+    ctx: &GroupingContext,
+) -> RebuildDedupOutcome {
     let mut ordered: Vec<&RecoverableScanItem> = candidates.iter().collect();
     ordered.sort_by_key(|c| c.scan_order);
 
-    let mut index = DedupIndex::with_capacity_and_tier2(ordered.len().max(1), enable_tier2);
+    let mut index = DedupIndex::with_capacity_and_context(ordered.len().max(1), ctx.clone());
     let mut results: HashMap<(String, u64), DedupResult> = HashMap::with_capacity(ordered.len());
     let mut total_savings = 0u64;
 
@@ -211,7 +236,41 @@ pub fn rebuild_dedup_results(
                 sender: String::new(),
                 size: c.size,
             });
-        let result = index.check_and_insert(c.message_id_norm.as_deref(), c.content_hash, msg_ref);
+        let eligible = match c.assess_tier2_eligibility() {
+            Ok(()) => true,
+            Err(Tier2IneligibleReason::UnreadableBody) => {
+                if ctx.enforce_readable_body() {
+                    index.record_tier2_block_unreadable();
+                    false
+                } else {
+                    true
+                }
+            }
+            Err(Tier2IneligibleReason::Degenerate) => {
+                if ctx.enforce_readable_body() {
+                    index.record_tier2_block_degenerate();
+                    false
+                } else {
+                    true
+                }
+            }
+        };
+        if c.preview_bytes_over_budget {
+            index.record_preview_over_budget();
+        }
+        let item = IndexItem {
+            message_id: c.message_id_norm.clone(),
+            content_hash: c.content_hash,
+            strong_content_hash: c.strong_content_hash,
+            tier2_eligible: eligible,
+            source_key: c.path_key(),
+            fp_body: c.fp_body,
+            fp_header: c.fp_header,
+            fp_recipients: c.fp_recipients,
+            fp_attachments: c.fp_attachments,
+            msg_ref,
+        };
+        let result = index.check_and_insert_item(item);
         if let DedupResult::DuplicateOf { .. } = &result {
             total_savings = total_savings.saturating_add(c.size as u64);
         }
@@ -225,6 +284,7 @@ pub fn rebuild_dedup_results(
         tier1_hits: index.tier1_hits,
         tier2_hits: index.tier2_hits,
         total_savings,
+        grouping_stats: index.stats,
     }
 }
 
@@ -361,7 +421,9 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     // Test/CI hook only: force every message to hard-skip after a successful open
     // (env PST_DEDUPE_TEST_FORCE_SKIP=1). Not an operator-facing feature.
     let force_skip = std::env::var_os("PST_DEDUPE_TEST_FORCE_SKIP").is_some_and(|v| v == "1");
-    let mut index = DedupIndex::with_capacity_and_tier2(100_000, opts.enable_tier2);
+    let mut grouping = opts.grouping.clone();
+    grouping.tier2_enabled = opts.enable_tier2;
+    let mut index = DedupIndex::with_capacity_and_context(100_000, grouping.clone());
     let mut all_rows: Vec<ReportRow> = Vec::new();
     let mut candidates: Vec<RecoverableScanItem> = Vec::new();
     let mut scan_order: u64 = 0;
@@ -557,7 +619,10 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                     continue;
                 }
 
-                let props = match pst.read_message_properties(msg_nid) {
+                let read_opts = pst_reader::MessageReadOpts {
+                    compute_body_digest: grouping.identity.is_strong(),
+                };
+                let props = match pst.read_message_properties_with_opts(msg_nid, read_opts) {
                     Ok(p) => p,
                     Err(e) => {
                         let mut reason = reason_from_pst_error(&e);
@@ -619,13 +684,18 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                 let attachments =
                     if opts.include_attachments && props.has_attachments.unwrap_or(false) {
                         match pst.read_attachment_metadata(msg_nid) {
-                            Ok(atts) => atts
-                                .into_iter()
-                                .map(|a| AttachmentInfo {
-                                    filename: a.filename,
-                                    size: a.size,
-                                })
-                                .collect(),
+                            Ok(atts) => {
+                                let mut out = Vec::with_capacity(atts.len());
+                                for a in atts {
+                                    if a.is_inline && grouping.ignore_inline_attachments {
+                                        index.record_inline_attachment_ignored();
+                                    }
+                                    let mut info = AttachmentInfo::new(a.filename, a.size);
+                                    info.is_inline = a.is_inline;
+                                    out.push(info);
+                                }
+                                out
+                            }
                             Err(e) => {
                                 attach_cls = classify_attach_meta_fail(opts.mode, e.to_string());
                                 Vec::new()
@@ -699,14 +769,43 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                             }
                         }
 
-                        let keys = hasher::compute_dedup_keys(
+                        let strong_in = StrongHashInput {
+                            identity: grouping.identity,
+                            body_sha256: props.body_sha256.as_ref(),
+                            body_char_len: props.body_char_len,
+                            display_to: props.display_to.as_deref(),
+                            display_cc: props.display_cc.as_deref(),
+                            display_bcc: props.display_bcc.as_deref(),
+                            ignore_inline_attachments: grouping.ignore_inline_attachments,
+                        };
+                        let keys = hasher::compute_dedup_keys_ex(
                             props.message_id.as_deref(),
                             props.subject.as_deref(),
                             props.submit_time,
                             props.sender_email.as_deref(),
                             props.body_preview.as_deref(),
                             &attachments,
+                            &strong_in,
                         );
+                        if keys.preview_bytes_over_budget {
+                            index.record_preview_over_budget();
+                        }
+                        // X.500-looking display strings (honesty signal; any level).
+                        let x500 = props
+                            .display_to
+                            .as_deref()
+                            .is_some_and(dedup_engine::recipient_has_x500)
+                            || props
+                                .display_cc
+                                .as_deref()
+                                .is_some_and(dedup_engine::recipient_has_x500)
+                            || props
+                                .display_bcc
+                                .as_deref()
+                                .is_some_and(dedup_engine::recipient_has_x500);
+                        if x500 {
+                            index.record_x500_recipient_item();
+                        }
 
                         let msg_ref = MessageRef {
                             pst_index: file_idx,
@@ -719,11 +818,67 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                             size: props.message_size.unwrap_or(0) as u32,
                         };
 
-                        let result = index.check_and_insert(
-                            keys.message_id.as_deref(),
-                            keys.content_hash,
-                            msg_ref.clone(),
-                        );
+                        // Presence ≠ non-emptiness: clean empty body still binds (§3.3).
+                        let has_body = props.body_preview.is_some();
+                        let subject_ne = props
+                            .subject
+                            .as_deref()
+                            .map(|s| !s.trim().is_empty())
+                            .unwrap_or(false);
+                        let sender_ne = props
+                            .sender_email
+                            .as_deref()
+                            .map(|s| !s.trim().is_empty())
+                            .unwrap_or(false);
+                        let eligible = match hasher::tier2_eligibility(
+                            props.body_incomplete,
+                            props.body_unavailable,
+                            has_body,
+                            subject_ne,
+                            props.submit_time.is_some(),
+                            sender_ne,
+                            attachments.len(),
+                        ) {
+                            Ok(()) => true,
+                            Err(Tier2IneligibleReason::UnreadableBody) => {
+                                if grouping.enforce_readable_body() {
+                                    index.record_tier2_block_unreadable();
+                                    false
+                                } else {
+                                    true
+                                }
+                            }
+                            Err(Tier2IneligibleReason::Degenerate) => {
+                                if grouping.enforce_readable_body() {
+                                    index.record_tier2_block_degenerate();
+                                    false
+                                } else {
+                                    true
+                                }
+                            }
+                        };
+
+                        let source_key = {
+                            let p = std::path::Path::new(&path_str);
+                            let s = p.to_string_lossy();
+                            if cfg!(windows) {
+                                s.to_lowercase()
+                            } else {
+                                s.into_owned()
+                            }
+                        };
+                        let result = index.check_and_insert_item(IndexItem {
+                            message_id: keys.message_id.clone(),
+                            content_hash: keys.content_hash,
+                            strong_content_hash: keys.strong_content_hash,
+                            tier2_eligible: eligible,
+                            source_key,
+                            fp_body: keys.fp_body,
+                            fp_header: keys.fp_header,
+                            fp_recipients: keys.fp_recipients,
+                            fp_attachments: keys.fp_attachments,
+                            msg_ref: msg_ref.clone(),
+                        });
 
                         if let DedupResult::DuplicateOf { .. } = &result {
                             file_duplicates += 1;
@@ -754,6 +909,30 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                                 submit_time: props.submit_time,
                                 delivery_time: props.delivery_time,
                                 has_bcc,
+                                // Successfully read (including empty); not the same as non-empty.
+                                has_body_preview: props.body_preview.is_some(),
+                                subject_nonempty: props
+                                    .subject
+                                    .as_deref()
+                                    .map(|s| !s.trim().is_empty())
+                                    .unwrap_or(false),
+                                sender_nonempty: props
+                                    .sender_email
+                                    .as_deref()
+                                    .map(|s| !s.trim().is_empty())
+                                    .unwrap_or(false),
+                                attach_count: attachments.len() as u32,
+                                body_sha256: props.body_sha256,
+                                body_char_len: props.body_char_len,
+                                display_to: props.display_to.clone(),
+                                display_cc: props.display_cc.clone(),
+                                display_bcc: props.display_bcc.clone(),
+                                strong_content_hash: keys.strong_content_hash,
+                                fp_header: keys.fp_header,
+                                fp_body: keys.fp_body,
+                                fp_recipients: keys.fp_recipients,
+                                fp_attachments: keys.fp_attachments,
+                                preview_bytes_over_budget: keys.preview_bytes_over_budget,
                             });
                             scan_order += 1;
                         }
@@ -864,6 +1043,7 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     let mut duplicate_count = index.duplicate_count;
     let mut tier1_hits = index.tier1_hits;
     let mut tier2_hits = index.tier2_hits;
+    let mut grouping_stats = index.stats.clone();
     let attach_probe_wanted = opts.deep_attach_preflight && opts.include_attachments;
     let attach_probe_enabled = attach_probe_wanted && !candidates.is_empty();
     let attach_level = if opts.deep_attach_level.is_empty() {
@@ -1000,12 +1180,15 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                     );
                 }
             }
-            let rebuild = rebuild_dedup_results(&candidates, &message_refs, opts.enable_tier2);
+            let rebuild = rebuild_dedup_results_with_ctx(&candidates, &message_refs, &grouping);
             unique_count = rebuild.unique_count;
             duplicate_count = rebuild.duplicate_count;
             tier1_hits = rebuild.tier1_hits;
             tier2_hits = rebuild.tier2_hits;
             total_savings = rebuild.total_savings;
+            // Post-strict rebuild re-inserts survivors under the same GroupingContext;
+            // keep its stats so summary.grouping is not zeroed after deep-attach.
+            grouping_stats = rebuild.grouping_stats;
             // Per-file messages already adjusted by apply_strict_probe_skips; rebuild dups.
             recompute_per_file_dup_from_results(&mut file_stats, &rebuild.results);
             // Stash for post-probe row.result rewrite (strict only).
@@ -1185,6 +1368,7 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         preflight,
         skips: skip_sample,
         integrity_csv: integrity_path.map(|p| p.display().to_string()),
+        grouping: grouping_stats,
     };
 
     Ok(ScanOutcome {
@@ -1259,7 +1443,7 @@ pub fn write_report(path: &Path, outcome: &ScanOutcome) -> Result<()> {
 pub fn collect_dups(outcome: &ScanOutcome, limit: Option<usize>) -> Vec<DupRow> {
     let mut out = Vec::new();
     for row in &outcome.rows {
-        if let DedupResult::DuplicateOf { original, tier } = &row.result {
+        if let DedupResult::DuplicateOf { original, tier, .. } = &row.result {
             out.push(DupRow {
                 tier: tier.to_string(),
                 subject: row.message.subject.clone(),
@@ -1376,6 +1560,21 @@ mod tests {
             submit_time: None,
             delivery_time: None,
             has_bcc: false,
+            has_body_preview: true,
+            subject_nonempty: true,
+            sender_nonempty: true,
+            attach_count: 0,
+            body_sha256: None,
+            body_char_len: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            strong_content_hash: None,
+            fp_header: 0,
+            fp_body: 0,
+            fp_recipients: 0,
+            fp_attachments: 0,
+            preview_bytes_over_budget: false,
         };
         let mut refs = HashMap::new();
         refs.insert(("a.pst".into(), 2u64), dup_ref);
@@ -1411,6 +1610,21 @@ mod tests {
             submit_time: None,
             delivery_time: None,
             has_bcc: false,
+            has_body_preview: true,
+            subject_nonempty: true,
+            sender_nonempty: true,
+            attach_count: 0,
+            body_sha256: None,
+            body_char_len: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            strong_content_hash: None,
+            fp_header: 0,
+            fp_body: 0,
+            fp_recipients: 0,
+            fp_attachments: 0,
+            preview_bytes_over_budget: false,
         };
         let c2 = RecoverableScanItem {
             locus: MessageLocus {
@@ -1428,6 +1642,21 @@ mod tests {
             submit_time: None,
             delivery_time: None,
             has_bcc: false,
+            has_body_preview: true,
+            subject_nonempty: true,
+            sender_nonempty: true,
+            attach_count: 0,
+            body_sha256: None,
+            body_char_len: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            strong_content_hash: None,
+            fp_header: 0,
+            fp_body: 0,
+            fp_recipients: 0,
+            fp_attachments: 0,
+            preview_bytes_over_budget: false,
         };
         // Pass in reverse order; scan_order must still make nid=10 the winner.
         let rebuild = rebuild_dedup_results(&[c2, c1], &HashMap::new(), true);
@@ -1523,6 +1752,7 @@ mod tests {
                     size: 10,
                 },
                 tier: dedup_engine::DedupTier::MessageId,
+                bound_by: dedup_engine::BoundBy::MessageId,
             },
         );
         recompute_per_file_dup_from_results(&mut files, &results);
@@ -1547,6 +1777,21 @@ mod tests {
             submit_time: None,
             delivery_time: None,
             has_bcc: false,
+            has_body_preview: true,
+            subject_nonempty: true,
+            sender_nonempty: true,
+            attach_count: 0,
+            body_sha256: None,
+            body_char_len: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            strong_content_hash: None,
+            fp_header: 0,
+            fp_body: 0,
+            fp_recipients: 0,
+            fp_attachments: 0,
+            preview_bytes_over_budget: false,
         };
         recompute_per_file_degraded_from_candidates(&mut files, &[cand]);
         assert_eq!(files[0].degraded_messages, 1);
@@ -1675,6 +1920,7 @@ mod tests {
             preflight,
             skips: vec![],
             integrity_csv: None,
+            grouping: Default::default(),
         };
         let mut opts = ScanOptions::default();
         assert!(evaluate_exit_policy(&summary, &opts).is_err());
@@ -1717,6 +1963,7 @@ mod tests {
             preflight,
             skips: vec![],
             integrity_csv: None,
+            grouping: Default::default(),
         };
         let opts = ScanOptions {
             mode: ScanMode::Strict,

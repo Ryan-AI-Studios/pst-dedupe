@@ -11,7 +11,7 @@
 //!
 //! Source PSTs are never mutated. EDRM MIH is interop metadata, not a suppress tier.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -20,7 +20,11 @@ use std::path::{Path, PathBuf};
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 
-use crate::index::DedupTier;
+use crate::grouping::{
+    mid_join_compatible, mid_present, BoundBy, DedupeScope, GroupingContext, GroupingStats,
+    IdentityLevel,
+};
+use crate::hasher::{tier2_eligibility, Tier2IneligibleReason};
 use crate::integrity::RecoverableIntegrity;
 
 /// Stable JSON schema identifier for keep-set payloads.
@@ -383,7 +387,7 @@ pub struct RecoverableScanItem {
     pub locus: MessageLocus,
     /// Normalized Message-ID used for Tier 1 (empty / None = missing).
     pub message_id_norm: Option<String>,
-    /// Tier 2 content hash (always computed).
+    /// Tier 2 v1 content hash (always computed; hex stable except char-clamp exception).
     pub content_hash: [u8; 32],
     pub size: u32,
     pub integrity: RecoverableIntegrity,
@@ -398,6 +402,50 @@ pub struct RecoverableScanItem {
     /// True iff PidTagDisplayBcc present and non-empty after trim.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_bcc: bool,
+    // ─── 0076 identity fields (additive; serde default for pre-0076 JSON) ──
+    /// Body property was successfully read at scan time (including genuinely empty).
+    /// Absent/`None` means no body property — not the same as clean empty body.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_body_preview: bool,
+    /// Non-empty normalized subject present.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subject_nonempty: bool,
+    /// Non-empty sender present.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sender_nonempty: bool,
+    /// Attachment count used for degenerate check / identity.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub attach_count: u32,
+    /// Full-body SHA-256 when strong identity requested (scan-time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_sha256: Option<[u8; 32]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_char_len: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_cc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_bcc: Option<String>,
+    /// Strong (v2) content hash when identity level ≥ body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strong_content_hash: Option<[u8; 32]>,
+    /// Component fingerprints (attribution only).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fp_header: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fp_body: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fp_recipients: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fp_attachments: u64,
+    /// Normalized preview exceeded 4096 bytes (hash may differ from pre-0076).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preview_bytes_over_budget: bool,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 impl RecoverableScanItem {
@@ -415,6 +463,47 @@ impl RecoverableScanItem {
             .as_deref()
             .filter(|m| !m.is_empty())
             .map(edrm_mih_hex)
+    }
+
+    /// Body known-unreadable from integrity reasons.
+    pub fn body_unreadable(&self) -> bool {
+        self.integrity.degraded_reasons.iter().any(|r| {
+            matches!(
+                r,
+                crate::integrity::IntegrityReason::BodyTruncated
+                    | crate::integrity::IntegrityReason::BodyUnavailable
+            )
+        })
+    }
+
+    /// Tier-2 eligibility under §3.3 (ignores escape-hatch flags).
+    pub fn assess_tier2_eligibility(&self) -> Result<(), Tier2IneligibleReason> {
+        let incomplete = self
+            .integrity
+            .degraded_reasons
+            .contains(&crate::integrity::IntegrityReason::BodyTruncated);
+        let unavailable = self
+            .integrity
+            .degraded_reasons
+            .contains(&crate::integrity::IntegrityReason::BodyUnavailable);
+        tier2_eligibility(
+            incomplete,
+            unavailable,
+            self.has_body_preview,
+            self.subject_nonempty,
+            self.submit_time.is_some(),
+            self.sender_nonempty,
+            self.attach_count as usize,
+        )
+    }
+
+    /// Bind key for Tier-2 map under the given identity level.
+    pub fn tier2_bind_hash(&self, identity: IdentityLevel) -> [u8; 32] {
+        if identity.is_strong() {
+            self.strong_content_hash.unwrap_or(self.content_hash)
+        } else {
+            self.content_hash
+        }
     }
 }
 
@@ -474,6 +563,13 @@ pub struct KeepSetStats {
     /// Winners whose folder class is under Recoverable Items (signal only).
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub winners_from_recoverable_items: u64,
+    /// 0076 identity-binding honesty counters (additive; default empty for pre-0076 JSON).
+    #[serde(default, skip_serializing_if = "grouping_stats_is_default")]
+    pub grouping: GroupingStats,
+}
+
+fn grouping_stats_is_default(s: &GroupingStats) -> bool {
+    s == &GroupingStats::default()
 }
 
 /// Provenance of the scan that produced candidates.
@@ -492,6 +588,12 @@ pub struct KeepSet {
     pub family_policy: FamilyPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_from: Option<KeepSetProvenance>,
+    /// 0076: identity level used for binding (`off` / `body` / …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_level: Option<String>,
+    /// 0076: `global` | `per-source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_scope: Option<String>,
     pub winners: Vec<KeepEntry>,
     pub stats: KeepSetStats,
 }
@@ -508,7 +610,7 @@ pub struct DecisionRecord {
     pub content_hash_hex: String,
     pub edrm_mih: Option<String>,
     pub role: DecisionRole,
-    /// Empty when unique / materialize_failed; `message_id` | `content_hash` when dup_of.
+    /// Empty when unique / materialize_failed; `message_id` | `content_hash` | `content_hash_strong` when dup_of.
     pub tier: Option<String>,
     pub winner_source_pst: Option<String>,
     pub winner_folder: Option<String>,
@@ -532,6 +634,16 @@ pub struct DecisionRecord {
     pub duplicate_source_count: u64,
     /// Unique rows only: `|`-delimited basenames (capped).
     pub duplicate_sources: String,
+    // ─── 0076 append-only columns ───────────────────────────────────────────
+    /// Bind provenance: `seed` | `message_id` | `content_hash` | `content_hash_strong`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bound_by: String,
+    /// `v1` | `v2`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub identity_version: String,
+    /// Whether this item was Tier-2 eligible under active guards.
+    #[serde(default)]
+    pub tier2_eligible: bool,
 }
 
 // ─── Materialization ────────────────────────────────────────────────────────
@@ -675,109 +787,491 @@ pub fn sort_input_paths(paths: &mut [PathBuf]) {
 
 // ─── Grouping (DedupIndex semantics, collect all members) ───────────────────
 
-/// Group candidates using the same Tier1/Tier2 binding rules as [`crate::DedupIndex`],
-/// but collecting **all** members per group instead of first-seen only.
-///
-/// Returns groups of indices into `items` (scan order preserved within groups).
+/// Result of [`group_candidates_with_stats`]: groups + per-item bind provenance + stats.
+#[derive(Clone, Debug)]
+pub struct GroupingOutcome {
+    /// Groups of indices into items (scan order preserved within groups).
+    pub groups: Vec<Vec<usize>>,
+    /// Bind provenance per item index (same length as items).
+    pub bound_by: Vec<BoundBy>,
+    /// Tier-2 eligibility per item under the active context.
+    pub tier2_eligible: Vec<bool>,
+    pub stats: GroupingStats,
+}
+
+/// Group candidates with default 0076 context (guards on). Prefer
+/// [`group_candidates_ctx`] when flags are available.
 pub fn group_candidates(items: &[RecoverableScanItem], tier2_enabled: bool) -> Vec<Vec<usize>> {
+    group_candidates_ctx(items, &GroupingContext::with_tier2(tier2_enabled)).groups
+}
+
+/// Group under an explicit [`GroupingContext`].
+pub fn group_candidates_ctx(
+    items: &[RecoverableScanItem],
+    ctx: &GroupingContext,
+) -> GroupingOutcome {
+    group_candidates_with_stats(items, ctx)
+}
+
+/// Full grouping: same rules as [`crate::DedupIndex`], collecting all members.
+pub fn group_candidates_with_stats(
+    items: &[RecoverableScanItem],
+    ctx: &GroupingContext,
+) -> GroupingOutcome {
+    let n = items.len();
     let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut group_bound_mid: Vec<Option<String>> = Vec::new();
+    let mut group_fp: Vec<(u64, u64, u64, u64)> = Vec::new(); // body, header, recip, attach
+    let mut group_bind_hash: Vec<[u8; 32]> = Vec::new();
     let mut mid_to_group: HashMap<String, usize> = HashMap::new();
-    let mut hash_to_group: HashMap<[u8; 32], usize> = HashMap::new();
+    let mut hash_to_group: HashMap<Vec<u8>, usize> = HashMap::new();
+    let mut bound_by = vec![BoundBy::Seed; n];
+    let mut tier2_eligible = vec![true; n];
+    let mut stats = GroupingStats::default();
+    let mut cross_mid_hash_seen: HashSet<Vec<u8>> = HashSet::new();
+    let mut cross_mid_cluster: HashMap<Vec<u8>, HashSet<String>> = HashMap::new();
 
     for (i, item) in items.iter().enumerate() {
-        let mut found: Option<usize> = None;
+        if item.preview_bytes_over_budget {
+            stats.tier2_preview_bytes_over_budget += 1;
+        }
 
-        if let Some(mid) = item.message_id_norm.as_deref() {
-            if !mid.is_empty() {
-                if let Some(&gid) = mid_to_group.get(mid) {
-                    found = Some(gid);
+        let eligible = match item.assess_tier2_eligibility() {
+            Ok(()) => true,
+            Err(Tier2IneligibleReason::UnreadableBody) => {
+                if ctx.enforce_readable_body() {
+                    stats.tier2_blocked_unreadable_body += 1;
+                    false
+                } else {
+                    true
+                }
+            }
+            Err(Tier2IneligibleReason::Degenerate) => {
+                if ctx.enforce_readable_body() {
+                    stats.tier2_blocked_degenerate += 1;
+                    false
+                } else {
+                    true
+                }
+            }
+        };
+        tier2_eligible[i] = eligible;
+
+        let mid = mid_present(item.message_id_norm.as_deref()).map(|s| s.to_string());
+        let scope_prefix = match ctx.scope {
+            DedupeScope::Global => String::new(),
+            DedupeScope::PerSource => format!("{}\0", item.path_key()),
+        };
+
+        let mut found: Option<(usize, BoundBy)> = None;
+
+        // Tier 1
+        if let Some(ref m) = mid {
+            let key = format!("{scope_prefix}{m}");
+            if let Some(&gid) = mid_to_group.get(&key) {
+                // §3.7: always report divergence, optionally split (tier1_verify).
+                let (gb, gh, gr, ga) = group_fp[gid];
+                let body_diff = item.fp_body != gb;
+                let meta_diff = item.fp_header != gh || item.fp_attachments != ga;
+                let recip_diff = item.fp_recipients != gr;
+                if body_diff {
+                    stats.tier1_divergent_body += 1;
+                } else if recip_diff && !meta_diff {
+                    stats.tier1_divergent_recipients += 1;
+                } else if meta_diff {
+                    stats.tier1_divergent_metadata += 1;
+                }
+                let split = match ctx.tier1_verify {
+                    crate::grouping::Tier1Verify::Off => false,
+                    crate::grouping::Tier1Verify::Content => {
+                        item.tier2_bind_hash(ctx.identity) != group_bind_hash[gid]
+                    }
+                    crate::grouping::Tier1Verify::Body => item.fp_body != group_fp[gid].0,
+                };
+                if !split {
+                    found = Some((gid, BoundBy::MessageId));
                 }
             }
         }
 
-        if found.is_none() && tier2_enabled {
-            if let Some(&gid) = hash_to_group.get(&item.content_hash) {
-                found = Some(gid);
+        // Tier 2
+        if found.is_none() && ctx.tier2_enabled && eligible {
+            let bind_hash = item.tier2_bind_hash(ctx.identity);
+            let mut hkey = scope_prefix.as_bytes().to_vec();
+            hkey.extend_from_slice(&bind_hash);
+            if let Some(&gid) = hash_to_group.get(&hkey) {
+                let (ok, new_bound) = mid_join_compatible(
+                    group_bound_mid[gid].as_deref(),
+                    mid.as_deref(),
+                    ctx.block_cross_mid(),
+                );
+                if ok {
+                    if let Some(nb) = new_bound {
+                        if group_bound_mid[gid].is_none() {
+                            group_bound_mid[gid] = Some(nb.clone());
+                            let mk = format!("{scope_prefix}{nb}");
+                            mid_to_group.entry(mk).or_insert(gid);
+                        }
+                    }
+                    let bb = if ctx.identity.is_strong() {
+                        BoundBy::StrongContentHash
+                    } else {
+                        BoundBy::ContentHash
+                    };
+                    found = Some((gid, bb));
+                } else {
+                    stats.cross_mid_blocked += 1;
+                    if cross_mid_hash_seen.insert(hkey.clone()) {
+                        stats.cross_mid_blocked_groups += 1;
+                    }
+                    if let Some(ref m) = mid {
+                        let cluster = cross_mid_cluster.entry(hkey.clone()).or_default();
+                        if let Some(ref existing) = group_bound_mid[gid] {
+                            cluster.insert(existing.clone());
+                        }
+                        cluster.insert(m.clone());
+                        stats.cross_mid_blocked_max_group =
+                            stats.cross_mid_blocked_max_group.max(cluster.len() as u64);
+                    }
+                }
             }
         }
 
-        if let Some(gid) = found {
+        if let Some((gid, bb)) = found {
             groups[gid].push(i);
+            bound_by[i] = bb;
         } else {
             let gid = groups.len();
             groups.push(vec![i]);
-            if let Some(mid) = item.message_id_norm.as_deref() {
-                if !mid.is_empty() {
-                    mid_to_group.insert(mid.to_string(), gid);
-                }
+            group_bound_mid.push(mid.clone());
+            group_fp.push((
+                item.fp_body,
+                item.fp_header,
+                item.fp_recipients,
+                item.fp_attachments,
+            ));
+            let bind_hash = item.tier2_bind_hash(ctx.identity);
+            group_bind_hash.push(bind_hash);
+            bound_by[i] = BoundBy::Seed;
+
+            if let Some(ref m) = mid {
+                let key = format!("{scope_prefix}{m}");
+                mid_to_group.insert(key, gid);
             }
-            if tier2_enabled {
-                hash_to_group.insert(item.content_hash, gid);
+            if ctx.tier2_enabled && eligible {
+                let mut hkey = scope_prefix.as_bytes().to_vec();
+                hkey.extend_from_slice(&bind_hash);
+                // Only first group owns a given hash key (cross-MID later items stay out).
+                hash_to_group.entry(hkey).or_insert(gid);
             }
+        }
+
+        // X.500-looking display recipients (honesty; independent of identity level).
+        if recipient_strings_have_x500(item) {
+            stats.x500_recipient_items += 1;
         }
     }
 
-    groups
+    // ── tier1_backfill (D6 residual): always count; merge only when flag on ──
+    // Missed merges: same v1 content_hash across groups whose bound MIDs are
+    // compatible and at least one non-empty MID is involved (not bare degenerate).
+    // Streaming DedupIndex cannot retro-merge; keep-set path owns this post-pass.
+    // Attribution runs *after* merge so counters describe final grouping.
+    apply_tier1_backfill_pass(
+        items,
+        ctx,
+        &mut groups,
+        &mut group_bound_mid,
+        &mut bound_by,
+        &mut stats,
+    );
+
+    // ── Tier 2.5 split attribution (eligible v1-equal items that did not co-group) ──
+    if ctx.identity.is_strong() {
+        attribute_tier2_5_splits(items, &groups, &tier2_eligible, &mut stats);
+    }
+
+    GroupingOutcome {
+        groups,
+        bound_by,
+        tier2_eligible,
+        stats,
+    }
 }
 
-/// Determine the tier that bound a member to its group's seed (for decision CSV).
-fn member_tier(
-    items: &[RecoverableScanItem],
-    seed_idx: usize,
-    member_idx: usize,
-    tier2_enabled: bool,
-) -> Option<DedupTier> {
-    if member_idx == seed_idx {
-        return None;
-    }
-    let seed = &items[seed_idx];
-    let member = &items[member_idx];
+fn recipient_strings_have_x500(item: &RecoverableScanItem) -> bool {
+    use crate::grouping::recipient_has_x500;
+    item.display_to.as_deref().is_some_and(recipient_has_x500)
+        || item.display_cc.as_deref().is_some_and(recipient_has_x500)
+        || item.display_bcc.as_deref().is_some_and(recipient_has_x500)
+}
 
-    // Prefer Message-ID when both share the same non-empty MID.
-    if let (Some(a), Some(b)) = (
-        seed.message_id_norm.as_deref(),
-        member.message_id_norm.as_deref(),
-    ) {
-        if !a.is_empty() && a == b {
-            return Some(DedupTier::MessageId);
+/// Attribute Tier-2.5 splits: **eligible** items that share v1 `content_hash`
+/// but land in different groups under a strong identity level (final groups).
+fn attribute_tier2_5_splits(
+    items: &[RecoverableScanItem],
+    groups: &[Vec<usize>],
+    tier2_eligible: &[bool],
+    stats: &mut GroupingStats,
+) {
+    let mut item_gid = vec![0usize; items.len()];
+    for (gid, members) in groups.iter().enumerate() {
+        for &i in members {
+            if i < item_gid.len() {
+                item_gid[i] = gid;
+            }
         }
     }
-    // Also: member matched via MID to a group that was seeded with that MID even if
-    // seed mid equals member mid already handled. If member has MID matching seed's MID.
-    if let Some(mid) = member.message_id_norm.as_deref() {
-        if !mid.is_empty() {
-            if let Some(seed_mid) = seed.message_id_norm.as_deref() {
-                if seed_mid == mid {
-                    return Some(DedupTier::MessageId);
+
+    let mut v1_to_items: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
+    for (i, item) in items.iter().enumerate() {
+        // Guard-separated / ineligible items are not Tier-2.5 identity splits.
+        if !tier2_eligible.get(i).copied().unwrap_or(true) {
+            continue;
+        }
+        v1_to_items.entry(item.content_hash).or_default().push(i);
+    }
+
+    for idxs in v1_to_items.values() {
+        if idxs.len() < 2 {
+            continue;
+        }
+        let mut gids: HashSet<usize> = HashSet::new();
+        for &i in idxs {
+            gids.insert(item_gid[i]);
+        }
+        if gids.len() <= 1 {
+            continue;
+        }
+        // One split edge per extra group in this v1 family.
+        stats.tier2_5_splits += (gids.len() as u64).saturating_sub(1);
+
+        // Attribute using first item per group as representative.
+        let mut reps: Vec<usize> = Vec::new();
+        let mut seen_g = HashSet::new();
+        for &i in idxs {
+            let g = item_gid[i];
+            if seen_g.insert(g) {
+                reps.push(i);
+            }
+        }
+        // Compare consecutive representatives for component-only attribution.
+        for w in reps.windows(2) {
+            let a = &items[w[0]];
+            let b = &items[w[1]];
+            let body_same = a.fp_body == b.fp_body;
+            let header_same = a.fp_header == b.fp_header;
+            let attach_same = a.fp_attachments == b.fp_attachments;
+            let recip_diff = a.fp_recipients != b.fp_recipients;
+            if body_same && header_same && attach_same && recip_diff {
+                stats.tier2_5_splits_recipients_only += 1;
+                // BCC-only: normalized to/cc match while BCC differs.
+                let to_same = recip_display_eq(a.display_to.as_deref(), b.display_to.as_deref());
+                let cc_same = recip_display_eq(a.display_cc.as_deref(), b.display_cc.as_deref());
+                let bcc_diff =
+                    !recip_display_eq(a.display_bcc.as_deref(), b.display_bcc.as_deref())
+                        || a.has_bcc != b.has_bcc;
+                if to_same && cc_same && bcc_diff {
+                    stats.tier2_5_splits_bcc_only += 1;
+                }
+            }
+        }
+    }
+}
+
+fn recip_display_eq(a: Option<&str>, b: Option<&str>) -> bool {
+    use crate::grouping::normalize_recipients;
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => normalize_recipients(x) == normalize_recipients(y),
+        _ => false,
+    }
+}
+
+/// Union-find post-pass for `--tier1-backfill` (D6 residual).
+///
+/// Always increments `tier1_backfill_candidates`. When `ctx.tier1_backfill` is
+/// true, merges groups that share a v1 content hash with compatible MIDs and at
+/// least one non-empty MID in the cluster (never merges bare degenerate pairs).
+///
+/// **Scope:** under [`DedupeScope::PerSource`], candidates are partitioned by
+/// `path_compare_key(source_path)` so custodial partitions never cross-merge.
+///
+/// **Provenance:** after a merge, non-seed members that remain `BoundBy::Seed`
+/// are reclassified (MID match → `MessageId`, else content/strong hash).
+fn apply_tier1_backfill_pass(
+    items: &[RecoverableScanItem],
+    ctx: &GroupingContext,
+    groups: &mut Vec<Vec<usize>>,
+    group_bound_mid: &mut Vec<Option<String>>,
+    bound_by: &mut [BoundBy],
+    stats: &mut GroupingStats,
+) {
+    let ng = groups.len();
+    if ng == 0 || items.is_empty() {
+        return;
+    }
+
+    let mut item_gid = vec![0usize; items.len()];
+    for (gid, members) in groups.iter().enumerate() {
+        for &i in members {
+            if i < item_gid.len() {
+                item_gid[i] = gid;
+            }
+        }
+    }
+
+    // parent[i] = representative group id
+    let mut parent: Vec<usize> = (0..ng).collect();
+    let mut rank: Vec<u8> = vec![0; ng];
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    fn unite(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) -> bool {
+        let mut ra = find(parent, a);
+        let mut rb = find(parent, b);
+        if ra == rb {
+            return false;
+        }
+        if rank[ra] < rank[rb] {
+            std::mem::swap(&mut ra, &mut rb);
+        }
+        parent[rb] = ra;
+        if rank[ra] == rank[rb] {
+            rank[ra] = rank[ra].saturating_add(1);
+        }
+        true
+    }
+
+    // Index items by (optional scope key, v1 content hash) so PerSource never
+    // unites across custodians (Codex F-backfill×scope).
+    let mut by_key: HashMap<(String, [u8; 32]), Vec<usize>> = HashMap::new();
+    for (i, item) in items.iter().enumerate() {
+        let scope_key = match ctx.scope {
+            DedupeScope::Global => String::new(),
+            DedupeScope::PerSource => item.path_key(),
+        };
+        by_key
+            .entry((scope_key, item.content_hash))
+            .or_default()
+            .push(i);
+    }
+
+    let mut unions = 0u64;
+    for idxs in by_key.values() {
+        if idxs.len() < 2 {
+            continue;
+        }
+        // Distinct groups present for this hash.
+        let mut gids: Vec<usize> = idxs.iter().map(|&i| item_gid[i]).collect();
+        gids.sort_unstable();
+        gids.dedup();
+        if gids.len() < 2 {
+            continue;
+        }
+
+        // Pairwise: unite when bound MIDs compatible and cluster involves a real MID.
+        for i in 0..gids.len() {
+            for j in (i + 1)..gids.len() {
+                let ga = gids[i];
+                let gb = gids[j];
+                let ma = group_bound_mid.get(ga).and_then(|m| m.as_deref());
+                let mb = group_bound_mid.get(gb).and_then(|m| m.as_deref());
+                let has_mid = mid_present(ma).is_some() || mid_present(mb).is_some();
+                if !has_mid {
+                    continue;
+                }
+                let (ok, _) = mid_join_compatible(ma, mb, true);
+                if ok && unite(&mut parent, &mut rank, ga, gb) {
+                    unions += 1;
                 }
             }
         }
     }
 
-    if tier2_enabled && member.content_hash == seed.content_hash {
-        return Some(DedupTier::ContentHash);
+    // Candidates = how many groups would be absorbed (edges united in the UF).
+    stats.tier1_backfill_candidates += unions;
+
+    if !ctx.tier1_backfill || unions == 0 {
+        return;
     }
 
-    // Member may have joined via content hash to a seed that also has MID:
-    // content hashes equal → content_hash tier (cross-tier acceptable).
-    if tier2_enabled {
-        // Walk: if member has no MID (or empty) and hashes match any — content hash.
-        let member_mid_empty = member
-            .message_id_norm
-            .as_deref()
-            .map(|m| m.is_empty())
-            .unwrap_or(true);
-        if member_mid_empty && member.content_hash == seed.content_hash {
-            return Some(DedupTier::ContentHash);
-        }
-        // Hashes equal under tier2 path.
-        if member.content_hash == seed.content_hash {
-            return Some(DedupTier::ContentHash);
+    // Rebuild groups from union-find (preserve first-seen seed order).
+    let mut root_to_new: HashMap<usize, usize> = HashMap::new();
+    let mut new_groups: Vec<Vec<usize>> = Vec::new();
+    let mut new_bounds: Vec<Option<String>> = Vec::new();
+
+    for (old_gid, members) in groups.iter().enumerate() {
+        let root = find(&mut parent, old_gid);
+        let new_gid = if let Some(&ngid) = root_to_new.get(&root) {
+            ngid
+        } else {
+            let ngid = new_groups.len();
+            root_to_new.insert(root, ngid);
+            new_groups.push(Vec::new());
+            new_bounds.push(group_bound_mid.get(root).cloned().unwrap_or(None));
+            ngid
+        };
+        new_groups[new_gid].extend(members.iter().copied());
+        // Prefer a non-empty bound MID when merging.
+        if new_bounds[new_gid]
+            .as_ref()
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
+        {
+            if let Some(b) = group_bound_mid.get(old_gid).cloned().flatten() {
+                if !b.is_empty() {
+                    new_bounds[new_gid] = Some(b);
+                }
+            }
         }
     }
 
-    // Fallback: treat as content_hash when in same group (should be rare).
-    Some(DedupTier::ContentHash)
+    // Keep members in scan-order within each group.
+    for g in &mut new_groups {
+        g.sort_unstable();
+    }
+
+    // Reclassify bind provenance for absorbed seeds (former BoundBy::Seed that
+    // are no longer the group's first-seen member).
+    for g in &new_groups {
+        if g.is_empty() {
+            continue;
+        }
+        let seed = g[0];
+        if seed < bound_by.len() {
+            bound_by[seed] = BoundBy::Seed;
+        }
+        let seed_mid = items.get(seed).and_then(|it| it.message_id_norm.as_deref());
+        for &idx in g.iter().skip(1) {
+            if idx >= bound_by.len() {
+                continue;
+            }
+            // Only reclassify former seeds / stale Seed tags after merge.
+            if !matches!(bound_by[idx], BoundBy::Seed) {
+                continue;
+            }
+            let member_mid = items.get(idx).and_then(|it| it.message_id_norm.as_deref());
+            let mid_match = matches!(
+                (mid_present(seed_mid), mid_present(member_mid)),
+                (Some(a), Some(b)) if a == b
+            );
+            bound_by[idx] = if mid_match {
+                BoundBy::MessageId
+            } else if ctx.identity.is_strong() {
+                BoundBy::StrongContentHash
+            } else {
+                BoundBy::ContentHash
+            };
+        }
+    }
+
+    *groups = new_groups;
+    *group_bound_mid = new_bounds;
 }
 
 // ─── Ranking / resolve ──────────────────────────────────────────────────────
@@ -1290,6 +1784,8 @@ pub struct ResolvedKeepSet {
     /// Full ranking context (0075); prefer_path mirrored for back-compat fields.
     pub rank_ctx: RankContext,
     pub tier2_enabled: bool,
+    /// 0076 grouping context (identity / scope / guards).
+    pub grouping_ctx: GroupingContext,
     pub items: Vec<RecoverableScanItem>,
     /// Groups of indices into `items`.
     pub groups: Vec<Vec<usize>>,
@@ -1301,6 +1797,12 @@ pub struct ResolvedKeepSet {
     pub winner_of: Vec<Option<usize>>,
     /// Tier string for dup_of rows.
     pub tier_of: Vec<Option<String>>,
+    /// Bind provenance per item (0076; recorded at group time).
+    pub bound_by: Vec<BoundBy>,
+    /// Tier-2 eligibility per item under active guards.
+    pub tier2_eligible: Vec<bool>,
+    /// Grouping honesty stats.
+    pub grouping_stats: GroupingStats,
     /// Per-item promoted_from_failure flag.
     pub promoted_from_failure: Vec<bool>,
     /// Per-group: true if all materialize attempts failed.
@@ -1389,7 +1891,7 @@ impl ResolvedKeepSet {
                     stats.duplicates += 1;
                     match self.tier_of[i].as_deref() {
                         Some("message_id") => stats.tier1_dups += 1,
-                        Some("content_hash") => stats.tier2_dups += 1,
+                        Some("content_hash") | Some("content_hash_strong") => stats.tier2_dups += 1,
                         _ => {}
                     }
                 }
@@ -1406,11 +1908,15 @@ impl ResolvedKeepSet {
             ka.cmp(&kb).then_with(|| a.locus.nid.cmp(&b.locus.nid))
         });
 
+        stats.grouping = self.grouping_stats.clone();
+
         KeepSet {
             schema: KEEP_SET_SCHEMA.to_string(),
             policy: self.policy,
             family_policy: self.family_policy,
             created_from: self.created_from.clone(),
+            identity_level: Some(self.grouping_ctx.identity.as_str().to_string()),
+            dedupe_scope: Some(self.grouping_ctx.scope.as_str().to_string()),
             winners,
             stats,
         }
@@ -1519,6 +2025,9 @@ impl ResolvedKeepSet {
             (0, String::new())
         };
 
+        let bb = self.bound_by.get(i).copied().unwrap_or(BoundBy::Seed);
+        let eligible = self.tier2_eligible.get(i).copied().unwrap_or(true);
+
         DecisionRecord {
             source_path: item.locus.source_path.clone(),
             source_pst: item.locus.source_pst.clone(),
@@ -1548,6 +2057,9 @@ impl ResolvedKeepSet {
             decided_by: decided.to_string(),
             duplicate_source_count: dup_count,
             duplicate_sources: dup_sources_str,
+            bound_by: bb.as_str().to_string(),
+            identity_version: self.grouping_ctx.identity.identity_version().to_string(),
+            tier2_eligible: eligible,
         }
     }
 
@@ -1601,6 +2113,8 @@ pub fn resolve_groups(
 }
 
 /// Resolve provisional winners with a full [`RankContext`] (0075).
+///
+/// Uses default 0076 [`GroupingContext`] with `tier2_enabled`.
 pub fn resolve_groups_with_ctx(
     items: Vec<RecoverableScanItem>,
     family_policy: FamilyPolicy,
@@ -1608,7 +2122,28 @@ pub fn resolve_groups_with_ctx(
     tier2_enabled: bool,
     created_from: Option<KeepSetProvenance>,
 ) -> ResolvedKeepSet {
-    let groups = group_candidates(&items, tier2_enabled);
+    resolve_groups_with_grouping(
+        items,
+        family_policy,
+        rank_ctx,
+        &GroupingContext::with_tier2(tier2_enabled),
+        created_from,
+    )
+}
+
+/// Resolve with full ranking + grouping contexts (0076).
+pub fn resolve_groups_with_grouping(
+    items: Vec<RecoverableScanItem>,
+    family_policy: FamilyPolicy,
+    rank_ctx: &RankContext,
+    grouping_ctx: &GroupingContext,
+    created_from: Option<KeepSetProvenance>,
+) -> ResolvedKeepSet {
+    let outcome = group_candidates_with_stats(&items, grouping_ctx);
+    let groups = outcome.groups;
+    let bound_by = outcome.bound_by;
+    let tier2_eligible = outcome.tier2_eligible;
+    let grouping_stats = outcome.stats;
     let n = items.len();
     let mut roles = vec![DecisionRole::Unique; n];
     let mut winner_of: Vec<Option<usize>> = vec![None; n];
@@ -1628,12 +2163,6 @@ pub fn resolve_groups_with_ctx(
         let winner = ranked[0];
         provisional_winners.push(Some(winner));
 
-        // Seed for tier labeling = first by scan order in the group (group binding seed).
-        let seed = *group
-            .iter()
-            .min_by_key(|&&idx| items[idx].scan_order)
-            .unwrap_or(&winner);
-
         for &idx in group {
             if idx == winner {
                 roles[idx] = DecisionRole::Unique;
@@ -1642,12 +2171,11 @@ pub fn resolve_groups_with_ctx(
             } else {
                 roles[idx] = DecisionRole::DupOf;
                 winner_of[idx] = Some(winner);
-                let tier = member_tier(&items, seed, idx, tier2_enabled);
-                tier_of[idx] = match tier {
-                    Some(DedupTier::MessageId) => Some("message_id".into()),
-                    Some(DedupTier::ContentHash) => Some("content_hash".into()),
-                    None => None,
-                };
+                // Bound_by recorded at group time — not reconstructed.
+                tier_of[idx] = bound_by
+                    .get(idx)
+                    .and_then(|b| b.tier_csv())
+                    .map(|s| s.to_string());
             }
         }
     }
@@ -1657,13 +2185,17 @@ pub fn resolve_groups_with_ctx(
         family_policy,
         prefer_path: rank_ctx.prefer_path.clone(),
         rank_ctx: rank_ctx.clone(),
-        tier2_enabled,
+        tier2_enabled: grouping_ctx.tier2_enabled,
+        grouping_ctx: grouping_ctx.clone(),
         items,
         groups,
         provisional_winners,
         roles,
         winner_of,
         tier_of,
+        bound_by,
+        tier2_eligible,
+        grouping_stats,
         promoted_from_failure,
         group_dropped,
         created_from,
@@ -1711,6 +2243,8 @@ pub struct MaterializeBuildOpts<'a> {
     pub created_from: Option<KeepSetProvenance>,
     /// Optional full rank context; when set, overrides policy/prefer_path for ranking.
     pub rank_ctx: Option<&'a RankContext>,
+    /// Optional grouping context (0076). When set, overrides `tier2_enabled`.
+    pub grouping_ctx: Option<&'a GroupingContext>,
 }
 
 /// Build keep-set then finalize winners via materialize + promotion.
@@ -1734,11 +2268,18 @@ where
         owned_ctx = RankContext::from_policy_and_prefer(opts.policy, opts.prefer_path);
         &owned_ctx
     };
-    let mut resolved = resolve_groups_with_ctx(
+    let owned_gctx;
+    let gctx_ref = if let Some(g) = opts.grouping_ctx {
+        g
+    } else {
+        owned_gctx = GroupingContext::with_tier2(opts.tier2_enabled);
+        &owned_gctx
+    };
+    let mut resolved = resolve_groups_with_grouping(
         items,
         opts.family_policy,
         ctx_ref,
-        opts.tier2_enabled,
+        gctx_ref,
         opts.created_from,
     );
     let count = finalize_with_materialize(&mut resolved, materializer, &mut on_winner)?;
@@ -1787,7 +2328,6 @@ where
 {
     let mut materialized_count = 0u64;
     let rank_ctx = resolved.rank_ctx.clone();
-    let tier2 = resolved.tier2_enabled;
 
     for (g_idx, group) in resolved.groups.clone().into_iter().enumerate() {
         if group.is_empty() {
@@ -1833,12 +2373,6 @@ where
             }
         }
 
-        // Seed for tier labels.
-        let seed = *group
-            .iter()
-            .min_by_key(|&&idx| resolved.items[idx].scan_order)
-            .unwrap_or(&ranked[0]);
-
         if let Some(winner) = final_winner {
             resolved.group_dropped[g_idx] = false;
             for &idx in &group {
@@ -1855,12 +2389,12 @@ where
                 } else {
                     resolved.roles[idx] = DecisionRole::DupOf;
                     resolved.winner_of[idx] = Some(winner);
-                    let tier = member_tier(&resolved.items, seed, idx, tier2);
-                    resolved.tier_of[idx] = match tier {
-                        Some(DedupTier::MessageId) => Some("message_id".into()),
-                        Some(DedupTier::ContentHash) => Some("content_hash".into()),
-                        None => None,
-                    };
+                    // Use bind-time provenance (member_tier deleted).
+                    resolved.tier_of[idx] = resolved
+                        .bound_by
+                        .get(idx)
+                        .and_then(|b| b.tier_csv())
+                        .map(|s| s.to_string());
                     resolved.promoted_from_failure[idx] = false;
                 }
             }
@@ -1904,8 +2438,8 @@ pub const DECISION_CSV_HEADER_V1: [&str; 19] = [
     "PromotedFromFailure",
 ];
 
-/// Full decision CSV header (pre-0075 + 0075 append columns).
-pub const DECISION_CSV_HEADER: [&str; 28] = [
+/// Full decision CSV header (pre-0075 + 0075 + 0076 append columns).
+pub const DECISION_CSV_HEADER: [&str; 31] = [
     "SourcePath",
     "SourcePst",
     "Folder",
@@ -1935,6 +2469,10 @@ pub const DECISION_CSV_HEADER: [&str; 28] = [
     "decided_by",
     "duplicate_source_count",
     "duplicate_sources",
+    // 0076 append-only
+    "bound_by",
+    "identity_version",
+    "tier2_eligible",
 ];
 
 /// Streaming decision CSV writer (Phase 3 only — after resolve).
@@ -1994,6 +2532,9 @@ impl DecisionCsvWriter {
             String::new()
         };
         let date_utc = neutralize_csv_formula(&row.date_filetime_utc);
+        let bound_by = neutralize_csv_formula(&row.bound_by);
+        let identity_version = neutralize_csv_formula(&row.identity_version);
+        let tier2_eligible = if row.tier2_eligible { "true" } else { "false" };
         self.wtr
             .write_record([
                 row.source_path.as_str(),
@@ -2028,6 +2569,10 @@ impl DecisionCsvWriter {
                 decided_by.as_str(),
                 dup_count.as_str(),
                 dup_sources.as_str(),
+                // 0076 append-only
+                bound_by.as_str(),
+                identity_version.as_str(),
+                tier2_eligible,
             ])
             .map_err(|e| KeepSetError::Csv(e.to_string()))?;
         self.rows_written += 1;
@@ -2164,6 +2709,22 @@ mod tests {
             submit_time: None,
             delivery_time: None,
             has_bcc: false,
+            // Eligible Tier-2 preimage for unit tests (two weak fields + body flag).
+            has_body_preview: !degraded,
+            subject_nonempty: true,
+            sender_nonempty: true,
+            attach_count: 0,
+            body_sha256: None,
+            body_char_len: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            strong_content_hash: None,
+            fp_header: 0,
+            fp_body: 0,
+            fp_recipients: 0,
+            fp_attachments: 0,
+            preview_bytes_over_budget: false,
         }
     }
 
@@ -2628,6 +3189,7 @@ mod tests {
                 tier2_enabled: true,
                 created_from: None,
                 rank_ctx: None,
+                grouping_ctx: None,
             },
             &mut mat,
             |msg| {
@@ -2667,6 +3229,7 @@ mod tests {
                 tier2_enabled: true,
                 created_from: None,
                 rank_ctx: None,
+                grouping_ctx: None,
             },
             &mut mat,
             |msg| {
@@ -2699,6 +3262,7 @@ mod tests {
                 tier2_enabled: true,
                 created_from: None,
                 rank_ctx: None,
+                grouping_ctx: None,
             },
             &mut mat,
             |_| Ok(()),
@@ -2738,6 +3302,7 @@ mod tests {
                 tier2_enabled: true,
                 created_from: None,
                 rank_ctx: None,
+                grouping_ctx: None,
             },
             &mut mat,
             |_| Ok(()),
@@ -2804,6 +3369,7 @@ mod tests {
                 tier2_enabled: true,
                 created_from: None,
                 rank_ctx: None,
+                grouping_ctx: None,
             },
             &mut mat,
             |_| Ok(()),
@@ -2880,6 +3446,7 @@ mod tests {
                 tier2_enabled: true,
                 created_from: None,
                 rank_ctx: None,
+                grouping_ctx: None,
             },
             &mut mat,
             |_| Ok(()),
@@ -3078,6 +3645,7 @@ mod tests {
                 tier2_enabled: true,
                 created_from: None,
                 rank_ctx: None,
+                grouping_ctx: None,
             },
             &mut mat,
             |msg| {
@@ -3110,7 +3678,7 @@ mod tests {
         for (i, col) in DECISION_CSV_HEADER_V1.iter().enumerate() {
             assert_eq!(DECISION_CSV_HEADER[i], *col, "column {i} must remain {col}");
         }
-        assert_eq!(DECISION_CSV_HEADER.len(), 28);
+        assert_eq!(DECISION_CSV_HEADER.len(), 31);
         assert_eq!(DECISION_CSV_HEADER_V1.len(), 19);
     }
 
@@ -4090,5 +4658,624 @@ mod tests {
                 .map(|d| d.tier.as_deref()),
             Some(Some("message_id"))
         );
+    }
+
+    // ─── 0076 identity binding ─────────────────────────────────────────────
+
+    #[test]
+    fn cross_mid_same_hash_splits_by_default() {
+        let a = item(
+            "C:/a.pst",
+            "a.pst",
+            "I",
+            1,
+            Some("m1"),
+            [9; 32],
+            10,
+            0,
+            false,
+        );
+        let b = item(
+            "C:/b.pst",
+            "b.pst",
+            "I",
+            2,
+            Some("m2"),
+            [9; 32],
+            10,
+            1,
+            false,
+        );
+        let out = group_candidates_with_stats(&[a, b], &GroupingContext::default());
+        assert_eq!(out.groups.len(), 2);
+        assert_eq!(out.stats.cross_mid_blocked, 1);
+    }
+
+    #[test]
+    fn cross_mid_allowed_with_escape() {
+        let a = item(
+            "C:/a.pst",
+            "a.pst",
+            "I",
+            1,
+            Some("m1"),
+            [9; 32],
+            10,
+            0,
+            false,
+        );
+        let b = item(
+            "C:/b.pst",
+            "b.pst",
+            "I",
+            2,
+            Some("m2"),
+            [9; 32],
+            10,
+            1,
+            false,
+        );
+        let ctx = GroupingContext {
+            allow_cross_mid_tier2: true,
+            ..Default::default()
+        };
+        let out = group_candidates_with_stats(&[a, b], &ctx);
+        assert_eq!(out.groups.len(), 1);
+    }
+
+    #[test]
+    fn unreadable_body_not_tier2_bound() {
+        let mut a = item("C:/a.pst", "a.pst", "I", 1, None, [3; 32], 10, 0, true);
+        a.has_body_preview = false;
+        let mut b = item("C:/b.pst", "b.pst", "I", 2, None, [3; 32], 10, 1, true);
+        b.has_body_preview = false;
+        let out = group_candidates_with_stats(&[a, b], &GroupingContext::default());
+        assert_eq!(out.groups.len(), 2);
+        assert!(out.stats.tier2_blocked_unreadable_body >= 1);
+    }
+
+    #[test]
+    fn degenerate_stays_unique() {
+        let mut a = item("C:/a.pst", "a.pst", "I", 1, None, [4; 32], 10, 0, false);
+        a.has_body_preview = false;
+        a.subject_nonempty = true;
+        a.sender_nonempty = false;
+        a.submit_time = None;
+        a.attach_count = 0;
+        let mut b = item("C:/b.pst", "b.pst", "I", 2, None, [4; 32], 10, 1, false);
+        b.has_body_preview = false;
+        b.subject_nonempty = true;
+        b.sender_nonempty = false;
+        b.submit_time = None;
+        b.attach_count = 0;
+        let out = group_candidates_with_stats(&[a, b], &GroupingContext::default());
+        assert_eq!(out.groups.len(), 2);
+        assert!(out.stats.tier2_blocked_degenerate >= 1);
+    }
+
+    #[test]
+    fn bound_by_recorded_not_guessed() {
+        let a = item(
+            "C:/a.pst",
+            "a.pst",
+            "I",
+            1,
+            Some("mid@x"),
+            [1; 32],
+            10,
+            0,
+            false,
+        );
+        let b = item(
+            "C:/b.pst",
+            "b.pst",
+            "I",
+            2,
+            Some("mid@x"),
+            [2; 32],
+            10,
+            1,
+            false,
+        );
+        let out = group_candidates_with_stats(&[a, b], &GroupingContext::default());
+        assert_eq!(out.bound_by[0], BoundBy::Seed);
+        assert_eq!(out.bound_by[1], BoundBy::MessageId);
+    }
+
+    #[test]
+    fn per_source_scope_splits_same_hash() {
+        let a = item("C:/a.pst", "a.pst", "I", 1, None, [7; 32], 10, 0, false);
+        let b = item("C:/b.pst", "b.pst", "I", 2, None, [7; 32], 10, 1, false);
+        let ctx = GroupingContext {
+            scope: DedupeScope::PerSource,
+            ..Default::default()
+        };
+        let out = group_candidates_with_stats(&[a, b], &ctx);
+        assert_eq!(out.groups.len(), 2);
+        let global = group_candidates_with_stats(
+            &[
+                item("C:/a.pst", "a.pst", "I", 1, None, [7; 32], 10, 0, false),
+                item("C:/b.pst", "b.pst", "I", 2, None, [7; 32], 10, 1, false),
+            ],
+            &GroupingContext::default(),
+        );
+        assert_eq!(global.groups.len(), 1);
+    }
+
+    #[test]
+    fn decision_csv_has_0076_columns() {
+        assert!(DECISION_CSV_HEADER.contains(&"bound_by"));
+        assert!(DECISION_CSV_HEADER.contains(&"identity_version"));
+        assert!(DECISION_CSV_HEADER.contains(&"tier2_eligible"));
+        assert_eq!(DECISION_CSV_HEADER.len(), 31);
+    }
+
+    #[test]
+    fn pre_0076_allow_flags_merge_cross_mid() {
+        let a = item(
+            "C:/a.pst",
+            "a.pst",
+            "I",
+            1,
+            Some("m1"),
+            [9; 32],
+            10,
+            0,
+            false,
+        );
+        let b = item(
+            "C:/b.pst",
+            "b.pst",
+            "I",
+            2,
+            Some("m2"),
+            [9; 32],
+            10,
+            1,
+            false,
+        );
+        let pre = GroupingContext::pre_0076();
+        let out = group_candidates_with_stats(&[a, b], &pre);
+        assert_eq!(out.groups.len(), 1);
+    }
+
+    /// D6 residual: item A (no mid, hash H) stays alone when B joins C's MID group
+    /// via Tier 1 even though B shares H with A. Backfill merges when flagged.
+    #[test]
+    fn tier1_backfill_off_split_on_merge_d6() {
+        let a = item("C:/a.pst", "a.pst", "I", 1, None, [0xAB; 32], 10, 0, false);
+        let c = item(
+            "C:/c.pst",
+            "c.pst",
+            "I",
+            2,
+            Some("shared@mid"),
+            [0xCD; 32],
+            10,
+            1,
+            false,
+        );
+        let b = item(
+            "C:/b.pst",
+            "b.pst",
+            "I",
+            3,
+            Some("shared@mid"),
+            [0xAB; 32],
+            10,
+            2,
+            false,
+        );
+        let items = [a.clone(), c.clone(), b.clone()];
+
+        let off = GroupingContext::default();
+        let out_off = group_candidates_with_stats(&items, &off);
+        assert_eq!(
+            out_off.groups.len(),
+            2,
+            "default must leave D6 residual split"
+        );
+        assert!(
+            out_off.stats.tier1_backfill_candidates >= 1,
+            "must always count candidates; got {}",
+            out_off.stats.tier1_backfill_candidates
+        );
+
+        let on = GroupingContext {
+            tier1_backfill: true,
+            ..Default::default()
+        };
+        let out_on = group_candidates_with_stats(&items, &on);
+        assert_eq!(out_on.groups.len(), 1, "backfill must merge D6 residual");
+        assert!(
+            out_on.stats.tier1_backfill_candidates >= 1,
+            "candidates still reported when merging"
+        );
+        // Absorbed former seed must not remain BoundBy::Seed.
+        let seed = out_on.groups[0][0];
+        for (i, bb) in out_on.bound_by.iter().enumerate() {
+            if i == seed {
+                assert_eq!(*bb, BoundBy::Seed);
+            } else {
+                assert_ne!(
+                    *bb,
+                    BoundBy::Seed,
+                    "member {i} must reclassify after backfill merge"
+                );
+            }
+        }
+
+        // Per-source: same residual must NOT cross-merge custodians.
+        let per = GroupingContext {
+            tier1_backfill: true,
+            scope: DedupeScope::PerSource,
+            ..Default::default()
+        };
+        let out_per = group_candidates_with_stats(&items, &per);
+        assert!(
+            out_per.groups.len() >= 2,
+            "per-source backfill must not unite across sources; got {} groups",
+            out_per.groups.len()
+        );
+        assert_eq!(
+            out_per.stats.tier1_backfill_candidates, 0,
+            "cross-source pairs are not backfill candidates under per-source"
+        );
+    }
+
+    #[test]
+    fn allow_degenerate_tier2_restores_pre_0076_bind() {
+        let mut a = item("C:/a.pst", "a.pst", "I", 1, None, [4; 32], 10, 0, false);
+        a.has_body_preview = false;
+        a.subject_nonempty = true;
+        a.sender_nonempty = false;
+        a.submit_time = None;
+        a.attach_count = 0;
+        let mut b = item("C:/b.pst", "b.pst", "I", 2, None, [4; 32], 10, 1, false);
+        b.has_body_preview = false;
+        b.subject_nonempty = true;
+        b.sender_nonempty = false;
+        b.submit_time = None;
+        b.attach_count = 0;
+
+        let blocked =
+            group_candidates_with_stats(&[a.clone(), b.clone()], &GroupingContext::default());
+        assert_eq!(blocked.groups.len(), 2);
+
+        let allowed = GroupingContext {
+            allow_degenerate_tier2: true,
+            require_readable_body: false,
+            ..Default::default()
+        };
+        let restored = group_candidates_with_stats(&[a, b], &allowed);
+        assert_eq!(
+            restored.groups.len(),
+            1,
+            "allow-degenerate restores Tier-2 bind"
+        );
+    }
+
+    #[test]
+    fn tier1_verify_content_splits_divergent_mid_group() {
+        let a = item(
+            "C:/a.pst",
+            "a.pst",
+            "I",
+            1,
+            Some("same@mid"),
+            [1; 32],
+            10,
+            0,
+            false,
+        );
+        let mut b = item(
+            "C:/b.pst",
+            "b.pst",
+            "I",
+            2,
+            Some("same@mid"),
+            [2; 32],
+            10,
+            1,
+            false,
+        );
+        b.fp_body = 99;
+        let off = group_candidates_with_stats(&[a.clone(), b.clone()], &GroupingContext::default());
+        assert_eq!(off.groups.len(), 1, "verify off keeps MID group");
+        assert!(off.stats.tier1_divergent_body >= 1 || off.stats.tier1_divergent_metadata >= 1);
+
+        let on = GroupingContext {
+            tier1_verify: crate::grouping::Tier1Verify::Content,
+            ..Default::default()
+        };
+        let split = group_candidates_with_stats(&[a, b], &on);
+        assert_eq!(split.groups.len(), 2, "tier1-verify content splits");
+        // §3.7: divergence still reported when verification splits.
+        assert!(
+            split.stats.tier1_divergent_body >= 1 || split.stats.tier1_divergent_metadata >= 1,
+            "divergence must be counted even when tier1-verify splits"
+        );
+    }
+
+    #[test]
+    fn component_attribution_body_vs_metadata() {
+        let mut a = item(
+            "C:/a.pst",
+            "a.pst",
+            "I",
+            1,
+            Some("m@x"),
+            [1; 32],
+            10,
+            0,
+            false,
+        );
+        a.fp_body = 1;
+        a.fp_header = 1;
+        a.fp_attachments = 1;
+        let mut b_meta = item(
+            "C:/b.pst",
+            "b.pst",
+            "I",
+            2,
+            Some("m@x"),
+            [2; 32],
+            10,
+            1,
+            false,
+        );
+        b_meta.fp_body = 1;
+        b_meta.fp_header = 99;
+        b_meta.fp_attachments = 1;
+        let out_meta =
+            group_candidates_with_stats(&[a.clone(), b_meta], &GroupingContext::default());
+        assert!(out_meta.stats.tier1_divergent_metadata >= 1);
+        assert_eq!(out_meta.stats.tier1_divergent_body, 0);
+
+        let mut b_body = item(
+            "C:/c.pst",
+            "c.pst",
+            "I",
+            3,
+            Some("m@x"),
+            [3; 32],
+            10,
+            1,
+            false,
+        );
+        b_body.fp_body = 77;
+        b_body.fp_header = 1;
+        b_body.fp_attachments = 1;
+        let out_body = group_candidates_with_stats(&[a, b_body], &GroupingContext::default());
+        assert!(out_body.stats.tier1_divergent_body >= 1);
+        assert_eq!(out_body.stats.tier1_divergent_metadata, 0);
+    }
+
+    #[test]
+    fn refinement_default_and_split_flags_are_subsets_of_pre_0076() {
+        // Multi-source synthetic covering cross-MID, degenerate, and clean dups.
+        let clean_a = item("C:/a.pst", "a.pst", "I", 1, None, [10; 32], 10, 0, false);
+        let clean_b = item("C:/b.pst", "b.pst", "I", 2, None, [10; 32], 10, 1, false);
+        let cross_a = item(
+            "C:/a.pst",
+            "a.pst",
+            "I",
+            3,
+            Some("m1"),
+            [20; 32],
+            10,
+            2,
+            false,
+        );
+        let cross_b = item(
+            "C:/b.pst",
+            "b.pst",
+            "I",
+            4,
+            Some("m2"),
+            [20; 32],
+            10,
+            3,
+            false,
+        );
+        let mut deg_a = item("C:/a.pst", "a.pst", "I", 5, None, [30; 32], 10, 4, false);
+        deg_a.has_body_preview = false;
+        deg_a.subject_nonempty = true;
+        deg_a.sender_nonempty = false;
+        deg_a.submit_time = None;
+        deg_a.attach_count = 0;
+        let mut deg_b = item("C:/b.pst", "b.pst", "I", 6, None, [30; 32], 10, 5, false);
+        deg_b.has_body_preview = false;
+        deg_b.subject_nonempty = true;
+        deg_b.sender_nonempty = false;
+        deg_b.submit_time = None;
+        deg_b.attach_count = 0;
+        let mid_a = item(
+            "C:/a.pst",
+            "a.pst",
+            "I",
+            7,
+            Some("same"),
+            [40; 32],
+            10,
+            6,
+            false,
+        );
+        let mid_b = item(
+            "C:/b.pst",
+            "b.pst",
+            "I",
+            8,
+            Some("same"),
+            [41; 32],
+            10,
+            7,
+            false,
+        );
+        let items = [
+            clean_a, clean_b, cross_a, cross_b, deg_a, deg_b, mid_a, mid_b,
+        ];
+
+        let baseline = group_candidates_with_stats(&items, &GroupingContext::pre_0076());
+        let contexts = [
+            GroupingContext::default(),
+            GroupingContext {
+                tier1_authority: true,
+                ..GroupingContext::pre_0076()
+            },
+            GroupingContext {
+                require_readable_body: true,
+                allow_degenerate_tier2: false,
+                ..GroupingContext::pre_0076()
+            },
+            GroupingContext {
+                scope: DedupeScope::PerSource,
+                ..Default::default()
+            },
+        ];
+        for ctx in &contexts {
+            let out = group_candidates_with_stats(&items, ctx);
+            assert_refinement(&baseline.groups, &out.groups, items.len());
+        }
+    }
+
+    /// Every group in `refined` is a subset of some group in `baseline`.
+    fn assert_refinement(baseline: &[Vec<usize>], refined: &[Vec<usize>], n: usize) {
+        let mut base_of = vec![usize::MAX; n];
+        for (gid, members) in baseline.iter().enumerate() {
+            for &i in members {
+                base_of[i] = gid;
+            }
+        }
+        for g in refined {
+            if g.is_empty() {
+                continue;
+            }
+            let parent = base_of[g[0]];
+            for &i in g {
+                assert_eq!(
+                    base_of[i], parent,
+                    "refined group {g:?} crosses baseline groups"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn index_group_candidates_equivalence_across_contexts() {
+        use crate::index::{DedupIndex, IndexItem, MessageRef};
+
+        let mk =
+            |path: &str, pst: &str, nid: u64, mid: Option<&str>, hash: [u8; 32], order: u64| {
+                let mut it = item(path, pst, "I", nid, mid, hash, 10, order, false);
+                it.has_body_preview = true;
+                it
+            };
+        let base_items = vec![
+            mk("C:/a.pst", "a.pst", 1, Some("m1"), [1; 32], 0),
+            mk("C:/b.pst", "b.pst", 2, Some("m1"), [9; 32], 1),
+            mk("C:/c.pst", "c.pst", 3, None, [2; 32], 2),
+            mk("C:/d.pst", "d.pst", 4, None, [2; 32], 3),
+            mk("C:/e.pst", "e.pst", 5, Some("m2"), [2; 32], 4),
+            mk("C:/f.pst", "f.pst", 6, Some("m3"), [3; 32], 5),
+        ];
+
+        // Note: `tier1_backfill: true` is intentionally omitted. Backfill merge is a
+        // keep-set post-pass only; streaming DedupIndex cannot retro-merge, so seed
+        // equivalence does not hold under that flag (CLI rejects it on scan/dups).
+        let contexts = [
+            GroupingContext::default(),
+            GroupingContext::pre_0076(),
+            GroupingContext {
+                tier2_enabled: false,
+                ..Default::default()
+            },
+            GroupingContext {
+                scope: DedupeScope::PerSource,
+                ..Default::default()
+            },
+            GroupingContext {
+                allow_cross_mid_tier2: true,
+                tier1_authority: false,
+                ..Default::default()
+            },
+        ];
+
+        for ctx in &contexts {
+            // Several scan-order shuffles of equal-key stability isn't full perm;
+            // permute by rotating the list.
+            for rot in 0..base_items.len() {
+                let mut items = base_items.clone();
+                items.rotate_left(rot);
+                // Reassign scan_order to match position.
+                for (i, it) in items.iter_mut().enumerate() {
+                    it.scan_order = i as u64;
+                }
+
+                let outcome = group_candidates_with_stats(&items, ctx);
+                let mut index = DedupIndex::with_context(ctx.clone());
+                let mut index_seeds = Vec::new();
+                let mut index_bound = Vec::new();
+                for it in &items {
+                    let result = index.check_and_insert_item(IndexItem {
+                        message_id: it.message_id_norm.clone(),
+                        content_hash: it.content_hash,
+                        strong_content_hash: it.strong_content_hash,
+                        tier2_eligible: it.assess_tier2_eligibility().is_ok()
+                            || !ctx.enforce_readable_body(),
+                        source_key: it.path_key(),
+                        fp_body: it.fp_body,
+                        fp_header: it.fp_header,
+                        fp_recipients: it.fp_recipients,
+                        fp_attachments: it.fp_attachments,
+                        msg_ref: MessageRef {
+                            pst_index: 0,
+                            pst_name: it.locus.source_pst.clone(),
+                            folder_path: it.locus.folder_path.clone(),
+                            nid: it.locus.nid,
+                            subject: String::new(),
+                            submit_time: it.submit_time,
+                            sender: String::new(),
+                            size: it.size,
+                        },
+                    });
+                    index_bound.push(result.bound_by());
+                    if result.is_unique() {
+                        index_seeds.push(it.locus.nid);
+                    }
+                }
+
+                let mut group_seeds: Vec<u64> = outcome
+                    .groups
+                    .iter()
+                    .filter_map(|g| g.first().map(|&i| items[i].locus.nid))
+                    .collect();
+                group_seeds.sort_unstable();
+                let mut idx_seeds = index_seeds.clone();
+                idx_seeds.sort_unstable();
+                assert_eq!(
+                    group_seeds, idx_seeds,
+                    "seed nids disagree for ctx={ctx:?} rot={rot}"
+                );
+
+                // BoundBy for non-seeds: index reports on insert; group_candidates on member.
+                for (i, bb) in outcome.bound_by.iter().enumerate() {
+                    // Seeds are BoundBy::Seed on both when unique first-seen.
+                    if *bb == BoundBy::Seed {
+                        assert_eq!(
+                            index_bound[i],
+                            BoundBy::Seed,
+                            "item {i} seed mismatch rot={rot}"
+                        );
+                    } else {
+                        assert_ne!(index_bound[i], BoundBy::Seed, "item {i} should be dup");
+                        assert_eq!(
+                            index_bound[i], *bb,
+                            "BoundBy mismatch item {i} rot={rot} ctx={ctx:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

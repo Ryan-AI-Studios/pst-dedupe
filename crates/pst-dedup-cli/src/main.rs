@@ -111,6 +111,28 @@ enum Commands {
         /// Max attach-stream probe fail rate before preflight recommends re-export (default 0.05).
         #[arg(long = "max-attach-fail-rate", default_value_t = 0.05, value_parser = parse_rate_threshold)]
         max_attach_fail_rate: f64,
+        /// Strong content identity: off (default) | body | body-recip (0076). body-recip-attach deferred (D-0076-attach-content).
+        #[arg(long = "strong-content-hash", default_value = "off", value_parser = parse_strong_content_hash)]
+        strong_content_hash: String,
+        /// Dedupe partition: global (default) | per-source (0076).
+        #[arg(long = "dedupe-scope", default_value = "global", value_parser = parse_dedupe_scope_cli)]
+        dedupe_scope: String,
+        /// Subdivide MID groups by content|body (default off) (0076).
+        #[arg(long = "tier1-verify", default_value = "off", value_parser = parse_tier1_verify_cli)]
+        tier1_verify: String,
+        /// Opt-in merge of late-discovered shared MIDs (0076). Keep-set/unique-* only —
+        /// rejected on scan/dups (streaming DedupIndex cannot retro-merge).
+        #[arg(long = "tier1-backfill")]
+        tier1_backfill: bool,
+        /// Exclude inline/embedded attachments from identity (default off; merge-increasing) (0076).
+        #[arg(long = "identity-ignore-inline-attachments")]
+        identity_ignore_inline_attachments: bool,
+        /// Allow cross-MID Tier-2 merges (restores pre-0076; default off) (0076).
+        #[arg(long = "allow-cross-mid-tier2")]
+        allow_cross_mid_tier2: bool,
+        /// Allow Tier-2 bind on unreadable/degenerate preimages (restores pre-0076; default off) (0076).
+        #[arg(long = "allow-degenerate-tier2")]
+        allow_degenerate_tier2: bool,
     },
 
     /// Inspect PST structure: encryption, folder tree, message counts.
@@ -147,6 +169,21 @@ enum Commands {
         integrity_csv: Option<PathBuf>,
         #[arg(long, default_value_t = 10_000)]
         skip_limit: usize,
+        #[arg(long = "strong-content-hash", default_value = "off", value_parser = parse_strong_content_hash)]
+        strong_content_hash: String,
+        #[arg(long = "dedupe-scope", default_value = "global", value_parser = parse_dedupe_scope_cli)]
+        dedupe_scope: String,
+        #[arg(long = "tier1-verify", default_value = "off", value_parser = parse_tier1_verify_cli)]
+        tier1_verify: String,
+        /// Keep-set/unique-* only — rejected on dups (streaming DedupIndex cannot retro-merge).
+        #[arg(long = "tier1-backfill")]
+        tier1_backfill: bool,
+        #[arg(long = "identity-ignore-inline-attachments")]
+        identity_ignore_inline_attachments: bool,
+        #[arg(long = "allow-cross-mid-tier2")]
+        allow_cross_mid_tier2: bool,
+        #[arg(long = "allow-degenerate-tier2")]
+        allow_degenerate_tier2: bool,
     },
 
     /// Build export keep-set (`keep_set_v1`): policy resolve, decision CSV, winners JSON.
@@ -218,6 +255,20 @@ enum Commands {
         integrity_csv: Option<PathBuf>,
         #[arg(long, default_value_t = 10_000)]
         skip_limit: usize,
+        #[arg(long = "strong-content-hash", default_value = "off", value_parser = parse_strong_content_hash)]
+        strong_content_hash: String,
+        #[arg(long = "dedupe-scope", default_value = "global", value_parser = parse_dedupe_scope_cli)]
+        dedupe_scope: String,
+        #[arg(long = "tier1-verify", default_value = "off", value_parser = parse_tier1_verify_cli)]
+        tier1_verify: String,
+        #[arg(long = "tier1-backfill")]
+        tier1_backfill: bool,
+        #[arg(long = "identity-ignore-inline-attachments")]
+        identity_ignore_inline_attachments: bool,
+        #[arg(long = "allow-cross-mid-tier2")]
+        allow_cross_mid_tier2: bool,
+        #[arg(long = "allow-degenerate-tier2")]
+        allow_degenerate_tier2: bool,
     },
 
     /// Export unique messages as a volume-batched EML pack (`eml_pack_v1`).
@@ -301,6 +352,20 @@ enum Commands {
         integrity_csv: Option<PathBuf>,
         #[arg(long, default_value_t = 10_000)]
         skip_limit: usize,
+        #[arg(long = "strong-content-hash", default_value = "off", value_parser = parse_strong_content_hash)]
+        strong_content_hash: String,
+        #[arg(long = "dedupe-scope", default_value = "global", value_parser = parse_dedupe_scope_cli)]
+        dedupe_scope: String,
+        #[arg(long = "tier1-verify", default_value = "off", value_parser = parse_tier1_verify_cli)]
+        tier1_verify: String,
+        #[arg(long = "tier1-backfill")]
+        tier1_backfill: bool,
+        #[arg(long = "identity-ignore-inline-attachments")]
+        identity_ignore_inline_attachments: bool,
+        #[arg(long = "allow-cross-mid-tier2")]
+        allow_cross_mid_tier2: bool,
+        #[arg(long = "allow-degenerate-tier2")]
+        allow_degenerate_tier2: bool,
     },
 
     /// Export unique messages as streaming PST volume(s) + report pack (`unique_export_report_v1`).
@@ -842,6 +907,13 @@ fn run(cli: Cli) -> Result<()> {
             deep_attach_max_open_psts,
             deep_attach_max_peer_probes,
             max_attach_fail_rate,
+            strong_content_hash,
+            dedupe_scope,
+            tier1_verify,
+            tier1_backfill,
+            identity_ignore_inline_attachments,
+            allow_cross_mid_tier2,
+            allow_degenerate_tier2,
         } => cmd_scan(ScanCliArgs {
             paths,
             no_tier2,
@@ -866,6 +938,13 @@ fn run(cli: Cli) -> Result<()> {
             deep_attach_max_open_psts,
             deep_attach_max_peer_probes,
             max_attach_fail_rate,
+            strong_content_hash,
+            dedupe_scope,
+            tier1_verify,
+            tier1_backfill,
+            identity_ignore_inline_attachments,
+            allow_cross_mid_tier2,
+            allow_degenerate_tier2,
         }),
         Commands::Inspect { path, top, json } => cmd_inspect(path, top, json),
         Commands::Dups {
@@ -880,6 +959,13 @@ fn run(cli: Cli) -> Result<()> {
             allow_failed_files,
             integrity_csv,
             skip_limit,
+            strong_content_hash,
+            dedupe_scope,
+            tier1_verify,
+            tier1_backfill,
+            identity_ignore_inline_attachments,
+            allow_cross_mid_tier2,
+            allow_degenerate_tier2,
         } => cmd_dups(ScanCliArgs {
             paths,
             no_tier2,
@@ -897,6 +983,14 @@ fn run(cli: Cli) -> Result<()> {
             skip_limit,
             deep_attach_preflight: false,
             deep_attach_level: "head".into(),
+            // 0076 flags
+            strong_content_hash,
+            dedupe_scope,
+            tier1_verify,
+            tier1_backfill,
+            identity_ignore_inline_attachments,
+            allow_cross_mid_tier2,
+            allow_degenerate_tier2,
             deep_attach_max_attaches: 50_000,
             deep_attach_max_probe_bytes: 268_435_456,
             deep_attach_per_attach_max_bytes: 1_048_576,
@@ -930,6 +1024,13 @@ fn run(cli: Cli) -> Result<()> {
             allow_failed_files,
             integrity_csv,
             skip_limit,
+            strong_content_hash,
+            dedupe_scope,
+            tier1_verify,
+            tier1_backfill,
+            identity_ignore_inline_attachments,
+            allow_cross_mid_tier2,
+            allow_degenerate_tier2,
         } => {
             let mut all = paths;
             all.extend(input);
@@ -962,6 +1063,13 @@ fn run(cli: Cli) -> Result<()> {
                 allow_failed_files,
                 integrity_csv,
                 skip_limit,
+                strong_content_hash,
+                dedupe_scope,
+                tier1_verify,
+                tier1_backfill,
+                identity_ignore_inline_attachments,
+                allow_cross_mid_tier2,
+                allow_degenerate_tier2,
             })
         }
         Commands::UniqueEml {
@@ -993,6 +1101,13 @@ fn run(cli: Cli) -> Result<()> {
             allow_failed_files,
             integrity_csv,
             skip_limit,
+            strong_content_hash,
+            dedupe_scope,
+            tier1_verify,
+            tier1_backfill,
+            identity_ignore_inline_attachments,
+            allow_cross_mid_tier2,
+            allow_degenerate_tier2,
         } => {
             let mut all = paths;
             all.extend(input);
@@ -1029,6 +1144,13 @@ fn run(cli: Cli) -> Result<()> {
                 allow_failed_files,
                 integrity_csv,
                 skip_limit,
+                strong_content_hash,
+                dedupe_scope,
+                tier1_verify,
+                tier1_backfill,
+                identity_ignore_inline_attachments,
+                allow_cross_mid_tier2,
+                allow_degenerate_tier2,
             })
         }
         Commands::UniquePst(clap_args) => {
@@ -1184,6 +1306,21 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 /// Validate preflight rate knobs: finite and in [0.0, 1.0].
+fn parse_strong_content_hash(s: &str) -> std::result::Result<String, String> {
+    pst_dedup_cli::grouping_cli::parse_identity_level(s)?;
+    Ok(s.to_string())
+}
+
+fn parse_dedupe_scope_cli(s: &str) -> std::result::Result<String, String> {
+    pst_dedup_cli::grouping_cli::parse_dedupe_scope(s)?;
+    Ok(s.to_string())
+}
+
+fn parse_tier1_verify_cli(s: &str) -> std::result::Result<String, String> {
+    pst_dedup_cli::grouping_cli::parse_tier1_verify(s)?;
+    Ok(s.to_string())
+}
+
 fn parse_rate_threshold(s: &str) -> std::result::Result<f64, String> {
     let v: f64 = s
         .parse()
@@ -1260,10 +1397,36 @@ struct ScanCliArgs {
     deep_attach_max_open_psts: usize,
     deep_attach_max_peer_probes: u64,
     max_attach_fail_rate: f64,
+    strong_content_hash: String,
+    dedupe_scope: String,
+    tier1_verify: String,
+    tier1_backfill: bool,
+    identity_ignore_inline_attachments: bool,
+    allow_cross_mid_tier2: bool,
+    allow_degenerate_tier2: bool,
 }
 
 fn cmd_scan(args: ScanCliArgs) -> Result<()> {
     let paths = resolve_pst_paths(&args.paths)?;
+    if args.tier1_backfill {
+        return Err(CliError::Usage(
+            "--tier1-backfill merge is keep-set/unique-pst/unique-eml only \
+             (streaming DedupIndex on scan/dups cannot retroactively merge already-emitted uniques). \
+             Run keep-set or unique-* with --tier1-backfill for the merge post-pass."
+                .into(),
+        ));
+    }
+    let grouping = pst_dedup_cli::grouping_cli::grouping_context_from_cli(
+        args.no_tier2,
+        &args.strong_content_hash,
+        &args.dedupe_scope,
+        &args.tier1_verify,
+        args.allow_cross_mid_tier2,
+        args.allow_degenerate_tier2,
+        false, // tier1_backfill rejected above for streaming scan
+        args.identity_ignore_inline_attachments,
+    )
+    .map_err(CliError::Usage)?;
     let opts = ScanOptions {
         enable_tier2: !args.no_tier2,
         include_attachments: !args.no_attachments,
@@ -1289,6 +1452,7 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
         deep_attach_max_probe_time_ms: args.deep_attach_max_probe_time_ms,
         deep_attach_max_open_psts: args.deep_attach_max_open_psts,
         deep_attach_max_peer_probes_per_group: args.deep_attach_max_peer_probes,
+        grouping,
     };
     // Artifacts (CSV/integrity) are streamed and flushed inside run_scan before return.
     let outcome = run_scan(&paths, &opts)?;
@@ -1390,6 +1554,25 @@ fn cmd_inspect(path: PathBuf, top: usize, json: bool) -> Result<()> {
 
 fn cmd_dups(args: ScanCliArgs) -> Result<()> {
     let paths = resolve_pst_paths(&args.paths)?;
+    if args.tier1_backfill {
+        return Err(CliError::Usage(
+            "--tier1-backfill merge is keep-set/unique-pst/unique-eml only \
+             (streaming DedupIndex on scan/dups cannot retroactively merge already-emitted uniques). \
+             Run keep-set or unique-* with --tier1-backfill for the merge post-pass."
+                .into(),
+        ));
+    }
+    let grouping = pst_dedup_cli::grouping_cli::grouping_context_from_cli(
+        args.no_tier2,
+        &args.strong_content_hash,
+        &args.dedupe_scope,
+        &args.tier1_verify,
+        args.allow_cross_mid_tier2,
+        args.allow_degenerate_tier2,
+        false, // tier1_backfill rejected above for streaming dups
+        args.identity_ignore_inline_attachments,
+    )
+    .map_err(CliError::Usage)?;
     let opts = ScanOptions {
         enable_tier2: !args.no_tier2,
         include_attachments: true,
@@ -1415,6 +1598,7 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
         deep_attach_max_probe_time_ms: 2000,
         deep_attach_max_open_psts: 32,
         deep_attach_max_peer_probes_per_group: 3,
+        grouping,
     };
     let outcome = run_scan(&paths, &opts)?;
     let dup_limit = if args.limit == 0 {
@@ -1458,6 +1642,7 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
 }
 
 fn print_summary_text(s: &ScanSummary) {
+    use pst_dedup_cli::grouping_cli::format_grouping_stats_human;
     println!(
         "=== Dedup summary ({:.2}s) mode={} schema={} ===",
         s.duration_secs, s.mode, s.schema
@@ -1484,6 +1669,9 @@ fn print_summary_text(s: &ScanSummary) {
     println!("  duplicates:    {}", s.duplicates);
     println!("  tier1 hits:    {}", s.tier1_hits);
     println!("  tier2 hits:    {}", s.tier2_hits);
+    for line in format_grouping_stats_human(&s.grouping) {
+        println!("{line}");
+    }
     println!("  skipped:       {}", s.skipped);
     if !s.skipped_by_reason.is_empty() {
         println!("  skipped_by_reason: {:?}", s.skipped_by_reason);

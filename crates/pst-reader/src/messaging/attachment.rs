@@ -23,6 +23,8 @@ pub struct AttachmentMeta {
     pub filename: String,
     /// Size in bytes (PidTagAttachSize).
     pub size: u32,
+    /// True when MAPI marks this as inline/embedded (0076).
+    pub is_inline: bool,
 }
 
 /// Richer attachment descriptor for Desk extract.
@@ -38,6 +40,8 @@ pub struct AttachmentInfo {
     pub mime_tag: Option<String>,
     /// PidTagAttachMethod when present.
     pub attach_method: Option<i32>,
+    /// True when MAPI marks inline/embedded: Content-ID present, rendered-in-body, or hidden.
+    pub is_inline: bool,
 }
 
 /// Streaming reader over attachment binary data.
@@ -127,11 +131,12 @@ impl PstFile {
             .map(|i| AttachmentMeta {
                 filename: i.filename,
                 size: i.size,
+                is_inline: i.is_inline,
             })
             .collect())
     }
 
-    /// List attachments with NID + filename + size + optional mime/method.
+    /// List attachments with NID + filename + size + optional mime/method + inline flags.
     pub fn list_attachments(&mut self, message_nid: NodeId) -> Result<Vec<AttachmentInfo>> {
         let nbt_entry = match self.nbt.get(message_nid) {
             Some(e) => e.clone(),
@@ -167,12 +172,28 @@ impl PstFile {
                 let mime_tag = pc.get_string(nid::PID_TAG_ATTACH_MIME_TAG)?;
                 let attach_method = pc.get_i32(nid::PID_TAG_ATTACH_METHOD)?;
 
+                // Inline/embedded detection (0076): MAPI flags, not a size threshold.
+                // Soft-fail individual property reads — missing tags are normal.
+                let content_id = pc
+                    .get_string(nid::PID_TAG_ATTACH_CONTENT_ID)
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.trim().is_empty());
+                let attach_flags = pc.get_i32(nid::PID_TAG_ATTACH_FLAGS).ok().flatten();
+                let hidden = pc.get_bool(nid::PID_TAG_ATTACHMENT_HIDDEN).ok().flatten();
+                let is_inline = content_id.is_some()
+                    || attach_flags
+                        .map(|f| f & nid::ATT_RENDERED_IN_BODY != 0)
+                        .unwrap_or(false)
+                    || hidden.unwrap_or(false);
+
                 attachments.push(AttachmentInfo {
                     nid: entry.nid,
                     filename,
                     size,
                     mime_tag,
                     attach_method,
+                    is_inline,
                 });
             }
         }

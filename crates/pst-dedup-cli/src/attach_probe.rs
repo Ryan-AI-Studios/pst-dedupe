@@ -16,8 +16,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use dedup_engine::integrity::{attach_reason_from_pst_error, IntegrityReason, ScanMode};
 use dedup_engine::keepset::{
-    group_candidates, rank_key, FamilyPolicy, KeepPolicy, RankContext, RecoverableScanItem,
+    group_candidates_ctx, rank_key, FamilyPolicy, KeepPolicy, RankContext, RecoverableScanItem,
 };
+use dedup_engine::GroupingContext;
 use pst_reader::{NodeId, PstFile};
 
 /// Fixed discard buffer size (64 KiB) — never grow with attach size.
@@ -1118,7 +1119,8 @@ pub struct KeepSetProbeOpts<'a> {
     pub policy: KeepPolicy,
     pub family: FamilyPolicy,
     pub prefer_path: &'a [String],
-    pub tier2_enabled: bool,
+    /// Same identity context as scan/resolve so peer groups match 0076 guards.
+    pub grouping: GroupingContext,
     /// Integrity mode: best-effort degrades; strict marks probe fails for skip/removal.
     pub mode: ScanMode,
     pub cancel: Option<Arc<AtomicBool>>,
@@ -1144,7 +1146,7 @@ pub fn probe_keep_set_groups(
         policy,
         family,
         prefer_path,
-        tier2_enabled,
+        grouping,
         mode,
         cancel,
         progress,
@@ -1162,7 +1164,7 @@ pub fn probe_keep_set_groups(
     }
 
     let mut engine = AttachProbeEngine::new(budgets, level, cancel, progress);
-    let groups = group_candidates(items, tier2_enabled);
+    let groups = group_candidates_ctx(items, &grouping).groups;
     let peer_cap = budgets.max_peer_probes_per_group.max(1);
 
     for group in &groups {
@@ -1492,6 +1494,21 @@ mod tests {
             submit_time: None,
             delivery_time: None,
             has_bcc: false,
+            has_body_preview: true,
+            subject_nonempty: true,
+            sender_nonempty: true,
+            attach_count: 0,
+            body_sha256: None,
+            body_char_len: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            strong_content_hash: None,
+            fp_header: 0,
+            fp_body: 0,
+            fp_recipients: 0,
+            fp_attachments: 0,
+            preview_bytes_over_budget: false,
         }];
         let (summary, _cache) = probe_keep_set_groups(
             &mut items,
@@ -1501,7 +1518,7 @@ mod tests {
                 policy: KeepPolicy::FirstSeen,
                 family: FamilyPolicy::ParentsOnly,
                 prefer_path: &[],
-                tier2_enabled: true,
+                grouping: GroupingContext::default(),
                 mode: ScanMode::BestEffort,
                 cancel: None,
                 progress: None,
@@ -1532,6 +1549,21 @@ mod tests {
                 submit_time: None,
                 delivery_time: None,
                 has_bcc: false,
+                has_body_preview: true,
+                subject_nonempty: true,
+                sender_nonempty: true,
+                attach_count: 0,
+                body_sha256: None,
+                body_char_len: None,
+                display_to: None,
+                display_cc: None,
+                display_bcc: None,
+                strong_content_hash: None,
+                fp_header: 0,
+                fp_body: 0,
+                fp_recipients: 0,
+                fp_attachments: 0,
+                preview_bytes_over_budget: false,
             })
             .collect();
         let budgets = ProbeBudgets {
@@ -1547,7 +1579,7 @@ mod tests {
                 policy: KeepPolicy::FirstSeen,
                 family: FamilyPolicy::KeepAttachmentsWithParent,
                 prefer_path: &[],
-                tier2_enabled: true,
+                grouping: GroupingContext::default(),
                 mode: ScanMode::BestEffort,
                 cancel: None,
                 progress: None,
@@ -1593,6 +1625,21 @@ mod tests {
                 submit_time: None,
                 delivery_time: None,
                 has_bcc: false,
+                has_body_preview: true,
+                subject_nonempty: true,
+                sender_nonempty: true,
+                attach_count: 0,
+                body_sha256: None,
+                body_char_len: None,
+                display_to: None,
+                display_cc: None,
+                display_bcc: None,
+                strong_content_hash: None,
+                fp_header: 0,
+                fp_body: 0,
+                fp_recipients: 0,
+                fp_attachments: 0,
+                preview_bytes_over_budget: false,
             })
             .collect();
         let budgets = ProbeBudgets {
@@ -1608,7 +1655,7 @@ mod tests {
                 policy: KeepPolicy::FirstSeen,
                 family: FamilyPolicy::KeepAttachmentsWithParent,
                 prefer_path: &[],
-                tier2_enabled: true,
+                grouping: GroupingContext::default(),
                 mode: ScanMode::BestEffort,
                 cancel: None,
                 progress: None,
@@ -1642,6 +1689,21 @@ mod tests {
                 submit_time: None,
                 delivery_time: None,
                 has_bcc: false,
+                has_body_preview: true,
+                subject_nonempty: true,
+                sender_nonempty: true,
+                attach_count: 0,
+                body_sha256: None,
+                body_char_len: None,
+                display_to: None,
+                display_cc: None,
+                display_bcc: None,
+                strong_content_hash: None,
+                fp_header: 0,
+                fp_body: 0,
+                fp_recipients: 0,
+                fp_attachments: 0,
+                preview_bytes_over_budget: false,
             })
             .collect();
         let budgets = ProbeBudgets {
@@ -1657,7 +1719,7 @@ mod tests {
                 policy: KeepPolicy::FirstSeen,
                 family: FamilyPolicy::KeepAttachmentsWithParent,
                 prefer_path: &[],
-                tier2_enabled: true,
+                grouping: GroupingContext::default(),
                 mode: ScanMode::BestEffort,
                 cancel: None,
                 progress: None,
@@ -1688,6 +1750,21 @@ mod tests {
                 submit_time: None,
                 delivery_time: None,
                 has_bcc: false,
+                has_body_preview: true,
+                subject_nonempty: true,
+                sender_nonempty: true,
+                attach_count: 0,
+                body_sha256: None,
+                body_char_len: None,
+                display_to: None,
+                display_cc: None,
+                display_bcc: None,
+                strong_content_hash: None,
+                fp_header: 0,
+                fp_body: 0,
+                fp_recipients: 0,
+                fp_attachments: 0,
+                preview_bytes_over_budget: false,
             })
             .collect();
         let budgets = ProbeBudgets {
@@ -1734,6 +1811,21 @@ mod tests {
                 submit_time: None,
                 delivery_time: None,
                 has_bcc: false,
+                has_body_preview: true,
+                subject_nonempty: true,
+                sender_nonempty: true,
+                attach_count: 0,
+                body_sha256: None,
+                body_char_len: None,
+                display_to: None,
+                display_cc: None,
+                display_bcc: None,
+                strong_content_hash: None,
+                fp_header: 0,
+                fp_body: 0,
+                fp_recipients: 0,
+                fp_attachments: 0,
+                preview_bytes_over_budget: false,
             })
             .collect();
         let (summary, _cache) = probe_scan_items(
@@ -1797,6 +1889,21 @@ mod tests {
             submit_time: None,
             delivery_time: None,
             has_bcc: false,
+            has_body_preview: true,
+            subject_nonempty: true,
+            sender_nonempty: true,
+            attach_count: 0,
+            body_sha256: None,
+            body_char_len: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            strong_content_hash: None,
+            fp_header: 0,
+            fp_body: 0,
+            fp_recipients: 0,
+            fp_attachments: 0,
+            preview_bytes_over_budget: false,
         }];
         let (summary, _cache) = probe_scan_items(
             &mut items,
@@ -1839,6 +1946,21 @@ mod tests {
             submit_time: None,
             delivery_time: None,
             has_bcc: false,
+            has_body_preview: true,
+            subject_nonempty: true,
+            sender_nonempty: true,
+            attach_count: 0,
+            body_sha256: None,
+            body_char_len: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            strong_content_hash: None,
+            fp_header: 0,
+            fp_body: 0,
+            fp_recipients: 0,
+            fp_attachments: 0,
+            preview_bytes_over_budget: false,
         };
         let clean = RecoverableScanItem {
             locus: MessageLocus {
@@ -1856,6 +1978,21 @@ mod tests {
             submit_time: None,
             delivery_time: None,
             has_bcc: false,
+            has_body_preview: true,
+            subject_nonempty: true,
+            sender_nonempty: true,
+            attach_count: 0,
+            body_sha256: None,
+            body_char_len: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            strong_content_hash: None,
+            fp_header: 0,
+            fp_body: 0,
+            fp_recipients: 0,
+            fp_attachments: 0,
+            preview_bytes_over_budget: false,
         };
         assert!(fidelity_rank(&clean) < fidelity_rank(&dirty));
         let ctx = RankContext::new(KeepPolicy::FirstSeen);
@@ -1992,6 +2129,21 @@ mod tests {
                 submit_time: None,
                 delivery_time: None,
                 has_bcc: false,
+                has_body_preview: true,
+                subject_nonempty: true,
+                sender_nonempty: true,
+                attach_count: 0,
+                body_sha256: None,
+                body_char_len: None,
+                display_to: None,
+                display_cc: None,
+                display_bcc: None,
+                strong_content_hash: None,
+                fp_header: 0,
+                fp_body: 0,
+                fp_recipients: 0,
+                fp_attachments: 0,
+                preview_bytes_over_budget: false,
             },
             RecoverableScanItem {
                 locus: MessageLocus {
@@ -2009,6 +2161,21 @@ mod tests {
                 submit_time: None,
                 delivery_time: None,
                 has_bcc: false,
+                has_body_preview: true,
+                subject_nonempty: true,
+                sender_nonempty: true,
+                attach_count: 0,
+                body_sha256: None,
+                body_char_len: None,
+                display_to: None,
+                display_cc: None,
+                display_bcc: None,
+                strong_content_hash: None,
+                fp_header: 0,
+                fp_body: 0,
+                fp_recipients: 0,
+                fp_attachments: 0,
+                preview_bytes_over_budget: false,
             },
         ];
         let (_summary, _cache) = probe_scan_items(

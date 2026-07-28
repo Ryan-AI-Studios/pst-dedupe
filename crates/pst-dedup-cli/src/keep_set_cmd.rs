@@ -7,13 +7,14 @@ use std::path::PathBuf;
 
 use dedup_engine::integrity::{IntegrityThresholds, ScanMode, SCAN_INTEGRITY_SCHEMA};
 use dedup_engine::keepset::{
-    finalize_with_materialize, recoverable_items_hint, resolve_groups_with_ctx, sort_input_paths,
-    write_keep_set_json, DecisionCsvWriter, FamilyPolicy, FidelityMode, FolderRankMode, KeepPolicy,
-    KeepSetProvenance, RankContext,
+    finalize_with_materialize, recoverable_items_hint, resolve_groups_with_grouping,
+    sort_input_paths, write_keep_set_json, DecisionCsvWriter, FamilyPolicy, FidelityMode,
+    FolderRankMode, KeepPolicy, KeepSetProvenance, RankContext,
 };
 use serde::Serialize;
 
 use crate::error::{CliError, Result};
+use crate::grouping_cli::{format_grouping_stats_human, grouping_context_from_cli};
 use crate::pst_materializer::PstMaterializer;
 use crate::scan::{evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions, ScanSummary};
 
@@ -42,6 +43,14 @@ pub struct KeepSetCliArgs {
     pub allow_failed_files: bool,
     pub integrity_csv: Option<PathBuf>,
     pub skip_limit: usize,
+    // 0076 identity binding
+    pub strong_content_hash: String,
+    pub dedupe_scope: String,
+    pub tier1_verify: String,
+    pub tier1_backfill: bool,
+    pub identity_ignore_inline_attachments: bool,
+    pub allow_cross_mid_tier2: bool,
+    pub allow_degenerate_tier2: bool,
 }
 
 /// Build [`RankContext`] from CLI keep-set / unique-* flags (0075).
@@ -93,6 +102,18 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
     let mut paths = resolve_pst_paths(&args.paths)?;
     sort_input_paths(&mut paths);
 
+    let grouping = grouping_context_from_cli(
+        args.no_tier2,
+        &args.strong_content_hash,
+        &args.dedupe_scope,
+        &args.tier1_verify,
+        args.allow_cross_mid_tier2,
+        args.allow_degenerate_tier2,
+        args.tier1_backfill,
+        args.identity_ignore_inline_attachments,
+    )
+    .map_err(CliError::Usage)?;
+
     let opts = ScanOptions {
         enable_tier2: !args.no_tier2,
         include_attachments: !args.no_attachments,
@@ -110,6 +131,7 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
         retain_rows: false,
         retain_candidates: true,
         cancel: None,
+        grouping: grouping.clone(),
         ..Default::default()
     };
 
@@ -133,11 +155,11 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
         args.rank_folder_class_first,
         &args.fidelity_rank,
     );
-    let mut resolved = resolve_groups_with_ctx(
+    let mut resolved = resolve_groups_with_grouping(
         outcome.candidates,
         args.family_policy,
         &rank_ctx,
-        !args.no_tier2,
+        &grouping,
         Some(provenance),
     );
 
@@ -235,6 +257,9 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
         "  tier1 dups:    {}  tier2 dups: {}",
         keep_set.stats.tier1_dups, keep_set.stats.tier2_dups
     );
+    for line in format_grouping_stats_human(&keep_set.stats.grouping) {
+        println!("{line}");
+    }
     println!("  degraded winners: {}", keep_set.stats.degraded_winners);
     println!(
         "  materialize_failed: {}  promoted: {}  groups_dropped_materialize: {}",

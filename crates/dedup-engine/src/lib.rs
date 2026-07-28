@@ -12,6 +12,7 @@
 
 pub mod eml_pack;
 pub mod exporter;
+pub mod grouping;
 pub mod hasher;
 pub mod index;
 pub mod integrity;
@@ -29,8 +30,16 @@ pub use eml_pack::{
     DEFAULT_FILES_PER_VOLUME, EML_PACK_SCHEMA, REASON_ATTACH_PART_FAILED,
 };
 pub use exporter::export_eml;
-pub use hasher::{compute_dedup_keys, normalize_message_id};
-pub use index::{DedupIndex, DedupResult, DedupTier, MessageRef};
+pub use grouping::{
+    mid_join_compatible, normalize_recipients, recipient_has_x500, BoundBy, DedupeScope,
+    GroupingContext, GroupingStats, IdentityLevel, Tier1Verify,
+};
+pub use hasher::{
+    compute_content_hash, compute_dedup_keys, compute_dedup_keys_ex, count_weak_fields,
+    hash_full_body, normalize_message_id, normalize_subject, tier2_eligibility, AttachmentInfo,
+    DedupKeys, StrongHashInput, Tier2IneligibleReason,
+};
+pub use index::{DedupIndex, DedupResult, DedupTier, IndexItem, MessageRef};
 pub use integrity::{
     attach_reason_from_pst_error, compute_preflight, reason_from_pst_error, AttachProbePreflight,
     FileScanStatus, IntegrityCsvWriter, IntegrityReason, IntegrityThresholds, PreflightInputs,
@@ -40,11 +49,12 @@ pub use keepset::{
     build_keep_set, build_keep_set_materialized, build_keep_set_with_ctx, classify_folder,
     decided_by_rung, duplicate_source_aggregate, edrm_mih_hex, fidelity_rank,
     fidelity_rank_with_mode, finalize_with_materialize, folder_class_and_rank,
-    format_date_filetime_utc, group_candidates, rank_key, reason_fidelity_tier,
-    recoverable_items_hint, resolve_groups, resolve_groups_with_ctx, resolve_item_date,
-    segment_glob_match, sort_input_paths, source_rank_of, write_keep_set_json, CanonicalAttachment,
-    CanonicalMessage, DateSource, DecisionCsvWriter, DecisionRecord, DecisionRole, FamilyPolicy,
-    FidelityMode, FolderClass, FolderRankMode, KeepEntry, KeepPolicy, KeepSet, KeepSetError,
+    format_date_filetime_utc, group_candidates, group_candidates_ctx, group_candidates_with_stats,
+    rank_key, reason_fidelity_tier, recoverable_items_hint, resolve_groups,
+    resolve_groups_with_ctx, resolve_groups_with_grouping, resolve_item_date, segment_glob_match,
+    sort_input_paths, source_rank_of, write_keep_set_json, CanonicalAttachment, CanonicalMessage,
+    DateSource, DecisionCsvWriter, DecisionRecord, DecisionRole, FamilyPolicy, FidelityMode,
+    FolderClass, FolderRankMode, GroupingOutcome, KeepEntry, KeepPolicy, KeepSet, KeepSetError,
     KeepSetProvenance, KeepSetStats, MaterializeBuildOpts, MaterializeError, MessageLocus,
     MessageMaterializer, RankContext, RankKey, RecoverableScanItem, ResolvedKeepSet,
     DECISION_CSV_HEADER, DECISION_CSV_HEADER_V1, DUPLICATE_SOURCES_CAP, KEEP_SET_SCHEMA,

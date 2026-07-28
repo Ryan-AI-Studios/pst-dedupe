@@ -2,10 +2,20 @@
 //!
 //! Extracts properties needed for deduplication and Desk extract.
 
+use sha2::{Digest, Sha256};
+
 use crate::error::{PstError, Result};
 use crate::ltp::pc;
 use crate::ndb::nid::{self, NodeId};
 use crate::PstFile;
+
+/// Options for [`PstFile::read_message_properties_with_opts`] (0076).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MessageReadOpts {
+    /// When true, compute SHA-256 + char len of the **full** normalized body before
+    /// the 4KB preview truncate (zero extra I/O; hashing cycles only). Default off.
+    pub compute_body_digest: bool,
+}
 
 /// Extracted message properties for dedup processing (CLI Tier-2 path).
 ///
@@ -35,6 +45,8 @@ pub struct MessageProperties {
     pub body_preview: Option<String>,
     /// PidTagDisplayTo — formatted recipient list.
     pub display_to: Option<String>,
+    /// PidTagDisplayCc — soft-read (0076); absent on decode error.
+    pub display_cc: Option<String>,
     /// PidTagMessageSize in bytes.
     pub message_size: Option<i32>,
     /// PidTagHasAttachments.
@@ -43,6 +55,10 @@ pub struct MessageProperties {
     pub body_incomplete: bool,
     /// True when the body property could not be read (other props may still be usable).
     pub body_unavailable: bool,
+    /// Full-body SHA-256 when [`MessageReadOpts::compute_body_digest`] was set.
+    pub body_sha256: Option<[u8; 32]>,
+    /// Full normalized body char length when digest was requested.
+    pub body_char_len: Option<u64>,
 }
 
 /// Full extract-oriented message properties (Desk / `extract-pst`).
@@ -172,14 +188,23 @@ impl PstFile {
     /// Body is truncated to 4096 chars for CLI Tier-2. Use
     /// [`Self::read_message_extract`] for full-body Desk extract.
     pub fn read_message_properties(&mut self, message_nid: NodeId) -> Result<MessageProperties> {
+        self.read_message_properties_with_opts(message_nid, MessageReadOpts::default())
+    }
+
+    /// Like [`Self::read_message_properties`] with optional full-body digest (0076).
+    pub fn read_message_properties_with_opts(
+        &mut self,
+        message_nid: NodeId,
+        opts: MessageReadOpts,
+    ) -> Result<MessageProperties> {
         let crypt = self.header.crypt_method;
         let prop_ctx = pc::load_pc(&mut self.reader, &self.nbt, &self.bbt, message_nid, crypt)?;
 
         let message_id = prop_ctx.get_string(nid::PID_TAG_INTERNET_MESSAGE_ID)?;
         let subject = prop_ctx.get_string(nid::PID_TAG_SUBJECT)?;
         let submit_time = prop_ctx.get_time(nid::PID_TAG_CLIENT_SUBMIT_TIME)?;
-        // Optional 0075 props: best-effort only. Decode errors become None so a
-        // corrupt delivery-time / BCC heap does not fail the whole message
+        // Optional 0075/0076 props: best-effort only. Decode errors become None so a
+        // corrupt delivery-time / BCC / CC heap does not fail the whole message
         // (zero-silent-change for keep-set ranking inputs).
         // `unwrap_or_default` on Result<Option<_>> → None on Err (not a panic path).
         let delivery_time: Option<i64> = prop_ctx
@@ -188,6 +213,9 @@ impl PstFile {
         let display_bcc: Option<String> = prop_ctx
             .get_string(nid::PID_TAG_DISPLAY_BCC)
             .unwrap_or_default();
+        let display_cc: Option<String> = prop_ctx
+            .get_string(nid::PID_TAG_DISPLAY_CC)
+            .unwrap_or_default();
 
         let sender_email = prop_ctx
             .get_string(nid::PID_TAG_SENDER_EMAIL_ADDRESS)?
@@ -195,19 +223,34 @@ impl PstFile {
 
         // Soft body read: PC already loaded; body errors degrade rather than fail the whole message.
         // Intentional Tier-2 4KB preview NEVER sets body_incomplete.
-        let (body_preview, body_incomplete, body_unavailable) =
+        // Full-body digest (0076 Tier 2.5) is computed from bytes already in RAM before truncate.
+        let (body_preview, body_incomplete, body_unavailable, body_sha256, body_char_len) =
             match prop_ctx.get_string(nid::PID_TAG_BODY) {
                 Ok(Some(b)) => {
+                    let (digest, char_len) = if opts.compute_body_digest {
+                        let normalized: String = b
+                            .chars()
+                            .filter(|c| !c.is_whitespace() || *c == ' ')
+                            .collect::<String>()
+                            .to_lowercase();
+                        let char_len = normalized.chars().count() as u64;
+                        let mut hasher = Sha256::new();
+                        hasher.update(normalized.as_bytes());
+                        let d: [u8; 32] = hasher.finalize().into();
+                        (Some(d), Some(char_len))
+                    } else {
+                        (None, None)
+                    };
                     let preview = if b.chars().count() > 4096 {
                         b.chars().take(4096).collect()
                     } else {
                         b
                     };
-                    (Some(preview), false, false)
+                    (Some(preview), false, false, digest, char_len)
                 }
-                Ok(None) => (None, false, false),
-                Err(e) if is_truncation_or_crc(&e) => (None, true, false),
-                Err(_) => (None, false, true),
+                Ok(None) => (None, false, false, None, None),
+                Err(e) if is_truncation_or_crc(&e) => (None, true, false, None, None),
+                Err(_) => (None, false, true, None, None),
             };
 
         let display_to = prop_ctx.get_string(nid::PID_TAG_DISPLAY_TO)?;
@@ -224,10 +267,13 @@ impl PstFile {
             sender_email,
             body_preview,
             display_to,
+            display_cc,
             message_size,
             has_attachments,
             body_incomplete,
             body_unavailable,
+            body_sha256,
+            body_char_len,
         })
     }
 

@@ -71,10 +71,7 @@ fn main() {
                     match pst.read_attachment_metadata(msg_nid) {
                         Ok(atts) => atts
                             .into_iter()
-                            .map(|a| AttachmentInfo {
-                                filename: a.filename,
-                                size: a.size,
-                            })
+                            .map(|a| AttachmentInfo::new(a.filename, a.size))
                             .collect(),
                         Err(_) => {
                             skipped += 1;

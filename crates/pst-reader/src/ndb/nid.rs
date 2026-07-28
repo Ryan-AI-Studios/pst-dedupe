@@ -222,6 +222,15 @@ pub const PID_TAG_ATTACH_LONG_FILENAME: u16 = 0x3707;
 /// PidTagAttachSize (PtypInteger32)
 pub const PID_TAG_ATTACH_SIZE: u16 = 0x0E20;
 
+/// PidTagAttachContentId (PtypString) — Content-ID for inline/related attachments.
+pub const PID_TAG_ATTACH_CONTENT_ID: u16 = 0x3712;
+
+/// PidTagAttachFlags (PtypInteger32) — attRenderedInBody etc.
+pub const PID_TAG_ATTACH_FLAGS: u16 = 0x3714;
+
+/// PidTagAttachmentHidden (PtypBoolean)
+pub const PID_TAG_ATTACHMENT_HIDDEN: u16 = 0x7FFE;
+
 /// PidTagNid — used in TC rows to reference child folder/message NIDs
 pub const PID_TAG_LTP_ROW_ID: u16 = 0x67F2;
 
@@ -231,3 +240,6 @@ pub const PID_TAG_LTP_ROW_ID: u16 = 0x67F2;
 pub const ATTACH_BY_VALUE: i32 = 0x0000_0001;
 /// Embedded message object.
 pub const ATTACH_EMBEDDED_MSG: i32 = 0x0000_0005;
+
+/// `PidTagAttachFlags` bit: attachment is rendered in the body (inline).
+pub const ATT_RENDERED_IN_BODY: i32 = 0x0000_0004;

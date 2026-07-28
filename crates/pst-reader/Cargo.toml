@@ -11,3 +11,4 @@ byteorder = { workspace = true }
 thiserror = { workspace = true }
 crc32fast = { workspace = true }
 tracing = { workspace = true }
+sha2 = { workspace = true }

@@ -21,15 +21,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut PstDedupApp) {
     if enable_tier2 {
         ui.add_space(4.0);
         ui.indent("tier2_opts", |ui| {
-            // Body hash length
-            let mut body_kb = (app.config().body_hash_len / 1024) as f32;
-            ui.horizontal(|ui| {
-                ui.label("Body preview for hash:");
-                ui.add(egui::Slider::new(&mut body_kb, 1.0..=8.0).suffix(" KB"));
-            });
-            app.config_mut().body_hash_len = (body_kb as usize) * 1024;
-
-            // Attachment metadata
+            // Attachment metadata (body preview budget is fixed at 4096 chars in the engine).
             let mut include_att = app.config().include_attachments;
             ui.checkbox(&mut include_att, "Include attachment names/sizes in hash");
             app.config_mut().include_attachments = include_att;
