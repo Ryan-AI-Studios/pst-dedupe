@@ -2116,6 +2116,8 @@ pub fn run_unique_pst_with_options(
                 peer_source_id,
                 peer_msg_nid: rec.peer_msg_nid.to_string(),
                 message_subject: String::new(),
+                cloud_provider: rec.cloud_provider.clone(),
+                cloud_url: rec.cloud_url.clone(),
             };
             ledger.enqueue_soft_skip_row(row);
         }

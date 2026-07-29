@@ -353,7 +353,7 @@ Deferred triage + operator soak       ← real PSTs local-only; bugfix tracks on
 Series K Clean Unique export (CLI)    ← planned product path (0065–0072 Proposed)
 ```
 
-Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedTeamFixes/spec.md) **Completed**; [`0064`](0064-DeskPlatformConnectUx/spec.md) **Completed**. Series K [`0065`](0065-ScanIntegrityReport/spec.md)–[`0072`](0072-DeskUniquePstWizard/spec.md) **Completed**. Series L (0073–0081 unique-export hardening) **Completed**. Series M: **0082**–**0083** Completed (recipients + Mode A promote).
+Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedTeamFixes/spec.md) **Completed**; [`0064`](0064-DeskPlatformConnectUx/spec.md) **Completed**. Series K [`0065`](0065-ScanIntegrityReport/spec.md)–[`0072`](0072-DeskUniquePstWizard/spec.md) **Completed**. Series L (0073–0081 unique-export hardening) **Completed**. Series M: **0082**–**0084** Completed (recipients + Mode A promote + named props / cloud attach detect).
 
 ### Wave 6 — Unique export fidelity residuals (Series M)
 
@@ -361,6 +361,7 @@ Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedT
 |---|---|---|---|---|
 | **0082** | RecipientTableFidelity | **Completed** | **P0 M** | MS-PST recipient TC read+write (`0x692`); SMTP+EX Tier-2.5; BCC write opt-in + suppress ledger; `retryable`; closes D-0080/D-0076 recip + D-0078-retryable. |
 | **0083** | PromoteOnAttachFail | **Completed** | **P0 M** | Mode A pre-write promote-on-attach-fail (`--promote-on-attach-fail`); closes **D-0073-promote**; Mode B declined; Codex luna PASS. |
+| **0084** | NamedPropCloudAttach | **Completed** | **P0 M** | MS-PST NPMAP (`0x61`) + **attach-table** cloud detect; `ATTACH_CLOUD_LINK` + `cloud_url`/`cloud_provider` ledger; pointer preserve; Mode A incomplete; closes **D-0080** (detect≠hydrate); residual body-inline links; Codex luna PASS. |
 
 ### What each step is for
 

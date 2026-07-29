@@ -256,8 +256,24 @@ pub const PID_TAG_LTP_ROW_ID: u16 = 0x67F2;
 
 /// Attachment data is in PidTagAttachDataBinary.
 pub const ATTACH_BY_VALUE: i32 = 0x0000_0001;
+/// Attachment is a reference (path/URL); not by-value binary.
+pub const ATTACH_BY_REFERENCE: i32 = 0x0000_0002;
+/// Attachment is a reference; resolve at create time (legacy).
+pub const ATTACH_BY_REF_RESOLVE: i32 = 0x0000_0003;
+/// Attachment is a reference only (no resolution).
+pub const ATTACH_BY_REF_ONLY: i32 = 0x0000_0004;
 /// Embedded message object.
 pub const ATTACH_EMBEDDED_MSG: i32 = 0x0000_0005;
+/// OLE attachment object.
+pub const ATTACH_OLE: i32 = 0x0000_0006;
+/// Web reference / modern cloud attachment (MS-OXCMSG ATTACH_BY_WEB_REFERENCE).
+pub const ATTACH_BY_WEB_REFERENCE: i32 = 0x0000_0007;
+
+/// PidTagAttachPathname (PtypString) — short path; may hold URL for ref attaches.
+pub const PID_TAG_ATTACH_PATHNAME: u16 = 0x3708;
+
+/// PidTagAttachLongPathname (PtypString) — long path; preferred classic URL slot.
+pub const PID_TAG_ATTACH_LONG_PATHNAME: u16 = 0x370D;
 
 /// `PidTagAttachFlags` bit: attachment is rendered in the body (inline).
 pub const ATT_RENDERED_IN_BODY: i32 = 0x0000_0004;

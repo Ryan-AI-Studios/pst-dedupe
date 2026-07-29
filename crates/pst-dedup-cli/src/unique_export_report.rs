@@ -35,7 +35,7 @@ pub const VOLUMES_CSV_HEADER: &str =
     "volume_index,path,bytes,sha256,md5,messages_written,finalized_early,volume_exceeded_soft_limit";
 
 /// Fixed header for `export_attachments.csv` (track 0073).
-pub const EXPORT_ATTACHMENTS_CSV_HEADER: &str = "source_id,source_path,folder_path,msg_nid,attach_nid,attach_index,filename,size,attach_method,reason_code,severity,volume_path,volume_index,winner_promoted,peer_source_id,peer_msg_nid,message_subject";
+pub const EXPORT_ATTACHMENTS_CSV_HEADER: &str = "source_id,source_path,folder_path,msg_nid,attach_nid,attach_index,filename,size,attach_method,reason_code,severity,volume_path,volume_index,winner_promoted,peer_source_id,peer_msg_nid,message_subject,cloud_provider,cloud_url";
 
 /// On-disk name for the attach failure ledger.
 pub const EXPORT_ATTACHMENTS_CSV_NAME: &str = "export_attachments.csv";
@@ -638,12 +638,17 @@ pub struct AttachLedgerRow {
     pub peer_source_id: String,
     pub peer_msg_nid: String,
     pub message_subject: String,
+    /// Cloud provider (0084 append); empty when not CloudLink.
+    pub cloud_provider: String,
+    /// Cloud URL (0084 append); empty when unknown / not CloudLink. Formula-neutralized.
+    pub cloud_url: String,
 }
 
 impl AttachLedgerRow {
-    fn to_csv_line(&self) -> String {
+    /// Format one CSV data line (public for unit tests of column append / injection).
+    pub fn to_csv_line(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             csv_escape_cell(&self.source_id),
             csv_escape_cell(&self.source_path),
             csv_escape_cell(&self.folder_path),
@@ -661,6 +666,8 @@ impl AttachLedgerRow {
             csv_escape_cell(&self.peer_source_id),
             csv_escape_cell(&self.peer_msg_nid),
             csv_escape_cell(&self.message_subject),
+            csv_escape_cell(&self.cloud_provider),
+            csv_escape_cell(&self.cloud_url),
         )
     }
 
@@ -686,6 +693,8 @@ impl AttachLedgerRow {
             peer_source_id: String::new(),
             peer_msg_nid: String::new(),
             message_subject: String::new(),
+            cloud_provider: String::new(),
+            cloud_url: String::new(),
         }
     }
 }
@@ -753,6 +762,8 @@ pub fn ledger_row_from_event_ex(
         peer_source_id: promote.peer_source_id.clone(),
         peer_msg_nid: promote.peer_msg_nid.clone(),
         message_subject: event.message_subject.clone(),
+        cloud_provider: event.cloud_provider.clone(),
+        cloud_url: event.cloud_url.clone(),
     }
 }
 
@@ -1482,6 +1493,38 @@ mod tests {
     }
 
     #[test]
+    fn export_attachments_header_appends_cloud_columns() {
+        assert!(
+            EXPORT_ATTACHMENTS_CSV_HEADER.ends_with(",cloud_provider,cloud_url"),
+            "0084 append-only columns must be rightmost: {EXPORT_ATTACHMENTS_CSV_HEADER}"
+        );
+        // Existing columns stay left of the append (schema discipline).
+        assert!(EXPORT_ATTACHMENTS_CSV_HEADER.contains("message_subject,cloud_provider"));
+    }
+
+    #[test]
+    fn cloud_link_ledger_row_populates_provider_url() {
+        let mut ev = synth_event(AttachmentFidelityKind::CloudLink, AttachEventSeverity::Fail);
+        ev.cloud_provider = "OneDrivePro".into();
+        ev.cloud_url = "https://contoso.sharepoint.com/x".into();
+        let row = ledger_row_from_event(&ev, Some(0), r"C:\out\u.pst", 1, LedgerPathMode::Full);
+        assert_eq!(row.reason_code, "ATTACH_CLOUD_LINK");
+        assert_eq!(row.cloud_provider, "OneDrivePro");
+        assert_eq!(row.cloud_url, "https://contoso.sharepoint.com/x");
+        let line = row.to_csv_line();
+        assert!(line.contains("OneDrivePro"));
+        assert!(line.contains("sharepoint"));
+        // Injection neutralization on cloud_url
+        ev.cloud_url = "=HYPERLINK(\"http://evil\")".into();
+        let row2 = ledger_row_from_event(&ev, Some(0), "", 0, LedgerPathMode::Full);
+        let line2 = row2.to_csv_line();
+        assert!(
+            line2.contains("'=HYPERLINK") || line2.contains("''=HYPERLINK"),
+            "cloud_url must neutralize formula injection: {line2}"
+        );
+    }
+
+    #[test]
     fn attach_ledger_mode_parse() {
         assert_eq!(
             AttachLedgerMode::parse("full"),
@@ -1735,6 +1778,8 @@ mod tests {
             size: Some(10),
             attach_method: 1,
             severity,
+            cloud_provider: String::new(),
+            cloud_url: String::new(),
         }
     }
 
@@ -1964,6 +2009,8 @@ mod tests {
             peer_source_id: "1".into(),
             peer_msg_nid: "20".into(),
             message_subject: String::new(),
+            cloud_provider: String::new(),
+            cloud_url: String::new(),
         });
         // Mode C fallback incomplete winner that was promoted: write-time fail.
         sink.mark_promoted_winner(r"C:\in\b.pst", 20);

@@ -6,5 +6,6 @@
 pub mod attachment;
 pub mod folder;
 pub mod message;
+pub mod named_prop;
 pub mod recipient;
 pub mod store;

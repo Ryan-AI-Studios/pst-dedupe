@@ -72,6 +72,10 @@ pub use messaging::message::{
     filetime_to_rfc3339, filetime_to_unix, is_calendar_message_class, ExtractedMessage,
     MessageProperties, MessageReadOpts,
 };
+pub use messaging::named_prop::{
+    encode_nameid_entry, encode_string_stream_entry, NameIdMap, NamedPropId, NamedPropKey,
+    NAME_ATTACHMENT_PROVIDER_TYPE, NPID_BASE, PSETID_ATTACHMENT, PS_MAPI, PS_PUBLIC_STRINGS,
+};
 pub use messaging::recipient::{
     looks_like_x500_dn, message_flags_is_unsent, Recipient, RecipientType,
 };
@@ -96,6 +100,8 @@ pub struct PstFile {
     pub(crate) header: PstHeader,
     pub(crate) nbt: NbtIndex,
     pub(crate) bbt: BbtIndex,
+    /// Cached Name-to-ID-Map (NPMAP) at NID `0x61` (0084). `None` = not yet loaded.
+    pub(crate) name_id_map: Option<messaging::named_prop::NameIdMap>,
 }
 
 impl PstFile {
@@ -132,6 +138,7 @@ impl PstFile {
             header,
             nbt,
             bbt,
+            name_id_map: None,
         })
     }
 

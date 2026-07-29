@@ -442,9 +442,19 @@ impl MessageMaterializer for PstMaterializer {
                     let mut stream_available =
                         optimistic_listed_stream_available(att.size, &att.filename);
 
+                    // 0084: attachment-table CloudLink → incomplete; prefer ATTACH_CLOUD_LINK.
+                    // Explicit is_cloud_link keeps parents_only omit distinct from cloud fail.
+                    if att.is_cloud_link {
+                        stream_available = false;
+                        if !soft_reasons.contains(&IntegrityReason::AttachCloudLink) {
+                            soft_reasons.push(IntegrityReason::AttachCloudLink);
+                        }
+                    }
+
                     // Prefer phase-1b cache (no re-I/O). Cache miss keeps optimistic.
+                    // Skip deep probe for CloudLink (no offline payload to verify).
                     let mut applied_cache = false;
-                    if !parents_only {
+                    if !parents_only && !att.is_cloud_link {
                         if let (Some((cache, level)), Some((mtime, source_size))) =
                             (probe_cache.as_ref(), cache_identity)
                         {
@@ -481,7 +491,8 @@ impl MessageMaterializer for PstMaterializer {
                         }
                     }
 
-                    if !parents_only && !applied_cache && deep_level.is_some() {
+                    if !parents_only && !att.is_cloud_link && !applied_cache && deep_level.is_some()
+                    {
                         // Cancel mid-materialize: do not re-degrade as attach fail.
                         let cancelled_now = cancel
                             .as_ref()
@@ -529,6 +540,7 @@ impl MessageMaterializer for PstMaterializer {
                             }
                         }
                     } else if !parents_only
+                        && !att.is_cloud_link
                         && !applied_cache
                         && load_payloads
                         && att.size > 0
@@ -590,6 +602,9 @@ impl MessageMaterializer for PstMaterializer {
                         stream_available,
                         attach_nid: Some(att.nid.0),
                         attach_method: att.attach_method,
+                        is_cloud_link: att.is_cloud_link,
+                        cloud_provider: att.cloud_provider,
+                        cloud_url: att.cloud_url,
                     });
                 }
             }
@@ -767,6 +782,9 @@ mod handle_cache_tests {
                 stream_available: optimistic_listed_stream_available(0, ""),
                 attach_nid: Some(100),
                 attach_method: Some(1), // by-value
+                is_cloud_link: false,
+                cloud_provider: None,
+                cloud_url: None,
             }],
             fidelity: RecoverableIntegrity::clean(),
             message_id_norm: None,

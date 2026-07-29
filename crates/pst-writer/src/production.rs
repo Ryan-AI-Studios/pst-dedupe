@@ -107,13 +107,20 @@ const PID_TAG_CONTENT_UNREAD_COUNT: u16 = 0x3603;
 const PID_TAG_SUBFOLDERS: u16 = 0x360A;
 const PTYP_BINARY: u16 = 0x0102;
 
-// Attachment property tags (MS-PST / MS-OXPROPS) — track 0069.
+// Attachment property tags (MS-PST / MS-OXPROPS) — track 0069 / 0084.
 const PID_TAG_ATTACH_DATA_BINARY: u16 = 0x3701;
 const PID_TAG_ATTACH_METHOD: u16 = 0x3705;
 const PID_TAG_ATTACH_MIME_TAG: u16 = 0x370E;
 const PID_TAG_ATTACH_FILENAME: u16 = 0x3704;
 const PID_TAG_ATTACH_LONG_FILENAME: u16 = 0x3707;
+const PID_TAG_ATTACH_LONG_PATHNAME: u16 = 0x370D;
 const PID_TAG_ATTACH_SIZE: u16 = 0x0E20;
+/// MS-OXCMSG attach methods used by CloudLink pointer-row honesty (0084).
+const ATTACH_BY_REFERENCE: i32 = 0x0000_0002;
+const ATTACH_BY_REF_RESOLVE: i32 = 0x0000_0003;
+const ATTACH_BY_REF_ONLY: i32 = 0x0000_0004;
+/// Preferred method encoding for CloudLink pointer rows (no binary payload).
+const ATTACH_BY_WEB_REFERENCE: i32 = 0x0000_0007;
 
 /// Fixed subnode NID for a message's attachment table (same value as the
 /// PST-level template [`NID_ATTACHMENT_TABLE_TEMPLATE`]).
@@ -217,6 +224,13 @@ pub struct WriteAttachment {
     pub parent_nid: Option<u64>,
     /// Nested message for `ATTACH_EMBEDDED_MSG` when extractable.
     pub embedded_message: Option<Box<WriteMessage>>,
+    /// Cloud/modern web-reference attach (0084): write metadata/pointer row only
+    /// — never invent binary payload bytes.
+    pub is_cloud_link: bool,
+    /// Provider string for ledger / pointer honesty (open string).
+    pub cloud_provider: Option<String>,
+    /// Best-effort URL/path written on classic long-pathname when present.
+    pub cloud_url: Option<String>,
 }
 
 /// Owned [`Read`] for chunked attachment payload (track 0070).
@@ -666,6 +680,9 @@ impl AttachEventSeverity {
 pub enum AttachmentFidelityKind {
     /// method ∉ {BY_VALUE=1, EMBEDDED_MSG=5}.
     MethodUnsupported,
+    /// Cloud/modern web-reference attach; pointer row may still be written (0084).
+    /// Prefer over [`Self::MethodUnsupported`] when CloudLink classified.
+    CloudLink,
     /// Cannot resolve/open payload (`Ok(None)` / open err).
     StreamOpenFailed,
     /// Mid-stream I/O while writing the attach chain.
@@ -698,6 +715,7 @@ impl AttachmentFidelityKind {
     pub fn as_code(self) -> &'static str {
         match self {
             Self::MethodUnsupported => "ATTACH_METHOD_UNSUPPORTED",
+            Self::CloudLink => "ATTACH_CLOUD_LINK",
             Self::StreamOpenFailed => "ATTACH_STREAM_OPEN_FAILED",
             Self::StreamReadFailed => "ATTACH_STREAM_READ_FAILED",
             Self::StreamCrc => "ATTACH_STREAM_CRC",
@@ -757,6 +775,10 @@ pub struct AttachmentFidelityEvent {
     pub size: Option<u64>,
     /// Raw `PidTagAttachMethod` (MS-OXCMSG); `-1` if unknown.
     pub attach_method: i32,
+    /// Cloud provider when kind is [`AttachmentFidelityKind::CloudLink`] (0084).
+    pub cloud_provider: String,
+    /// Cloud URL when kind is [`AttachmentFidelityKind::CloudLink`] (0084).
+    pub cloud_url: String,
     pub severity: AttachEventSeverity,
 }
 
@@ -825,6 +847,8 @@ fn make_attach_event(
         size,
         attach_method: method,
         severity,
+        cloud_provider: attach.cloud_provider.clone().unwrap_or_default(),
+        cloud_url: attach.cloud_url.clone().unwrap_or_default(),
     }
 }
 
@@ -904,6 +928,9 @@ pub fn from_canonical_message(
             source_path: Some(msg.locus.source_path.clone()),
             parent_nid: Some(msg.locus.nid),
             embedded_message: None,
+            is_cloud_link: a.is_cloud_link,
+            cloud_provider: a.cloud_provider.clone(),
+            cloud_url: a.cloud_url.clone(),
         })
         .collect();
     // Only true list_attachments failure: AttachMetaFailed with an empty list.
@@ -999,6 +1026,9 @@ pub fn from_canonical_message_owned(
             source_path: Some(source_path.clone()),
             parent_nid: Some(parent_nid),
             embedded_message: None,
+            is_cloud_link: a.is_cloud_link,
+            cloud_provider: a.cloud_provider,
+            cloud_url: a.cloud_url,
         })
         .collect();
     let write_msg = WriteMessage {
@@ -2709,6 +2739,98 @@ struct WrittenAttach {
     filename: String,
 }
 
+/// Write a CloudLink metadata/pointer attach row (0084 DoD-4b).
+///
+/// - No `PidTagAttachDataBinary` (never invent payload bytes).
+/// - Method: original web-ref/method when present, else `ATTACH_BY_WEB_REFERENCE`.
+/// - Best-effort URL on `PidTagAttachLongPathname` when `cloud_url` known.
+/// - Always emits fail-severity `ATTACH_CLOUD_LINK` (payload not collected offline).
+fn write_cloud_link_pointer_attach(
+    layout: &mut Layout,
+    msg: &WriteMessage,
+    attach: &WriteAttachment,
+    attach_index: u32,
+    counters: &mut WriteCounters,
+    attach_nid_counter: &mut u32,
+    attach_event_sink: &mut Option<&mut dyn AttachEventSink>,
+) -> Result<Option<WrittenAttach>> {
+    // Preserve empty filename honestly — do not invent "cloud-link".
+    let filename = attach.filename.clone();
+    let short = short_attach_filename(&filename);
+    // Honest method for pointer rows (no binary): never advertise BY_VALUE (1)
+    // without PidTagAttachDataBinary. Preserve reference / web-ref methods;
+    // force ATTACH_BY_WEB_REFERENCE for by-value/unknown/zero.
+    let method = match attach.attach_method {
+        Some(m)
+            if m == ATTACH_BY_WEB_REFERENCE
+                || m == ATTACH_BY_REFERENCE
+                || m == ATTACH_BY_REF_RESOLVE
+                || m == ATTACH_BY_REF_ONLY =>
+        {
+            m
+        }
+        _ => ATTACH_BY_WEB_REFERENCE,
+    };
+    let size_i32 = i32::try_from(attach.size.min(i32::MAX as u32)).unwrap_or(i32::MAX);
+
+    let mut props = vec![
+        (
+            PID_TAG_ATTACH_LONG_FILENAME,
+            PcValue::String(filename.clone()),
+        ),
+        (PID_TAG_ATTACH_FILENAME, PcValue::String(short)),
+        (PID_TAG_ATTACH_METHOD, PcValue::I32(method)),
+        (PID_TAG_ATTACH_SIZE, PcValue::I32(size_i32)),
+    ];
+    if let Some(url) = attach
+        .cloud_url
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        props.push((
+            PID_TAG_ATTACH_LONG_PATHNAME,
+            PcValue::String(url.to_string()),
+        ));
+    }
+    if let Some(mime) = &attach.mime {
+        props.push((PID_TAG_ATTACH_MIME_TAG, PcValue::String(mime.clone())));
+    }
+
+    let attach_nid = next_attach_nid(attach_nid_counter);
+    let mut heap = HeapBuilder::new(0x6C);
+    let hid = build_pc_v2(&mut heap, &props)?;
+    let pc_bytes = heap.finalize(hid);
+    let pc_len = pc_bytes.len() as u64;
+    let bid_data = layout.write_data_chain(pc_bytes)?;
+
+    // Fail-severity cloud ledger (payload not collected); row still written.
+    record_attach_event(
+        counters,
+        make_attach_event(
+            msg,
+            attach,
+            attach_index,
+            AttachmentFidelityKind::CloudLink,
+            AttachEventSeverity::Fail,
+        ),
+        attach_event_sink,
+    );
+    // Count as written (pointer present) AND failed (payload missing) — fail
+    // is already incremented by record_attach_event for Fail severity.
+    counters.attachments_written += 1;
+
+    Ok(Some(WrittenAttach {
+        nid: attach_nid,
+        bid_data,
+        bid_sub: 0,
+        size_contrib: pc_len,
+        attach_size: size_i32 as u32,
+        method,
+        filename,
+    }))
+}
+
 /// Build attach PC + data; returns written metadata for the attachment table.
 ///
 /// MessageSize contribution (aligned with body logic):
@@ -2734,7 +2856,21 @@ fn write_one_attachment(
 ) -> Result<Option<WrittenAttach>> {
     let method = attach.attach_method.unwrap_or(ATTACH_BY_VALUE);
 
-    // Cloud / reference / OLE — skip soft.
+    // 0084 CloudLink pointer preserve (anti-ghost): write metadata/pointer attach
+    // row without inventing binary payload; still emit fail-severity ATTACH_CLOUD_LINK.
+    if attach.is_cloud_link {
+        return write_cloud_link_pointer_attach(
+            layout,
+            msg,
+            attach,
+            attach_index,
+            counters,
+            attach_nid_counter,
+            attach_event_sink,
+        );
+    }
+
+    // Non-cloud reference / OLE — skip soft (pre-0084 ghost path retained).
     if method != ATTACH_BY_VALUE && method != ATTACH_EMBEDDED_MSG {
         record_attach_event(
             counters,

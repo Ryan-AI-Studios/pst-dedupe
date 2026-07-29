@@ -499,6 +499,9 @@ fn attach_payload_mismatch_is_defect() {
         source_path: None,
         parent_nid: None,
         embedded_message: None,
+        is_cloud_link: false,
+        cloud_provider: None,
+        cloud_url: None,
     }];
     write_simple_pst(&src, vec![src_msg]);
 
@@ -514,6 +517,9 @@ fn attach_payload_mismatch_is_defect() {
         source_path: None,
         parent_nid: None,
         embedded_message: None,
+        is_cloud_link: false,
+        cloud_provider: None,
+        cloud_url: None,
     }];
     write_simple_pst(&out, vec![out_msg]);
 

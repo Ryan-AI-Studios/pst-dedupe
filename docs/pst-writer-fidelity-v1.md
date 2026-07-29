@@ -31,7 +31,7 @@ single-block only; keep using it only for existing fixture callers.
 | Encrypted / Permute output | **No** | Residual; unencrypted only. |
 | ANSI PST | **No** | Never. |
 | Recipient table | **Yes (0082)** | Store template NID **`0x692`** (zero rows, **14 MUST columns** per MS-PST Recipient Table Template). Every written message gets a per-message recipient TC subnode (may be **zero rows** when source had none / unreadable — empty TC still present). One row per **included** recipient; optional extra column `PidTagSmtpAddress` (`0x39FE`) when known. Structural columns synthesized when source omits them (`ObjectType=6`, Responsibility, RecordKey/EntryId/SearchKey patterns, etc.). |
-| Named-prop set beyond the store stub | **No** | Minimal named-property map stub only, sufficient for the properties this writer emits (none of which require named props). Residual: full named-prop map (cloud attach detection, etc.). |
+| Named-prop set beyond the store stub | **No** | Minimal named-property map stub only on the writer. **0084** added **reader** NPMAP resolve + attachment-table cloud detect + CloudLink **pointer rows** (classic tags; no full named-prop re-emit). Residual full map write: **D-0084-cloud-named-prop-write**. |
 | RTF | **No** | v1 never writes `PidTagRtfCompressed` or any RTF-native hint — there is nothing RTF-related to clear because nothing RTF-related is ever produced. |
 | `PidTagMessageFlags` | `MSGFLAG_READ` (0x1); `\| MSGFLAG_HASATTACH` (0x10) when ≥1 attach written | Paperclip + read default (0069). |
 | `PidTagDisplayTo` | Yes, when present | Written from source display To string. |
@@ -59,7 +59,8 @@ shape above without regressing XBLOCK bodies, IPM special folders, or safety.
 | **parents_only** | `WritePstOpts::parents_only` empties attach list; `attachments_omitted_by_policy++`. |
 | **Embedded (`ATTACH_EMBEDDED_MSG` = 5)** | Nested message PC under attach **subnode** when `WriteAttachment.embedded_message` present; method=5; size reflects nested; **never** invent by-value file bytes. `open_attachment_data` binary path does **not** apply (no `PidTagAttachDataBinary`). Missing nested → `embedded_unparsed++` + `attachments_failed++` + fidelity event. |
 | **Depth cap** | `max_embedded_depth` default **3**, clamp `[1, 8]`. Deeper branches halt; `embedded_depth_limit_hits++` + fidelity event (DoD-8 surface — not a MAPI property on the item). |
-| **Cloud/ref methods** | Skip + fail count (D-0067-cloud residual). |
+| **CloudLink (classified)** | Write **metadata/pointer row** (classic tags: method, long pathname/URL when known, filename when known — **no invented name**, **no** `PidTagAttachDataBinary`). Emit fail-severity `ATTACH_CLOUD_LINK` (payload not collected offline). Full named-prop re-emit residual: **D-0084-cloud-named-prop-write**. Network hydration never. |
+| **Non-cloud OLE / ref methods** | Still **omit** + fail `ATTACH_METHOD_UNSUPPORTED` (method ∉ {1, 5} and not CloudLink-classified). |
 
 `from_canonical_message` **maps** `CanonicalAttachment` metadata (and small `data`
 when present) plus `locus.folder_path` / `locus.source_path`. The second return
@@ -111,7 +112,8 @@ taxonomy so every former silent `attachments_failed++` path emits an event.
 
 | Code | Severity | When |
 |---|---|---|
-| `ATTACH_METHOD_UNSUPPORTED` | fail | method ∉ {1, 5} |
+| `ATTACH_METHOD_UNSUPPORTED` | fail | method ∉ {1, 5} and not CloudLink-classified → attach omitted |
+| `ATTACH_CLOUD_LINK` | fail | CloudLink classified → pointer/metadata row written (no binary); payload not collected offline (0084) |
 | `ATTACH_STREAM_OPEN_FAILED` | fail | resolve/open payload None or open err |
 | `ATTACH_STREAM_READ_FAILED` | fail | mid-stream I/O while writing chain |
 | `ATTACH_STREAM_CRC` / `ATTACH_BLOCK_NOT_FOUND` / `ATTACH_DATA_TRUNCATED` / `ATTACH_SIZE_CAP` | fail | reserved when distinguishable |
@@ -139,8 +141,8 @@ report `Vec` for tests. Invariant: fail-severity event count == `attachments_fai
 | One-attach full buffer without chunked stream | **Closed in 0070** (`open_attach_stream` + `write_data_chain_from_reader`) |
 | `unique-pst` CLI + multi-volume product UX | **0071** (uses 0070 physical size / stop / hashes) |
 | scanpst / Outlook operator proof | D-0068-02 (carry) — recommend on multi-GB operator run |
-| Cloud attach download | D-0067-cloud |
-| Full named props (cloud attach provider type, etc.) | residual — recipient TC closed in **0082**; named-prop map remains |
+| Cloud attach network hydration / download | never in-scope offline; residual D-0067-cloud if ever reconsidered |
+| Full named-prop map re-emit on unique-PST (provider type write-back) | **D-0084-cloud-named-prop-write** (0084 writes classic pointer tags only) |
 | `PidTagAttachDataObject` (PtypObject) on embeds | residual — nested message is linked as an attach subnode leaf entry with method=5; PC builder has no PtypObject; reader binary open path correctly fails |
 | Per-folder contents-table RowIndex BTH | not required this track (attach table only) |
 | Eager spill of all leaf block `Vec`s from `Layout` | **Closed in 0070 P1** — `EagerWriteCtx` spills leaves (`on_disk=true`); residual RAM is small internal blocks (XBLOCK/PC heaps) only |
