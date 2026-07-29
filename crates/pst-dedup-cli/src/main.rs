@@ -51,6 +51,7 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)] // clap subcommand payloads (UniquePstClapArgs)
 enum Commands {
     /// Scan PST file(s), run tiered dedup, print summary.
     Scan {
@@ -111,9 +112,21 @@ enum Commands {
         /// Max attach-stream probe fail rate before preflight recommends re-export (default 0.05).
         #[arg(long = "max-attach-fail-rate", default_value_t = 0.05, value_parser = parse_rate_threshold)]
         max_attach_fail_rate: f64,
-        /// Strong content identity: off (default) | body | body-recip (0076). body-recip-attach deferred (D-0076-attach-content).
+        /// Strong content identity: off (default) | body | body-recip | body-recip-attach (0086).
         #[arg(long = "strong-content-hash", default_value = "off", value_parser = parse_strong_content_hash)]
         strong_content_hash: String,
+        /// Max attaches full-stream digested under body-recip-attach (0086; default 50000).
+        #[arg(long = "strong-hash-attach-max-attaches", default_value_t = 50_000)]
+        strong_hash_attach_max_attaches: u64,
+        /// Max digest bytes per run under body-recip-attach (0086; default 1 GiB).
+        #[arg(long = "strong-hash-attach-max-bytes", default_value_t = 1_073_741_824)]
+        strong_hash_attach_max_bytes: u64,
+        /// Per-attach max digest bytes under body-recip-attach (0086; default 512 MiB; full-stream, not L2 head).
+        #[arg(
+            long = "strong-hash-attach-per-attach-max-bytes",
+            default_value_t = 536_870_912
+        )]
+        strong_hash_attach_per_attach_max_bytes: u64,
         /// Dedupe partition: global (default) | per-source (0076).
         #[arg(long = "dedupe-scope", default_value = "global", value_parser = parse_dedupe_scope_cli)]
         dedupe_scope: String,
@@ -180,6 +193,18 @@ enum Commands {
         skip_limit: usize,
         #[arg(long = "strong-content-hash", default_value = "off", value_parser = parse_strong_content_hash)]
         strong_content_hash: String,
+        /// Max attaches full-stream digested under body-recip-attach (0086; default 50000).
+        #[arg(long = "strong-hash-attach-max-attaches", default_value_t = 50_000)]
+        strong_hash_attach_max_attaches: u64,
+        /// Max digest bytes per run under body-recip-attach (0086; default 1 GiB).
+        #[arg(long = "strong-hash-attach-max-bytes", default_value_t = 1_073_741_824)]
+        strong_hash_attach_max_bytes: u64,
+        /// Per-attach max digest bytes under body-recip-attach (0086; default 512 MiB; full-stream, not L2 head).
+        #[arg(
+            long = "strong-hash-attach-per-attach-max-bytes",
+            default_value_t = 536_870_912
+        )]
+        strong_hash_attach_per_attach_max_bytes: u64,
         #[arg(long = "dedupe-scope", default_value = "global", value_parser = parse_dedupe_scope_cli)]
         dedupe_scope: String,
         #[arg(long = "tier1-verify", default_value = "off", value_parser = parse_tier1_verify_cli)]
@@ -275,6 +300,18 @@ enum Commands {
         skip_limit: usize,
         #[arg(long = "strong-content-hash", default_value = "off", value_parser = parse_strong_content_hash)]
         strong_content_hash: String,
+        /// Max attaches full-stream digested under body-recip-attach (0086; default 50000).
+        #[arg(long = "strong-hash-attach-max-attaches", default_value_t = 50_000)]
+        strong_hash_attach_max_attaches: u64,
+        /// Max digest bytes per run under body-recip-attach (0086; default 1 GiB).
+        #[arg(long = "strong-hash-attach-max-bytes", default_value_t = 1_073_741_824)]
+        strong_hash_attach_max_bytes: u64,
+        /// Per-attach max digest bytes under body-recip-attach (0086; default 512 MiB; full-stream, not L2 head).
+        #[arg(
+            long = "strong-hash-attach-per-attach-max-bytes",
+            default_value_t = 536_870_912
+        )]
+        strong_hash_attach_per_attach_max_bytes: u64,
         #[arg(long = "dedupe-scope", default_value = "global", value_parser = parse_dedupe_scope_cli)]
         dedupe_scope: String,
         #[arg(long = "tier1-verify", default_value = "off", value_parser = parse_tier1_verify_cli)]
@@ -381,6 +418,18 @@ enum Commands {
         skip_limit: usize,
         #[arg(long = "strong-content-hash", default_value = "off", value_parser = parse_strong_content_hash)]
         strong_content_hash: String,
+        /// Max attaches full-stream digested under body-recip-attach (0086; default 50000).
+        #[arg(long = "strong-hash-attach-max-attaches", default_value_t = 50_000)]
+        strong_hash_attach_max_attaches: u64,
+        /// Max digest bytes per run under body-recip-attach (0086; default 1 GiB).
+        #[arg(long = "strong-hash-attach-max-bytes", default_value_t = 1_073_741_824)]
+        strong_hash_attach_max_bytes: u64,
+        /// Per-attach max digest bytes under body-recip-attach (0086; default 512 MiB; full-stream, not L2 head).
+        #[arg(
+            long = "strong-hash-attach-per-attach-max-bytes",
+            default_value_t = 536_870_912
+        )]
+        strong_hash_attach_per_attach_max_bytes: u64,
         #[arg(long = "dedupe-scope", default_value = "global", value_parser = parse_dedupe_scope_cli)]
         dedupe_scope: String,
         #[arg(long = "tier1-verify", default_value = "off", value_parser = parse_tier1_verify_cli)]
@@ -981,6 +1030,9 @@ fn run(cli: Cli) -> Result<CliExit> {
             deep_attach_max_peer_probes,
             max_attach_fail_rate,
             strong_content_hash,
+            strong_hash_attach_max_attaches,
+            strong_hash_attach_max_bytes,
+            strong_hash_attach_per_attach_max_bytes,
             dedupe_scope,
             tier1_verify,
             tier1_backfill,
@@ -1015,6 +1067,9 @@ fn run(cli: Cli) -> Result<CliExit> {
             deep_attach_max_peer_probes,
             max_attach_fail_rate,
             strong_content_hash,
+            strong_hash_attach_max_attaches,
+            strong_hash_attach_max_bytes,
+            strong_hash_attach_per_attach_max_bytes,
             dedupe_scope,
             tier1_verify,
             tier1_backfill,
@@ -1039,6 +1094,9 @@ fn run(cli: Cli) -> Result<CliExit> {
             integrity_csv,
             skip_limit,
             strong_content_hash,
+            strong_hash_attach_max_attaches,
+            strong_hash_attach_max_bytes,
+            strong_hash_attach_per_attach_max_bytes,
             dedupe_scope,
             tier1_verify,
             tier1_backfill,
@@ -1065,8 +1123,11 @@ fn run(cli: Cli) -> Result<CliExit> {
             skip_limit,
             deep_attach_preflight: false,
             deep_attach_level: "head".into(),
-            // 0076 flags
+            // 0076 / 0086 flags
             strong_content_hash,
+            strong_hash_attach_max_attaches,
+            strong_hash_attach_max_bytes,
+            strong_hash_attach_per_attach_max_bytes,
             dedupe_scope,
             tier1_verify,
             tier1_backfill,
@@ -1110,6 +1171,9 @@ fn run(cli: Cli) -> Result<CliExit> {
             integrity_csv,
             skip_limit,
             strong_content_hash,
+            strong_hash_attach_max_attaches,
+            strong_hash_attach_max_bytes,
+            strong_hash_attach_per_attach_max_bytes,
             dedupe_scope,
             tier1_verify,
             tier1_backfill,
@@ -1152,6 +1216,9 @@ fn run(cli: Cli) -> Result<CliExit> {
                 integrity_csv,
                 skip_limit,
                 strong_content_hash,
+                strong_hash_attach_max_attaches,
+                strong_hash_attach_max_bytes,
+                strong_hash_attach_per_attach_max_bytes,
                 dedupe_scope,
                 tier1_verify,
                 tier1_backfill,
@@ -1193,6 +1260,9 @@ fn run(cli: Cli) -> Result<CliExit> {
             integrity_csv,
             skip_limit,
             strong_content_hash,
+            strong_hash_attach_max_attaches,
+            strong_hash_attach_max_bytes,
+            strong_hash_attach_per_attach_max_bytes,
             dedupe_scope,
             tier1_verify,
             tier1_backfill,
@@ -1254,6 +1324,9 @@ fn run(cli: Cli) -> Result<CliExit> {
                 integrity_csv,
                 skip_limit,
                 strong_content_hash,
+                strong_hash_attach_max_attaches,
+                strong_hash_attach_max_bytes,
+                strong_hash_attach_per_attach_max_bytes,
                 dedupe_scope,
                 tier1_verify,
                 tier1_backfill,
@@ -1574,6 +1647,9 @@ struct ScanCliArgs {
     deep_attach_max_peer_probes: u64,
     max_attach_fail_rate: f64,
     strong_content_hash: String,
+    strong_hash_attach_max_attaches: u64,
+    strong_hash_attach_max_bytes: u64,
+    strong_hash_attach_per_attach_max_bytes: u64,
     dedupe_scope: String,
     tier1_verify: String,
     tier1_backfill: bool,
@@ -1613,6 +1689,7 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
         args.allow_crc_suspect_tier2,
         false, // tier1_backfill rejected above for streaming scan
         args.identity_ignore_inline_attachments,
+        args.no_attachments,
     )
     .map_err(CliError::Usage)?;
     let opts = ScanOptions {
@@ -1641,6 +1718,9 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
         deep_attach_max_open_psts: args.deep_attach_max_open_psts,
         deep_attach_max_peer_probes_per_group: args.deep_attach_max_peer_probes,
         grouping,
+        strong_hash_attach_max_attaches: args.strong_hash_attach_max_attaches,
+        strong_hash_attach_max_bytes: args.strong_hash_attach_max_bytes,
+        strong_hash_attach_per_attach_max_bytes: args.strong_hash_attach_per_attach_max_bytes,
     };
     // Artifacts (CSV/integrity) are streamed and flushed inside run_scan before return.
     let outcome = run_scan(&paths, &opts)?;
@@ -1761,6 +1841,7 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
         args.allow_crc_suspect_tier2,
         false, // tier1_backfill rejected above for streaming dups
         args.identity_ignore_inline_attachments,
+        false, // dups always includes attach meta for identity
     )
     .map_err(CliError::Usage)?;
     let opts = ScanOptions {
@@ -1789,6 +1870,9 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
         deep_attach_max_open_psts: 32,
         deep_attach_max_peer_probes_per_group: 3,
         grouping,
+        strong_hash_attach_max_attaches: args.strong_hash_attach_max_attaches,
+        strong_hash_attach_max_bytes: args.strong_hash_attach_max_bytes,
+        strong_hash_attach_per_attach_max_bytes: args.strong_hash_attach_per_attach_max_bytes,
     };
     let outcome = run_scan(&paths, &opts)?;
     let dup_limit = if args.limit == 0 {

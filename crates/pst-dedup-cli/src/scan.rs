@@ -9,11 +9,12 @@ use std::time::Instant;
 use dedup_engine::{
     hasher::{self, AttachmentInfo, StrongHashInput, Tier2IneligibleReason},
     integrity::{
-        classify_attach_meta_fail, classify_body_flags, classify_orphaned, compute_preflight,
-        integrity_sidecar_path, merge_recoverable, reason_from_pst_error, tally_reason,
-        FileScanStatus, IntegrityCsvWriter, IntegrityLedgerWriter, IntegrityReason,
-        IntegrityThresholds, MessageClassification, PreflightInputs, PreflightReport,
-        RecoverableIntegrity, ScanMode, SkipRecord, SCAN_INTEGRITY_SCHEMA,
+        classify_attach_enum_for_identity, classify_attach_meta_fail, classify_body_flags,
+        classify_orphaned, compute_preflight, integrity_sidecar_path, merge_recoverable,
+        reason_from_pst_error, tally_reason, FileScanStatus, IntegrityCsvWriter,
+        IntegrityLedgerWriter, IntegrityReason, IntegrityThresholds, MessageClassification,
+        PreflightInputs, PreflightReport, RecoverableIntegrity, ScanMode, SkipRecord,
+        SCAN_INTEGRITY_SCHEMA,
     },
     keepset::{MessageLocus, RecoverableScanItem},
     report::{write_summary_report, ReportRow, StreamingCsvReportWriter},
@@ -58,6 +59,13 @@ pub struct ScanOptions {
     pub deep_attach_max_peer_probes_per_group: u64,
     /// 0076 identity-binding context (guards, scope, strong hash level).
     pub grouping: GroupingContext,
+    /// Max attaches full-stream digested under `body-recip-attach` (0086; default 50_000).
+    pub strong_hash_attach_max_attaches: u64,
+    /// Max digest bytes per run under `body-recip-attach` (0086; default 1 GiB).
+    pub strong_hash_attach_max_bytes: u64,
+    /// Per-attach max digest bytes under `body-recip-attach` (0086; default 512 MiB).
+    /// Distinct from deep-attach L2 head caps — identity always full-streams.
+    pub strong_hash_attach_per_attach_max_bytes: u64,
 }
 
 impl Default for ScanOptions {
@@ -83,6 +91,10 @@ impl Default for ScanOptions {
             deep_attach_max_open_psts: 32,
             deep_attach_max_peer_probes_per_group: 3,
             grouping: GroupingContext::default(),
+            strong_hash_attach_max_attaches: crate::attach_content_hash::DEFAULT_MAX_ATTACHES,
+            strong_hash_attach_max_bytes: crate::attach_content_hash::DEFAULT_MAX_BYTES,
+            strong_hash_attach_per_attach_max_bytes:
+                crate::attach_content_hash::DEFAULT_PER_ATTACH_MAX_BYTES,
         }
     }
 }
@@ -486,6 +498,8 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     let mut grouping = opts.grouping.clone();
     grouping.tier2_enabled = opts.enable_tier2;
     let mut index = DedupIndex::with_capacity_and_context(100_000, grouping.clone());
+    // 0086: run-level attach-content digest budgets (only used when identity includes attach).
+    let mut attach_hash_state = crate::attach_content_hash::AttachContentHashState::default();
     let mut all_rows: Vec<ReportRow> = Vec::new();
     let mut candidates: Vec<RecoverableScanItem> = Vec::new();
     let mut scan_order: u64 = 0;
@@ -770,30 +784,115 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
 
                 // Attachments — 0077: attach-meta block CRC ORs into message CRC_SUSPECT
                 // (props scope already exited; wrap meta walk so attach PC reads taint).
+                // 0086: when identity includes attach content, list_attachments (nid +
+                // is_cloud_link) + full-stream digests; lower levels keep meta-only path.
                 let mut attach_cls = MessageClassification::Recoverable {
                     integrity: RecoverableIntegrity::clean(),
                 };
                 let mut msg_crc_suspect = props.crc_suspect;
-                let attachments = if opts.include_attachments
-                    && props.has_attachments.unwrap_or(false)
-                {
+                let need_attach_content = grouping.identity.includes_attach_content();
+                // body-recip-attach always attempts enumeration when attachments are
+                // included — do not trust missing has_attachments alone as "zero attaches"
+                // (Choice B: omit would false-merge). Meta-only levels keep the historical
+                // has_attachments gate.
+                let walk_attaches = opts.include_attachments
+                    && (need_attach_content || props.has_attachments.unwrap_or(false));
+                let attachments = if walk_attaches {
                     pst_reader::integrity_telemetry::with_crc_scope(&mut msg_crc_suspect, || {
-                        match pst.read_attachment_metadata(msg_nid) {
-                            Ok(atts) => {
-                                let mut out = Vec::with_capacity(atts.len());
-                                for a in atts {
-                                    if a.is_inline && grouping.ignore_inline_attachments {
-                                        index.record_inline_attachment_ignored();
+                        if need_attach_content {
+                            // Strict enumeration: any unreadable attach PC → Err (not partial Ok).
+                            match pst.list_attachments_strict(msg_nid) {
+                                Ok(atts) => {
+                                    // Claimed attaches but empty strict list → fail closed.
+                                    if atts.is_empty() && props.has_attachments == Some(true) {
+                                        attach_cls = classify_attach_enum_for_identity(
+                                            true,
+                                            opts.mode,
+                                            "has_attachments=true but attachment table empty after strict enumeration",
+                                        );
+                                        return Vec::new();
                                     }
-                                    let mut info = AttachmentInfo::new(a.filename, a.size);
-                                    info.is_inline = a.is_inline;
-                                    out.push(info);
+                                    let mut out = Vec::with_capacity(atts.len());
+                                    let budgets =
+                                        crate::attach_content_hash::AttachContentHashBudgets {
+                                            max_attaches: opts.strong_hash_attach_max_attaches,
+                                            max_bytes: opts.strong_hash_attach_max_bytes,
+                                            per_attach_max_bytes: opts
+                                                .strong_hash_attach_per_attach_max_bytes,
+                                        };
+                                    for a in atts {
+                                        if a.is_inline && grouping.ignore_inline_attachments {
+                                            index.record_inline_attachment_ignored();
+                                            // Still skip digest work for ignored inline.
+                                            let mut info = AttachmentInfo::new(a.filename, a.size);
+                                            info.is_inline = a.is_inline;
+                                            out.push(info);
+                                            continue;
+                                        }
+                                        let mut info =
+                                            AttachmentInfo::new(a.filename.clone(), a.size);
+                                        info.is_inline = a.is_inline;
+                                        let result =
+                                            crate::attach_content_hash::hash_attachment_stream(
+                                                &mut pst,
+                                                msg_nid,
+                                                a.nid,
+                                                &a.filename,
+                                                a.size,
+                                                a.is_cloud_link,
+                                                &budgets,
+                                                &mut attach_hash_state,
+                                                &opts.cancel,
+                                            );
+                                        match result {
+                                            crate::attach_content_hash::AttachDigestResult::Real {
+                                                digest,
+                                                bytes,
+                                            } => {
+                                                info.content_sha256 = Some(digest);
+                                                index.record_strong_hash_attach_digested(bytes);
+                                            }
+                                            crate::attach_content_hash::AttachDigestResult::Unread {
+                                                sentinel,
+                                            } => {
+                                                info.content_sha256 = Some(sentinel);
+                                                index.record_strong_hash_attach_unread();
+                                            }
+                                        }
+                                        out.push(info);
+                                    }
+                                    out
                                 }
-                                out
+                                Err(e) => {
+                                    // Fail closed under body-recip-attach: empty/partial
+                                    // attach list would false-merge with fewer-attach peers.
+                                    attach_cls = classify_attach_enum_for_identity(
+                                        need_attach_content,
+                                        opts.mode,
+                                        e.to_string(),
+                                    );
+                                    Vec::new()
+                                }
                             }
-                            Err(e) => {
-                                attach_cls = classify_attach_meta_fail(opts.mode, e.to_string());
-                                Vec::new()
+                        } else {
+                            match pst.read_attachment_metadata(msg_nid) {
+                                Ok(atts) => {
+                                    let mut out = Vec::with_capacity(atts.len());
+                                    for a in atts {
+                                        if a.is_inline && grouping.ignore_inline_attachments {
+                                            index.record_inline_attachment_ignored();
+                                        }
+                                        let mut info = AttachmentInfo::new(a.filename, a.size);
+                                        info.is_inline = a.is_inline;
+                                        out.push(info);
+                                    }
+                                    out
+                                }
+                                Err(e) => {
+                                    attach_cls =
+                                        classify_attach_meta_fail(opts.mode, e.to_string());
+                                    Vec::new()
+                                }
                             }
                         }
                     })
@@ -1243,6 +1342,11 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
 
     let mut recoverable_messages = index.total();
 
+    // 0086: surface attach-content budget/cancel truncation on GroupingStats.
+    if attach_hash_state.truncated {
+        index.record_strong_hash_attach_truncated();
+    }
+
     // ── Deep attach preflight (0074, opt-in) ────────────────────────────────
     // Skipped when parents_only equivalent: include_attachments == false.
     let mut attach_attempted = 0u64;
@@ -1399,7 +1503,17 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             total_savings = rebuild.total_savings;
             // Post-strict rebuild re-inserts survivors under the same GroupingContext;
             // keep its stats so summary.grouping is not zeroed after deep-attach.
+            // Rebuild re-inserts content hashes but does not re-digest attach streams,
+            // so attach I/O counters would zero out — preserve scan-path attach stats.
+            let pre_attach_unread = grouping_stats.strong_hash_attach_unread;
+            let pre_attach_digested = grouping_stats.strong_hash_attach_digested;
+            let pre_attach_bytes = grouping_stats.strong_hash_attach_bytes;
+            let pre_attach_truncated = grouping_stats.strong_hash_attach_truncated;
             grouping_stats = rebuild.grouping_stats;
+            grouping_stats.strong_hash_attach_unread = pre_attach_unread;
+            grouping_stats.strong_hash_attach_digested = pre_attach_digested;
+            grouping_stats.strong_hash_attach_bytes = pre_attach_bytes;
+            grouping_stats.strong_hash_attach_truncated = pre_attach_truncated;
             // Per-file messages already adjusted by apply_strict_probe_skips; rebuild dups.
             recompute_per_file_dup_from_results(&mut file_stats, &rebuild.results);
             // Stash for post-probe row.result rewrite (strict only).

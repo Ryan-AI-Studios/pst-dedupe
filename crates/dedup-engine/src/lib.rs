@@ -42,9 +42,10 @@ pub use grouping::{
     GroupingContext, GroupingStats, IdentityLevel, Tier1Verify,
 };
 pub use hasher::{
-    compute_content_hash, compute_dedup_keys, compute_dedup_keys_ex, count_weak_fields,
-    hash_full_body, normalize_message_id, normalize_subject, tier2_eligibility, AttachmentInfo,
-    DedupKeys, StrongHashInput, Tier2IneligibleReason,
+    attach_content_slot, attach_unread_sentinel, compute_content_hash, compute_dedup_keys,
+    compute_dedup_keys_ex, count_weak_fields, hash_full_body, normalize_message_id,
+    normalize_subject, tier2_eligibility, AttachmentInfo, DedupKeys, StrongHashInput,
+    Tier2IneligibleReason, ATTACH_UNREAD_DOMAIN, EMPTY_CONTENT_SHA256,
 };
 pub use index::{DedupIndex, DedupResult, DedupTier, IndexItem, MessageRef};
 pub use integrity::{

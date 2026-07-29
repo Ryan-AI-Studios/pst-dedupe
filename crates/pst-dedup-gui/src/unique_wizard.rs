@@ -393,6 +393,9 @@ impl UniqueWizardForm {
             } else {
                 "off".into()
             },
+            strong_hash_attach_max_attaches: 50_000,
+            strong_hash_attach_max_bytes: 1_073_741_824,
+            strong_hash_attach_per_attach_max_bytes: 536_870_912,
             dedupe_scope: "global".into(),
             tier1_verify: "off".into(),
             tier1_backfill: false,

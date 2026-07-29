@@ -7,6 +7,19 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0086 — Attach-content strong identity)
+
+- **`--strong-content-hash body-recip-attach`** live on scan / dups / keep-set / unique-eml / unique-pst (default remains `off`).
+- Full-stream per-attachment **SHA-256** via chunked `open_attachment_data` (64 KiB; no multi-GB `Vec`); digests sorted into Tier-2.5 strong preimage.
+- **Choice B unread sentinels** for cloud-link / open-fail / CRC / length-mismatch / budget / cancel:
+  `SHA-256("pst-dedup/attach-unread/v1\0" || name_lower || "\0" || size_le_u32)` — never omit slots, never tier-downgrade to `body-recip`.
+- Legitimate size-0 empty stream → real `SHA-256("")`; size &gt; 0 + empty/short stream → unread.
+- Budgets: `--strong-hash-attach-max-attaches` (50k), `--strong-hash-attach-max-bytes` (1 GiB), `--strong-hash-attach-per-attach-max-bytes` (512 MiB).
+- Stats: `strong_hash_attach_unread` / `_digested` / `_bytes` / `_truncated`; soft stderr warning when combined with `--identity-ignore-inline-attachments`.
+- Fail-closed: `list_attachments_strict` under `body-recip-attach` (row PC errors → Err → Skip); `has_attachments=true` + empty list → Skip; hard-reject `--no-attachments` + `body-recip-attach`.
+- NIST multi-block SHA-256 KAT on the same `sha2` path; synthetic PST integration proves same name:size different bytes split only at attach level.
+- Closes **D-0076-attach-content**. Opens **D-0086-embedded-email-hash**, **D-0086-digest-probe-unify**.
+
 ### Added (0085 — Body-inline cloud link detect)
 
 - **Offline body scan** for **document-shaped** commercial SharePoint/OneDrive URLs in HTML (primary) and plain body: action tokens `:w:`/`:x:` (Excel mandatory)/`:p:`/`:b:`/`:u:` (exclude `:f:`); Office/PDF extensions; `1drv.ms`; SafeLinks unwrap when nested target is document-shaped.

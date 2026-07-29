@@ -60,6 +60,12 @@ pub struct UniqueEmlCliArgs {
     pub integrity_csv: Option<PathBuf>,
     pub skip_limit: usize,
     pub strong_content_hash: String,
+    /// Max attaches full-stream digested under body-recip-attach (0086).
+    pub strong_hash_attach_max_attaches: u64,
+    /// Max digest bytes per run under body-recip-attach (0086).
+    pub strong_hash_attach_max_bytes: u64,
+    /// Per-attach max digest bytes under body-recip-attach (0086).
+    pub strong_hash_attach_per_attach_max_bytes: u64,
     pub dedupe_scope: String,
     pub tier1_verify: String,
     pub tier1_backfill: bool,
@@ -175,6 +181,7 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         args.allow_crc_suspect_tier2,
         args.tier1_backfill,
         args.identity_ignore_inline_attachments,
+        args.no_attachments,
     )
     .map_err(CliError::Usage)?;
 
@@ -196,6 +203,9 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         retain_candidates: true,
         cancel: None,
         grouping: grouping.clone(),
+        strong_hash_attach_max_attaches: args.strong_hash_attach_max_attaches,
+        strong_hash_attach_max_bytes: args.strong_hash_attach_max_bytes,
+        strong_hash_attach_per_attach_max_bytes: args.strong_hash_attach_per_attach_max_bytes,
         ..Default::default()
     };
 

@@ -788,7 +788,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0076-default-v2 | — | Switch default identity to v2 strong hash | Would change every stored `content_hash_hex` | product |
-| D-0076-attach-content | P2 | `--strong-content-hash body-recip-attach` over 0074 probe | **CLI rejects** the value with a clear error pointing here; live levels are `off\|body\|body-recip` only. Enum variant retained for future wire-up. | residual |
+| D-0076-attach-content | P2 | `--strong-content-hash body-recip-attach` full-stream digests + Choice B unread | **Closed in 0086:** live levels `off\|body\|body-recip\|body-recip-attach`; streaming SHA-256; name+size domain-separated unread sentinels; dedicated budgets; soft warn with ignore-inline | **closed / 0086** |
 | D-0076-recipient-table | P2 | Recipient table (SMTP + PidTagRecipientType) instead of display strings | **Closed in 0082:** Tier-2.5 uses per-row identity cascade SMTP → EX DN → display when table present; table-less messages keep display path; To+Cc+Bcc in identity | **closed / 0082** |
 | D-0076-inline-attach | P3 | Residual edge cases for inline detection | **Shipped** MAPI flags on attach PC (`0x3712` / `attRenderedInBody` / hidden) + `inline_attachments_ignored`; residual only for stores that omit those tags | residual |
 | D-0076-bulk-class | — | Template / Newsletter class for large MID-distinct clusters | Stats surface cluster; classification is product | residual |
@@ -856,6 +856,13 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 |---|---|---|---|---|
 | D-0085-sovereign-cloud-hosts | P3 | GCC High / DoD / other sovereign-cloud SharePoint + SafeLinks hostname suffixes | Commercial allowlist shipped in 0085 (`*.sharepoint.com`, `*.sharepoint-df.com`, `onedrive.live.com`, `1drv.ms`, commercial SafeLinks). Sovereign host variants unconfirmed in a single stable public table — document incompleteness; do not claim coverage | residual / future |
 | D-0080-unexplained-byte-edit | P3 | `unexplained_loss` is allowlist fail-closed for properties not in `fidelity_contract_v1`; PST byte-edits of preserved fields produce `defect`, not `unexplained_loss`. DoD-9 defect class proven by truncate/flip/CC strip; `unexplained_loss` proven by production record path + `extra_source_props` (unmapped property observation channel). | **By design (keep `extra_source_props`):** allowlist fail-closed for property names absent from `fidelity_contract_v1`. Production path: `record_classified_finding` + digest `extra_source_props` (QC product sidecar, not a probe). Truncated/corrupt PST ⇒ `defect`. Inventing an uncontracted MAPI prop via pure byte-edit is not a realistic writer failure mode. | residual / design |
+
+## From track 0086-AttachContentIdentity
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0086-embedded-email-hash | P3 | Recursive Relativity-style four-component hash for `ATTACH_EMBEDDED_MSG` | P0 (0086) hashes raw attach data stream as standard SHA-256 blob | residual |
+| D-0086-digest-probe-unify | P3 | Unify 0074 Full (L3) probe + identity digest into one streaming pass | 0086 keeps identity digest separate from integrity probe; double I/O residual when both enabled | residual / perf |
 
 ## From track 0062-ReleaseHardeningRc
 

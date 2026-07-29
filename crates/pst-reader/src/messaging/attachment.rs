@@ -309,6 +309,10 @@ impl PstFile {
 
     /// List attachments with NID + filename + size + optional mime/method + inline flags.
     ///
+    /// Attachment rows whose property context fails to load are **soft-skipped**
+    /// (historical BestEffort behavior for meta-only consumers). For identity
+    /// that must not omit attach slots, use [`Self::list_attachments_strict`].
+    ///
     /// **0077:** block reads for attach PCs run under a message CRC scope so an
     /// outer [`crate::integrity_telemetry::with_crc_scope`] (or nested enter/exit)
     /// attributes attach-meta CRC to the message. Page CRC is excluded from taint.
@@ -316,13 +320,29 @@ impl PstFile {
         // Scope so standalone callers (and outer scan scopes) attribute attach-PC
         // block CRC to this message path.
         let scope = crate::integrity_telemetry::message_scope_enter();
-        let result = self.list_attachments_inner(message_nid);
+        let result = self.list_attachments_inner(message_nid, false);
         // Drop scope: delta is visible to any outer scope via TLS totals.
         let _ = scope.exit();
         result
     }
 
-    fn list_attachments_inner(&mut self, message_nid: NodeId) -> Result<Vec<AttachmentInfo>> {
+    /// List attachments **fail-closed** on any attachment-row PC load/read error.
+    ///
+    /// Used by Tier-2.5 `body-recip-attach` (0086): a partial list would omit
+    /// identity slots and can false-merge with fewer-attach / no-attach peers.
+    /// Soft meta consumers should keep [`Self::list_attachments`].
+    pub fn list_attachments_strict(&mut self, message_nid: NodeId) -> Result<Vec<AttachmentInfo>> {
+        let scope = crate::integrity_telemetry::message_scope_enter();
+        let result = self.list_attachments_inner(message_nid, true);
+        let _ = scope.exit();
+        result
+    }
+
+    fn list_attachments_inner(
+        &mut self,
+        message_nid: NodeId,
+        fail_on_row_error: bool,
+    ) -> Result<Vec<AttachmentInfo>> {
         let nbt_entry = match self.nbt.get(message_nid) {
             Some(e) => e.clone(),
             None => return Ok(Vec::new()),
@@ -351,50 +371,96 @@ impl PstFile {
             let att_data =
                 block::read_block_data(&mut self.reader, &self.bbt, entry.bid_data, crypt)?;
 
-            if let Ok(pc) = PropContext::load(att_data) {
-                let filename = pc
-                    .get_string(nid::PID_TAG_ATTACH_LONG_FILENAME)?
-                    .or(pc.get_string(nid::PID_TAG_ATTACH_FILENAME)?)
-                    .unwrap_or_default();
+            let pc = match PropContext::load(att_data) {
+                Ok(pc) => pc,
+                Err(e) => {
+                    if fail_on_row_error {
+                        return Err(e);
+                    }
+                    // Soft meta path: skip unreadable attach PC rows.
+                    continue;
+                }
+            };
 
-                let size = pc.get_i32(nid::PID_TAG_ATTACH_SIZE)?.unwrap_or(0) as u32;
-                let mime_tag = pc.get_string(nid::PID_TAG_ATTACH_MIME_TAG)?;
-                let attach_method = pc.get_i32(nid::PID_TAG_ATTACH_METHOD)?;
+            let filename = match pc
+                .get_string(nid::PID_TAG_ATTACH_LONG_FILENAME)
+                .and_then(|long| {
+                    if long.is_some() {
+                        Ok(long)
+                    } else {
+                        pc.get_string(nid::PID_TAG_ATTACH_FILENAME)
+                    }
+                }) {
+                Ok(v) => v.unwrap_or_default(),
+                Err(e) => {
+                    if fail_on_row_error {
+                        return Err(e);
+                    }
+                    continue;
+                }
+            };
 
-                // Inline/embedded detection (0076): MAPI flags, not a size threshold.
-                // Soft-fail individual property reads — missing tags are normal.
-                let content_id = pc
-                    .get_string(nid::PID_TAG_ATTACH_CONTENT_ID)
-                    .ok()
-                    .flatten()
-                    .filter(|s| !s.trim().is_empty());
-                let attach_flags = pc.get_i32(nid::PID_TAG_ATTACH_FLAGS).ok().flatten();
-                let hidden = pc.get_bool(nid::PID_TAG_ATTACHMENT_HIDDEN).ok().flatten();
-                let is_inline = content_id.is_some()
-                    || attach_flags
-                        .map(|f| f & nid::ATT_RENDERED_IN_BODY != 0)
-                        .unwrap_or(false)
-                    || hidden.unwrap_or(false);
+            let size = match pc.get_i32(nid::PID_TAG_ATTACH_SIZE) {
+                Ok(v) => v.unwrap_or(0) as u32,
+                Err(e) => {
+                    if fail_on_row_error {
+                        return Err(e);
+                    }
+                    continue;
+                }
+            };
+            let mime_tag = match pc.get_string(nid::PID_TAG_ATTACH_MIME_TAG) {
+                Ok(v) => v,
+                Err(e) => {
+                    if fail_on_row_error {
+                        return Err(e);
+                    }
+                    continue;
+                }
+            };
+            let attach_method = match pc.get_i32(nid::PID_TAG_ATTACH_METHOD) {
+                Ok(v) => v,
+                Err(e) => {
+                    if fail_on_row_error {
+                        return Err(e);
+                    }
+                    continue;
+                }
+            };
 
-                // 0084: attachment-table cloud classification (independent OR signals).
-                let kind = classify_attach_pc(&pc, provider_npid, &filename);
-                let (is_cloud_link, cloud_provider, cloud_url) = match kind {
-                    AttachKind::CloudLink { provider, url } => (true, provider, url),
-                    AttachKind::Classic => (false, None, None),
-                };
+            // Inline/embedded detection (0076): MAPI flags, not a size threshold.
+            // Soft-fail individual property reads — missing tags are normal.
+            let content_id = pc
+                .get_string(nid::PID_TAG_ATTACH_CONTENT_ID)
+                .ok()
+                .flatten()
+                .filter(|s| !s.trim().is_empty());
+            let attach_flags = pc.get_i32(nid::PID_TAG_ATTACH_FLAGS).ok().flatten();
+            let hidden = pc.get_bool(nid::PID_TAG_ATTACHMENT_HIDDEN).ok().flatten();
+            let is_inline = content_id.is_some()
+                || attach_flags
+                    .map(|f| f & nid::ATT_RENDERED_IN_BODY != 0)
+                    .unwrap_or(false)
+                || hidden.unwrap_or(false);
 
-                attachments.push(AttachmentInfo {
-                    nid: entry.nid,
-                    filename,
-                    size,
-                    mime_tag,
-                    attach_method,
-                    is_inline,
-                    is_cloud_link,
-                    cloud_provider,
-                    cloud_url,
-                });
-            }
+            // 0084: attachment-table cloud classification (independent OR signals).
+            let kind = classify_attach_pc(&pc, provider_npid, &filename);
+            let (is_cloud_link, cloud_provider, cloud_url) = match kind {
+                AttachKind::CloudLink { provider, url } => (true, provider, url),
+                AttachKind::Classic => (false, None, None),
+            };
+
+            attachments.push(AttachmentInfo {
+                nid: entry.nid,
+                filename,
+                size,
+                mime_tag,
+                attach_method,
+                is_inline,
+                is_cloud_link,
+                cloud_provider,
+                cloud_url,
+            });
         }
 
         Ok(attachments)

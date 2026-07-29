@@ -353,7 +353,7 @@ Deferred triage + operator soak       ← real PSTs local-only; bugfix tracks on
 Series K Clean Unique export (CLI)    ← planned product path (0065–0072 Proposed)
 ```
 
-Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedTeamFixes/spec.md) **Completed**; [`0064`](0064-DeskPlatformConnectUx/spec.md) **Completed**. Series K [`0065`](0065-ScanIntegrityReport/spec.md)–[`0072`](0072-DeskUniquePstWizard/spec.md) **Completed**. Series L (0073–0081 unique-export hardening) **Completed**. Series M: **0082**–**0085** Completed (recipients + Mode A promote + named props / cloud attach + body-inline cloud links).
+Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedTeamFixes/spec.md) **Completed**; [`0064`](0064-DeskPlatformConnectUx/spec.md) **Completed**. Series K [`0065`](0065-ScanIntegrityReport/spec.md)–[`0072`](0072-DeskUniquePstWizard/spec.md) **Completed**. Series L (0073–0081 unique-export hardening) **Completed**. Series M: **0082**–**0086** Completed (recipients + Mode A promote + named props / cloud attach + body-inline cloud links + attach-content strong identity).
 
 ### Wave 6 — Unique export fidelity residuals (Series M)
 
@@ -363,6 +363,7 @@ Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedT
 | **0083** | PromoteOnAttachFail | **Completed** | **P0 M** | Mode A pre-write promote-on-attach-fail (`--promote-on-attach-fail`); closes **D-0073-promote**; Mode B declined; Codex luna PASS. |
 | **0084** | NamedPropCloudAttach | **Completed** | **P0 M** | MS-PST NPMAP (`0x61`) + **attach-table** cloud detect; `ATTACH_CLOUD_LINK` + `cloud_url`/`cloud_provider` ledger; pointer preserve; Mode A incomplete; closes **D-0080** (detect≠hydrate); residual body-inline links; Codex luna PASS. |
 | **0085** | BodyCloudLinks | **Completed** | **P0 M** | Body-inline **document-shaped** URL scan (`:x:` Excel incl.); hit-list CSV query-preserved; Mode A known gap documented; closes **D-0084-body-cloud-links**; residual **D-0085-sovereign-cloud-hosts**; Codex luna PASS WITH DEFERRED P3. |
+| **0086** | AttachContentIdentity | **Completed** | **P1 M** | Enable `body-recip-attach`: full-stream attach SHA-256; **Choice B** unread sentinels; fail-closed strict enum; NIST KAT; closes **D-0076-attach-content**; residual **D-0086-embedded-email-hash** / **D-0086-digest-probe-unify**; Codex luna PASS WITH DEFERRED P3. |
 
 ### What each step is for
 

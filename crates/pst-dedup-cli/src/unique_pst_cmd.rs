@@ -195,9 +195,21 @@ pub struct UniquePstClapArgs {
     /// Max attach-stream probe fail rate before preflight recommends re-export (default 0.05).
     #[arg(long = "max-attach-fail-rate", default_value_t = 0.05, value_parser = parse_rate_threshold_arg)]
     pub max_attach_fail_rate: f64,
-    /// Strong content identity: off|body|body-recip (0076). body-recip-attach deferred (D-0076-attach-content).
+    /// Strong content identity: off|body|body-recip|body-recip-attach (0086).
     #[arg(long = "strong-content-hash", default_value = "off", value_parser = parse_strong_content_hash_arg)]
     pub strong_content_hash: String,
+    /// Max attaches full-stream digested under body-recip-attach (0086; default 50000).
+    #[arg(long = "strong-hash-attach-max-attaches", default_value_t = 50_000)]
+    pub strong_hash_attach_max_attaches: u64,
+    /// Max digest bytes per run under body-recip-attach (0086; default 1 GiB).
+    #[arg(long = "strong-hash-attach-max-bytes", default_value_t = 1_073_741_824)]
+    pub strong_hash_attach_max_bytes: u64,
+    /// Per-attach max digest bytes under body-recip-attach (0086; default 512 MiB).
+    #[arg(
+        long = "strong-hash-attach-per-attach-max-bytes",
+        default_value_t = 536_870_912
+    )]
+    pub strong_hash_attach_per_attach_max_bytes: u64,
     /// Dedupe partition: global|per-source (0076).
     #[arg(long = "dedupe-scope", default_value = "global", value_parser = parse_dedupe_scope_arg)]
     pub dedupe_scope: String,
@@ -311,6 +323,9 @@ pub struct UniquePstCliArgs {
     pub deep_attach_max_peer_probes: u64,
     pub max_attach_fail_rate: f64,
     pub strong_content_hash: String,
+    pub strong_hash_attach_max_attaches: u64,
+    pub strong_hash_attach_max_bytes: u64,
+    pub strong_hash_attach_per_attach_max_bytes: u64,
     pub dedupe_scope: String,
     pub tier1_verify: String,
     pub tier1_backfill: bool,
@@ -497,6 +512,9 @@ impl UniquePstClapArgs {
             deep_attach_max_peer_probes: self.deep_attach_max_peer_probes,
             max_attach_fail_rate: self.max_attach_fail_rate,
             strong_content_hash: self.strong_content_hash,
+            strong_hash_attach_max_attaches: self.strong_hash_attach_max_attaches,
+            strong_hash_attach_max_bytes: self.strong_hash_attach_max_bytes,
+            strong_hash_attach_per_attach_max_bytes: self.strong_hash_attach_per_attach_max_bytes,
             dedupe_scope: self.dedupe_scope,
             tier1_verify: self.tier1_verify,
             tier1_backfill: self.tier1_backfill,
@@ -1418,8 +1436,12 @@ pub fn run_unique_pst_with_options(
             args.allow_crc_suspect_tier2,
             args.tier1_backfill,
             args.identity_ignore_inline_attachments,
+            args.no_attachments,
         )
         .map_err(CliError::Usage)?,
+        strong_hash_attach_max_attaches: args.strong_hash_attach_max_attaches,
+        strong_hash_attach_max_bytes: args.strong_hash_attach_max_bytes,
+        strong_hash_attach_per_attach_max_bytes: args.strong_hash_attach_per_attach_max_bytes,
     };
 
     // ── Phase 1: integrity scan ─────────────────────────────────────────────
@@ -1810,6 +1832,7 @@ pub fn run_unique_pst_with_options(
         args.allow_crc_suspect_tier2,
         args.tier1_backfill,
         args.identity_ignore_inline_attachments,
+        args.no_attachments,
     )
     .map_err(CliError::Usage)?;
     let mut resolved = resolve_groups_with_grouping(
@@ -3904,6 +3927,9 @@ mod tests {
             deep_attach_max_peer_probes: 3,
             max_attach_fail_rate: 0.05,
             strong_content_hash: "off".into(),
+            strong_hash_attach_max_attaches: 50_000,
+            strong_hash_attach_max_bytes: 1_073_741_824,
+            strong_hash_attach_per_attach_max_bytes: 536_870_912,
             dedupe_scope: "global".into(),
             tier1_verify: "off".into(),
             tier1_backfill: false,
@@ -4011,6 +4037,9 @@ mod tests {
             deep_attach_max_peer_probes: 3,
             max_attach_fail_rate: 0.05,
             strong_content_hash: "off".into(),
+            strong_hash_attach_max_attaches: 50_000,
+            strong_hash_attach_max_bytes: 1_073_741_824,
+            strong_hash_attach_per_attach_max_bytes: 536_870_912,
             dedupe_scope: "global".into(),
             tier1_verify: "off".into(),
             tier1_backfill: false,
@@ -4125,6 +4154,9 @@ mod tests {
             deep_attach_max_peer_probes: 3,
             max_attach_fail_rate: 0.05,
             strong_content_hash: "off".into(),
+            strong_hash_attach_max_attaches: 50_000,
+            strong_hash_attach_max_bytes: 1_073_741_824,
+            strong_hash_attach_per_attach_max_bytes: 536_870_912,
             dedupe_scope: "global".into(),
             tier1_verify: "off".into(),
             tier1_backfill: false,
@@ -4230,6 +4262,9 @@ mod tests {
             deep_attach_max_peer_probes: 3,
             max_attach_fail_rate: 0.05,
             strong_content_hash: "off".into(),
+            strong_hash_attach_max_attaches: 50_000,
+            strong_hash_attach_max_bytes: 1_073_741_824,
+            strong_hash_attach_per_attach_max_bytes: 536_870_912,
             dedupe_scope: "global".into(),
             tier1_verify: "off".into(),
             tier1_backfill: false,
