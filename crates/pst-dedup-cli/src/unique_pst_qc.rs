@@ -543,6 +543,8 @@ pub struct ContentDigestEntry {
     #[serde(default)]
     pub subject: String,
     #[serde(default)]
+    pub sender: String,
+    #[serde(default)]
     pub display_to: String,
     #[serde(default)]
     pub display_cc: String,
@@ -1521,6 +1523,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                     // Prefer persisted field-level data so clean-room under parents_only
                     // can body-match (DoD-21); never silently zero these when present.
                     subject: m.subject.clone(),
+                    sender: m.sender.clone(),
                     display_to: m.display_to.clone(),
                     display_cc: m.display_cc.clone(),
                     body_plain_len: m.body_plain_len,
@@ -1570,6 +1573,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
         message_id_norm: cand.message_id_norm.clone(),
         content_digest: src.digest.clone(),
         subject: src.subject.clone(),
+        sender: src.sender.clone(),
         display_to: src.display_to.clone(),
         display_cc: src.display_cc.clone(),
         body_plain_len: src.body_plain_len,
@@ -1810,6 +1814,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
     // Body explain flags: body_unavailable | body_incomplete | crc_suspect only.
     // Never: generic has_degraded alone, attach ledger, or any of the above for CC.
     let subject_match = src.subject.eq_ignore_ascii_case(&out.subject);
+    let sender_match = normalize_display_addr(&src.sender) == normalize_display_addr(&out.sender);
     let to_match =
         normalize_display_addr(&src.display_to) == normalize_display_addr(&out.display_to);
     let cc_match =
@@ -1828,6 +1833,18 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             source_nid: cand.source_nid,
             message_id_norm: cand.message_id_norm.clone(),
             detail: format!("subject src={:?} out={:?}", src.subject, out.subject),
+        });
+    }
+    if !sender_match && !src.sender.is_empty() {
+        let (class, _) = contract.classify("PidTagSenderEmailAddress", false);
+        findings.push(QcFinding {
+            class,
+            property: "PidTagSenderEmailAddress".into(),
+            volume_index: cand.volume_index,
+            source_path: cand.source_path.clone(),
+            source_nid: cand.source_nid,
+            message_id_norm: cand.message_id_norm.clone(),
+            detail: format!("sender src={:?} out={:?}", src.sender, out.sender),
         });
     }
     if !to_match && !src.display_to.is_empty() {

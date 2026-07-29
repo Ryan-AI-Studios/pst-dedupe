@@ -1,7 +1,7 @@
 # 0080 — Unique PST Output QC (source-differential + external validators)
 
 - **Track ID:** 0080-UniquePstOutlookQc
-- **Status:** Ready
+- **Status:** Completed
 - **Series:** L
 - **Depends on:** 0071 verification block · 0078 exit contract · 0079 `export_oracle`
 - **Verified against:** `ce9cfc8` (0079 merged)

@@ -535,6 +535,7 @@ pub struct MessageContentDetail {
     pub digest: String,
     pub message_id: String,
     pub subject: String,
+    pub sender: String,
     pub display_to: String,
     pub display_cc: String,
     pub body_plain_len: usize,
@@ -561,6 +562,7 @@ pub fn message_content_detail(
         .trim()
         .to_ascii_lowercase();
     let subject = extract.subject.as_deref().unwrap_or("").to_string();
+    let sender = extract.sender_email.as_deref().unwrap_or("").to_string();
     let display_to = extract.display_to.as_deref().unwrap_or("").to_string();
     let display_cc = extract.display_cc.as_deref().unwrap_or("").to_string();
     let body_plain = extract.body_text.as_deref().unwrap_or("");
@@ -595,6 +597,8 @@ pub fn message_content_detail(
     h.update([0]);
     h.update(subject.as_bytes());
     h.update([0]);
+    h.update(sender.as_bytes());
+    h.update([0]);
     h.update(display_to.as_bytes());
     h.update([0]);
     h.update(display_cc.as_bytes());
@@ -616,6 +620,7 @@ pub fn message_content_detail(
         digest: hex_sha256_digest(h.finalize().as_slice()),
         message_id: mid,
         subject,
+        sender,
         display_to,
         display_cc,
         body_plain_len: body_plain.len(),
