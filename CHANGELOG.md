@@ -7,6 +7,15 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0085 — Body-inline cloud link detect)
+
+- **Offline body scan** for **document-shaped** commercial SharePoint/OneDrive URLs in HTML (primary) and plain body: action tokens `:w:`/`:x:` (Excel mandatory)/`:p:`/`:b:`/`:u:` (exclude `:f:`); Office/PDF extensions; `1drv.ms`; SafeLinks unwrap when nested target is document-shaped.
+- **Report pack:** `export_body_cloud_links.csv` (multi-row hit-list; full query preserved; CSV injection neutralized without URL rewrite); `export_messages.csv` appends `body_cloud_link_count`; summary `messages_with_body_cloud_links` / `body_cloud_links_total` / `body_cloud_link_truncated_messages`.
+- **Caps:** 100_000 body window, 2048 URL length, 50 links/message; truncation marker `BODY_CLOUD_LINK_TRUNCATED`.
+- **Product rules:** no network fetch; no invented Attachment Table rows; body hits do **not** set `is_attach_incomplete` / Mode A promote; exit 64 not forced by body-only hits; commercial host allowlist only.
+- **`fidelity_contract_v1.cloud_modern_attachments`:** attach-table **and** body-inline document-shaped detect offline; payload never Preserved; Mode A body-only known gap stated; sovereign residual **D-0085-sovereign-cloud-hosts**.
+- Closes **D-0084-body-cloud-links**. Opens **D-0085-sovereign-cloud-hosts**.
+
 ### Added (0084 — Named property resolution & cloud attach detect)
 
 - **NPMAP reader** (`NID_NAME_TO_ID_MAP` `0x61`): parse Entry/GUID/String streams; resolve GUID+LID and GUID+name → NPID; cache per `PstFile`; degrade on corrupt/missing (no hard-fail open).

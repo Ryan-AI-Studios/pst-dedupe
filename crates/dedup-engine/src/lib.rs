@@ -10,6 +10,7 @@
 //! **Tier 2 — Content Hash:** For emails missing a Message-ID, we compute a SHA-256
 //! hash of: normalized subject + submit time + sender + body preview + attachment metadata.
 
+pub mod body_cloud_links;
 pub mod eml_pack;
 pub mod exporter;
 pub mod grouping;
@@ -19,6 +20,11 @@ pub mod integrity;
 pub mod keepset;
 pub mod report;
 pub mod util;
+
+pub use body_cloud_links::{
+    scan_body_cloud_links, BodyCloudLinkHit, BodyCloudScan, BodyCloudUrlSource,
+    MAX_BODY_SCAN_CHARS, MAX_LINKS_PER_MESSAGE, MAX_URL_LEN,
+};
 
 pub use eml_pack::{
     clamp_files_per_volume, format_date_utc_filetime, format_date_utc_unix, make_eml_pack_filename,

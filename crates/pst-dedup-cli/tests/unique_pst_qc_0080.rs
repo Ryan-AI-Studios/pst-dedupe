@@ -84,6 +84,7 @@ fn export_row_folder(mid: &str, nid: u64, idx: u64, folder: &str) -> ExportMessa
         duplicate_sources: String::new(),
         source_id: String::new(),
         bcc_suppressed: false,
+        body_cloud_link_count: 0,
         subject: "subj".into(),
     }
 }
@@ -455,6 +456,7 @@ fn display_cc_strip_is_defect_when_source_has_cc() {
         duplicate_sources: String::new(),
         source_id: String::new(),
         bcc_suppressed: false,
+        body_cloud_link_count: 0,
         subject: "CC roundtrip".into(),
     }];
     let mut c = cand(1, 12);
@@ -542,6 +544,7 @@ fn attach_payload_mismatch_is_defect() {
         duplicate_sources: String::new(),
         source_id: String::new(),
         bcc_suppressed: false,
+        body_cloud_link_count: 0,
         subject: "Attach".into(),
     }];
     let mut c = cand(1, 11);
@@ -1222,6 +1225,7 @@ fn degraded_message_stripped_cc_still_defects() {
         duplicate_sources: String::new(),
         source_id: String::new(),
         bcc_suppressed: false,
+        body_cloud_link_count: 0,
         subject: "Deg CC".into(),
     }];
     let mut c = cand(1, 8);
@@ -1284,6 +1288,7 @@ fn degraded_body_unavailable_stripped_body_still_defects_when_not_flagged() {
         duplicate_sources: String::new(),
         source_id: String::new(),
         bcc_suppressed: false,
+        body_cloud_link_count: 0,
         subject: "Body loss".into(),
     }];
     let mut c = cand(1, 26);
@@ -1336,6 +1341,7 @@ fn corrupt_existing_source_hard_fails_not_skip() {
         duplicate_sources: String::new(),
         source_id: String::new(),
         bcc_suppressed: false,
+        body_cloud_link_count: 0,
         subject: "Corrupt src".into(),
     }];
     let mut c = cand(1, 4);
@@ -1450,6 +1456,7 @@ fn multi_volume_external_reader_called_for_each_volume() {
             duplicate_sources: String::new(),
             source_id: String::new(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: "V1".into(),
         },
         ExportMessageRow {
@@ -1467,6 +1474,7 @@ fn multi_volume_external_reader_called_for_each_volume() {
             duplicate_sources: String::new(),
             source_id: String::new(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: "V2".into(),
         },
     ];
@@ -1675,6 +1683,7 @@ fn no_mid_message_green_when_digests_match() {
         duplicate_sources: String::new(),
         source_id: String::new(),
         bcc_suppressed: false,
+        body_cloud_link_count: 0,
         subject: "NoMid Subject".into(),
     }];
     let mut c = cand(1, detail.body_plain_len);
@@ -1753,6 +1762,7 @@ fn attach_ledger_fail_does_not_explain_unrelated_missing_attach() {
         duplicate_sources: String::new(),
         source_id: String::new(),
         bcc_suppressed: false,
+        body_cloud_link_count: 0,
         subject: "TwoAttaches".into(),
     }];
     let mut c = cand(1, 18);
@@ -2074,6 +2084,7 @@ fn no_mid_duplicate_subjects_do_not_misassociate() {
             duplicate_sources: String::new(),
             source_id: String::new(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: "Same Subject".into(),
         },
         ExportMessageRow {
@@ -2091,6 +2102,7 @@ fn no_mid_duplicate_subjects_do_not_misassociate() {
             duplicate_sources: String::new(),
             source_id: String::new(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: "Same Subject".into(),
         },
     ];
@@ -2170,6 +2182,7 @@ fn fixture_matrix_multi_volume_structure_green() {
             duplicate_sources: String::new(),
             source_id: String::new(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: "Vol1".into(),
         },
         ExportMessageRow {
@@ -2187,6 +2200,7 @@ fn fixture_matrix_multi_volume_structure_green() {
             duplicate_sources: String::new(),
             source_id: String::new(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: "Vol2".into(),
         },
     ];
@@ -2597,6 +2611,7 @@ fn duplicate_attach_filename_multiset_missing_is_defect() {
         duplicate_sources: String::new(),
         source_id: String::new(),
         bcc_suppressed: false,
+        body_cloud_link_count: 0,
         subject: "DupAtt".into(),
     }];
     let mut c = cand(1, 12);
@@ -2817,6 +2832,7 @@ fn orphan_volume_index_rows_hard_fail_via_qc_pipeline() {
             duplicate_sources: String::new(),
             source_id: String::new(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: "Ghost".into(),
         },
     ];
@@ -2908,6 +2924,7 @@ fn multi_volume_external_one_skipped_aggregate_not_ok() {
             duplicate_sources: String::new(),
             source_id: String::new(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: "Agg1".into(),
         },
         ExportMessageRow {
@@ -2925,6 +2942,7 @@ fn multi_volume_external_one_skipped_aggregate_not_ok() {
             duplicate_sources: String::new(),
             source_id: String::new(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: "Agg2".into(),
         },
     ];
@@ -3243,6 +3261,7 @@ fn production_multi_volume_full_qc_green() {
                 duplicate_sources: String::new(),
                 source_id: String::new(),
                 bcc_suppressed: false,
+                body_cloud_link_count: 0,
                 subject: "SynV1".into(),
             },
             ExportMessageRow {
@@ -3260,6 +3279,7 @@ fn production_multi_volume_full_qc_green() {
                 duplicate_sources: String::new(),
                 source_id: String::new(),
                 bcc_suppressed: false,
+                body_cloud_link_count: 0,
                 subject: "SynV2".into(),
             },
         ];
@@ -3413,6 +3433,7 @@ fn recipient_table_source_output_respects_bcc_filter() {
         duplicate_sources: String::new(),
         source_id: String::new(),
         bcc_suppressed: true,
+        body_cloud_link_count: 0,
         subject: "Multi recip".into(),
     }];
     let mut c = cand(1, 10);
@@ -3503,6 +3524,7 @@ fn recipient_table_qc_include_bcc_true_matches_full_set() {
         duplicate_sources: String::new(),
         source_id: String::new(),
         bcc_suppressed: false,
+        body_cloud_link_count: 0,
         subject: "Multi recip".into(),
     }];
     let mut c = cand(1, 10);

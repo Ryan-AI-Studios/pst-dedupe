@@ -118,6 +118,7 @@ If volume *k* fails fatally (disk full, path unwritable, layout hard fail):
   keepset.json              # winners + stats (no bodies)
   volumes.csv               # one row per completed volume (+ sha256/md5)
   export_messages.csv       # MANDATORY winner → volume cross-reference
+  export_body_cloud_links.csv  # 0085 body-inline document-shaped cloud URL hit-list
   qc_report_v1.json         # 0080 QC summary (when --qc-level ≠ off)
   qc_findings.csv           # 0080 row-level findings
   content_digests.json      # 0080 source-side digests for clean-room re-verify
@@ -163,14 +164,14 @@ The entire **`report-dir` is operator-sensitive**: absolute paths, folder names,
 
 ### CSV open safety
 
-Free-text cells in `export_attachments.csv` and `export_messages.csv` neutralize spreadsheet formula injection: values whose leading non-space character is `=`, `+`, `-`, or `@` are prefixed with `'` before CSV quoting. Still open CSVs as text when possible; treat the pack as sensitive.
+Free-text cells in `export_attachments.csv`, `export_messages.csv`, and `export_body_cloud_links.csv` neutralize spreadsheet formula injection: values whose leading non-space character is `=`, `+`, `-`, or `@` are prefixed with `'` before CSV quoting (**without** rewriting URL structure). Still open CSVs as text when possible; treat the pack as sensitive.
 
 ### `export_messages.csv` (mandatory)
 
-Fixed columns (prefix locked; **0073**/**0075**/**0081**/**0082** append only):
+Fixed columns (prefix locked; **0073**/**0075**/**0081**/**0082**/**0085** append only):
 
 ```text
-source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources,source_id,bcc_suppressed
+source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources,source_id,bcc_suppressed,body_cloud_link_count
 ```
 
 One row per **successfully written** unique winner. **No body text** columns.
@@ -467,8 +468,9 @@ Desk wizard: single **Strong content hash** checkbox → `body` level. Full enum
 - Operator residual: Outlook / `scanpst.exe` structural check on multi-GB artifacts (not CI DoD).
 - Count invariant (full success): sum of messages across volumes == `keep_set.stats.unique`.
 - **Attach soft-fail invariant:** `export.attachments_failed` == sum of fail-severity ledger accounting (histogram always complete; CSV may be truncated under the row cap).
-- **Promote-on-attach-fail (Mode A, 0083/0084):** `--promote-on-attach-fail` (default **off**). Pre-write only: when a keep-set peer materializes with incomplete attaches (`stream_available == false`, explicit `is_cloud_link`, or fail-severity attach fidelity) and a ranked peer is complete, promote the complete peer **before** PST/EML write commits that family. Default remains **Mode C** (write best-effort, ledger fails). **Mode B** write-time mid-message promote is **permanently declined**. All peers incomplete → Mode C fallback on highest-ranked materializable (`decided_by=mode_c_fallback_all_peers_incomplete`); group is not dropped for soft attach incompleteness alone. Under default global scope this may select another custodian’s complete copy (**cross-custodian de-duplication** — Sedona term); see the eDiscovery runbook. `duplicate_sources` on Unique rows still lists the full group after promote. **0084 cloud/modern attaches (attachment-table only):** detected via NPMAP `AttachmentProviderType` and/or web-ref method signals → incomplete + ledger reason `ATTACH_CLOUD_LINK` with appended columns `cloud_provider`,`cloud_url`; unique-PST writes a **pointer/metadata attach row** (no invented binary; no network download). Body-only inline SharePoint/OneDrive URLs without a MAPI attachment object are **not** classified (**D-0084-body-cloud-links**). Identity levels that hash attach payloads (**D-0076-attach-content**, not live) can fracture incomplete vs complete into different groups — Mode A only walks within one keep-set group.
+- **Promote-on-attach-fail (Mode A, 0083/0084):** `--promote-on-attach-fail` (default **off**). Pre-write only: when a keep-set peer materializes with incomplete attaches (`stream_available == false`, explicit `is_cloud_link`, or fail-severity attach fidelity) and a ranked peer is complete, promote the complete peer **before** PST/EML write commits that family. Default remains **Mode C** (write best-effort, ledger fails). **Mode B** write-time mid-message promote is **permanently declined**. All peers incomplete → Mode C fallback on highest-ranked materializable (`decided_by=mode_c_fallback_all_peers_incomplete`); group is not dropped for soft attach incompleteness alone. Under default global scope this may select another custodian’s complete copy (**cross-custodian de-duplication** — Sedona term); see the eDiscovery runbook. `duplicate_sources` on Unique rows still lists the full group after promote. **0084 cloud/modern attaches (attachment-table only):** detected via NPMAP `AttachmentProviderType` and/or web-ref method signals → incomplete + ledger reason `ATTACH_CLOUD_LINK` with appended columns `cloud_provider`,`cloud_url`; unique-PST writes a **pointer/metadata attach row** (no invented binary; no network download). **0085 body-inline document-shaped cloud URLs** are ledged in `export_body_cloud_links.csv` and counted on `export_messages.body_cloud_link_count` — they do **not** set `is_attach_incomplete` / Mode A promote (**known gap:** Mode A will not prefer a peer with a physical attach over a peer that only has the same logical message as an HTML inline link). Identity levels that hash attach payloads (**D-0076-attach-content**, not live) can fracture incomplete vs complete into different groups — Mode A only walks within one keep-set group.
 - **`export_attachments.csv` cloud columns (0084):** header appends `cloud_provider,cloud_url` (right of existing columns; empty when not CloudLink). Formula injection neutralization applies to free-text URL cells.
+- **`export_body_cloud_links.csv` (0085):** multi-row hit-list of **document-shaped** commercial SharePoint/OneDrive body URLs (action tokens `:w:`/`:x:`/`:p:`/`:b:`/`:u:`; Office/PDF extensions; `1drv.ms`; SafeLinks unwrap when nested target is document-shaped). Caps: 100k body window, 2048 URL length, 50 links/message. Query strings are **never** stripped (as-sent share context). Bare site roots / `:f:` folder shares are misses. Always written when the report pack exists (independent of `--attach-ledger`). Summary: `messages_with_body_cloud_links`, `body_cloud_links_total`, `body_cloud_link_truncated_messages`. Sovereign-cloud hosts residual **D-0085-sovereign-cloud-hosts**. No network fetch; no invented Attachment Table rows; body-only hits do not alone force exit 64.
 - **unique-eml:** Mode A flag threads the shared materialize finalizer; full attach-ledger CSV remains residual **D-0073-eml**.
 - **GUI:** no attach-ledger / Mode A UI controls — residual **D-0073-gui** (CLI flags; wizard pass-through default false).
 - CRC stderr noise is **0077**; ledger is not a dump of page CRCs.

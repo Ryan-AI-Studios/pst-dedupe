@@ -47,11 +47,12 @@ use crate::scan::{
     recompute_per_file_dup_from_results, resolve_pst_paths, run_scan, ScanOptions,
 };
 use crate::unique_export_report::{
-    default_report_dir, volume_path_for, write_export_messages_csv, write_summary_json,
-    write_volumes_csv, AttachLedgerMode, AttachLedgerSink, ExportMessageRow, ExportSection,
-    LedgerPathMode, PhaseTimings, SummaryError, UniqueExportSummary, VerificationReport,
-    VolumeAttachBuffer, VolumeReportRow, VolumeVerification, DEFAULT_ATTACH_LEDGER_MAX_ROWS,
-    PREPARED_BYTES_PEAK_WARN_THRESHOLD, UNIQUE_EXPORT_REPORT_SCHEMA,
+    default_report_dir, volume_path_for, write_body_cloud_links_csv, write_export_messages_csv,
+    write_summary_json, write_volumes_csv, AttachLedgerMode, AttachLedgerSink, BodyCloudLinkRow,
+    ExportMessageRow, ExportSection, LedgerPathMode, PhaseTimings, SummaryError,
+    UniqueExportSummary, VerificationReport, VolumeAttachBuffer, VolumeReportRow,
+    VolumeVerification, DEFAULT_ATTACH_LEDGER_MAX_ROWS, EXPORT_BODY_CLOUD_LINKS_CSV_NAME,
+    PREPARED_BYTES_PEAK_WARN_THRESHOLD, REASON_BODY_CLOUD_LINK, UNIQUE_EXPORT_REPORT_SCHEMA,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -652,6 +653,9 @@ struct PreparedWinner {
     source_has_bcc: bool,
     /// Empty recipient table + flags present + not UNSENT (0082 rule 8 anomaly).
     sent_message_with_no_recipients: bool,
+    /// 0085: body-inline document-shaped cloud hits (scanned at prepare; bodies may be moved at write).
+    body_cloud_hits: Vec<(String, String)>, // (url, url_source)
+    body_cloud_truncated: bool,
 }
 
 /// Adapter: `PstAttachStreamSource` → `pst_writer::AttachStreamSource`.
@@ -1161,6 +1165,9 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
         promote_on_attach_fail: ctx.promote_on_attach_fail,
         promoted_after_attach_incomplete_count: 0,
         mode_c_fallback_all_peers_incomplete_count: 0,
+        messages_with_body_cloud_links: 0,
+        body_cloud_links_total: 0,
+        body_cloud_link_truncated_messages: 0,
     };
     if let Err(e) = write_summary_json(ctx.summary_path, &summary) {
         tracing::warn!(
@@ -1978,6 +1985,11 @@ pub fn run_unique_pst_with_options(
     let t_write = Instant::now();
     let mut volumes: Vec<VolumeReportRow> = Vec::new();
     let mut export_rows: Vec<ExportMessageRow> = Vec::new();
+    // 0085: body-inline document-shaped cloud link hit-list (independent of attach ledger).
+    let mut body_cloud_link_rows: Vec<BodyCloudLinkRow> = Vec::new();
+    let mut messages_with_body_cloud_links: u64 = 0;
+    let mut body_cloud_links_total: u64 = 0;
+    let mut body_cloud_link_truncated_messages: u64 = 0;
     // QC sample meta ordered by prepare/write order (export_message_index assigned later).
     let mut qc_meta_by_prepare_idx: Vec<crate::unique_pst_qc::QcSampleCandidate> = prepared
         .iter()
@@ -2330,6 +2342,40 @@ pub fn run_unique_pst_with_options(
                     )
                     .map(|id| id.to_string())
                     .unwrap_or_default();
+                    // 0085: body cloud hits were scanned at prepare (before write moves bodies).
+                    let body_cloud_link_count = p.body_cloud_hits.len() as u64;
+                    if body_cloud_link_count > 0 {
+                        messages_with_body_cloud_links =
+                            messages_with_body_cloud_links.saturating_add(1);
+                        body_cloud_links_total =
+                            body_cloud_links_total.saturating_add(body_cloud_link_count);
+                        for (link_index, (url, url_source)) in p.body_cloud_hits.iter().enumerate()
+                        {
+                            body_cloud_link_rows.push(BodyCloudLinkRow {
+                                source_id: source_id.clone(),
+                                source_path: p.source_path.clone(),
+                                folder_path: p.folder_path.clone(),
+                                msg_nid: p.nid,
+                                link_index: link_index as u32,
+                                cloud_url: url.clone(),
+                                url_source: url_source.clone(),
+                                truncated: false,
+                                message_subject: p.subject.clone(),
+                                reason: REASON_BODY_CLOUD_LINK.into(),
+                            });
+                        }
+                    }
+                    if p.body_cloud_truncated {
+                        body_cloud_link_truncated_messages =
+                            body_cloud_link_truncated_messages.saturating_add(1);
+                        body_cloud_link_rows.push(BodyCloudLinkRow::truncated_marker(
+                            source_id.clone(),
+                            p.source_path.clone(),
+                            p.folder_path.clone(),
+                            p.nid,
+                            p.subject.clone(),
+                        ));
+                    }
                     export_rows.push(ExportMessageRow {
                         source_path: p.source_path.clone(),
                         folder_path: p.folder_path.clone(),
@@ -2346,6 +2392,7 @@ pub fn run_unique_pst_with_options(
                         source_id,
                         // true when source had BCC and write path omitted it (0082 rule 7).
                         bcc_suppressed: p.source_has_bcc && !args.include_bcc_recipients,
+                        body_cloud_link_count,
                         subject: p.subject.clone(),
                     });
                     // Bind pre-write QC meta to this export index / volume.
@@ -2583,6 +2630,19 @@ pub fn run_unique_pst_with_options(
         write_export_messages_csv(&export_messages_path, &[], args.ledger_path_mode)
     {
         let msg = format!("export_messages.csv write failed: {e}");
+        tracing::warn!("{msg}");
+        emit_log(stderr, &on_log, &format!("warning: {msg}"));
+        report_write_errors.push(msg);
+    }
+
+    // 0085: body cloud links CSV when report pack exists (independent of attach-ledger mode).
+    let body_cloud_csv_path = report_dir.join(EXPORT_BODY_CLOUD_LINKS_CSV_NAME);
+    if let Err(e) = write_body_cloud_links_csv(
+        &body_cloud_csv_path,
+        &body_cloud_link_rows,
+        args.ledger_path_mode,
+    ) {
+        let msg = format!("export_body_cloud_links.csv write failed: {e}");
         tracing::warn!("{msg}");
         emit_log(stderr, &on_log, &format!("warning: {msg}"));
         report_write_errors.push(msg);
@@ -2914,6 +2974,9 @@ pub fn run_unique_pst_with_options(
         mode_c_fallback_all_peers_incomplete_count: keep_set
             .stats
             .mode_c_fallback_all_peers_incomplete_count,
+        messages_with_body_cloud_links,
+        body_cloud_links_total,
+        body_cloud_link_truncated_messages,
     };
 
     // Fail-closed: if summary.json itself fails, force non-success exit even if
@@ -3142,6 +3205,16 @@ fn prepared_winner_from_canonical(
         !display_bcc.trim().is_empty() || msg.recipients.iter().any(|r| r.recipient_type.is_bcc());
     let sent_message_with_no_recipients =
         is_sent_message_with_no_recipients(msg.recipients.is_empty(), msg.message_flags);
+    // 0085: scan bodies before move into WriteMessage / before write-path mem::take.
+    // Body hits never set is_attach_incomplete (Mode A non-interaction).
+    let body_scan =
+        dedup_engine::scan_body_cloud_links(msg.body_html.as_deref(), msg.body_plain.as_deref());
+    let body_cloud_hits: Vec<(String, String)> = body_scan
+        .hits
+        .into_iter()
+        .map(|h| (h.url, h.source.as_str().to_string()))
+        .collect();
+    let body_cloud_truncated = body_scan.truncated;
     let (write_msg, _adapter_dropped) = from_canonical_message_owned(msg);
     let subject = write_msg.subject.clone();
     Ok(PreparedWinner {
@@ -3156,6 +3229,8 @@ fn prepared_winner_from_canonical(
         display_bcc,
         source_has_bcc,
         sent_message_with_no_recipients,
+        body_cloud_hits,
+        body_cloud_truncated,
     })
 }
 

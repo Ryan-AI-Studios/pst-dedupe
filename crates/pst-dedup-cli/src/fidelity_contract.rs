@@ -225,11 +225,9 @@ const CONTRACT_V1: &[ContractProperty] = &[
     },
     ContractProperty {
         name: "cloud_modern_attachments",
-        // BestEffort: attachment-table detect + ATTACH_CLOUD_LINK ledger explains incompleteness;
-        // offline payload is never Preserved. (ContractStatus has no KnownGap variant —
-        // DroppedByDesign would imply we intentionally ignore detection; we detect and declare.)
+        // BestEffort: attach-table + body-inline document-shaped detect offline; payload never Preserved.
         status: ContractStatus::BestEffort,
-        reason: "0084: attachment-table web-ref / OneDrive-SharePoint cloud attaches are detected (ATTACH_CLOUD_LINK + incomplete for Mode A); offline payload is NOT collected and must never be claimed Preserved. Body-only inline cloud links are not scanned (D-0084-body-cloud-links). Pointer metadata preserved on unique-PST when known; full named-prop re-emit residual D-0084-cloud-named-prop-write",
+        reason: "0084+0085: attachment-table web-ref / OneDrive-SharePoint cloud attaches are detected (ATTACH_CLOUD_LINK + incomplete for Mode A) AND body-inline document-shaped SharePoint/OneDrive URLs are detected offline (export_body_cloud_links.csv / body_cloud_link_count; commercial hosts only). Offline payload is NOT collected and must never be claimed Preserved. Body hits do NOT set is_attach_incomplete / Mode A promote (known gap: physical attach peer is NOT preferred over HTML-inline-only via Mode A). Sovereign-cloud host variants residual D-0085-sovereign-cloud-hosts. Pointer metadata preserved on unique-PST when known; full named-prop re-emit residual D-0084-cloud-named-prop-write",
     },
     ContractProperty {
         name: "PidNameAttachmentProviderType",
@@ -299,8 +297,23 @@ mod tests {
             p.reason
         );
         assert!(
-            p.reason.contains("D-0084-body-cloud-links") || p.reason.contains("Body-only"),
-            "reason must name body-inline residual: {}",
+            p.reason.contains("body-inline") || p.reason.contains("export_body_cloud_links"),
+            "reason must state body-inline detect closed: {}",
+            p.reason
+        );
+        assert!(
+            !p.reason.contains("D-0084-body-cloud-links"),
+            "body residual must be closed (no open D-0084-body-cloud-links): {}",
+            p.reason
+        );
+        assert!(
+            p.reason.contains("Mode A") || p.reason.contains("is_attach_incomplete"),
+            "reason must state Mode A body-only known gap: {}",
+            p.reason
+        );
+        assert!(
+            p.reason.contains("D-0085-sovereign-cloud-hosts") || p.reason.contains("Sovereign"),
+            "reason must name sovereign host residual: {}",
             p.reason
         );
         let provider = c.get("PidNameAttachmentProviderType").expect("present");

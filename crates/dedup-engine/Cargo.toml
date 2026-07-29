@@ -13,6 +13,7 @@ csv = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+regex = { workspace = true }
 pst-reader = { path = "../pst-reader" }
 
 [dev-dependencies]
