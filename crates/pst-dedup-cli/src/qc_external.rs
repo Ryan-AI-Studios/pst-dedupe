@@ -314,21 +314,22 @@ pub fn guess_scanpst_build(scanpst_path: &Path) -> Option<String> {
     None
 }
 
-/// Verify that the installed scanpst **documents** the exact `-no repair` token.
+/// Help/usage probe for documentation of `-no repair`.
 ///
-/// **Honesty (DoD-13 / rule 2):** `.accepts-no-repair` files and
-/// `PST_DEDUP_SCANPST_NO_REPAIR_OK` env markers are **not** accepted as proof —
-/// they can green-wash an incompatible binary that silently enters the legacy
-/// repairing path.
+/// **Honesty (DoD-13 / rule 2):** Help text alone is **not** behavioural proof that
+/// a real Microsoft `scanpst.exe` honours `-no repair` (asymmetric failure: unknown
+/// args fall into the legacy repairing path). Production path therefore **always
+/// Skips** unless the operator attests verification via
+/// `PST_DEDUP_SCANPST_OPERATOR_VERIFIED=1` (see [`run_scanpst`]).
 ///
-/// Only a help/usage probe that clearly documents "no repair" counts here.
-/// CI stubs that cannot print help may still prove acceptance **after** the run
-/// by writing `NO_REPAIR_MODE` into the log (see [`log_proves_no_repair_mode`]
-/// and the stub contract on [`run_scanpst`]).
+/// CI stubs (`.cmd`/`.bat`) may still prove acceptance **after** the run by writing
+/// `NO_REPAIR_MODE` into the log (see [`log_proves_no_repair_mode`]).
 ///
-/// Unverifiable ⇒ `Err` (caller skips Ok unless log proves mode).
+/// `.accepts-no-repair` files and `PST_DEDUP_SCANPST_NO_REPAIR_OK` env markers are
+/// never accepted as proof.
 pub fn verify_scanpst_no_repair(scanpst_path: &Path) -> Result<(), String> {
     // Help probe — look for "no repair" (case-insensitive) in usage text.
+    // Used only as a soft signal for stubs / diagnostics — not Ok proof for real MS tools.
     for help_arg in ["-?", "/?", "-help", "--help"] {
         let mut cmd = Command::new(scanpst_path);
         cmd.arg(help_arg)
@@ -348,6 +349,30 @@ pub fn verify_scanpst_no_repair(scanpst_path: &Path) -> Result<(), String> {
         "scanpst -no repair support unverifiable via help/version; skip rather than risk repair (rule 2 / D-0080-scanpst-arg)"
             .into(),
     )
+}
+
+/// Operator attestation that real Microsoft scanpst `-no repair` was verified on this host.
+///
+/// Required for production (non-stub) scanpst Ok path. Help text alone is not proof.
+fn scanpst_operator_verified() -> bool {
+    std::env::var("PST_DEDUP_SCANPST_OPERATOR_VERIFIED")
+        .map(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
+/// True when the binary looks like a CI/test stub (not Microsoft scanpst.exe).
+fn scanpst_looks_like_test_stub(scanpst_path: &Path) -> bool {
+    scanpst_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let el = e.to_ascii_lowercase();
+            el == "cmd" || el == "bat"
+        })
+        .unwrap_or(false)
 }
 
 /// CI stub contract: log line proving the process accepted `-no repair`.
@@ -382,13 +407,27 @@ pub fn log_indicates_scanpst_success(text: &str) -> bool {
 
 /// Run scanpst `-no repair` on a **local temp copy** of the deliverable.
 ///
-/// - Build must be ≥ [`SCANPST_MIN_BUILD`] from a **real** version source
-///   (sibling `.version` or `PST_DEDUP_SCANPST_BUILD`) — folder names alone never count.
-/// - Ok requires: no `.bak`, recognized success markers, **and** proof that `-no repair`
-///   was honored via either (a) help/usage that documents it, or (b) CI stub log line
-///   `NO_REPAIR_MODE` ([`log_proves_no_repair_mode`]). Never Ok from bare env/flag markers.
-/// - When `-no repair` cannot be proven, status is **Skipped** (D-0080-scanpst-arg residual).
-/// - `.bak` next to the copy ⇒ hard error (proves repair ran). Deliverable path is never mutated.
+/// ## Production Microsoft scanpst.exe (not a CI stub)
+///
+/// Help text alone is **not** proof that `-no repair` is honoured (DoD-13 / rule 2 /
+/// D-0080-scanpst-arg). Real `scanpst.exe` is **always Skipped** with reason
+/// `"operator residual D-0080-scanpst-arg; -no repair not behaviorally verified on this host"`
+/// unless **both**:
+/// 1. build ≥ [`SCANPST_MIN_BUILD`] from a real version source (`.version` /
+///    `PST_DEDUP_SCANPST_BUILD`), and
+/// 2. env `PST_DEDUP_SCANPST_OPERATOR_VERIFIED=1` (operator attestation that they
+///    verified `-no repair` behaviour on this host).
+///
+/// After operator attestation, Ok still requires no `.bak` + recognized success
+/// markers. `NO_REPAIR_MODE` is **not** required for real MS tools (they never emit it).
+///
+/// ## CI stubs (`.cmd` / `.bat`)
+///
+/// Stubs may still Ok when build is pinned **and** the log contains both a success
+/// marker and `NO_REPAIR_MODE` (or help documents `-no repair`). Never Ok from bare
+/// `.accepts-no-repair` / `PST_DEDUP_SCANPST_NO_REPAIR_OK` env alone.
+///
+/// `.bak` next to the copy ⇒ hard error (proves repair ran). Deliverable path is never mutated.
 pub fn run_scanpst(scanpst_path: &Path, pst_path: &Path, timeout: Duration) -> ScanpstResult {
     if !scanpst_path.is_file() {
         return ScanpstResult::skipped(format!("scanpst not found: {}", scanpst_path.display()));
@@ -419,26 +458,35 @@ pub fn run_scanpst(scanpst_path: &Path, pst_path: &Path, timeout: Duration) -> S
         );
     }
 
-    // Help-based preverify (not flag/env). Stubs may still prove via NO_REPAIR_MODE log.
-    let no_repair_help_ok = verify_scanpst_no_repair(scanpst_path).is_ok();
-    // Safe default: if help does not document -no repair, do not invoke the binary
-    // (asymmetric failure: unrecognized flags fall into the legacy repairing path).
-    // Exception: CI stubs prove acceptance post-run via NO_REPAIR_MODE — those stubs
-    // must still be invokable. We only skip pre-run when help fails **and** the binary
-    // is not a cmd/bat test stub (extension heuristic for local CI only).
-    let looks_like_test_stub = scanpst_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| {
-            let el = e.to_ascii_lowercase();
-            el == "cmd" || el == "bat"
-        })
-        .unwrap_or(false);
-    if !no_repair_help_ok && !looks_like_test_stub {
+    let looks_like_test_stub = scanpst_looks_like_test_stub(scanpst_path);
+
+    // Production real scanpst.exe: always Skip unless operator attests behavioural verify.
+    // Help text is NEVER sufficient Ok proof for a real Microsoft binary.
+    if !looks_like_test_stub && !scanpst_operator_verified() {
         return ScanpstResult {
             status: ExternalStatus::Skipped,
             reason: Some(
-                "scanpst -no repair support unverifiable via help; skip rather than risk repair (rule 2 / D-0080-scanpst-arg)"
+                "operator residual D-0080-scanpst-arg; -no repair not behaviorally verified on this host"
+                    .into(),
+            ),
+            build,
+            log_path: None,
+            bak_present: false,
+            log_summary: None,
+            hard_error: false,
+        };
+    }
+
+    // Help probe (soft). Stubs may still prove via NO_REPAIR_MODE log after the run.
+    let no_repair_help_ok = verify_scanpst_no_repair(scanpst_path).is_ok();
+    // Stubs without help still run (NO_REPAIR_MODE post-proof). Real binaries that
+    // reached here already have operator attestation + build pin.
+    if !no_repair_help_ok && !looks_like_test_stub && !scanpst_operator_verified() {
+        // Defensive: should already have returned above; keep residual skip.
+        return ScanpstResult {
+            status: ExternalStatus::Skipped,
+            reason: Some(
+                "operator residual D-0080-scanpst-arg; -no repair not behaviorally verified on this host"
                     .into(),
             ),
             build,
@@ -503,7 +551,15 @@ pub fn run_scanpst(scanpst_path: &Path, pst_path: &Path, timeout: Duration) -> S
         }
     }
 
-    let no_repair_proven = no_repair_help_ok || log_proves_no_repair_mode(&log_text);
+    // Stubs: help docs OR NO_REPAIR_MODE log line. Real MS tool after operator
+    // attestation: NO_REPAIR_MODE is never emitted by Microsoft — success markers
+    // alone suffice (operator residual already gated).
+    let no_repair_proven = if looks_like_test_stub {
+        no_repair_help_ok || log_proves_no_repair_mode(&log_text)
+    } else {
+        // Real binary path only reachable with PST_DEDUP_SCANPST_OPERATOR_VERIFIED=1.
+        true
+    };
 
     let result = if bak_present {
         ScanpstResult {
@@ -574,11 +630,11 @@ pub fn run_scanpst(scanpst_path: &Path, pst_path: &Path, timeout: Duration) -> S
                             hard_error: false,
                         }
                     } else {
-                        // Success markers without -no repair proof ⇒ never Ok.
+                        // Success markers without -no repair proof ⇒ never Ok (stub path).
                         ScanpstResult {
                             status: ExternalStatus::Skipped,
                             reason: Some(
-                                "scanpst log has success markers but -no repair not proven (help docs or NO_REPAIR_MODE stub line required; D-0080-scanpst-arg)"
+                                "scanpst log has success markers but -no repair not proven (CI stub requires NO_REPAIR_MODE log line or help docs; D-0080-scanpst-arg)"
                                     .into(),
                             ),
                             build,
@@ -1177,5 +1233,34 @@ mod tests {
         assert!(log_indicates_scanpst_success("Scan complete. 0 errors."));
         assert!(!log_indicates_scanpst_success("lorem ipsum banner"));
         assert!(!log_indicates_scanpst_success(""));
+    }
+
+    /// Real-looking scanpst.exe (not .cmd/.bat) always Skips without operator attestation,
+    /// even when build is pinned — help text alone is not behavioural proof (DoD-13).
+    #[test]
+    fn real_exe_skips_without_operator_verified() {
+        let dir = TempDir::new().expect("tmp");
+        let office = dir.path().join("Office16");
+        fs::create_dir_all(&office).expect("dir");
+        // Non-stub extension: treated as production Microsoft binary path.
+        let fake_exe = office.join("SCANPST.exe");
+        fs::write(&fake_exe, b"MZ-fake-not-runnable").expect("exe");
+        pin_scanpst_build(&fake_exe);
+        let pst = dir.path().join("d.pst");
+        fs::write(&pst, b"x").expect("pst");
+        let prev_op = std::env::var("PST_DEDUP_SCANPST_OPERATOR_VERIFIED").ok();
+        std::env::remove_var("PST_DEDUP_SCANPST_OPERATOR_VERIFIED");
+        let r = run_scanpst(&fake_exe, &pst, Duration::from_secs(5));
+        if let Some(v) = prev_op {
+            std::env::set_var("PST_DEDUP_SCANPST_OPERATOR_VERIFIED", v);
+        }
+        assert_eq!(r.status, ExternalStatus::Skipped, "{r:?}");
+        let reason = r.reason.as_deref().unwrap_or("").to_ascii_lowercase();
+        assert!(
+            reason.contains("operator residual")
+                || reason.contains("d-0080-scanpst-arg")
+                || reason.contains("not behaviorally verified"),
+            "expected operator residual skip reason: {r:?}"
+        );
     }
 }

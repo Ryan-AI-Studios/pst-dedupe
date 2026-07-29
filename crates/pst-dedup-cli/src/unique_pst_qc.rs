@@ -465,20 +465,38 @@ pub fn candidate_from_write_msg(input: CandidateFromWriteMsg<'_>) -> QcSampleCan
     }
 }
 
-/// True when `filename` is in the message's attach-ledger fail set (case-insensitive).
-/// Empty/unnamed source attaches match only empty ledger-fail names (not any fail).
-fn attach_ledger_explains(cand: &QcSampleCandidate, filename: &str) -> bool {
+/// Effective ledger-fail names: candidate (live export) ∪ clean-room digest flags.
+fn attach_ledger_explains_effective(
+    cand: &QcSampleCandidate,
+    digest: Option<&ContentDigestEntry>,
+    filename: &str,
+) -> bool {
     let target = filename.trim().to_ascii_lowercase();
-    cand.ledger_failed_attach_names.iter().any(|n| {
-        let n = n.trim().to_ascii_lowercase();
-        n == target
+    if cand
+        .ledger_failed_attach_names
+        .iter()
+        .any(|n| n.trim().to_ascii_lowercase() == target)
+    {
+        return true;
+    }
+    digest.is_some_and(|d| {
+        d.ledger_failed_attach_names
+            .iter()
+            .any(|n| n.trim().to_ascii_lowercase() == target)
     })
 }
 
 /// True when a body-specific fidelity flag may explain body/digest differences.
 /// Never use for CC, subject, or attachment presence.
-fn body_loss_explained(cand: &QcSampleCandidate) -> bool {
-    cand.body_unavailable || cand.body_incomplete || cand.crc_suspect
+/// Prefers live candidate flags; falls back to clean-room digest flags (DoD-21).
+fn body_loss_explained_with_digest(
+    cand: &QcSampleCandidate,
+    digest: Option<&ContentDigestEntry>,
+) -> bool {
+    if cand.body_unavailable || cand.body_incomplete || cand.crc_suspect {
+        return true;
+    }
+    digest.is_some_and(|d| d.body_unavailable || d.body_incomplete || d.crc_suspect)
 }
 
 /// Normalize display address strings for comparison (strip quotes / angle brackets).
@@ -537,6 +555,22 @@ pub struct ContentDigestEntry {
     /// Each prop is classified via the fidelity allowlist; unknown ⇒ `unexplained_loss`.
     #[serde(default)]
     pub extra_source_props: Vec<String>,
+    /// Fidelity explanation flags persisted at export so clean-room `qc-pst` can
+    /// reclassify soft-fails the same way as the live source-differential path (DoD-21).
+    #[serde(default)]
+    pub has_degraded: bool,
+    #[serde(default)]
+    pub body_unavailable: bool,
+    #[serde(default)]
+    pub body_incomplete: bool,
+    #[serde(default)]
+    pub crc_suspect: bool,
+    #[serde(default)]
+    pub has_ledger_fail: bool,
+    /// Filenames with attach-ledger Fail events (case-preserving). Explains missing
+    /// output attaches only when the filename matches (case-insensitive).
+    #[serde(default)]
+    pub ledger_failed_attach_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1115,7 +1149,8 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
     report
 }
 
-/// Merge two independent-reader results (worst status wins; prefer Failed > Timeout > Ok > Skipped).
+/// Merge two independent-reader results (worst status wins).
+/// Ranking: Failed > Timeout > Skipped > Ok — any Skipped volume prevents aggregate Ok.
 fn merge_independent_reader(
     a: &IndependentReaderResult,
     b: &IndependentReaderResult,
@@ -1173,13 +1208,17 @@ fn merge_scanpst(a: &ScanpstResult, b: &ScanpstResult) -> ScanpstResult {
     }
 }
 
+/// Worst-status ranking for multi-volume external aggregates.
+///
+/// Order: **Failed > Timeout > Skipped > Ok**.
+/// A volume that was not checked (`Skipped`) must not green-wash aggregate `Ok`.
 fn worse_external_status(a: ExternalStatus, b: ExternalStatus) -> ExternalStatus {
     use ExternalStatus::*;
     let rank = |s: &ExternalStatus| match s {
-        Failed => 3,
-        Timeout => 2,
+        Failed => 4,
+        Timeout => 3,
+        Skipped => 2,
         Ok => 1,
-        Skipped => 0,
     };
     if rank(&b) > rank(&a) {
         b
@@ -1202,7 +1241,13 @@ enum MatchKind {
     HashMismatch(String),
 }
 
-/// Fail closed when `export_messages.csv` is missing/short/duplicated vs volumes.
+/// Fail closed when `export_messages.csv` is missing/short/duplicated/orphaned vs volumes.
+///
+/// Strict membership rules (DoD-3/6/21):
+/// - every export row `volume_index` must be in the declared volume set (orphan ⇒ defect)
+/// - global `export_message_index` unique
+/// - per-volume row count exact-match `messages_written`
+/// - per-volume `export_message_index` set unique (also covered by global unique)
 fn validate_export_metadata_coverage(
     volumes: &[VolumeReportRow],
     export_rows: &[ExportMessageRow],
@@ -1212,7 +1257,24 @@ fn validate_export_metadata_coverage(
 ) {
     let total_written: u64 = volumes.iter().map(|v| v.messages_written).sum();
     if total_written == 0 && volumes.iter().all(|v| v.messages_written == 0) {
-        // Zero-winner / empty export: empty CSV is OK.
+        // Zero-winner / empty export: empty CSV is OK only when no orphan rows either.
+        if export_rows.is_empty() {
+            return;
+        }
+        // Rows present while all volumes claim zero messages ⇒ defect (orphan / stale CSV).
+        counts.record(FindingClass::Defect);
+        findings_list.push(QcFinding {
+            class: FindingClass::Defect,
+            property: "export_messages_orphan_rows".into(),
+            volume_index: 0,
+            source_path: String::new(),
+            source_nid: 0,
+            message_id_norm: String::new(),
+            detail: format!(
+                "export_messages.csv has {} row(s) but volumes report messages_written_total=0",
+                export_rows.len()
+            ),
+        });
         return;
     }
 
@@ -1232,7 +1294,35 @@ fn validate_export_metadata_coverage(
         return;
     }
 
-    // Duplicate export_message_index ⇒ defect (join key must be unique).
+    let declared_vols: BTreeSet<u32> = volumes.iter().map(|v| v.volume_index).collect();
+
+    // Every export row must reference a declared volume (orphan volume_index ⇒ defect).
+    // Without this, wrong-volume-index rows can leave per-volume counts matching while
+    // unclaimed messages are never compared in the volume loop (false green).
+    let mut orphan_vols: BTreeSet<u32> = BTreeSet::new();
+    for r in export_rows {
+        if !declared_vols.contains(&r.volume_index) {
+            orphan_vols.insert(r.volume_index);
+        }
+    }
+    if !orphan_vols.is_empty() {
+        counts.record(FindingClass::Defect);
+        findings_list.push(QcFinding {
+            class: FindingClass::Defect,
+            property: "export_messages_orphan_volume_index".into(),
+            volume_index: 0,
+            source_path: String::new(),
+            source_nid: 0,
+            message_id_norm: String::new(),
+            detail: format!(
+                "export_messages.csv row(s) reference volume_index not in declared volumes {:?}: orphan={:?}",
+                declared_vols.iter().collect::<Vec<_>>(),
+                orphan_vols.iter().collect::<Vec<_>>()
+            ),
+        });
+    }
+
+    // Duplicate export_message_index ⇒ defect (join key must be unique globally).
     let mut seen_idx: BTreeSet<u64> = BTreeSet::new();
     let mut dups: Vec<u64> = Vec::new();
     for r in export_rows {
@@ -1256,12 +1346,13 @@ fn validate_export_metadata_coverage(
         });
     }
 
-    // Per-volume row count must match messages_written.
+    // Per-volume: exact row count match AND unique export_message_index set within volume.
     for vol in volumes {
-        let row_count = export_rows
+        let vol_rows: Vec<&ExportMessageRow> = export_rows
             .iter()
             .filter(|r| r.volume_index == vol.volume_index)
-            .count() as u64;
+            .collect();
+        let row_count = vol_rows.len() as u64;
         if row_count != vol.messages_written {
             let (class, _) = contract.classify("message_content_digest", false);
             let _ = class;
@@ -1276,6 +1367,29 @@ fn validate_export_metadata_coverage(
                 detail: format!(
                     "export_messages.csv rows for volume {} = {row_count}, messages_written = {}",
                     vol.volume_index, vol.messages_written
+                ),
+            });
+        }
+        let mut vol_idxs: BTreeSet<u64> = BTreeSet::new();
+        let mut vol_dups: Vec<u64> = Vec::new();
+        for r in &vol_rows {
+            if !vol_idxs.insert(r.export_message_index) {
+                vol_dups.push(r.export_message_index);
+            }
+        }
+        if !vol_dups.is_empty() {
+            counts.record(FindingClass::Defect);
+            findings_list.push(QcFinding {
+                class: FindingClass::Defect,
+                property: "export_message_index_duplicate_in_volume".into(),
+                volume_index: vol.volume_index,
+                source_path: String::new(),
+                source_nid: 0,
+                message_id_norm: String::new(),
+                detail: format!(
+                    "duplicate export_message_index within volume {}: {:?}",
+                    vol.volume_index,
+                    vol_dups.iter().take(8).collect::<Vec<_>>()
                 ),
             });
         }
@@ -1313,6 +1427,14 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
     let mut findings = Vec::new();
     let mut attachments_compared = 0u64;
     let mut skipped_source = false;
+    // Clean-room digest entry for this candidate (fidelity flags + field payload).
+    let digest_for_cand: Option<&ContentDigestEntry> = existing.and_then(|digests| {
+        digests
+            .volumes
+            .iter()
+            .flat_map(|v| v.messages.iter())
+            .find(|m| m.export_message_index == cand.export_message_index)
+    });
 
     // Resolve source-side detail
     let source_detail: Option<MessageContentDetail> = if source_differential {
@@ -1463,6 +1585,13 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             .collect(),
         // Export path always empty; production extras only via crafted digests / tests.
         extra_source_props: Vec::new(),
+        // Persist fidelity flags so clean-room qc-pst can explain soft-fails (DoD-21).
+        has_degraded: cand.has_degraded,
+        body_unavailable: cand.body_unavailable,
+        body_incomplete: cand.body_incomplete,
+        crc_suspect: cand.crc_suspect,
+        has_ledger_fail: cand.has_ledger_fail,
+        ledger_failed_attach_names: cand.ledger_failed_attach_names.clone(),
     };
 
     let Some(out) = out_detail else {
@@ -1546,7 +1675,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             let fnm_key = fnm.to_ascii_lowercase();
             if ph.is_empty() {
                 // Empty source hash: only filename-specific ledger fail explains.
-                let explained = attach_ledger_explains(cand, fnm);
+                let explained = attach_ledger_explains_effective(cand, digest_for_cand, fnm);
                 let (class, _) = contract.classify("attachment_stream_soft_fail", explained);
                 findings.push(QcFinding {
                     class,
@@ -1613,7 +1742,8 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                 None => {
                     // Missing in output: explain only when **this filename** is in the
                     // attach-ledger fail set (never message-wide has_ledger_fail alone).
-                    if attach_ledger_explains(cand, fnm) {
+                    // Clean-room: also honor ledger names persisted on content digests.
+                    if attach_ledger_explains_effective(cand, digest_for_cand, fnm) {
                         let (class, _) = contract.classify("attachment_stream_soft_fail", true);
                         findings.push(QcFinding {
                             class,
@@ -1713,15 +1843,22 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             detail: format!("to src={:?} out={:?}", src.display_to, out.display_to),
         });
     }
+    let body_explained = body_loss_explained_with_digest(cand, digest_for_cand);
+    let body_unavail_flag =
+        cand.body_unavailable || digest_for_cand.is_some_and(|d| d.body_unavailable);
+    let body_incompl_flag =
+        cand.body_incomplete || digest_for_cand.is_some_and(|d| d.body_incomplete);
+    let crc_flag = cand.crc_suspect || digest_for_cand.is_some_and(|d| d.crc_suspect);
+
     if !body_len_match {
-        if body_loss_explained(cand) {
-            let prop = if cand.body_unavailable {
+        if body_explained {
+            let prop = if body_unavail_flag {
                 "body_unavailable"
             } else {
                 "body_plain"
             };
             let (class, _) = contract.classify(
-                if cand.body_unavailable {
+                if body_unavail_flag {
                     "body_unavailable"
                 } else {
                     // Best-effort path: treat as explained soft body under incomplete/CRC.
@@ -1740,9 +1877,9 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                     "body lengths differ under body fidelity flag (explained) src_plain={} out_plain={} flags=bu:{} bi:{} crc:{}",
                     src.body_plain_len,
                     out.body_plain_len,
-                    cand.body_unavailable,
-                    cand.body_incomplete,
-                    cand.crc_suspect
+                    body_unavail_flag,
+                    body_incompl_flag,
+                    crc_flag
                 ),
             });
         } else {
@@ -1767,7 +1904,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
     } else if !digest_match {
         // Digest mismatch: explain only with body-specific flags when non-body fields match.
         let non_body_ok = subject_match && to_match && cc_match;
-        if body_loss_explained(cand) && non_body_ok {
+        if body_explained && non_body_ok {
             let (class, _) = contract.classify("body_unavailable", true);
             findings.push(QcFinding {
                 class,
@@ -2209,7 +2346,7 @@ fn hydrate_export_subjects_from_digests(report_dir: &Path, rows: &mut [ExportMes
     }
 }
 
-/// Hydrate candidate subjects / body lens from digests for no-MID clean-room matching.
+/// Hydrate candidate subjects / body lens / fidelity flags from digests for clean-room QC.
 fn hydrate_candidates_from_digests(report_dir: &Path, candidates: &mut [QcSampleCandidate]) {
     let Some(digests) = load_content_digests(&report_dir.join("content_digests.json")) else {
         return;
@@ -2243,10 +2380,32 @@ fn hydrate_candidates_from_digests(report_dir: &Path, candidates: &mut [QcSample
             c.attach_count = m.attaches.len();
             c.max_attach_size = m.attaches.iter().map(|a| a.size).max().unwrap_or(0);
         }
+        // Reconstruct fidelity explanation flags from persisted digests (DoD-21).
+        if m.has_degraded {
+            c.has_degraded = true;
+        }
+        if m.body_unavailable {
+            c.body_unavailable = true;
+        }
+        if m.body_incomplete {
+            c.body_incomplete = true;
+        }
+        if m.crc_suspect {
+            c.crc_suspect = true;
+        }
+        if m.has_ledger_fail || !m.ledger_failed_attach_names.is_empty() {
+            c.has_ledger_fail = true;
+        }
+        if c.ledger_failed_attach_names.is_empty() && !m.ledger_failed_attach_names.is_empty() {
+            c.ledger_failed_attach_names = m.ledger_failed_attach_names.clone();
+        }
     }
 }
 
 /// Detect parents_only / no-attachments export from summary.json.
+///
+/// Fail-closed when the export section is missing: return false so missing attaches
+/// surface as defects rather than silently explained by a guessed policy.
 fn load_parents_only_for_qc(report_dir: &Path) -> bool {
     let summary_path = report_dir.join("summary.json");
     let Ok(text) = fs::read_to_string(&summary_path) else {
@@ -2255,6 +2414,10 @@ fn load_parents_only_for_qc(report_dir: &Path) -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
         return false;
     };
+    // Missing export section ⇒ cannot infer policy; fail closed (false).
+    if v.get("export").is_none() && v.get("family_policy").is_none() {
+        return false;
+    }
     let family = v
         .get("family_policy")
         .and_then(|x| x.as_str())
@@ -2271,6 +2434,13 @@ fn load_parents_only_for_qc(report_dir: &Path) -> bool {
             return true;
         }
     }
+    // Explicit no_attachments flag on summary when present.
+    if v.pointer("/export/no_attachments")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
     false
 }
 
@@ -2280,19 +2450,32 @@ fn load_volumes_for_qc(report_dir: &Path, out_pst: &Path) -> Result<Vec<VolumeRe
         let v: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&summary_path).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
+        // When summary exists but has no export/volumes, fall through carefully —
+        // do not invent messages_written from partial fields (fail closed via structure).
         if let Some(arr) = v.pointer("/export/volumes").and_then(|x| x.as_array()) {
             let mut rows = Vec::new();
             for (i, item) in arr.iter().enumerate() {
+                // Require path and messages_written when a volume object is present;
+                // silent default-to-0 for messages_written would green-wash missing metadata.
+                let path = item
+                    .get("path")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let messages_written = match item.get("messages_written").and_then(|x| x.as_u64()) {
+                    Some(n) => n,
+                    None => {
+                        return Err(format!(
+                            "summary.json export/volumes[{i}] missing messages_written (strict metadata)"
+                        ));
+                    }
+                };
                 rows.push(VolumeReportRow {
                     volume_index: item
                         .get("volume_index")
                         .and_then(|x| x.as_u64())
-                        .unwrap_or(i as u64) as u32,
-                    path: item
-                        .get("path")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string(),
+                        .unwrap_or(i as u64 + 1) as u32,
+                    path,
                     bytes: item.get("bytes").and_then(|x| x.as_u64()).unwrap_or(0),
                     sha256_hex: item
                         .get("sha256_hex")
@@ -2304,10 +2487,7 @@ fn load_volumes_for_qc(report_dir: &Path, out_pst: &Path) -> Result<Vec<VolumeRe
                         .and_then(|x| x.as_str())
                         .unwrap_or("")
                         .to_string(),
-                    messages_written: item
-                        .get("messages_written")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(0),
+                    messages_written,
                     finalized_early: item
                         .get("finalized_early")
                         .and_then(|x| x.as_bool())
@@ -2336,7 +2516,9 @@ fn load_volumes_for_qc(report_dir: &Path, out_pst: &Path) -> Result<Vec<VolumeRe
             }
         }
     }
-    // Fallback: single volume = out_pst
+    // Fallback: single volume = out_pst. messages_written=0 is intentional —
+    // structure compare will defect if the PST has messages and CSV is empty
+    // (validate_export_metadata_coverage) or count mismatches after open.
     let meta = fs::metadata(out_pst).map_err(|e| e.to_string())?;
     Ok(vec![VolumeReportRow {
         volume_index: 1,
@@ -2344,7 +2526,7 @@ fn load_volumes_for_qc(report_dir: &Path, out_pst: &Path) -> Result<Vec<VolumeRe
         bytes: meta.len(),
         sha256_hex: String::new(),
         md5_hex: String::new(),
-        messages_written: 0, // unknown — structure will report found
+        messages_written: 0,
         finalized_early: false,
         volume_exceeded_soft_limit: false,
     }])
@@ -2698,6 +2880,94 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.property == "export_messages_row_count"));
+    }
+
+    /// Wrong-volume-index orphan rows: declared vol1 count can still match while an
+    /// extra row points at volume 99 — must hard_fail (membership strictness).
+    #[test]
+    fn export_metadata_orphan_volume_index_is_defect() {
+        let volumes = vec![VolumeReportRow {
+            volume_index: 1,
+            path: "out.pst".into(),
+            bytes: 1,
+            sha256_hex: String::new(),
+            md5_hex: String::new(),
+            messages_written: 1,
+            finalized_early: false,
+            volume_exceeded_soft_limit: false,
+        }];
+        let rows = vec![
+            ExportMessageRow {
+                source_path: "a.pst".into(),
+                folder_path: "Inbox".into(),
+                nid: 1,
+                message_id_norm: "m1".into(),
+                edrm_mih: String::new(),
+                content_hash_hex: String::new(),
+                volume_path: "out.pst".into(),
+                volume_index: 1,
+                export_message_index: 1,
+                attachments_failed_count: 0,
+                duplicate_source_count: 0,
+                duplicate_sources: String::new(),
+                subject: "s1".into(),
+            },
+            // Orphan: volume_index 99 not declared — per-vol1 count still matches (=1).
+            ExportMessageRow {
+                source_path: "a.pst".into(),
+                folder_path: "Inbox".into(),
+                nid: 2,
+                message_id_norm: "m2".into(),
+                edrm_mih: String::new(),
+                content_hash_hex: String::new(),
+                volume_path: "ghost.pst".into(),
+                volume_index: 99,
+                export_message_index: 2,
+                attachments_failed_count: 0,
+                duplicate_source_count: 0,
+                duplicate_sources: String::new(),
+                subject: "s2".into(),
+            },
+        ];
+        let contract = FidelityContract::v1();
+        let mut counts = QcFindingCounts::default();
+        let mut findings = Vec::new();
+        validate_export_metadata_coverage(&volumes, &rows, &contract, &mut counts, &mut findings);
+        assert!(
+            counts.hard_fail(),
+            "orphan volume_index with matching declared count must hard_fail: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.property == "export_messages_orphan_volume_index"),
+            "expected orphan_volume_index finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn worse_external_status_skipped_beats_ok() {
+        use crate::qc_external::ExternalStatus;
+        assert_eq!(
+            worse_external_status(ExternalStatus::Ok, ExternalStatus::Skipped),
+            ExternalStatus::Skipped
+        );
+        assert_eq!(
+            worse_external_status(ExternalStatus::Skipped, ExternalStatus::Ok),
+            ExternalStatus::Skipped
+        );
+        assert_eq!(
+            worse_external_status(ExternalStatus::Skipped, ExternalStatus::Failed),
+            ExternalStatus::Failed
+        );
+        assert_eq!(
+            worse_external_status(ExternalStatus::Ok, ExternalStatus::Failed),
+            ExternalStatus::Failed
+        );
+        assert_eq!(
+            worse_external_status(ExternalStatus::Timeout, ExternalStatus::Skipped),
+            ExternalStatus::Timeout
+        );
     }
 
     #[test]

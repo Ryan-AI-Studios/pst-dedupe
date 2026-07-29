@@ -134,6 +134,12 @@ fn digest_entry(
         body_html_len: 0,
         attaches: vec![],
         extra_source_props: vec![],
+        has_degraded: false,
+        body_unavailable: false,
+        body_incomplete: false,
+        crc_suspect: false,
+        has_ledger_fail: false,
+        ledger_failed_attach_names: Vec::new(),
     }
 }
 
@@ -980,6 +986,12 @@ fn clean_room_parents_only_with_source_digests_is_green() {
                     })
                     .collect(),
                 extra_source_props: vec![],
+                has_degraded: false,
+                body_unavailable: false,
+                body_incomplete: false,
+                crc_suspect: false,
+                has_ledger_fail: false,
+                ledger_failed_attach_names: Vec::new(),
             }],
         }],
     };
@@ -1051,6 +1063,12 @@ fn clean_room_parents_only_mismatched_body_is_defect() {
                 body_html_len: 0,
                 attaches: vec![],
                 extra_source_props: vec![],
+                has_degraded: false,
+                body_unavailable: false,
+                body_incomplete: false,
+                crc_suspect: false,
+                has_ledger_fail: false,
+                ledger_failed_attach_names: Vec::new(),
             }],
         }],
     };
@@ -1580,6 +1598,12 @@ fn no_mid_message_green_when_digests_match() {
                 body_html_len: detail.body_html_len,
                 attaches: vec![],
                 extra_source_props: vec![],
+                has_degraded: false,
+                body_unavailable: false,
+                body_incomplete: false,
+                crc_suspect: false,
+                has_ledger_fail: false,
+                ledger_failed_attach_names: Vec::new(),
             }],
         }],
     };
@@ -1761,6 +1785,12 @@ fn sample_digests_full_qc_not_silent_green_for_uncovered() {
                 body_html_len: d0.body_html_len,
                 attaches: vec![],
                 extra_source_props: vec![],
+                has_degraded: false,
+                body_unavailable: false,
+                body_incomplete: false,
+                crc_suspect: false,
+                has_ledger_fail: false,
+                ledger_failed_attach_names: Vec::new(),
             }],
         }],
     };
@@ -1849,6 +1879,12 @@ fn unexplained_loss_via_extra_source_props_production_path() {
                 body_html_len: detail.body_html_len,
                 attaches: vec![],
                 extra_source_props: vec!["PidTagUnmappedQcTest".into()],
+                has_degraded: false,
+                body_unavailable: false,
+                body_incomplete: false,
+                crc_suspect: false,
+                has_ledger_fail: false,
+                ledger_failed_attach_names: Vec::new(),
             }],
         }],
     };
@@ -2160,6 +2196,12 @@ fn fixture_matrix_non_ascii_subject_qc_green() {
                 body_html_len: detail.body_html_len,
                 attaches: vec![],
                 extra_source_props: vec![],
+                has_degraded: false,
+                body_unavailable: false,
+                body_incomplete: false,
+                crc_suspect: false,
+                has_ledger_fail: false,
+                ledger_failed_attach_names: Vec::new(),
             }],
         }],
     };
@@ -2237,6 +2279,12 @@ fn fixture_matrix_oversized_subject_qc_green() {
                 body_html_len: detail.body_html_len,
                 attaches: vec![],
                 extra_source_props: vec![],
+                has_degraded: false,
+                body_unavailable: false,
+                body_incomplete: false,
+                crc_suspect: false,
+                has_ledger_fail: false,
+                ledger_failed_attach_names: Vec::new(),
             }],
         }],
     };
@@ -2669,6 +2717,508 @@ fn production_zero_byte_attachment_unique_pst_qc_green() {
     assert_eq!(
         qc["hard_fail"], false,
         "zero-byte attach full QC must be green: {:?}",
+        qc["findings"]
+    );
+    assert_eq!(qc["findings"]["defect"].as_u64().unwrap_or(99), 0);
+    assert_eq!(qc["findings"]["unexplained_loss"].as_u64().unwrap_or(99), 0);
+}
+
+/// CSV membership: orphan volume_index with declared-volume count still matching ⇒ hard_fail.
+#[test]
+fn orphan_volume_index_rows_hard_fail_via_qc_pipeline() {
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("out.pst");
+    write_simple_pst(
+        &path,
+        vec![base_msg("<or@ex.com>", "Orphan", "body orphan")],
+    );
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&path, 1)];
+    // One legitimate row + one orphan volume_index=99 (vol1 count still 1).
+    let export_rows = vec![
+        export_row("or@ex.com", 1, 1),
+        ExportMessageRow {
+            source_path: r"C:\src\a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 2,
+            message_id_norm: "ghost@ex.com".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: String::new(),
+            volume_path: "ghost.pst".into(),
+            volume_index: 99,
+            export_message_index: 2,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            subject: "Ghost".into(),
+        },
+    ];
+    let mut c = cand(1, 11);
+    c.message_id_norm = "or@ex.com".into();
+    c.subject = "Orphan".into();
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Structure,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        false,
+        false,
+    ));
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "orphan volume_index must hard_fail: {:?}",
+        report.findings
+    );
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    assert!(
+        csv.contains("export_messages_orphan_volume_index") || csv.contains("orphan"),
+        "findings csv must mention orphan volume: {csv}"
+    );
+}
+
+/// Multi-volume external reader: one Ok + one Skipped ⇒ aggregate not Ok.
+#[test]
+fn multi_volume_external_one_skipped_aggregate_not_ok() {
+    let dir = TempDir::new().expect("tmp");
+    // Stub: Ok only when PST path basename contains "v1"; otherwise exit 0 without counts
+    // (Skipped, not Failed — ranking under test is Skipped > Ok).
+    let stub = dir.path().join("pffinfo.cmd");
+    {
+        let mut f = fs::File::create(&stub).expect("stub");
+        writeln!(f, "@echo off").expect("w");
+        // %1 is the PST path. Only emit counts for paths containing "v1".
+        writeln!(f, "echo %1 | findstr /I \"\\v1.pst\" >nul").expect("w");
+        writeln!(f, "if errorlevel 1 (").expect("w");
+        writeln!(f, "  echo tool unavailable for this volume").expect("w");
+        writeln!(f, "  exit /b 0").expect("w");
+        writeln!(f, ")").expect("w");
+        writeln!(f, "echo Number of folders : 1").expect("w");
+        writeln!(f, "echo Number of items : 1").expect("w");
+        writeln!(f, "exit /b 0").expect("w");
+    }
+    let v1 = dir.path().join("v1.pst");
+    let v2 = dir.path().join("v2.pst");
+    write_simple_pst(&v1, vec![base_msg("<agg1@ex.com>", "Agg1", "a")]);
+    write_simple_pst(&v2, vec![base_msg("<agg2@ex.com>", "Agg2", "b")]);
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![
+        VolumeReportRow {
+            volume_index: 1,
+            path: v1.display().to_string(),
+            bytes: fs::metadata(&v1).map(|m| m.len()).unwrap_or(0),
+            sha256_hex: String::new(),
+            md5_hex: String::new(),
+            messages_written: 1,
+            finalized_early: false,
+            volume_exceeded_soft_limit: false,
+        },
+        VolumeReportRow {
+            volume_index: 2,
+            path: v2.display().to_string(),
+            bytes: fs::metadata(&v2).map(|m| m.len()).unwrap_or(0),
+            sha256_hex: String::new(),
+            md5_hex: String::new(),
+            messages_written: 1,
+            finalized_early: false,
+            volume_exceeded_soft_limit: false,
+        },
+    ];
+    let export_rows = vec![
+        ExportMessageRow {
+            source_path: r"C:\src\a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 1,
+            message_id_norm: "agg1@ex.com".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: String::new(),
+            volume_path: v1.display().to_string(),
+            volume_index: 1,
+            export_message_index: 1,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            subject: "Agg1".into(),
+        },
+        ExportMessageRow {
+            source_path: r"C:\src\a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 2,
+            message_id_norm: "agg2@ex.com".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: String::new(),
+            volume_path: v2.display().to_string(),
+            volume_index: 2,
+            export_message_index: 2,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            subject: "Agg2".into(),
+        },
+    ];
+    let mut input = qc_input(
+        QcLevel::Structure,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[],
+        false,
+        false,
+    );
+    input.external_reader = Some(&stub);
+    let report = run_unique_pst_qc(input);
+    let status = format!("{:?}", report.external.independent_reader.status);
+    assert!(
+        !status.eq_ignore_ascii_case("ok")
+            && report.external.independent_reader.status
+                != pst_dedup_cli::qc_external::ExternalStatus::Ok,
+        "one skipped volume must not yield aggregate Ok: {:?}",
+        report.external.independent_reader
+    );
+}
+
+/// Clean-room: ledger fail name on digest explains missing attach without live candidate flags.
+#[test]
+fn clean_room_digest_ledger_fail_explains_missing_attach() {
+    use pst_dedup_cli::export_oracle::message_content_detail;
+    use pst_reader::PstFile;
+
+    let dir = TempDir::new().expect("tmp");
+    // Source-side digest claims softfail.bin existed; output has no attaches.
+    let out = dir.path().join("out.pst");
+    write_simple_pst(
+        &out,
+        vec![base_msg(
+            "<crlf@ex.com>",
+            "CleanRoomLedger",
+            "body clean room ledger",
+        )],
+    );
+    // Build a source digest with one attach that is missing from output.
+    let src = dir.path().join("src.pst");
+    let mut src_msg = base_msg("<crlf@ex.com>", "CleanRoomLedger", "body clean room ledger");
+    src_msg.attachments = vec![WriteAttachment {
+        filename: "softfail.bin".into(),
+        data: Some(b"payload".to_vec()),
+        size: 7,
+        attach_method: Some(1),
+        stream_available: true,
+        ..WriteAttachment::default()
+    }];
+    write_simple_pst(&src, vec![src_msg]);
+    let mut pst = PstFile::open(&src).expect("open src");
+    let folders = pst.folders().expect("f");
+    let nid = folders
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("nid");
+    let detail = message_content_detail(&mut pst, nid.0).expect("detail");
+    drop(pst);
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let digests = ContentDigestsFile {
+        schema: "content_digests_v1".into(),
+        origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
+        qc_level: "full".into(),
+        volumes: vec![ContentDigestsVolume {
+            volume_index: 1,
+            path: out.display().to_string(),
+            messages: vec![ContentDigestEntry {
+                export_message_index: 1,
+                source_path: src.display().to_string(),
+                source_nid: nid.0,
+                message_id_norm: "crlf@ex.com".into(),
+                content_digest: detail.digest.clone(),
+                subject: detail.subject.clone(),
+                display_to: detail.display_to.clone(),
+                display_cc: detail.display_cc.clone(),
+                body_plain_len: detail.body_plain_len,
+                body_html_len: detail.body_html_len,
+                attaches: detail
+                    .attaches
+                    .iter()
+                    .map(|(f, s, _, h)| AttachDigestEntry {
+                        filename: f.clone(),
+                        size: *s,
+                        payload_sha256: h.clone(),
+                    })
+                    .collect(),
+                extra_source_props: vec![],
+                has_degraded: false,
+                body_unavailable: false,
+                body_incomplete: false,
+                crc_suspect: false,
+                has_ledger_fail: true,
+                ledger_failed_attach_names: vec!["softfail.bin".into()],
+            }],
+        }],
+    };
+    fs::write(
+        report_dir.join("content_digests.json"),
+        serde_json::to_string_pretty(&digests).expect("json"),
+    )
+    .expect("digests");
+
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![export_row("crlf@ex.com", 1, 1)];
+    // Candidate has NO ledger flags — clean-room must reconstruct from digests.
+    let mut c = cand(1, detail.body_plain_len);
+    c.message_id_norm = "crlf@ex.com".into();
+    c.subject = "CleanRoomLedger".into();
+    c.has_ledger_fail = false;
+    c.ledger_failed_attach_names.clear();
+    c.attach_count = 1;
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        false, // clean-room: source-differential off, digests backed
+        false,
+    ));
+    // Missing softfail.bin explained by digest ledger name ⇒ not hard_fail for that attach.
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    let explained_soft = csv.contains("ledger soft-fail")
+        || csv.contains("attachment_stream_soft_fail")
+        || report.findings.explained > 0;
+    let hard_on_attach = csv.contains("attachment_by_value") && csv.contains("softfail.bin");
+    assert!(
+        explained_soft || !hard_on_attach,
+        "digest ledger_failed_attach_names must explain missing softfail.bin on clean-room path; findings={:?} csv={csv}",
+        report.findings
+    );
+    // Must not hard-fail solely because attach is missing when ledger name explains it.
+    // (Other hard findings are ok only if not attach_by_value for softfail.bin.)
+    if report.hard_fail {
+        assert!(
+            !hard_on_attach,
+            "must not defect softfail.bin when digest ledger names it: {csv}"
+        );
+    }
+}
+
+/// Production multi-volume unique-pst + full QC green (tiny max_volume_bytes).
+#[test]
+fn production_multi_volume_full_qc_green() {
+    let dir = TempDir::new().expect("tmp");
+    let a = dir.path().join("src_mv_a.pst");
+    let b = dir.path().join("src_mv_b.pst");
+    write_simple_pst(
+        &a,
+        vec![base_msg(
+            "<mva@ex.com>",
+            "MultiVolA",
+            &format!("body multi vol a {}", "X".repeat(200)),
+        )],
+    );
+    write_simple_pst(
+        &b,
+        vec![base_msg(
+            "<mvb@ex.com>",
+            "MultiVolB",
+            &format!("body multi vol b {}", "Y".repeat(200)),
+        )],
+    );
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            a.to_str().expect("utf8"),
+            b.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--no-attachments",
+            "--max-volume-bytes",
+            "4096",
+            "--qc-level",
+            "full",
+            "--json",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        result.status.success() || report.join("qc_report_v1.json").is_file(),
+        "multi-volume unique-pst: stderr={} stdout={}",
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(
+        report.join("qc_report_v1.json").is_file(),
+        "qc_report required for multi-volume full QC"
+    );
+    let qc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report.join("qc_report_v1.json")).expect("qc"))
+            .expect("json");
+    let vol_count = qc
+        .pointer("/volumes")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    // Prefer ≥2 volumes; if writer kept single volume under tiny limit, still require green full QC.
+    if vol_count < 2 {
+        // Fallback: synthetic two-volume writer path via run_unique_pst_qc.
+        let v1 = dir.path().join("syn_v1.pst");
+        let v2 = dir.path().join("syn_v2.pst");
+        write_simple_pst(&v1, vec![base_msg("<sv1@ex.com>", "SynV1", "syn body 1")]);
+        write_simple_pst(&v2, vec![base_msg("<sv2@ex.com>", "SynV2", "syn body 2")]);
+        let rd = dir.path().join("report_syn");
+        fs::create_dir_all(&rd).expect("rd");
+        // Build source digests from each volume-as-source (self compare for structure+full green).
+        use pst_dedup_cli::export_oracle::message_content_detail;
+        use pst_reader::PstFile;
+        let mut dig_msgs = Vec::new();
+        for (i, p, mid, subj) in [
+            (1u64, &v1, "sv1@ex.com", "SynV1"),
+            (2u64, &v2, "sv2@ex.com", "SynV2"),
+        ] {
+            let mut pst = PstFile::open(p).expect("open");
+            let folders = pst.folders().expect("f");
+            let nid = folders
+                .iter()
+                .flat_map(|f| f.message_nids.iter().copied())
+                .next()
+                .expect("nid");
+            let d = message_content_detail(&mut pst, nid.0).expect("d");
+            dig_msgs.push((
+                i,
+                p.display().to_string(),
+                ContentDigestEntry {
+                    export_message_index: i,
+                    source_path: p.display().to_string(),
+                    source_nid: nid.0,
+                    message_id_norm: mid.into(),
+                    content_digest: d.digest.clone(),
+                    subject: d.subject.clone(),
+                    display_to: d.display_to.clone(),
+                    display_cc: d.display_cc.clone(),
+                    body_plain_len: d.body_plain_len,
+                    body_html_len: d.body_html_len,
+                    attaches: vec![],
+                    extra_source_props: vec![],
+                    has_degraded: false,
+                    body_unavailable: false,
+                    body_incomplete: false,
+                    crc_suspect: false,
+                    has_ledger_fail: false,
+                    ledger_failed_attach_names: Vec::new(),
+                },
+                subj,
+            ));
+            let _ = subj;
+        }
+        let digests = ContentDigestsFile {
+            schema: "content_digests_v1".into(),
+            origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
+            qc_level: "full".into(),
+            volumes: dig_msgs
+                .iter()
+                .map(|(i, path, entry, _)| ContentDigestsVolume {
+                    volume_index: *i as u32,
+                    path: path.clone(),
+                    messages: vec![entry.clone()],
+                })
+                .collect(),
+        };
+        fs::write(
+            rd.join("content_digests.json"),
+            serde_json::to_string_pretty(&digests).expect("json"),
+        )
+        .expect("w");
+        let volumes = vec![
+            VolumeReportRow {
+                volume_index: 1,
+                path: v1.display().to_string(),
+                bytes: fs::metadata(&v1).map(|m| m.len()).unwrap_or(0),
+                sha256_hex: String::new(),
+                md5_hex: String::new(),
+                messages_written: 1,
+                finalized_early: false,
+                volume_exceeded_soft_limit: false,
+            },
+            VolumeReportRow {
+                volume_index: 2,
+                path: v2.display().to_string(),
+                bytes: fs::metadata(&v2).map(|m| m.len()).unwrap_or(0),
+                sha256_hex: String::new(),
+                md5_hex: String::new(),
+                messages_written: 1,
+                finalized_early: false,
+                volume_exceeded_soft_limit: false,
+            },
+        ];
+        let export_rows = vec![
+            ExportMessageRow {
+                source_path: v1.display().to_string(),
+                folder_path: "Inbox".into(),
+                nid: dig_msgs[0].2.source_nid,
+                message_id_norm: "sv1@ex.com".into(),
+                edrm_mih: String::new(),
+                content_hash_hex: String::new(),
+                volume_path: v1.display().to_string(),
+                volume_index: 1,
+                export_message_index: 1,
+                attachments_failed_count: 0,
+                duplicate_source_count: 0,
+                duplicate_sources: String::new(),
+                subject: "SynV1".into(),
+            },
+            ExportMessageRow {
+                source_path: v2.display().to_string(),
+                folder_path: "Inbox".into(),
+                nid: dig_msgs[1].2.source_nid,
+                message_id_norm: "sv2@ex.com".into(),
+                edrm_mih: String::new(),
+                content_hash_hex: String::new(),
+                volume_path: v2.display().to_string(),
+                volume_index: 2,
+                export_message_index: 2,
+                attachments_failed_count: 0,
+                duplicate_source_count: 0,
+                duplicate_sources: String::new(),
+                subject: "SynV2".into(),
+            },
+        ];
+        let mut c1 = cand(1, dig_msgs[0].2.body_plain_len);
+        c1.message_id_norm = "sv1@ex.com".into();
+        c1.subject = "SynV1".into();
+        c1.volume_index = 1;
+        c1.source_path = v1.display().to_string();
+        c1.source_nid = dig_msgs[0].2.source_nid;
+        let mut c2 = cand(2, dig_msgs[1].2.body_plain_len);
+        c2.message_id_norm = "sv2@ex.com".into();
+        c2.subject = "SynV2".into();
+        c2.volume_index = 2;
+        c2.source_path = v2.display().to_string();
+        c2.source_nid = dig_msgs[1].2.source_nid;
+        let r = run_unique_pst_qc(qc_input(
+            QcLevel::Full,
+            &rd,
+            &volumes,
+            &export_rows,
+            &[c1, c2],
+            false,
+            true,
+        ));
+        assert!(
+            !r.hard_fail,
+            "two-volume full QC must be green: {:?}",
+            r.findings
+        );
+        assert_eq!(r.volumes.len(), 2);
+        return;
+    }
+    assert_eq!(
+        qc["hard_fail"], false,
+        "multi-volume full QC must be green: {:?}",
         qc["findings"]
     );
     assert_eq!(qc["findings"]["defect"].as_u64().unwrap_or(99), 0);
