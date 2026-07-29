@@ -225,13 +225,16 @@ const CONTRACT_V1: &[ContractProperty] = &[
     },
     ContractProperty {
         name: "cloud_modern_attachments",
-        status: ContractStatus::DroppedByDesign,
-        reason: "Q10 blind spot: pst-reader has no named-property resolution; OneDrive/SharePoint link attachments cannot be distinguished from ordinary small attaches; payload completeness for such messages is unverified, not confirmed (D-0080-cloud-attachments)",
+        // BestEffort: attachment-table detect + ATTACH_CLOUD_LINK ledger explains incompleteness;
+        // offline payload is never Preserved. (ContractStatus has no KnownGap variant —
+        // DroppedByDesign would imply we intentionally ignore detection; we detect and declare.)
+        status: ContractStatus::BestEffort,
+        reason: "0084: attachment-table web-ref / OneDrive-SharePoint cloud attaches are detected (ATTACH_CLOUD_LINK + incomplete for Mode A); offline payload is NOT collected and must never be claimed Preserved. Body-only inline cloud links are not scanned (D-0084-body-cloud-links). Pointer metadata preserved on unique-PST when known; full named-prop re-emit residual D-0084-cloud-named-prop-write",
     },
     ContractProperty {
         name: "PidNameAttachmentProviderType",
-        status: ContractStatus::DroppedByDesign,
-        reason: "Cloud-attachment provider named prop — reader cannot resolve; documented blind spot not silently preserved",
+        status: ContractStatus::BestEffort,
+        reason: "0084: readable when present via NPMAP GUID+name resolve (PSETID_Attachment / AttachmentProviderType); absence is not a defect; provider string open (OneDrivePro/OneDriveConsumer/other). Payload never Preserved offline",
     },
     ContractProperty {
         name: "message_content_digest",
@@ -282,8 +285,27 @@ mod tests {
     fn cloud_attachments_not_silently_preserved() {
         let c = FidelityContract::v1();
         let p = c.get("cloud_modern_attachments").expect("present");
-        assert_eq!(p.status, ContractStatus::DroppedByDesign);
-        assert!(p.reason.contains("named-property") || p.reason.contains("unverified"));
+        // 0084: BestEffort (detect + ledger) — never Preserved for offline payload.
+        assert_ne!(p.status, ContractStatus::Preserved);
+        assert_eq!(
+            p.status,
+            ContractStatus::BestEffort,
+            "cloud payload must stay BestEffort, got {:?}",
+            p.status
+        );
+        assert!(
+            p.reason.contains("attachment-table") || p.reason.contains("ATTACH_CLOUD_LINK"),
+            "reason must state attach-table scope: {}",
+            p.reason
+        );
+        assert!(
+            p.reason.contains("D-0084-body-cloud-links") || p.reason.contains("Body-only"),
+            "reason must name body-inline residual: {}",
+            p.reason
+        );
+        let provider = c.get("PidNameAttachmentProviderType").expect("present");
+        assert_ne!(provider.status, ContractStatus::Preserved);
+        assert_eq!(provider.status, ContractStatus::BestEffort);
     }
 
     /// 0082 DoD-6: recipient_table is Preserved (not DroppedByDesign).

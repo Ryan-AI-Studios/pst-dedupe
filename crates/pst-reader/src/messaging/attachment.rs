@@ -4,6 +4,14 @@
 //! [`PstFile::list_attachments`] and [`PstFile::open_attachment_data`] to stream
 //! raw attach bytes into CAS without requiring a full multi-GB `Vec<u8>` for
 //! the production put path (leaf blocks are read one at a time).
+//!
+//! **0084 cloud/modern attach (attachment-table only):**
+//! Classification uses **independent OR** signals (do not simplify to named-prop-only):
+//! 1. Allowlisted named prop `AttachmentProviderType` + no usable binary payload
+//! 2. Non-portable / web-reference attach method + no usable binary payload
+//! 3. Conservative fallback: empty data + URL-shaped classic path/filename
+//!
+//! Body-only inline SharePoint/OneDrive URLs are **out of scope** (D-0084-body-cloud-links).
 
 use std::fs::File;
 use std::io::{self, BufReader, Read};
@@ -27,6 +35,21 @@ pub struct AttachmentMeta {
     pub is_inline: bool,
 }
 
+/// Classification of an attachment-table row (0084).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AttachKind {
+    /// Ordinary by-value or embedded-message attach.
+    #[default]
+    Classic,
+    /// Cloud/modern web-reference attach (link + provider metadata; no offline payload).
+    CloudLink {
+        /// Open provider string (`OneDrivePro` / `OneDriveConsumer` / other / None).
+        provider: Option<String>,
+        /// Best-effort URL/path from classic tags (may be empty/None).
+        url: Option<String>,
+    },
+}
+
 /// Richer attachment descriptor for Desk extract.
 #[derive(Debug, Clone)]
 pub struct AttachmentInfo {
@@ -42,6 +65,134 @@ pub struct AttachmentInfo {
     pub attach_method: Option<i32>,
     /// True when MAPI marks inline/embedded: Content-ID present, rendered-in-body, or hidden.
     pub is_inline: bool,
+    /// True when classified as attachment-table cloud/web-ref without exportable payload (0084).
+    pub is_cloud_link: bool,
+    /// Provider string from `PidNameAttachmentProviderType` when present (open string).
+    pub cloud_provider: Option<String>,
+    /// Best-effort cloud URL/path from classic pathname/filename tags.
+    pub cloud_url: Option<String>,
+}
+
+/// True when `s` looks like an absolute URL (conservative cloud-path heuristic).
+pub fn looks_like_url(s: &str) -> bool {
+    let t = s.trim();
+    let lower = t.to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("file://")
+        || lower.starts_with("onedrive:")
+}
+
+/// True when attach method is **web-reference** (cloud/modern shaped).
+///
+/// Independent OR signal #2 (0084): third-party cloud add-ins may use
+/// `ATTACH_BY_WEB_REFERENCE` (7) without Microsoft's `AttachmentProviderType`.
+///
+/// Classic filesystem reference methods (2/3/4) and OLE (6) are **not**
+/// cloud-shaped by method alone — they remain `ATTACH_METHOD_UNSUPPORTED`
+/// omit unless a named-prop provider hit or URL-shaped path (signal 1/3)
+/// independently classifies CloudLink.
+pub fn is_cloud_shaped_method(method: Option<i32>) -> bool {
+    matches!(method, Some(nid::ATTACH_BY_WEB_REFERENCE))
+}
+
+/// True when the attach PC has a usable by-value binary payload reference.
+fn has_usable_binary_payload(pc: &PropContext) -> bool {
+    if let Ok(Some(bytes)) = pc.get_binary(nid::PID_TAG_ATTACH_DATA_BINARY) {
+        if !bytes.is_empty() {
+            return true;
+        }
+    }
+    // Subnode / non-null HNID for attach binary counts as "payload may exist".
+    if let Some((_ptype, value_hnid)) = pc.get_raw_hnid(nid::PID_TAG_ATTACH_DATA_BINARY) {
+        if value_hnid != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Best-effort URL from classic attach string tags (Phase-0 order).
+///
+/// 1. `PidTagAttachLongPathname` (0x370D)
+/// 2. `PidTagAttachPathname` (0x3708)
+/// 3. Long/short filename when URL-shaped
+fn extract_cloud_url(pc: &PropContext, filename: &str) -> Option<String> {
+    let candidates = [
+        pc.get_string(nid::PID_TAG_ATTACH_LONG_PATHNAME)
+            .ok()
+            .flatten(),
+        pc.get_string(nid::PID_TAG_ATTACH_PATHNAME).ok().flatten(),
+        Some(filename.to_string()).filter(|s| looks_like_url(s)),
+        pc.get_string(nid::PID_TAG_ATTACH_LONG_FILENAME)
+            .ok()
+            .flatten()
+            .filter(|s| looks_like_url(s)),
+        pc.get_string(nid::PID_TAG_ATTACH_FILENAME)
+            .ok()
+            .flatten()
+            .filter(|s| looks_like_url(s)),
+    ];
+    for c in candidates.into_iter().flatten() {
+        let t = c.trim();
+        if !t.is_empty() && (looks_like_url(t) || t.contains("sharepoint") || t.contains("1drv.")) {
+            return Some(t.to_string());
+        }
+    }
+    // Non-URL long pathname still useful as pointer when method is web-ref.
+    if let Ok(Some(path)) = pc.get_string(nid::PID_TAG_ATTACH_LONG_PATHNAME) {
+        let t = path.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    if let Ok(Some(path)) = pc.get_string(nid::PID_TAG_ATTACH_PATHNAME) {
+        let t = path.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
+/// Classify an attachment-table PC row (0084 independent OR signals).
+///
+/// `provider_npid` is the resolved NPID for `AttachmentProviderType` when the
+/// store NPMAP has that entry; `None` if map missing/unresolved.
+pub fn classify_attach_pc(
+    pc: &PropContext,
+    provider_npid: Option<u16>,
+    filename: &str,
+) -> AttachKind {
+    let attach_method = pc.get_i32(nid::PID_TAG_ATTACH_METHOD).ok().flatten();
+    let has_payload = has_usable_binary_payload(pc);
+    let url = extract_cloud_url(pc, filename);
+
+    let mut provider: Option<String> = None;
+    if let Some(npid) = provider_npid {
+        if let Ok(Some(s)) = pc.get_string(npid) {
+            let t = s.trim();
+            if !t.is_empty() {
+                provider = Some(t.to_string());
+            }
+        }
+    }
+
+    // Signal 1: named-prop provider hit + no usable binary.
+    let named_cloud = provider.is_some() && !has_payload;
+    // Signal 2: non-portable / web-ref method + no payload (even without named prop).
+    let method_cloud = is_cloud_shaped_method(attach_method) && !has_payload;
+    // Signal 3 (conservative): empty data + URL-shaped path/filename.
+    let url_fallback = !has_payload
+        && url
+            .as_deref()
+            .is_some_and(|u| looks_like_url(u) || u.contains("sharepoint") || u.contains("1drv."));
+
+    if named_cloud || method_cloud || url_fallback {
+        AttachKind::CloudLink { provider, url }
+    } else {
+        AttachKind::Classic
+    }
 }
 
 /// Streaming reader over attachment binary data.
@@ -184,6 +335,10 @@ impl PstFile {
         let sub_entries =
             block::list_subnode_entries(&mut self.reader, &self.bbt, nbt_entry.bid_sub)?;
 
+        // Resolve allowlisted cloud named-prop once per list (cached NPMAP).
+        // Degraded/missing map → None; classic method/URL signals still run.
+        let provider_npid = self.attachment_provider_type_npid();
+
         let crypt = self.header.crypt_method;
         let mut attachments = Vec::new();
 
@@ -221,6 +376,13 @@ impl PstFile {
                         .unwrap_or(false)
                     || hidden.unwrap_or(false);
 
+                // 0084: attachment-table cloud classification (independent OR signals).
+                let kind = classify_attach_pc(&pc, provider_npid, &filename);
+                let (is_cloud_link, cloud_provider, cloud_url) = match kind {
+                    AttachKind::CloudLink { provider, url } => (true, provider, url),
+                    AttachKind::Classic => (false, None, None),
+                };
+
                 attachments.push(AttachmentInfo {
                     nid: entry.nid,
                     filename,
@@ -228,6 +390,9 @@ impl PstFile {
                     mime_tag,
                     attach_method,
                     is_inline,
+                    is_cloud_link,
+                    cloud_provider,
+                    cloud_url,
                 });
             }
         }
@@ -420,5 +585,235 @@ impl PstFile {
             },
             crc_suspect: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    /// Minimal PC with only attach method + optional string props (heap-resident).
+    fn build_attach_pc(
+        method: Option<i32>,
+        long_path: Option<&str>,
+        long_name: Option<&str>,
+        provider_npid: Option<(u16, &str)>,
+        with_binary: bool,
+    ) -> PropContext {
+        // Layout: alloc1 Hid 0x20 = BTH header; alloc2 Hid 0x40 = leaf; then strings/binary.
+        let mut strings: Vec<(u16, Vec<u8>)> = Vec::new();
+        if let Some(p) = long_path {
+            strings.push((
+                nid::PID_TAG_ATTACH_LONG_PATHNAME,
+                p.encode_utf16().flat_map(|c| c.to_le_bytes()).collect(),
+            ));
+        }
+        if let Some(n) = long_name {
+            strings.push((
+                nid::PID_TAG_ATTACH_LONG_FILENAME,
+                n.encode_utf16().flat_map(|c| c.to_le_bytes()).collect(),
+            ));
+        }
+        if let Some((npid, prov)) = provider_npid {
+            strings.push((
+                npid,
+                prov.encode_utf16().flat_map(|c| c.to_le_bytes()).collect(),
+            ));
+        }
+        let binary: Option<Vec<u8>> = if with_binary {
+            Some(b"payload".to_vec())
+        } else {
+            None
+        };
+
+        let n_var = strings.len() + usize::from(binary.is_some());
+        let mut leaf_records = Vec::new();
+        if let Some(m) = method {
+            leaf_records.extend_from_slice(&nid::PID_TAG_ATTACH_METHOD.to_le_bytes());
+            leaf_records.extend_from_slice(&0x0003u16.to_le_bytes()); // PtypInteger32
+            leaf_records.extend_from_slice(&(m as u32).to_le_bytes());
+        }
+        // HID: bits5–15 = hidIndex (1-based), type/block 0. Alloc #1 → 0x20, #3 → 0x60.
+        let mut var_hids = Vec::new();
+        for i in 0..n_var {
+            let hid_index = (3 + i) as u32;
+            var_hids.push(hid_index << 5);
+        }
+        let mut vi = 0usize;
+        for (prop, _bytes) in &strings {
+            leaf_records.extend_from_slice(&prop.to_le_bytes());
+            leaf_records.extend_from_slice(&0x001Fu16.to_le_bytes());
+            leaf_records.extend_from_slice(&var_hids[vi].to_le_bytes());
+            vi += 1;
+        }
+        if binary.is_some() {
+            leaf_records.extend_from_slice(&nid::PID_TAG_ATTACH_DATA_BINARY.to_le_bytes());
+            leaf_records.extend_from_slice(&0x0102u16.to_le_bytes());
+            leaf_records.extend_from_slice(&var_hids[vi].to_le_bytes());
+        }
+
+        let bth_header = [0xB5u8, 0x02, 0x06, 0x00, 0x40, 0x00, 0x00, 0x00];
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(0xEC);
+        data.push(0x6C);
+        data.extend_from_slice(&0x20u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&bth_header);
+        data.extend_from_slice(&leaf_records);
+        for (_p, bytes) in &strings {
+            data.extend_from_slice(bytes);
+        }
+        if let Some(ref b) = binary {
+            data.extend_from_slice(b);
+        }
+
+        let ib_hnpm = data.len() as u16;
+        data[0..2].copy_from_slice(&ib_hnpm.to_le_bytes());
+
+        let alloc1_start = 12u16;
+        let alloc2_start = alloc1_start + bth_header.len() as u16;
+        let mut starts = vec![alloc1_start, alloc2_start];
+        let mut cursor = alloc2_start + leaf_records.len() as u16;
+        for (_p, bytes) in &strings {
+            starts.push(cursor);
+            cursor += bytes.len() as u16;
+        }
+        if let Some(ref b) = binary {
+            starts.push(cursor);
+            cursor += b.len() as u16;
+        }
+        let alloc_end = cursor;
+
+        data.extend_from_slice(&(starts.len() as u16).to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        for s in &starts {
+            data.extend_from_slice(&s.to_le_bytes());
+        }
+        data.extend_from_slice(&alloc_end.to_le_bytes());
+
+        PropContext::load(data).expect("test PC must load")
+    }
+
+    #[test]
+    fn web_ref_method_without_payload_is_cloud() {
+        let pc = build_attach_pc(
+            Some(nid::ATTACH_BY_WEB_REFERENCE),
+            Some("https://contoso.sharepoint.com/x"),
+            Some("report.xlsx"),
+            None,
+            false,
+        );
+        let kind = classify_attach_pc(&pc, None, "report.xlsx");
+        match kind {
+            AttachKind::CloudLink { provider, url } => {
+                assert!(provider.is_none());
+                assert_eq!(url.as_deref(), Some("https://contoso.sharepoint.com/x"));
+            }
+            AttachKind::Classic => panic!("expected CloudLink"),
+        }
+    }
+
+    #[test]
+    fn named_provider_without_payload_is_cloud() {
+        let pc = build_attach_pc(
+            Some(nid::ATTACH_BY_VALUE),
+            Some("https://1drv.ms/x/s!abc"),
+            Some("doc.docx"),
+            Some((0x8000, "OneDrivePro")),
+            false,
+        );
+        let kind = classify_attach_pc(&pc, Some(0x8000), "doc.docx");
+        match kind {
+            AttachKind::CloudLink { provider, url } => {
+                assert_eq!(provider.as_deref(), Some("OneDrivePro"));
+                assert!(url.is_some());
+            }
+            AttachKind::Classic => panic!("expected CloudLink"),
+        }
+    }
+
+    #[test]
+    fn by_value_with_binary_is_classic() {
+        let pc = build_attach_pc(
+            Some(nid::ATTACH_BY_VALUE),
+            None,
+            Some("file.bin"),
+            None,
+            true,
+        );
+        assert_eq!(
+            classify_attach_pc(&pc, None, "file.bin"),
+            AttachKind::Classic
+        );
+    }
+
+    #[test]
+    fn looks_like_url_helpers() {
+        assert!(looks_like_url("https://example.com/a"));
+        assert!(looks_like_url("HTTP://X"));
+        assert!(!looks_like_url("report.xlsx"));
+        assert!(is_cloud_shaped_method(Some(nid::ATTACH_BY_WEB_REFERENCE)));
+        assert!(!is_cloud_shaped_method(Some(nid::ATTACH_BY_VALUE)));
+        // Classic filesystem reference methods are NOT cloud-shaped by method alone.
+        assert!(!is_cloud_shaped_method(Some(nid::ATTACH_BY_REFERENCE)));
+        assert!(!is_cloud_shaped_method(Some(nid::ATTACH_BY_REF_ONLY)));
+        assert!(!is_cloud_shaped_method(Some(nid::ATTACH_BY_REF_RESOLVE)));
+        assert!(!is_cloud_shaped_method(Some(nid::ATTACH_OLE)));
+    }
+
+    #[test]
+    fn classic_ref_method_without_url_is_not_cloud() {
+        // Method 2/4 alone + no payload + non-URL path → not CloudLink
+        // (remains METHOD_UNSUPPORTED omit on write path).
+        let pc = build_attach_pc(
+            Some(nid::ATTACH_BY_REFERENCE),
+            Some(r"\\fileserver\share\doc.pdf"),
+            Some("doc.pdf"),
+            None,
+            false,
+        );
+        assert_eq!(
+            classify_attach_pc(&pc, None, "doc.pdf"),
+            AttachKind::Classic,
+            "classic ref + UNC path must not be CloudLink"
+        );
+    }
+
+    /// End-to-end DoD: protocol-correct NPMAP (`w_guid=3` → first GUID-stream slot =
+    /// `PSETID_Attachment`) resolves `AttachmentProviderType`, and that NPID on an
+    /// attach PC classifies as CloudLink with the provider string.
+    #[test]
+    fn npmap_w_guid_3_provider_npid_classifies_cloud_link() {
+        use crate::messaging::named_prop::{
+            encode_nameid_entry, encode_string_stream_entry, NameIdMap,
+            NAME_ATTACHMENT_PROVIDER_TYPE, PSETID_ATTACHMENT,
+        };
+
+        // MS-PST / MS-OXMSG: wGuid 0=none, 1=PS_MAPI, 2=PS_PUBLIC_STRINGS, ≥3 = stream[n-3].
+        let guid_stream = PSETID_ATTACHMENT.to_vec();
+        let string_stream = encode_string_stream_entry(NAME_ATTACHMENT_PROVIDER_TYPE);
+        let entry = encode_nameid_entry(0, true, 3, 0);
+        let map = NameIdMap::from_streams(&guid_stream, &entry, &string_stream);
+        let npid = map
+            .attachment_provider_type_npid()
+            .expect("AttachmentProviderType must resolve with w_guid=3");
+        assert_eq!(npid, 0x8000);
+        assert_eq!(map.reverse(npid).map(|k| k.guid), Some(PSETID_ATTACHMENT));
+
+        let pc = build_attach_pc(
+            Some(nid::ATTACH_BY_VALUE),
+            None,
+            Some("report.xlsx"),
+            Some((npid, "OneDrivePro")),
+            false,
+        );
+        match classify_attach_pc(&pc, Some(npid), "report.xlsx") {
+            AttachKind::CloudLink { provider, url: _ } => {
+                assert_eq!(provider.as_deref(), Some("OneDrivePro"));
+            }
+            AttachKind::Classic => panic!("expected CloudLink via NPMAP-resolved NPID"),
+        }
     }
 }

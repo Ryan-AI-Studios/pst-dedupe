@@ -1363,6 +1363,9 @@ mod tests {
             stream_available: true,
             attach_nid: Some(100),
             attach_method: Some(1), // by value
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
         });
         let mut src = NullAttachStreamSource;
         let mut buf = Vec::new();
@@ -1387,6 +1390,9 @@ mod tests {
             stream_available: true,
             attach_nid: Some(200),
             attach_method: Some(ATTACH_EMBEDDED_MSG),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
         });
         let mut src = NullAttachStreamSource;
         let mut buf = Vec::new();
@@ -1448,6 +1454,9 @@ mod tests {
             stream_available: true,
             attach_nid: Some(999),
             attach_method: Some(1),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
         });
         let mut src = NullAttachStreamSource; // open will fail
         let mut buf = Vec::new();
@@ -1481,6 +1490,9 @@ mod tests {
             stream_available: true,
             attach_nid: Some(1),
             attach_method: Some(1),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
         });
         msg.attachments.push(CanonicalAttachment {
             filename: "bad.bin".into(),
@@ -1490,6 +1502,9 @@ mod tests {
             stream_available: true,
             attach_nid: Some(2),
             attach_method: Some(1),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
         });
         let mut src = NullAttachStreamSource;
         let mut buf = Vec::new();
@@ -1572,6 +1587,9 @@ mod tests {
             stream_available: true,
             attach_nid: Some(1),
             attach_method: Some(1),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
         });
         let mut src = NullAttachStreamSource;
         let opts = EmlWriteOpts {
@@ -1749,6 +1767,9 @@ mod tests {
             stream_available: true,
             attach_nid: Some(42),
             attach_method: Some(1),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
         });
         let mut src = MapAttachSource {
             map: [(42, b"Hello".to_vec())].into_iter().collect(),
@@ -1782,6 +1803,9 @@ mod tests {
             stream_available: true,
             attach_nid: Some(55),
             attach_method: Some(ATTACH_EMBEDDED_MSG),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
         });
         let mut src = NullAttachStreamSource;
         let mut buf = Vec::new();

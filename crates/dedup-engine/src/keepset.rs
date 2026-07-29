@@ -687,6 +687,16 @@ pub struct CanonicalAttachment {
     /// PidTagAttachMethod when known (e.g. ATTACH_EMBEDDED_MSG = 0x5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_method: Option<i32>,
+    /// Explicit cloud/web-ref link-only attach (0084). Prefer over overloading
+    /// [`Self::stream_available`] alone so parents_only omit stays distinct.
+    #[serde(default)]
+    pub is_cloud_link: bool,
+    /// Provider string from `PidNameAttachmentProviderType` (open string).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_provider: Option<String>,
+    /// Best-effort cloud URL/path for ledger actionability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_url: Option<String>,
 }
 
 // Re-export recipient types for keep-set callers (defined in grouping for hasher use).
@@ -772,12 +782,18 @@ pub struct SoftSkipAttachRecord {
     pub peer_source_path: String,
     /// Final accepted winner msg nid.
     pub peer_msg_nid: u64,
+    /// Cloud provider when soft-skip was for a CloudLink attach (0084).
+    pub cloud_provider: String,
+    /// Cloud URL when soft-skip was for a CloudLink attach (0084).
+    pub cloud_url: String,
 }
 
-/// True when a materialized message is **attach-incomplete** for Mode A (0083).
+/// True when a materialized message is **attach-incomplete** for Mode A (0083/0084).
 ///
-/// Normative (§2.5 rule 5):
+/// Normative:
 /// - any attach with `stream_available == false`; **or**
+/// - any attach with explicit [`CanonicalAttachment::is_cloud_link`] (no offline
+///   payload); **or**
 /// - fail-severity attach outcomes already bound on message fidelity
 ///   ([`IntegrityReason::is_attach_probe_fail`]).
 ///
@@ -786,11 +802,15 @@ pub struct SoftSkipAttachRecord {
 /// Materializers must not force `stream_available=false` solely for parents_only;
 /// the writer omits by family policy independently.
 ///
-/// Honesty ceiling (**D-0080-cloud-attachments**): cloud/modern link-only attaches
-/// that present as parsed with no fail-severity stream error **cannot** be detected
-/// without named-property resolution. Do not invent a modern-attach detector here.
+/// **0084:** attachment-table cloud/modern link-only attaches set `is_cloud_link`
+/// (and typically `stream_available=false`) so Mode A can prefer a physical peer.
+/// Body-only inline SharePoint URLs remain undetected (D-0084-body-cloud-links).
 pub fn is_attach_incomplete(msg: &CanonicalMessage) -> bool {
-    if msg.attachments.iter().any(|a| !a.stream_available) {
+    if msg
+        .attachments
+        .iter()
+        .any(|a| !a.stream_available || a.is_cloud_link)
+    {
         return true;
     }
     msg.fidelity
@@ -810,7 +830,14 @@ fn soft_skip_records_for_msg(
         .fidelity
         .degraded_reasons
         .iter()
-        .find(|r| r.is_attach_probe_fail())
+        // Prefer cloud reason over generic stream/method when both present (0084).
+        .find(|r| **r == crate::integrity::IntegrityReason::AttachCloudLink)
+        .or_else(|| {
+            msg.fidelity
+                .degraded_reasons
+                .iter()
+                .find(|r| r.is_attach_probe_fail())
+        })
         .map(|r| r.as_str())
         .unwrap_or("ATTACH_STREAM_OPEN_FAILED");
 
@@ -818,7 +845,7 @@ fn soft_skip_records_for_msg(
         .attachments
         .iter()
         .enumerate()
-        .filter(|(_, a)| !a.stream_available)
+        .filter(|(_, a)| !a.stream_available || a.is_cloud_link)
         .collect();
 
     if incomplete_attaches.is_empty() {
@@ -836,11 +863,18 @@ fn soft_skip_records_for_msg(
             reason_code: fail_reason.to_string(),
             peer_source_path: peer_source_path.to_string(),
             peer_msg_nid,
+            cloud_provider: String::new(),
+            cloud_url: String::new(),
         });
         return out;
     }
 
     for (i, a) in incomplete_attaches {
+        let reason = if a.is_cloud_link {
+            "ATTACH_CLOUD_LINK"
+        } else {
+            fail_reason
+        };
         out.push(SoftSkipAttachRecord {
             source_path: msg.locus.source_path.clone(),
             source_pst: msg.locus.source_pst.clone(),
@@ -851,9 +885,11 @@ fn soft_skip_records_for_msg(
             filename: a.filename.clone(),
             size: a.size,
             attach_method: a.attach_method.unwrap_or(-1),
-            reason_code: fail_reason.to_string(),
+            reason_code: reason.to_string(),
             peer_source_path: peer_source_path.to_string(),
             peer_msg_nid,
+            cloud_provider: a.cloud_provider.clone().unwrap_or_default(),
+            cloud_url: a.cloud_url.clone().unwrap_or_default(),
         });
     }
     out
@@ -1463,7 +1499,8 @@ pub fn reason_fidelity_tier(reason: crate::integrity::IntegrityReason) -> u8 {
         | AttachStreamCrc
         | AttachBlockNotFound
         | AttachDataTruncated
-        | AttachMethodUnsupported => 2,
+        | AttachMethodUnsupported
+        | AttachCloudLink => 2,
         // tier 3 — body / data loss
         BodyTruncated | BodyUnavailable | DataTruncated | CrcMismatch | CrcSuspect
         | BlockNotFound => 3,
@@ -3453,6 +3490,9 @@ mod tests {
                                 stream_available: true,
                                 attach_nid: Some(i as u64 + 100),
                                 attach_method: Some(1),
+                                is_cloud_link: false,
+                                cloud_provider: None,
+                                cloud_url: None,
                             })
                             .collect()
                     };
@@ -3654,6 +3694,9 @@ mod tests {
                             stream_available,
                             attach_nid: Some(100),
                             attach_method: Some(1),
+                            is_cloud_link: false,
+                            cloud_provider: None,
+                            cloud_url: None,
                         }],
                         fidelity: if stream_available {
                             RecoverableIntegrity::clean()
@@ -3723,6 +3766,9 @@ mod tests {
             stream_available: true,
             attach_nid: Some(1),
             attach_method: Some(1),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
         };
         // Zero-byte by-value with empty display name (materializer must set stream_available).
         let zero_empty_name = CanonicalAttachment {
@@ -3733,6 +3779,9 @@ mod tests {
             stream_available: true,
             attach_nid: Some(1),
             attach_method: Some(1),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
         };
         let bad_att = CanonicalAttachment {
             filename: "f.bin".into(),
@@ -3742,6 +3791,9 @@ mod tests {
             stream_available: false,
             attach_nid: Some(1),
             attach_method: Some(1),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
         };
 
         // Positives
@@ -3806,6 +3858,207 @@ mod tests {
             false,
             true
         )));
+
+        // 0084: explicit is_cloud_link is incomplete even if stream_available were true.
+        let cloud = CanonicalAttachment {
+            filename: "link.xlsx".into(),
+            size: 0,
+            mime: None,
+            data: None,
+            stream_available: true, // defensive: flag alone must still count
+            attach_nid: Some(1),
+            attach_method: Some(7),
+            is_cloud_link: true,
+            cloud_provider: Some("OneDrivePro".into()),
+            cloud_url: Some("https://1drv.ms/x/s!abc".into()),
+        };
+        assert!(is_attach_incomplete(&base(
+            vec![cloud],
+            RecoverableIntegrity::clean(),
+            false,
+            false
+        )));
+    }
+
+    /// Materializer: nid → CloudLink incomplete (peer) vs complete by-value.
+    /// Used to prove Mode A prefers physical peer over attachment-table cloud.
+    struct CloudLinkMat {
+        /// nids that are CloudLink (incomplete); others complete by-value
+        cloud_nids: HashMap<u64, (String, String)>, // provider, url
+    }
+
+    impl MessageMaterializer for CloudLinkMat {
+        fn materialize(
+            &mut self,
+            locus: &MessageLocus,
+        ) -> Result<CanonicalMessage, MaterializeError> {
+            if let Some((provider, url)) = self.cloud_nids.get(&locus.nid) {
+                Ok(CanonicalMessage {
+                    locus: locus.clone(),
+                    message_id: None,
+                    subject: Some("s".into()),
+                    sender: None,
+                    display_to: None,
+                    display_cc: None,
+                    display_bcc: None,
+                    recipients: Vec::new(),
+                    message_flags: None,
+                    submit_time: None,
+                    size: Some(10),
+                    message_class: None,
+                    body_plain: Some("body".into()),
+                    body_html: None,
+                    attachments: vec![CanonicalAttachment {
+                        filename: "report.xlsx".into(),
+                        size: 0,
+                        mime: None,
+                        data: None,
+                        stream_available: false,
+                        attach_nid: Some(100),
+                        attach_method: Some(7), // ATTACH_BY_WEB_REFERENCE
+                        is_cloud_link: true,
+                        cloud_provider: Some(provider.clone()),
+                        cloud_url: Some(url.clone()),
+                    }],
+                    fidelity: RecoverableIntegrity::with_degraded(
+                        vec![IntegrityReason::AttachCloudLink],
+                        false,
+                    ),
+                    message_id_norm: None,
+                    content_hash: [0; 32],
+                    edrm_mih_hex: None,
+                    body_incomplete: false,
+                    body_unavailable: false,
+                })
+            } else {
+                Ok(CanonicalMessage {
+                    locus: locus.clone(),
+                    message_id: None,
+                    subject: Some("s".into()),
+                    sender: None,
+                    display_to: None,
+                    display_cc: None,
+                    display_bcc: None,
+                    recipients: Vec::new(),
+                    message_flags: None,
+                    submit_time: None,
+                    size: Some(10),
+                    message_class: None,
+                    body_plain: Some("body".into()),
+                    body_html: None,
+                    attachments: vec![CanonicalAttachment {
+                        filename: "a.bin".into(),
+                        size: 10,
+                        mime: Some("application/octet-stream".into()),
+                        data: Some(vec![1, 2, 3]),
+                        stream_available: true,
+                        attach_nid: Some(100),
+                        attach_method: Some(1),
+                        is_cloud_link: false,
+                        cloud_provider: None,
+                        cloud_url: None,
+                    }],
+                    fidelity: RecoverableIntegrity::clean(),
+                    message_id_norm: None,
+                    content_hash: [0; 32],
+                    edrm_mih_hex: None,
+                    body_incomplete: false,
+                    body_unavailable: false,
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn mode_a_promotes_physical_peer_over_cloud_link() {
+        // DoD-3: cloud incomplete peer0 + physical complete peer1 → promote.
+        let mid = Some("modea-cloud@x");
+        let a = item("C:/a.pst", "a.pst", "I", 1, mid, [1; 32], 100, 0, false);
+        let b = item("C:/b.pst", "b.pst", "I", 2, mid, [1; 32], 100, 1, false);
+        let mut mat = CloudLinkMat {
+            cloud_nids: HashMap::from([(
+                1,
+                (
+                    "OneDrivePro".into(),
+                    "https://contoso.sharepoint.com/sites/x/report.xlsx".into(),
+                ),
+            )]),
+        };
+        let (ks, dec, count) = build_keep_set_materialized(
+            vec![a, b],
+            MaterializeBuildOpts {
+                policy: KeepPolicy::FirstSeen,
+                family_policy: FamilyPolicy::KeepAttachmentsWithParent,
+                prefer_path: &[],
+                tier2_enabled: true,
+                created_from: None,
+                rank_ctx: None,
+                grouping_ctx: None,
+                promote_on_attach_fail: true,
+            },
+            &mut mat,
+            |_| Ok(()),
+        )
+        .expect("m");
+        assert_eq!(count, 1);
+        assert_eq!(ks.stats.unique, 1);
+        assert_eq!(
+            ks.winners[0].locus.nid, 2,
+            "Mode A must prefer physical attach peer over CloudLink"
+        );
+        assert!(ks.winners[0].promoted_from_failure);
+        assert_eq!(
+            ks.winners[0].decided_by.as_deref(),
+            Some("promoted_after_attach_incomplete")
+        );
+        assert_eq!(ks.stats.promoted_after_attach_incomplete_count, 1);
+        let skipped = dec
+            .iter()
+            .find(|d| d.nid == 1)
+            .expect("cloud peer soft-skip");
+        assert_eq!(skipped.role, DecisionRole::DupOf);
+        assert!(
+            ks.winners[0].duplicate_sources.iter().any(|s| s == "a.pst"),
+            "dup_sources must keep full group"
+        );
+
+        // Soft-skip ledger records carry ATTACH_CLOUD_LINK + provider/url (0084).
+        let mut resolved = resolve_groups_with_grouping(
+            vec![
+                item("C:/a.pst", "a.pst", "I", 1, mid, [1; 32], 100, 0, false),
+                item("C:/b.pst", "b.pst", "I", 2, mid, [1; 32], 100, 1, false),
+            ],
+            FamilyPolicy::KeepAttachmentsWithParent,
+            &RankContext::from_policy_and_prefer(KeepPolicy::FirstSeen, &[]),
+            &GroupingContext::with_tier2(true),
+            None,
+        );
+        let mut mat2 = CloudLinkMat {
+            cloud_nids: HashMap::from([(
+                1,
+                (
+                    "OneDrivePro".into(),
+                    "https://contoso.sharepoint.com/sites/x/report.xlsx".into(),
+                ),
+            )]),
+        };
+        let fin = MaterializeFinalizeOpts {
+            promote_on_attach_fail: true,
+        };
+        finalize_with_materialize_opts(&mut resolved, &mut mat2, &fin, &mut |_| Ok(()))
+            .expect("finalize");
+        let soft = resolved
+            .soft_skip_attach_records
+            .iter()
+            .find(|r| r.msg_nid == 1)
+            .expect("soft skip for cloud peer");
+        assert_eq!(soft.reason_code, "ATTACH_CLOUD_LINK");
+        assert_eq!(soft.cloud_provider, "OneDrivePro");
+        assert!(
+            soft.cloud_url.contains("sharepoint.com"),
+            "soft skip must carry cloud_url: {}",
+            soft.cloud_url
+        );
     }
 
     #[test]
@@ -4025,6 +4278,9 @@ mod tests {
                                 stream_available: true,
                                 attach_nid: Some(100),
                                 attach_method: Some(1),
+                                is_cloud_link: false,
+                                cloud_provider: None,
+                                cloud_url: None,
                             });
                         } else {
                             for i in 0..n {
@@ -4036,6 +4292,9 @@ mod tests {
                                     stream_available: false,
                                     attach_nid: Some(100 + i as u64),
                                     attach_method: Some(1),
+                                    is_cloud_link: false,
+                                    cloud_provider: None,
+                                    cloud_url: None,
                                 });
                             }
                         }
@@ -5470,6 +5729,7 @@ mod tests {
             AttachBlockNotFound,
             AttachDataTruncated,
             AttachMethodUnsupported,
+            AttachCloudLink,
         ];
         for r in attach {
             assert_eq!(reason_fidelity_tier(r), 2);

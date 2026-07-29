@@ -130,6 +130,9 @@ pub enum IntegrityReason {
     AttachDataTruncated,
     /// Attach method not portable for export (0073/0074).
     AttachMethodUnsupported,
+    /// Cloud/modern web-reference attach without offline payload (0084).
+    /// Prefer over bare [`Self::AttachMethodUnsupported`] when CloudLink classified.
+    AttachCloudLink,
     /// Info: global attach-probe budget hit (not an attach fail; 0074).
     AttachProbeTruncated,
     /// Per-attach probe wall-clock exceeded (0074).
@@ -167,6 +170,7 @@ impl IntegrityReason {
             Self::AttachBlockNotFound => "ATTACH_BLOCK_NOT_FOUND",
             Self::AttachDataTruncated => "ATTACH_DATA_TRUNCATED",
             Self::AttachMethodUnsupported => "ATTACH_METHOD_UNSUPPORTED",
+            Self::AttachCloudLink => "ATTACH_CLOUD_LINK",
             Self::AttachProbeTruncated => "ATTACH_PROBE_TRUNCATED",
             Self::AttachProbeTimeout => "ATTACH_PROBE_TIMEOUT",
             Self::AttachPeerProbeCap => "ATTACH_PEER_PROBE_CAP",
@@ -188,6 +192,7 @@ impl IntegrityReason {
                 | Self::AttachBlockNotFound
                 | Self::AttachDataTruncated
                 | Self::AttachMethodUnsupported
+                | Self::AttachCloudLink
                 | Self::AttachProbeTimeout
                 | Self::AttachMetaFailed
         )
@@ -232,6 +237,7 @@ impl<'de> Deserialize<'de> for IntegrityReason {
             "ATTACH_BLOCK_NOT_FOUND" => Ok(Self::AttachBlockNotFound),
             "ATTACH_DATA_TRUNCATED" => Ok(Self::AttachDataTruncated),
             "ATTACH_METHOD_UNSUPPORTED" => Ok(Self::AttachMethodUnsupported),
+            "ATTACH_CLOUD_LINK" => Ok(Self::AttachCloudLink),
             "ATTACH_PROBE_TRUNCATED" => Ok(Self::AttachProbeTruncated),
             "ATTACH_PROBE_TIMEOUT" => Ok(Self::AttachProbeTimeout),
             "ATTACH_PEER_PROBE_CAP" => Ok(Self::AttachPeerProbeCap),
@@ -1052,6 +1058,11 @@ mod tests {
             IntegrityReason::AttachMethodUnsupported.as_str(),
             "ATTACH_METHOD_UNSUPPORTED"
         );
+        assert_eq!(
+            IntegrityReason::AttachCloudLink.as_str(),
+            "ATTACH_CLOUD_LINK"
+        );
+        assert!(IntegrityReason::AttachCloudLink.is_attach_probe_fail());
         assert_eq!(
             IntegrityReason::AttachMetaFailed.as_str(),
             "ATTACH_META_FAILED"

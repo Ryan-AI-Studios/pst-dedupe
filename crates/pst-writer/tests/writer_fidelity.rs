@@ -1530,6 +1530,162 @@ fn embedded_unparsed_method_5_without_nested() {
 // ── 0073: reason taxonomy + locus events ─────────────────────────────────────
 
 #[test]
+fn cloud_link_writes_pointer_row_and_ledger() {
+    let path = scratch_path("cloud_link_ptr");
+    cleanup(&path);
+
+    let mut msg = base_msg("<cloud@ex.com>", "Cloud attach");
+    msg.source_path = Some(r"C:\src\cloud.pst".into());
+    msg.source_folder_path = Some("Inbox".into());
+    msg.attachments.push(WriteAttachment {
+        filename: "report.xlsx".into(),
+        size: 0,
+        attach_method: Some(7), // ATTACH_BY_WEB_REFERENCE
+        data: None,
+        parent_nid: Some(0x100),
+        attach_nid: Some(0x200),
+        source_path: Some(r"C:\src\cloud.pst".into()),
+        is_cloud_link: true,
+        cloud_provider: Some("OneDrivePro".into()),
+        cloud_url: Some("https://contoso.sharepoint.com/sites/x/report.xlsx".into()),
+        ..Default::default()
+    });
+
+    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    // Pointer row written (anti-ghost) AND fail ledger for missing payload.
+    assert_eq!(
+        report.attachments_written, 1,
+        "CloudLink must write pointer row"
+    );
+    assert_eq!(
+        report.attachments_failed, 1,
+        "CloudLink still fail-severity"
+    );
+    let ev = report
+        .attachment_fidelity_events
+        .iter()
+        .find(|e| e.kind == AttachmentFidelityKind::CloudLink)
+        .expect("ATTACH_CLOUD_LINK event");
+    assert_eq!(ev.kind.as_code(), "ATTACH_CLOUD_LINK");
+    assert_eq!(ev.severity, pst_writer::AttachEventSeverity::Fail);
+    assert_eq!(ev.cloud_provider, "OneDrivePro");
+    assert!(ev.cloud_url.contains("sharepoint"));
+
+    // Reader sees attachment-table row (not silent omit).
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let folders = pst.folders().expect("folders");
+    let nid = folders
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("msg nid");
+    let attaches = pst.list_attachments(nid).expect("list");
+    assert_eq!(
+        attaches.len(),
+        1,
+        "unique-PST must keep attach row for CloudLink"
+    );
+    assert_eq!(attaches[0].filename, "report.xlsx");
+    // Method/web-ref + URL path should re-classify as cloud on read.
+    assert!(
+        attaches[0].is_cloud_link || attaches[0].attach_method == Some(7),
+        "reader should see cloud method or classify cloud: {:?}",
+        attaches[0]
+    );
+
+    cleanup(&path);
+}
+
+#[test]
+fn cloud_link_named_provider_by_value_writes_web_ref_method() {
+    // Named-provider CloudLink with original method=1 (BY_VALUE) but no payload
+    // must not advertise BY_VALUE without binary — force ATTACH_BY_WEB_REFERENCE (7).
+    let path = scratch_path("cloud_link_by_value_method");
+    cleanup(&path);
+
+    let mut msg = base_msg("<cloud-bv@ex.com>", "Cloud by-value method");
+    msg.attachments.push(WriteAttachment {
+        filename: "doc.docx".into(),
+        size: 0,
+        attach_method: Some(1), // ATTACH_BY_VALUE — dishonest without binary
+        data: None,
+        is_cloud_link: true,
+        cloud_provider: Some("OneDrivePro".into()),
+        cloud_url: Some("https://1drv.ms/x/s!xyz".into()),
+        ..Default::default()
+    });
+
+    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    assert_eq!(report.attachments_written, 1);
+    assert_eq!(report.attachments_failed, 1);
+
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let folders = pst.folders().expect("folders");
+    let nid = folders
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("msg nid");
+    let attaches = pst.list_attachments(nid).expect("list");
+    assert_eq!(attaches.len(), 1);
+    assert_eq!(
+        attaches[0].attach_method,
+        Some(7),
+        "CloudLink without payload must not write ATTACH_BY_VALUE: {:?}",
+        attaches[0]
+    );
+
+    cleanup(&path);
+}
+
+#[test]
+fn cloud_link_preserves_empty_filename() {
+    let path = scratch_path("cloud_link_empty_name");
+    cleanup(&path);
+
+    let mut msg = base_msg("<cloud-empty@ex.com>", "Cloud empty name");
+    msg.attachments.push(WriteAttachment {
+        filename: String::new(),
+        size: 0,
+        attach_method: Some(7),
+        data: None,
+        is_cloud_link: true,
+        cloud_provider: Some("OneDriveConsumer".into()),
+        cloud_url: Some("https://1drv.ms/x/s!abc".into()),
+        ..Default::default()
+    });
+
+    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    assert_eq!(report.attachments_written, 1);
+    assert_eq!(report.attachments_failed, 1);
+
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let folders = pst.folders().expect("folders");
+    let nid = folders
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("msg nid");
+    let attaches = pst.list_attachments(nid).expect("list");
+    assert_eq!(attaches.len(), 1);
+    assert_eq!(
+        attaches[0].filename, "",
+        "must not invent 'cloud-link' when source filename empty"
+    );
+    assert!(
+        attaches[0].is_cloud_link
+            || attaches[0]
+                .cloud_url
+                .as_deref()
+                .is_some_and(|u| u.contains("1drv")),
+        "URL pointer should still be preserved: {:?}",
+        attaches[0]
+    );
+
+    cleanup(&path);
+}
+
+#[test]
 fn method_unsupported_emits_fail_event() {
     let path = scratch_path("method_unsup");
     cleanup(&path);

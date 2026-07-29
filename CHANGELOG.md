@@ -7,10 +7,20 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0084 — Named property resolution & cloud attach detect)
+
+- **NPMAP reader** (`NID_NAME_TO_ID_MAP` `0x61`): parse Entry/GUID/String streams; resolve GUID+LID and GUID+name → NPID; cache per `PstFile`; degrade on corrupt/missing (no hard-fail open).
+- **Attachment-table cloud detect** (independent OR): `PidNameAttachmentProviderType` (PSETID_Attachment + name) without usable binary **or** web-ref/non-portable method without payload **or** conservative URL-shaped path fallback. Explicit `is_cloud_link` + `cloud_provider` / `cloud_url` on attach descriptors.
+- **Incomplete / Mode A:** CloudLink without offline payload → `is_attach_incomplete` true; Mode A can prefer a physical peer.
+- **Ledger:** reason `ATTACH_CLOUD_LINK` (fail severity; prefer over bare `ATTACH_METHOD_UNSUPPORTED` when CloudLink); `export_attachments.csv` appends `cloud_provider,cloud_url` (injection-neutralized).
+- **Pointer preserve (anti-ghost):** unique-PST writes metadata/pointer attach row for CloudLink (method + filename + best-effort long pathname URL); **never** invents binary; no network hydration.
+- **`fidelity_contract_v1`:** `cloud_modern_attachments` + `PidNameAttachmentProviderType` → BestEffort with honest attach-table scope + body residual named (payload never Preserved).
+- Closes **D-0080-cloud-attachments** (attach-table detect). Opens **D-0084-body-cloud-links**, **D-0084-cloud-named-prop-write**. Narrows **D-0068-04** named-prop residual.
+
 ### Added (0083 — Mode A promote-on-attach-fail)
 
 - **`--promote-on-attach-fail`** (default **off**) on `unique-pst` and `unique-eml`: pre-write promote when a keep-set peer materializes with incomplete attachments and a ranked peer is complete.
-- **Incomplete predicate** centralized as `is_attach_incomplete` (`stream_available == false` or fail-severity attach fidelity; not body soft flags / parents_only omit / CRC noise). Cloud/modern link-only attaches remain undetectable without named props (**D-0080-cloud-attachments**).
+- **Incomplete predicate** centralized as `is_attach_incomplete` (`stream_available == false` or fail-severity attach fidelity; not body soft flags / parents_only omit / CRC noise). **0084** extends this for attachment-table cloud/modern link-only attaches.
 - **`decided_by` vocabulary:** `promoted_after_attach_incomplete`, `promoted_after_materialize_fail` (hard path unchanged), `mode_c_fallback_all_peers_incomplete` (all materializable peers incomplete → highest-ranked materializable; not group drop).
 - Summary counters: `promote_on_attach_fail`, `promoted_after_attach_incomplete_count`, `mode_c_fallback_all_peers_incomplete_count`.
 - Attach ledger: `winner_promoted` / peer locus honesty for soft-skipped incomplete peers and promoted winners.

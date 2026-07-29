@@ -108,8 +108,9 @@ Default keep-set grouping unites messages **across custodians** (global scope). 
 
 ### Honesty ceilings
 
-- **Cloud / modern link-only attaches** (OneDrive/SharePoint) are **not** detected as incomplete without named-property resolution (**D-0080-cloud-attachments**). Mode A will not promote away from an undetected cloud-link “complete” copy.
-- Mode A does **not** change grouping (who is a peer) — only which peer wins export after grouping. Future attach-byte identity (**D-0076-attach-content**) can fracture incomplete vs complete into different groups; Mode A cannot cross that split.
+- **Cloud / modern attachment-table web-ref attaches (0084):** Offline-only — this tool does **not** download OneDrive/SharePoint file bytes. It **detects** attachment-table cloud/modern attaches (NPMAP `PidNameAttachmentProviderType` and/or non-portable/web-ref method + no payload), marks them **attach-incomplete** for Mode A, ledgers `ATTACH_CLOUD_LINK` with `cloud_provider` / `cloud_url` for native re-collection (e.g. Purview “Access links (cloud attachments)”), and **preserves pointer metadata** on the unique-PST when available so the deliverable is not a silent empty attach. Payload is never claimed preserved.
+- **Body-only / inline paste cloud links** (SharePoint/OneDrive URLs in HTML/plain body without a MAPI attachment-table row) are **not** classified as `ATTACH_CLOUD_LINK` (**D-0084-body-cloud-links**). Downstream review platforms or a future body-scan residual must handle those.
+- Mode A does **not** change grouping (who is a peer) — only which peer wins export after grouping. With 0084, Mode A can prefer a peer with **physical** attach bytes over a link-only winner in the same keep-set group. Future attach-byte identity (**D-0076-attach-content**) can fracture incomplete vs complete into different groups; Mode A cannot cross that split.
 - Peer order is existing keep-set `rank_key` only — **no** “least incomplete” re-rank.
 
 ```powershell
