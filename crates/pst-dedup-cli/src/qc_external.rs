@@ -314,25 +314,20 @@ pub fn guess_scanpst_build(scanpst_path: &Path) -> Option<String> {
     None
 }
 
-/// Verify that the installed scanpst accepts the exact `-no repair` token (rule 2).
+/// Verify that the installed scanpst **documents** the exact `-no repair` token.
 ///
-/// Order:
-/// 1. Sibling `.accepts-no-repair` flag file (tests / operator pin)
-/// 2. Env `PST_DEDUP_SCANPST_NO_REPAIR_OK=1` (operator opt-in)
-/// 3. Help probe (`-?` / `/?` / `-help`) looking for "no repair" text
+/// **Honesty (DoD-13 / rule 2):** `.accepts-no-repair` files and
+/// `PST_DEDUP_SCANPST_NO_REPAIR_OK` env markers are **not** accepted as proof —
+/// they can green-wash an incompatible binary that silently enters the legacy
+/// repairing path.
 ///
-/// Unverifiable ⇒ skip (never risk repair path).
+/// Only a help/usage probe that clearly documents "no repair" counts here.
+/// CI stubs that cannot print help may still prove acceptance **after** the run
+/// by writing `NO_REPAIR_MODE` into the log (see [`log_proves_no_repair_mode`]
+/// and the stub contract on [`run_scanpst`]).
+///
+/// Unverifiable ⇒ `Err` (caller skips Ok unless log proves mode).
 pub fn verify_scanpst_no_repair(scanpst_path: &Path) -> Result<(), String> {
-    let flag = scanpst_path.with_extension("accepts-no-repair");
-    if flag.is_file() {
-        return Ok(());
-    }
-    if std::env::var("PST_DEDUP_SCANPST_NO_REPAIR_OK")
-        .map(|v| v.trim() == "1")
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
     // Help probe — look for "no repair" (case-insensitive) in usage text.
     for help_arg in ["-?", "/?", "-help", "--help"] {
         let mut cmd = Command::new(scanpst_path);
@@ -343,15 +338,25 @@ pub fn verify_scanpst_no_repair(scanpst_path: &Path) -> Result<(), String> {
         let run = run_with_timeout(cmd, Duration::from_secs(5));
         if let RunOutcome::Done { stdout, stderr, .. } = run {
             let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+            // Require clear documentation of the two-token form (not just "repair").
             if combined.contains("no repair") || combined.contains("-no repair") {
                 return Ok(());
             }
         }
     }
     Err(
-        "scanpst -no repair support unverifiable; skip rather than risk repair (rule 2 / D-0080-scanpst-arg)"
+        "scanpst -no repair support unverifiable via help/version; skip rather than risk repair (rule 2 / D-0080-scanpst-arg)"
             .into(),
     )
+}
+
+/// CI stub contract: log line proving the process accepted `-no repair`.
+///
+/// Production Microsoft scanpst logs do not emit this token. Stubs used in tests
+/// **must** write `NO_REPAIR_MODE` (case-insensitive) when they honor `-no repair`
+/// args, together with a recognized success marker, before QC may report Ok.
+pub fn log_proves_no_repair_mode(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("no_repair_mode")
 }
 
 /// Recognized scanpst **success** log markers (case-insensitive).
@@ -377,10 +382,13 @@ pub fn log_indicates_scanpst_success(text: &str) -> bool {
 
 /// Run scanpst `-no repair` on a **local temp copy** of the deliverable.
 ///
-/// - Verifies build ≥ [`SCANPST_MIN_BUILD`] and `-no repair` support (else skip).
-/// - `.bak` next to the copy ⇒ hard error (proves repair ran).
-/// - Parses the log for **recognized success markers**, not the exit code.
-/// - Unrecognized non-empty log ⇒ Skipped/Failed, never Ok.
+/// - Build must be ≥ [`SCANPST_MIN_BUILD`] from a **real** version source
+///   (sibling `.version` or `PST_DEDUP_SCANPST_BUILD`) — folder names alone never count.
+/// - Ok requires: no `.bak`, recognized success markers, **and** proof that `-no repair`
+///   was honored via either (a) help/usage that documents it, or (b) CI stub log line
+///   `NO_REPAIR_MODE` ([`log_proves_no_repair_mode`]). Never Ok from bare env/flag markers.
+/// - When `-no repair` cannot be proven, status is **Skipped** (D-0080-scanpst-arg residual).
+/// - `.bak` next to the copy ⇒ hard error (proves repair ran). Deliverable path is never mutated.
 pub fn run_scanpst(scanpst_path: &Path, pst_path: &Path, timeout: Duration) -> ScanpstResult {
     if !scanpst_path.is_file() {
         return ScanpstResult::skipped(format!("scanpst not found: {}", scanpst_path.display()));
@@ -411,10 +419,28 @@ pub fn run_scanpst(scanpst_path: &Path, pst_path: &Path, timeout: Duration) -> S
         );
     }
 
-    if let Err(reason) = verify_scanpst_no_repair(scanpst_path) {
+    // Help-based preverify (not flag/env). Stubs may still prove via NO_REPAIR_MODE log.
+    let no_repair_help_ok = verify_scanpst_no_repair(scanpst_path).is_ok();
+    // Safe default: if help does not document -no repair, do not invoke the binary
+    // (asymmetric failure: unrecognized flags fall into the legacy repairing path).
+    // Exception: CI stubs prove acceptance post-run via NO_REPAIR_MODE — those stubs
+    // must still be invokable. We only skip pre-run when help fails **and** the binary
+    // is not a cmd/bat test stub (extension heuristic for local CI only).
+    let looks_like_test_stub = scanpst_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let el = e.to_ascii_lowercase();
+            el == "cmd" || el == "bat"
+        })
+        .unwrap_or(false);
+    if !no_repair_help_ok && !looks_like_test_stub {
         return ScanpstResult {
             status: ExternalStatus::Skipped,
-            reason: Some(reason),
+            reason: Some(
+                "scanpst -no repair support unverifiable via help; skip rather than risk repair (rule 2 / D-0080-scanpst-arg)"
+                    .into(),
+            ),
             build,
             log_path: None,
             bak_present: false,
@@ -477,6 +503,8 @@ pub fn run_scanpst(scanpst_path: &Path, pst_path: &Path, timeout: Duration) -> S
         }
     }
 
+    let no_repair_proven = no_repair_help_ok || log_proves_no_repair_mode(&log_text);
+
     let result = if bak_present {
         ScanpstResult {
             status: ExternalStatus::Failed,
@@ -535,14 +563,30 @@ pub fn run_scanpst(scanpst_path: &Path, pst_path: &Path, timeout: Duration) -> S
                         hard_error: true,
                     }
                 } else if log_indicates_scanpst_success(&log_text) {
-                    ScanpstResult {
-                        status: ExternalStatus::Ok,
-                        reason: None,
-                        build,
-                        log_path: log_path.map(|p| p.display().to_string()),
-                        bak_present: false,
-                        log_summary: summarize_scanpst_log(&log_text),
-                        hard_error: false,
+                    if no_repair_proven {
+                        ScanpstResult {
+                            status: ExternalStatus::Ok,
+                            reason: None,
+                            build,
+                            log_path: log_path.map(|p| p.display().to_string()),
+                            bak_present: false,
+                            log_summary: summarize_scanpst_log(&log_text),
+                            hard_error: false,
+                        }
+                    } else {
+                        // Success markers without -no repair proof ⇒ never Ok.
+                        ScanpstResult {
+                            status: ExternalStatus::Skipped,
+                            reason: Some(
+                                "scanpst log has success markers but -no repair not proven (help docs or NO_REPAIR_MODE stub line required; D-0080-scanpst-arg)"
+                                    .into(),
+                            ),
+                            build,
+                            log_path: log_path.map(|p| p.display().to_string()),
+                            bak_present: false,
+                            log_summary: summarize_scanpst_log(&log_text),
+                            hard_error: false,
+                        }
                     }
                 } else {
                     // Non-empty but unrecognized — never Ok (DoD-13).
@@ -799,13 +843,21 @@ mod tests {
 
     fn pin_scanpst_build(cmd_path: &Path) {
         // Verified build via sibling .version — never invent from Office16 folder alone.
+        // Do **not** write `.accepts-no-repair` (removed as Ok path — DoD-13 honesty).
         fs::write(
             cmd_path.with_extension("version"),
             format!("{SCANPST_MIN_BUILD}\n"),
         )
         .expect("version pin");
-        // Stub-friendly: accept -no repair without help probe.
-        fs::write(cmd_path.with_extension("accepts-no-repair"), b"1\n").expect("no-repair pin");
+    }
+
+    /// CI stub contract body: prove `-no repair` via `NO_REPAIR_MODE` log line + success marker.
+    /// `%2` is the pst path after `-file` (production argv shape).
+    fn stub_scanpst_ok_body() -> &'static str {
+        "if not \"%~2\"==\"\" (\r\n\
+         echo NO_REPAIR_MODE> \"%~dpn2.log\"\r\n\
+         echo No errors found>> \"%~dpn2.log\"\r\n\
+         )\r\nexit /b 0\r\n"
     }
 
     #[test]
@@ -814,12 +866,7 @@ mod tests {
         let office = dir.path().join("Office16");
         fs::create_dir_all(&office).expect("dir");
         let named_cmd = office.join("SCANPST.cmd");
-        // %2 is the pst path after -file (production argv shape).
-        write_stub_cmd(
-            &named_cmd,
-            "if not \"%~2\"==\"\" (echo No errors found> \"%~dpn2.log\")\r\nexit /b 0\r\n",
-        )
-        .expect("stub");
+        write_stub_cmd(&named_cmd, stub_scanpst_ok_body()).expect("stub");
         pin_scanpst_build(&named_cmd);
         let pst = dir.path().join("deliverable.pst");
         fs::write(&pst, b"fake-pst-bytes").expect("pst");
@@ -828,11 +875,59 @@ mod tests {
         // May be Ok or Failed depending on log write; must not hard_error without bak.
         assert!(!r.bak_present, "{r:?}");
         assert!(!r.hard_error || r.status == ExternalStatus::Failed, "{r:?}");
-        // With a success-marker log, status should be Ok.
+        // Stub contract: NO_REPAIR_MODE + success marker ⇒ Ok.
         assert_eq!(
             r.status,
             ExternalStatus::Ok,
-            "recognized success log must be Ok: {r:?}"
+            "stub with NO_REPAIR_MODE + success must be Ok: {r:?}"
+        );
+    }
+
+    #[test]
+    fn stub_success_without_no_repair_proof_is_not_ok() {
+        let dir = TempDir::new().expect("tmp");
+        let office = dir.path().join("tools");
+        fs::create_dir_all(&office).expect("dir");
+        let named_cmd = office.join("SCANPST.cmd");
+        // Success markers only — no NO_REPAIR_MODE, help has no "no repair".
+        write_stub_cmd(
+            &named_cmd,
+            "if not \"%~2\"==\"\" (echo No errors found> \"%~dpn2.log\")\r\nexit /b 0\r\n",
+        )
+        .expect("stub");
+        pin_scanpst_build(&named_cmd);
+        let pst = dir.path().join("d.pst");
+        fs::write(&pst, b"x").expect("pst");
+        let r = run_scanpst(&named_cmd, &pst, Duration::from_secs(15));
+        assert_ne!(
+            r.status,
+            ExternalStatus::Ok,
+            "success log without -no repair proof must not be Ok: {r:?}"
+        );
+        assert_eq!(r.status, ExternalStatus::Skipped, "{r:?}");
+    }
+
+    #[test]
+    fn accepts_no_repair_flag_file_alone_is_not_ok() {
+        // Regression: bare .accepts-no-repair must never green-wash Ok.
+        let dir = TempDir::new().expect("tmp");
+        let office = dir.path().join("tools");
+        fs::create_dir_all(&office).expect("dir");
+        let named_cmd = office.join("SCANPST.cmd");
+        write_stub_cmd(
+            &named_cmd,
+            "if not \"%~2\"==\"\" (echo No errors found> \"%~dpn2.log\")\r\nexit /b 0\r\n",
+        )
+        .expect("stub");
+        pin_scanpst_build(&named_cmd);
+        fs::write(named_cmd.with_extension("accepts-no-repair"), b"1\n").expect("flag");
+        let pst = dir.path().join("d.pst");
+        fs::write(&pst, b"x").expect("pst");
+        let r = run_scanpst(&named_cmd, &pst, Duration::from_secs(15));
+        assert_ne!(
+            r.status,
+            ExternalStatus::Ok,
+            ".accepts-no-repair alone must not yield Ok: {r:?}"
         );
     }
 
@@ -846,7 +941,7 @@ mod tests {
         // Write .bak next to %2 (the pst path after -file) — most reliable on cmd.
         write_stub_cmd(
             &named_cmd,
-            "if not \"%~2\"==\"\" (echo repaired> \"%~dpn2.bak\")\r\nif not \"%~3\"==\"\" (echo repaired> \"%~dpn3.bak\")\r\nexit /b 0\r\n",
+            "if not \"%~2\"==\"\" (echo NO_REPAIR_MODE> \"%~dpn2.log\" & echo repaired> \"%~dpn2.bak\")\r\nif not \"%~3\"==\"\" (echo repaired> \"%~dpn3.bak\")\r\nexit /b 0\r\n",
         )
         .expect("stub");
         pin_scanpst_build(&named_cmd);
@@ -985,7 +1080,7 @@ mod tests {
         let office = dir.path().join("tools");
         fs::create_dir_all(&office).expect("dir");
         let named_cmd = office.join("SCANPST.cmd");
-        // Version pin only — no .accepts-no-repair, no env, help has no "no repair".
+        // Version pin only — help has no "no repair", run writes no NO_REPAIR_MODE.
         write_stub_cmd(
             &named_cmd,
             "echo usage: SCANPST -file path\r\nexit /b 0\r\n",
@@ -998,25 +1093,49 @@ mod tests {
         .expect("version");
         let pst = dir.path().join("d.pst");
         fs::write(&pst, b"x").expect("pst");
-        let prev = std::env::var("PST_DEDUP_SCANPST_NO_REPAIR_OK").ok();
-        std::env::remove_var("PST_DEDUP_SCANPST_NO_REPAIR_OK");
         let r = run_scanpst(&named_cmd, &pst, Duration::from_secs(10));
+        // Stub may run (cmd) but must not be Ok without proof.
+        assert_ne!(r.status, ExternalStatus::Ok, "{r:?}");
+        assert!(
+            matches!(r.status, ExternalStatus::Skipped | ExternalStatus::Failed),
+            "{r:?}"
+        );
+        let reason = r.reason.as_deref().unwrap_or("").to_ascii_lowercase();
+        assert!(
+            reason.contains("no repair")
+                || reason.contains("unverif")
+                || reason.contains("log")
+                || reason.contains("success"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn env_no_repair_marker_alone_is_not_ok() {
+        let dir = TempDir::new().expect("tmp");
+        let office = dir.path().join("tools");
+        fs::create_dir_all(&office).expect("dir");
+        let named_cmd = office.join("SCANPST.cmd");
+        write_stub_cmd(
+            &named_cmd,
+            "if not \"%~2\"==\"\" (echo No errors found> \"%~dpn2.log\")\r\nexit /b 0\r\n",
+        )
+        .expect("stub");
+        pin_scanpst_build(&named_cmd);
+        let pst = dir.path().join("d.pst");
+        fs::write(&pst, b"x").expect("pst");
+        let prev = std::env::var("PST_DEDUP_SCANPST_NO_REPAIR_OK").ok();
+        std::env::set_var("PST_DEDUP_SCANPST_NO_REPAIR_OK", "1");
+        let r = run_scanpst(&named_cmd, &pst, Duration::from_secs(15));
         if let Some(v) = prev {
             std::env::set_var("PST_DEDUP_SCANPST_NO_REPAIR_OK", v);
+        } else {
+            std::env::remove_var("PST_DEDUP_SCANPST_NO_REPAIR_OK");
         }
-        assert_eq!(r.status, ExternalStatus::Skipped, "{r:?}");
-        assert!(
-            r.reason
-                .as_deref()
-                .unwrap_or("")
-                .to_ascii_lowercase()
-                .contains("no repair")
-                || r.reason
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_ascii_lowercase()
-                    .contains("unverif"),
-            "{r:?}"
+        assert_ne!(
+            r.status,
+            ExternalStatus::Ok,
+            "env PST_DEDUP_SCANPST_NO_REPAIR_OK alone must not yield Ok: {r:?}"
         );
     }
 

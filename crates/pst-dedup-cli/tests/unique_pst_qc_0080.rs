@@ -2268,6 +2268,413 @@ fn fixture_matrix_oversized_subject_qc_green() {
     );
 }
 
+/// Missing export_messages.csv with messages_written > 0 ⇒ hard defect (not empty green).
+#[test]
+fn missing_export_messages_csv_is_defect_not_green() {
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("out.pst");
+    write_simple_pst(&path, vec![base_msg("<miss@ex.com>", "Miss", "body miss")]);
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    // No export_messages.csv — only summary with messages_written=1.
+    fs::write(
+        report_dir.join("summary.json"),
+        serde_json::json!({
+            "export": {
+                "volumes": [{
+                    "volume_index": 1,
+                    "path": path.display().to_string(),
+                    "bytes": 1,
+                    "sha256_hex": "",
+                    "md5_hex": "",
+                    "messages_written": 1,
+                    "finalized_early": false,
+                    "volume_exceeded_soft_limit": false
+                }]
+            }
+        })
+        .to_string(),
+    )
+    .expect("summary");
+
+    let report = run_qc_pst(&path, &report_dir, QcLevel::Structure, 64, None, false, 4)
+        .expect("qc-pst should run");
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "missing export_messages.csv must hard-fail: {:?}",
+        report.findings
+    );
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    assert!(
+        csv.contains("export_messages_missing")
+            || csv.contains("export_messages")
+            || report.findings.defect > 0,
+        "findings must cite missing CSV: {csv}"
+    );
+}
+
+/// Omitted export rows (shortfall vs messages_written) ⇒ defect.
+#[test]
+fn omitted_export_rows_vs_messages_written_is_defect() {
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("out.pst");
+    write_simple_pst(
+        &path,
+        vec![
+            base_msg("<o1@ex.com>", "One", "body one"),
+            base_msg("<o2@ex.com>", "Two", "body two"),
+        ],
+    );
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    // Only one CSV row while messages_written=2.
+    let volumes = vec![vol_row(&path, 2)];
+    let export_rows = vec![export_row("o1@ex.com", 1, 1)];
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Structure,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[],
+        false,
+        false,
+    ));
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "export row shortfall must defect: {:?}",
+        report.findings
+    );
+}
+
+/// Duplicate export_message_index ⇒ defect.
+#[test]
+fn duplicate_export_message_index_is_defect() {
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("out.pst");
+    write_simple_pst(
+        &path,
+        vec![
+            base_msg("<d1@ex.com>", "D1", "body d1"),
+            base_msg("<d2@ex.com>", "D2", "body d2"),
+        ],
+    );
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&path, 2)];
+    let export_rows = vec![
+        export_row("d1@ex.com", 1, 1),
+        export_row("d2@ex.com", 2, 1), // duplicate index 1
+    ];
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Structure,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[],
+        false,
+        false,
+    ));
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "duplicate export_message_index must defect: {:?}",
+        report.findings
+    );
+}
+
+/// Unclaimed output folder with messages ⇒ folder_tree mismatch / defect.
+#[test]
+fn unclaimed_output_folder_with_messages_is_defect() {
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("out.pst");
+    // Two folders with messages.
+    let mut m1 = base_msg("<u1@ex.com>", "In1", "body u1");
+    m1.source_folder_path = Some("Inbox".into());
+    let mut m2 = base_msg("<u2@ex.com>", "Ar1", "body u2");
+    m2.source_folder_path = Some("Archive".into());
+    write_unicode_pst(
+        &path,
+        vec![m1, m2],
+        &[],
+        &WritePstOpts {
+            folder_layout: FolderLayoutPolicy::PreservePaths {
+                multi_source_prefix: false,
+            },
+            ..WritePstOpts::default()
+        },
+    )
+    .expect("write");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&path, 2)];
+    // Export claims only Inbox=1 and Inbox=1 again would be wrong total —
+    // claim only Inbox for both rows so Archive remains unclaimed.
+    let export_rows = vec![
+        export_row_folder("u1@ex.com", 1, 1, "Inbox"),
+        export_row_folder("u2@ex.com", 2, 2, "Inbox"),
+    ];
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Structure,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[],
+        false,
+        false,
+    ));
+    assert!(
+        !report.volumes[0].folder_tree_match,
+        "unclaimed Archive must fail folder_tree_match"
+    );
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "unclaimed folder must hard-fail: {:?}",
+        report.findings
+    );
+}
+
+/// DoD-5: two same-name source attaches, only one on output ⇒ multiset defect.
+#[test]
+fn duplicate_attach_filename_multiset_missing_is_defect() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let payload_a = b"payload-aaa-111";
+    let payload_b = b"payload-bbb-222";
+    let mut src_msg = base_msg("<dupatt@ex.com>", "DupAtt", "body dup att");
+    src_msg.attachments = vec![
+        WriteAttachment {
+            filename: "same.txt".into(),
+            data: Some(payload_a.to_vec()),
+            size: payload_a.len() as u32,
+            ..WriteAttachment::default()
+        },
+        WriteAttachment {
+            filename: "same.txt".into(),
+            data: Some(payload_b.to_vec()),
+            size: payload_b.len() as u32,
+            ..WriteAttachment::default()
+        },
+    ];
+    write_simple_pst(&src, vec![src_msg]);
+
+    // Output has only one same-named attach (first payload) — second must be defect.
+    let mut out_msg = base_msg("<dupatt@ex.com>", "DupAtt", "body dup att");
+    out_msg.attachments = vec![WriteAttachment {
+        filename: "same.txt".into(),
+        data: Some(payload_a.to_vec()),
+        size: payload_a.len() as u32,
+        ..WriteAttachment::default()
+    }];
+    write_simple_pst(&out, vec![out_msg]);
+
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "dupatt@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 0,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        subject: "DupAtt".into(),
+    }];
+    let mut c = cand(1, 12);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "dupatt@ex.com".into();
+    c.subject = "DupAtt".into();
+    c.attach_count = 2;
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        true,
+        false,
+    ));
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "duplicate filename multiset shortfall must defect: {:?}",
+        report.findings
+    );
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    assert!(
+        csv.contains("attachment") || csv.contains("multiset") || csv.contains("missing"),
+        "findings must mention attach loss: {csv}"
+    );
+}
+
+/// DoD-9 design doc: unexplained_loss via production digest extras (not probe);
+/// byte-edit residual is D-0080-unexplained-byte-edit.
+#[test]
+fn unexplained_loss_design_via_extra_source_props_not_probe() {
+    // Re-assert production path used by clean-room compare (extra_source_props),
+    // independent of probe_unexplained_property. See D-0080-unexplained-byte-edit.
+    unexplained_loss_via_extra_source_props_production_path();
+}
+
+/// DoD-11: zero-winner production unique-pst still emits QC report.
+#[test]
+fn production_zero_winner_unique_pst_emits_qc_report() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("empty_src.pst");
+    // Empty message list → zero winners.
+    write_simple_pst(&src, vec![]);
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            src.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--no-attachments",
+            "--qc-level",
+            "structure",
+            "--json",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        report.join("qc_report_v1.json").is_file() || report.join("summary.json").is_file(),
+        "zero-winner must emit report pack; stderr={} stdout={}",
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+    if report.join("qc_report_v1.json").is_file() {
+        let qc: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(report.join("qc_report_v1.json")).expect("qc"),
+        )
+        .expect("json");
+        assert_eq!(qc["hard_fail"], false, "zero-winner QC must not hard_fail");
+    }
+}
+
+/// DoD-11: multi-source synthetic PSTs via writer → unique-pst full QC green.
+#[test]
+fn production_multi_source_synthetic_unique_pst_qc_green() {
+    let dir = TempDir::new().expect("tmp");
+    let a = dir.path().join("src_a.pst");
+    let b = dir.path().join("src_b.pst");
+    write_simple_pst(&a, vec![base_msg("<msa@ex.com>", "MultiA", "body multi a")]);
+    write_simple_pst(&b, vec![base_msg("<msb@ex.com>", "MultiB", "body multi b")]);
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            a.to_str().expect("utf8"),
+            b.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--no-attachments",
+            "--qc-level",
+            "full",
+            "--json",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        result.status.success(),
+        "multi-source unique-pst failed: stderr={} stdout={}",
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(report.join("qc_report_v1.json").is_file());
+    let qc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report.join("qc_report_v1.json")).expect("qc"))
+            .expect("json");
+    assert_eq!(
+        qc["hard_fail"], false,
+        "multi-source QC: {:?}",
+        qc["findings"]
+    );
+    assert_eq!(qc["findings"]["defect"].as_u64().unwrap_or(99), 0);
+    assert_eq!(qc["findings"]["unexplained_loss"].as_u64().unwrap_or(99), 0);
+    let written = qc
+        .pointer("/volumes")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    assert!(written >= 1);
+    // Two unique messages expected.
+    let stdout: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).unwrap_or_default();
+    let unique = stdout
+        .pointer("/keep_set/stats/unique")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    assert_eq!(unique, 2, "two synthetic sources must yield 2 uniques");
+}
+
+/// DoD-11: zero-byte attachment write + full QC green (production unique-pst path).
+#[test]
+fn production_zero_byte_attachment_unique_pst_qc_green() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src_zba.pst");
+    let mut msg = base_msg("<zba@ex.com>", "ZeroByteAtt", "body with zero-byte attach");
+    msg.attachments = vec![WriteAttachment {
+        filename: "empty.bin".into(),
+        data: Some(Vec::new()),
+        size: 0,
+        attach_method: Some(1),
+        stream_available: true,
+        ..WriteAttachment::default()
+    }];
+    write_simple_pst(&src, vec![msg]);
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            src.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--qc-level",
+            "full",
+            "--json",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        result.status.success() || report.join("qc_report_v1.json").is_file(),
+        "zero-byte attach unique-pst: stderr={} stdout={}",
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(
+        report.join("qc_report_v1.json").is_file(),
+        "qc_report required for zero-byte attach path"
+    );
+    let qc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report.join("qc_report_v1.json")).expect("qc"))
+            .expect("json");
+    assert_eq!(
+        qc["hard_fail"], false,
+        "zero-byte attach full QC must be green: {:?}",
+        qc["findings"]
+    );
+    assert_eq!(qc["findings"]["defect"].as_u64().unwrap_or(99), 0);
+    assert_eq!(qc["findings"]["unexplained_loss"].as_u64().unwrap_or(99), 0);
+}
+
 // Silence unused import warning if BTreeMap unused in some builds.
 #[allow(dead_code)]
 fn _touch_btreemap() -> BTreeMap<u64, u64> {

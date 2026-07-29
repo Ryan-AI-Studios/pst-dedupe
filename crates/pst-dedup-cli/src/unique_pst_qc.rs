@@ -557,6 +557,16 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
     let mut attachments_compared = 0u64;
     let mut content_volumes: Vec<ContentDigestsVolume> = Vec::new();
 
+    // Mandatory export_messages.csv coverage (DoD-3/6/21): never green when volumes
+    // claim messages but the CSV is missing, short, or has duplicate indexes.
+    validate_export_metadata_coverage(
+        input.volumes,
+        input.export_rows,
+        &contract,
+        &mut counts,
+        &mut findings_list,
+    );
+
     let content_digests_path = input.report_dir.join("content_digests.json");
     let existing_digests = load_content_digests(&content_digests_path);
     // content_digest_backed only when loaded digests are source-origin (never output).
@@ -1185,6 +1195,93 @@ struct MsgCompareResult {
     digest_entry: Option<ContentDigestEntry>,
 }
 
+/// How a source attachment matched an output multiset slot.
+enum MatchKind {
+    Exact,
+    HashOnly,
+    HashMismatch(String),
+}
+
+/// Fail closed when `export_messages.csv` is missing/short/duplicated vs volumes.
+fn validate_export_metadata_coverage(
+    volumes: &[VolumeReportRow],
+    export_rows: &[ExportMessageRow],
+    contract: &FidelityContract,
+    counts: &mut QcFindingCounts,
+    findings_list: &mut Vec<QcFinding>,
+) {
+    let total_written: u64 = volumes.iter().map(|v| v.messages_written).sum();
+    if total_written == 0 && volumes.iter().all(|v| v.messages_written == 0) {
+        // Zero-winner / empty export: empty CSV is OK.
+        return;
+    }
+
+    if total_written > 0 && export_rows.is_empty() {
+        counts.record(FindingClass::Defect);
+        findings_list.push(QcFinding {
+            class: FindingClass::Defect,
+            property: "export_messages_missing".into(),
+            volume_index: 0,
+            source_path: String::new(),
+            source_nid: 0,
+            message_id_norm: String::new(),
+            detail: format!(
+                "export_messages.csv missing or empty while volumes report messages_written_total={total_written}"
+            ),
+        });
+        return;
+    }
+
+    // Duplicate export_message_index ⇒ defect (join key must be unique).
+    let mut seen_idx: BTreeSet<u64> = BTreeSet::new();
+    let mut dups: Vec<u64> = Vec::new();
+    for r in export_rows {
+        if !seen_idx.insert(r.export_message_index) {
+            dups.push(r.export_message_index);
+        }
+    }
+    if !dups.is_empty() {
+        counts.record(FindingClass::Defect);
+        findings_list.push(QcFinding {
+            class: FindingClass::Defect,
+            property: "export_message_index_duplicate".into(),
+            volume_index: 0,
+            source_path: String::new(),
+            source_nid: 0,
+            message_id_norm: String::new(),
+            detail: format!(
+                "duplicate export_message_index values in export_messages.csv: {:?}",
+                dups.iter().take(8).collect::<Vec<_>>()
+            ),
+        });
+    }
+
+    // Per-volume row count must match messages_written.
+    for vol in volumes {
+        let row_count = export_rows
+            .iter()
+            .filter(|r| r.volume_index == vol.volume_index)
+            .count() as u64;
+        if row_count != vol.messages_written {
+            let (class, _) = contract.classify("message_content_digest", false);
+            let _ = class;
+            counts.record(FindingClass::Defect);
+            findings_list.push(QcFinding {
+                class: FindingClass::Defect,
+                property: "export_messages_row_count".into(),
+                volume_index: vol.volume_index,
+                source_path: String::new(),
+                source_nid: 0,
+                message_id_norm: String::new(),
+                detail: format!(
+                    "export_messages.csv rows for volume {} = {row_count}, messages_written = {}",
+                    vol.volume_index, vol.messages_written
+                ),
+            });
+        }
+    }
+}
+
 fn normalize_mid_key(s: &str) -> String {
     s.trim()
         .trim_matches(|c| c == '<' || c == '>')
@@ -1434,12 +1531,16 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             });
         }
     } else if src.attach_list_error.is_none() {
-        let out_attach_map: BTreeMap<String, &str> = out
-            .attaches
-            .iter()
-            .map(|(f, _, _, h)| (f.to_ascii_lowercase(), h.as_str()))
-            .collect();
-        let mut matched_out: BTreeSet<String> = BTreeSet::new();
+        // Multiset of output attaches keyed by lowercase filename. Duplicate names
+        // must not collapse: each source attach consumes exactly one output slot
+        // (prefer filename+size+hash, then filename+hash, then filename+size).
+        let mut out_attach_pool: BTreeMap<String, Vec<(u64, String, bool)>> = BTreeMap::new();
+        for (f, sz, _, h) in &out.attaches {
+            out_attach_pool
+                .entry(f.to_ascii_lowercase())
+                .or_default()
+                .push((*sz, h.clone(), false));
+        }
         for (fnm, sz, _, ph) in &src.attaches {
             attachments_compared = attachments_compared.saturating_add(1);
             let fnm_key = fnm.to_ascii_lowercase();
@@ -1462,12 +1563,42 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                 });
                 continue;
             }
-            match out_attach_map.get(&fnm_key) {
-                Some(out_ph) if *out_ph == ph.as_str() => {
-                    matched_out.insert(fnm_key);
+            let pool = out_attach_pool.get_mut(&fnm_key);
+            let consumed = pool.and_then(|slots| {
+                // Prefer exact size+hash, then hash-only, then size-only (hash mismatch).
+                let exact = slots.iter().position(|(osz, oh, used)| {
+                    !*used && *osz == *sz && oh.as_str() == ph.as_str()
+                });
+                if let Some(i) = exact {
+                    slots[i].2 = true;
+                    return Some(MatchKind::Exact);
                 }
-                Some(out_ph) => {
-                    matched_out.insert(fnm_key);
+                let hash_only = slots
+                    .iter()
+                    .position(|(_, oh, used)| !*used && oh.as_str() == ph.as_str());
+                if let Some(i) = hash_only {
+                    slots[i].2 = true;
+                    return Some(MatchKind::HashOnly);
+                }
+                let size_only = slots
+                    .iter()
+                    .position(|(osz, _, used)| !*used && *osz == *sz);
+                if let Some(i) = size_only {
+                    let out_ph = slots[i].1.clone();
+                    slots[i].2 = true;
+                    return Some(MatchKind::HashMismatch(out_ph));
+                }
+                let any = slots.iter().position(|(_, _, used)| !*used);
+                if let Some(i) = any {
+                    let out_ph = slots[i].1.clone();
+                    slots[i].2 = true;
+                    return Some(MatchKind::HashMismatch(out_ph));
+                }
+                None
+            });
+            match consumed {
+                Some(MatchKind::Exact | MatchKind::HashOnly) => {}
+                Some(MatchKind::HashMismatch(out_ph)) => {
                     let (class, _) = contract.classify("attachment_payload_sha256", false);
                     findings.push(QcFinding {
                         class,
@@ -1504,21 +1635,33 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                             source_path: cand.source_path.clone(),
                             source_nid: cand.source_nid,
                             message_id_norm: cand.message_id_norm.clone(),
-                            detail: format!("attach {fnm} missing in output"),
+                            detail: format!("attach {fnm} missing in output (multiset exhausted)"),
                         });
                     }
                 }
             }
         }
-        // Unexpected output attaches not present on source.
-        for (f, _, _, _) in &out.attaches {
+        // Unexpected / unconsumed output attaches (extra multiset entries).
+        for (f, sz, _, h) in &out.attaches {
             let key = f.to_ascii_lowercase();
-            if !matched_out.contains(&key)
-                && !src
-                    .attaches
-                    .iter()
-                    .any(|(sf, _, _, _)| sf.eq_ignore_ascii_case(f))
-            {
+            let still_free = out_attach_pool
+                .get(&key)
+                .map(|slots| {
+                    slots
+                        .iter()
+                        .any(|(osz, oh, used)| !*used && *osz == *sz && oh.as_str() == h.as_str())
+                })
+                .unwrap_or(false);
+            if still_free {
+                // Mark one free slot consumed for reporting so we don't double-count.
+                if let Some(slots) = out_attach_pool.get_mut(&key) {
+                    if let Some(slot) = slots
+                        .iter_mut()
+                        .find(|(osz, oh, used)| !*used && *osz == *sz && oh.as_str() == h.as_str())
+                    {
+                        slot.2 = true;
+                    }
+                }
                 let (class, _) = contract.classify("attachment_by_value", false);
                 findings.push(QcFinding {
                     class,
@@ -1527,7 +1670,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                     source_path: cand.source_path.clone(),
                     source_nid: cand.source_nid,
                     message_id_norm: cand.message_id_norm.clone(),
-                    detail: format!("unexpected output attach {f} not present on source"),
+                    detail: format!("unexpected/unconsumed output attach {f}"),
                 });
             }
         }
@@ -1800,6 +1943,10 @@ fn is_residual_unique_mail(path: &str) -> bool {
 /// suffix, case-insensitive) **with equal per-folder message counts**.
 /// Presence alone is not enough: same leaves with redistributed counts fail.
 ///
+/// After expected leaves claim output slots, any **remaining** non-system output
+/// folder that still has messages is unclaimed → fail (DoD-4: no silent extra
+/// folders with mail).
+///
 /// **Residual Unique Mail allowance** (documented only): an expected path that
 /// *is itself* residual Unique Mail may match an output Unique Mail folder when
 /// counts agree. Wholesale collapse (multi-leaf expected → single residual) fails.
@@ -1815,7 +1962,25 @@ fn folder_tree_matches(
         return false;
     }
     if expected_folder_counts.is_empty() {
-        return true;
+        // No expected folder rows (metadata incomplete) — do not green-pass
+        // multi-folder output as matched; message_count alone already checked.
+        // Unclaimed check below still applies when expected is empty: any
+        // message-bearing output folder is unclaimed.
+        let any_mail_folder = digest
+            .folder_paths
+            .iter()
+            .zip(
+                digest
+                    .folder_message_counts
+                    .iter()
+                    .copied()
+                    .chain(std::iter::repeat(0)),
+            )
+            .any(|(p, c)| {
+                let n = normalize_folder_key(p);
+                c > 0 && !n.is_empty() && !is_system_folder_path(&n)
+            });
+        return !any_mail_folder;
     }
 
     // Available output folders with message counts.
@@ -1832,7 +1997,7 @@ fn folder_tree_matches(
                 .chain(std::iter::repeat(0)),
         )
         .map(|(p, c)| (normalize_folder_key(p), c))
-        .filter(|(p, c)| !p.is_empty() && *c > 0)
+        .filter(|(p, c)| !p.is_empty() && *c > 0 && !is_system_folder_path(p))
         .collect();
 
     // Longest expected leaves first so "Inbox/Sub" claims before "Inbox".
@@ -1864,7 +2029,23 @@ fn folder_tree_matches(
             out_slots.remove(i);
         }
     }
-    true
+    // Unclaimed message-bearing output folders ⇒ tree mismatch.
+    out_slots.is_empty()
+}
+
+/// System / non-content folders that may appear with zero user expectation.
+fn is_system_folder_path(normalized: &str) -> bool {
+    let n = normalized.trim_matches('/');
+    matches!(
+        n,
+        "" | "ipm_subtree"
+            | "top of personal folders"
+            | "to-do search"
+            | "search root"
+            | "deleted items"
+            | "finder"
+    ) || n.ends_with("/deleted items")
+        || n.ends_with("/search root")
 }
 
 /// Source-origin digests only enable content_digest_backed (DoD-21).
@@ -2172,6 +2353,8 @@ fn load_volumes_for_qc(report_dir: &Path, out_pst: &Path) -> Result<Vec<VolumeRe
 fn load_export_rows_for_qc(report_dir: &Path) -> Result<Vec<ExportMessageRow>, String> {
     let path = report_dir.join("export_messages.csv");
     if !path.is_file() {
+        // Missing file: return empty; `validate_export_metadata_coverage` turns
+        // this into a hard defect when any volume has messages_written > 0.
         return Ok(Vec::new());
     }
     let mut rdr = csv::ReaderBuilder::new()
@@ -2179,6 +2362,7 @@ fn load_export_rows_for_qc(report_dir: &Path) -> Result<Vec<ExportMessageRow>, S
         .from_path(&path)
         .map_err(|e| e.to_string())?;
     let mut rows = Vec::new();
+    let mut seen_idx: BTreeSet<u64> = BTreeSet::new();
     for (i, rec) in rdr.records().enumerate() {
         let rec = rec.map_err(|e| format!("export_messages.csv row {}: {e}", i + 1))?;
         // source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,...
@@ -2210,6 +2394,12 @@ fn load_export_rows_for_qc(report_dir: &Path) -> Result<Vec<ExportMessageRow>, S
                 rec.get(8)
             )
         })?;
+        if !seen_idx.insert(export_message_index) {
+            return Err(format!(
+                "export_messages.csv row {}: duplicate export_message_index {export_message_index}",
+                i + 1
+            ));
+        }
         rows.push(ExportMessageRow {
             source_path: rec.get(0).unwrap_or("").to_string(),
             folder_path: rec.get(1).unwrap_or("").to_string(),
@@ -2430,6 +2620,84 @@ mod tests {
             !folder_tree_matches(&digest, &expected, 3),
             "same leaves with different per-folder counts must hard-fail match"
         );
+    }
+
+    #[test]
+    fn folder_tree_rejects_unclaimed_output_folder_with_messages() {
+        // Expected only Inbox=1 but output also has Archive=1 (total still 2 if both counted).
+        let digest = VolumeStructuralDigest {
+            message_count: 2,
+            folder_paths: vec!["IPM_SUBTREE/Inbox".into(), "IPM_SUBTREE/Archive".into()],
+            folder_message_counts: vec![1, 1],
+            message_digests: vec!["a".into(), "b".into()],
+        };
+        let mut expected = BTreeMap::new();
+        expected.insert("inbox".into(), 1);
+        // Message count mismatch first... use expected_count=2 with only inbox claimed partial.
+        // Claim inbox=1, archive remains unclaimed ⇒ fail even if we lie about expected total.
+        assert!(
+            !folder_tree_matches(&digest, &expected, 2),
+            "unclaimed Archive with messages must fail folder_tree_matches"
+        );
+    }
+
+    #[test]
+    fn export_metadata_missing_csv_is_defect() {
+        let volumes = vec![VolumeReportRow {
+            volume_index: 1,
+            path: "out.pst".into(),
+            bytes: 1,
+            sha256_hex: String::new(),
+            md5_hex: String::new(),
+            messages_written: 2,
+            finalized_early: false,
+            volume_exceeded_soft_limit: false,
+        }];
+        let contract = FidelityContract::v1();
+        let mut counts = QcFindingCounts::default();
+        let mut findings = Vec::new();
+        validate_export_metadata_coverage(&volumes, &[], &contract, &mut counts, &mut findings);
+        assert!(counts.hard_fail());
+        assert!(findings
+            .iter()
+            .any(|f| f.property == "export_messages_missing"));
+    }
+
+    #[test]
+    fn export_metadata_row_shortfall_is_defect() {
+        let volumes = vec![VolumeReportRow {
+            volume_index: 1,
+            path: "out.pst".into(),
+            bytes: 1,
+            sha256_hex: String::new(),
+            md5_hex: String::new(),
+            messages_written: 2,
+            finalized_early: false,
+            volume_exceeded_soft_limit: false,
+        }];
+        let rows = vec![ExportMessageRow {
+            source_path: "a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 1,
+            message_id_norm: "m1".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: String::new(),
+            volume_path: "out.pst".into(),
+            volume_index: 1,
+            export_message_index: 1,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            subject: "s".into(),
+        }];
+        let contract = FidelityContract::v1();
+        let mut counts = QcFindingCounts::default();
+        let mut findings = Vec::new();
+        validate_export_metadata_coverage(&volumes, &rows, &contract, &mut counts, &mut findings);
+        assert!(counts.hard_fail());
+        assert!(findings
+            .iter()
+            .any(|f| f.property == "export_messages_row_count"));
     }
 
     #[test]
