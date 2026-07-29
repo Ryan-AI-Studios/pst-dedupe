@@ -9,7 +9,7 @@
 | Fixture | `fixtures/aspose_outlook.pst` (~3.2 MiB, 17 unique) |
 | Parent | `9c8be49` worktree `.wt-0079-baseline` |
 | Date | 2026-07-28 |
-| Status | **In Progress — Codex P1 fix round** (not Completed until final Codex PASS) |
+| Status | **Completed — Codex luna PASS WITH DEFERRED P3** (final gate `review.codex.final.md`) |
 
 ## Scope
 
@@ -140,7 +140,7 @@ Phases 1–5 miss the operator target.
 | 16 cancel latency | **Partial** | behavioral 0078 retained; numeric residual |
 | 17 no unjustified default dep | **Met** | |
 | 18 deferred.md | **Met** | In Progress header until final PASS |
-| 19 conductor/sequencing/review | **In Progress** | until final Codex PASS |
+| 19 conductor/sequencing/review | **Met** | Completed after final Codex PASS WITH DEFERRED P3 |
 | 20 fmt/clippy/test | **Gate** | orchestrator re-runs outside Codex sandbox (sandbox cannot write `target/`) |
 
 ## Residuals

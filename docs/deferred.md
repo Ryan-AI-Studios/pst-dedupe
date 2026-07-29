@@ -820,7 +820,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0078-retryable | P3 | Transient (retry-safe) vs permanent failure — as a **`retryable: bool` JSON field, not a new exit code** | Retryability cross-cuts outcome classes (a transient IO surfaces as exit 1 in scan or exit 5 in matter open), so encoding it in the integer would double the table. Real need: SMB/cloud-mount PST reads hit network drops + AV file locks constantly. Blocked on a taxonomy across `PstError` / `matter_core::Error`. **0081 must not advise blanket "retry exit 5"** — `CliExit::MatterIo` also covers `AuditChainBroken` / `SchemaVersionMismatch` / `WrongPassphrase`, where retry is useless and delays escalation. | residual |
 | D-0078-gui | P3 | Desk surfacing of `fidelity` / `exit_reason` | 0077 banner already covers `export_risk` (the safety-critical half); wizard shows completion, not exit class | residual polish |
 
-## From track 0079-MaterializeWritePerformance (In Progress — Codex P1 fix round)
+## From track 0079-MaterializeWritePerformance (Completed — Codex luna PASS WITH DEFERRED P3)
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|

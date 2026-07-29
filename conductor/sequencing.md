@@ -145,6 +145,6 @@
 | 2c | **0078** Exit codes | **Completed** — `classify_export`, exit 64/65/130, cancel quarantine, JSON contract; feeds **0080** QC / **0081** runbook (anti-recommendation: no blanket retry exit 5 / `AuditChainBroken`); Codex luna PASS WITH DEFERRED P3 |
 | 3 | **0075** Winner policies | **Completed** — ladder fidelity→bcc→source→folder→policy + `decided_by` + All Custodians; D-0075-* residual |
 | 4 | **0076** Tier-2 hardening | **Completed** — char-clamp, split-only guards, BoundBy, Tier 2.5 body/body-recip, `--dedupe-scope` (closes D-0075-scope); Codex luna PASS WITH DEFERRED P3 |
-| 5 | **0079** Performance | **In Progress** (Phases 0–5 code + docs). After 0078 summary contract. Oracle + `baseline.md` landed; D1 single-materialize; AMap O(1); positioned writes; shared LRU; concurrent hash. **`--jobs` skipped** pending operator multi-GB evidence. |
+| 5 | **0079** Performance | **Completed** — Codex luna PASS WITH DEFERRED P3. Phases 0–5; `--jobs` skipped (D-0079-operator-multigb). |
 | 6 | **0080** Outlook QC | After unique-pst stable |
 | 7 | **0081** Deps + runbook | Can draft early; finalize after 0073/0077 |

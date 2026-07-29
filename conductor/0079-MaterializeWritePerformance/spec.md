@@ -1,7 +1,7 @@
 # 0079 — Materialize & PST Write Performance
 
 - **Track ID:** 0079-MaterializeWritePerformance
-- **Status:** Ready
+- **Status:** Completed
 - **Series:** L (unique export hardening)
 - **Verified against:** `9c8be49` (post-0078)
 - **Evidence:** INC unique-pst ~**275 s** wall, scan ~**3 s**, 3728 winners, 366 attach fails. Source PSTs stay out of git.
