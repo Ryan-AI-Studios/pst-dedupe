@@ -183,33 +183,41 @@ pub struct QcRunInput<'a> {
     /// When true, attachments were omitted by policy (`parents_only` / `--no-attachments`).
     /// Missing attach payloads are then `explained`, not `defect`.
     pub parents_only: bool,
+    /// Test / diagnostic hook: when set, classify this property once and record the finding
+    /// (exercises `unexplained_loss` → hard_fail wiring beyond unit-only `classify`).
+    pub probe_unexplained_property: Option<&'a str>,
 }
 
 /// Select risk-weighted sample indices (deterministic pure function of candidates).
 ///
-/// Strata from §3.3; dedupe; cap at `sample_max`. Sort key: export_message_index.
+/// Strata from §3.3; dedupe; cap at `sample_max`. When capping, **stratum
+/// representatives are preferred** over naive index-order truncate (so volume-last
+/// / extremes are not dropped solely because they sort late).
+/// Final order is stable by `export_message_index`.
 pub fn select_sample_indices(candidates: &[QcSampleCandidate], sample_max: usize) -> Vec<usize> {
     if candidates.is_empty() || sample_max == 0 {
         return Vec::new();
     }
-    let mut selected: BTreeSet<usize> = BTreeSet::new();
-    let push = |sel: &mut BTreeSet<usize>, idx: Option<usize>| {
+
+    // Priority-ordered stratum representatives (first insertion wins when capping).
+    let mut priority: Vec<usize> = Vec::new();
+    let mut push_prio = |idx: Option<usize>| {
         if let Some(i) = idx {
-            sel.insert(i);
+            if !priority.contains(&i) {
+                priority.push(i);
+            }
         }
     };
 
     // Largest body_plain / body_html
-    push(
-        &mut selected,
+    push_prio(
         candidates
             .iter()
             .enumerate()
             .max_by_key(|(_, c)| c.body_plain_len)
             .map(|(i, _)| i),
     );
-    push(
-        &mut selected,
+    push_prio(
         candidates
             .iter()
             .enumerate()
@@ -217,8 +225,7 @@ pub fn select_sample_indices(candidates: &[QcSampleCandidate], sample_max: usize
             .map(|(i, _)| i),
     );
     // Smallest / zero-byte body_plain floor
-    push(
-        &mut selected,
+    push_prio(
         candidates
             .iter()
             .enumerate()
@@ -226,16 +233,14 @@ pub fn select_sample_indices(candidates: &[QcSampleCandidate], sample_max: usize
             .map(|(i, _)| i),
     );
     // Most attachments; largest single attach; zero-byte attach
-    push(
-        &mut selected,
+    push_prio(
         candidates
             .iter()
             .enumerate()
             .max_by_key(|(_, c)| c.attach_count)
             .map(|(i, _)| i),
     );
-    push(
-        &mut selected,
+    push_prio(
         candidates
             .iter()
             .enumerate()
@@ -244,21 +249,19 @@ pub fn select_sample_indices(candidates: &[QcSampleCandidate], sample_max: usize
     );
     for (i, c) in candidates.iter().enumerate() {
         if c.has_zero_byte_attach {
-            selected.insert(i);
+            push_prio(Some(i));
             break;
         }
     }
     // Longest subject / sender
-    push(
-        &mut selected,
+    push_prio(
         candidates
             .iter()
             .enumerate()
             .max_by_key(|(_, c)| c.subject.len())
             .map(|(i, _)| i),
     );
-    push(
-        &mut selected,
+    push_prio(
         candidates
             .iter()
             .enumerate()
@@ -268,27 +271,27 @@ pub fn select_sample_indices(candidates: &[QcSampleCandidate], sample_max: usize
     // Degraded / ledger
     for (i, c) in candidates.iter().enumerate() {
         if c.has_degraded || c.has_ledger_fail {
-            selected.insert(i);
+            push_prio(Some(i));
         }
     }
     // Non-ASCII subject
     for (i, c) in candidates.iter().enumerate() {
         if c.subject_non_ascii {
-            selected.insert(i);
+            push_prio(Some(i));
             break;
         }
     }
-    // Volume first/last
+    // Volume first/last (high priority — must survive capping)
     let mut by_vol: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
     for (i, c) in candidates.iter().enumerate() {
         by_vol.entry(c.volume_index).or_default().push(i);
     }
     for idxs in by_vol.values() {
         if let Some(&first) = idxs.first() {
-            selected.insert(first);
+            push_prio(Some(first));
         }
         if let Some(&last) = idxs.last() {
-            selected.insert(last);
+            push_prio(Some(last));
         }
     }
     // One per distinct source
@@ -296,22 +299,40 @@ pub fn select_sample_indices(candidates: &[QcSampleCandidate], sample_max: usize
     for (i, c) in candidates.iter().enumerate() {
         let key = c.source_path.to_ascii_lowercase();
         if seen_src.insert(key) {
-            selected.insert(i);
+            push_prio(Some(i));
         }
     }
     // Embedded
     for (i, c) in candidates.iter().enumerate() {
         if c.has_embedded {
-            selected.insert(i);
+            push_prio(Some(i));
         }
     }
 
-    // Stable order by export_message_index, then cap.
-    let mut ordered: Vec<usize> = selected.into_iter().collect();
-    ordered.sort_by_key(|&i| candidates[i].export_message_index);
-    if ordered.len() > sample_max {
-        ordered.truncate(sample_max);
+    // Cap: keep stratum reps first, then fill remaining by export_message_index.
+    let mut ordered: Vec<usize> = Vec::with_capacity(sample_max.min(candidates.len()));
+    let mut seen: BTreeSet<usize> = BTreeSet::new();
+    for i in priority {
+        if ordered.len() >= sample_max {
+            break;
+        }
+        if seen.insert(i) {
+            ordered.push(i);
+        }
     }
+    if ordered.len() < sample_max {
+        let mut rest: Vec<usize> = (0..candidates.len()).collect();
+        rest.sort_by_key(|&i| candidates[i].export_message_index);
+        for i in rest {
+            if ordered.len() >= sample_max {
+                break;
+            }
+            if seen.insert(i) {
+                ordered.push(i);
+            }
+        }
+    }
+    ordered.sort_by_key(|&i| candidates[i].export_message_index);
     ordered
 }
 
@@ -363,6 +384,8 @@ pub struct CandidateFromWriteMsg<'a> {
     pub write_msg: &'a pst_writer::WriteMessage,
     pub has_degraded: bool,
     pub has_ledger_fail: bool,
+    /// Source-side BCC (not written; used for known_gap accounting).
+    pub display_bcc: &'a str,
 }
 
 /// Build a sample candidate from a write-path `WriteMessage` + export identity.
@@ -378,6 +401,7 @@ pub fn candidate_from_write_msg(input: CandidateFromWriteMsg<'_>) -> QcSampleCan
         write_msg,
         has_degraded,
         has_ledger_fail,
+        display_bcc,
     } = input;
     let body_plain_len = write_msg.body_plain.as_ref().map(|s| s.len()).unwrap_or(0);
     let body_html_len = write_msg.body_html.as_ref().map(|b| b.len()).unwrap_or(0);
@@ -412,14 +436,23 @@ pub fn candidate_from_write_msg(input: CandidateFromWriteMsg<'_>) -> QcSampleCan
         has_ledger_fail,
         subject_non_ascii: !subject.is_ascii(),
         display_cc: write_msg.display_cc.clone().unwrap_or_default(),
-        display_bcc: String::new(),
+        display_bcc: display_bcc.to_string(),
     }
 }
 
-/// Persist `content_digests.json` for clean-room re-verify.
+/// Origin of digests in `content_digests.json`. Only `"source"` enables
+/// `content_digest_backed` clean-room content compare.
+pub const CONTENT_DIGEST_ORIGIN_SOURCE: &str = "source";
+/// Output-side digests must never enable defect-capable clean-room path.
+pub const CONTENT_DIGEST_ORIGIN_OUTPUT: &str = "output";
+
+/// Persist `content_digests.json` for clean-room re-verify (source-side only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentDigestsFile {
     pub schema: String,
+    /// `"source"` = export-time source-side digests; `"output"` must not enable content_digest_backed.
+    #[serde(default)]
+    pub origin: String,
     pub qc_level: String,
     pub volumes: Vec<ContentDigestsVolume>,
 }
@@ -461,9 +494,13 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
 
     let content_digests_path = input.report_dir.join("content_digests.json");
     let existing_digests = load_content_digests(&content_digests_path);
-    let content_digest_backed = !input.source_differential && existing_digests.is_some();
+    // content_digest_backed only when loaded digests are source-origin (never output).
+    let content_digest_backed = !input.source_differential
+        && existing_digests
+            .as_ref()
+            .is_some_and(content_digests_are_source_origin);
 
-    // Output-only without digests: structural only — cannot emit defect from content.
+    // Output-only without source digests: structural only — cannot emit defect from content.
     let content_capable = input.source_differential || content_digest_backed;
 
     let sample_idxs: Vec<usize> = match input.level {
@@ -544,7 +581,7 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
                     let _ = class;
                 }
 
-                // Content comparison for sample/full
+                // Content comparison for sample/full (source-differential or source digests).
                 if matches!(input.level, QcLevel::Sample | QcLevel::Full) && content_capable {
                     let mut digest_entries = Vec::new();
                     let mut out_by_mid = index_output_by_mid(&path);
@@ -560,7 +597,9 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
                             out_by_mid: &mut out_by_mid,
                             out_path: &path,
                             source_differential: input.source_differential,
-                            existing: existing_digests.as_ref(),
+                            existing: existing_digests
+                                .as_ref()
+                                .filter(|d| content_digests_are_source_origin(d)),
                             contract: &contract,
                             parents_only: input.parents_only,
                         });
@@ -579,51 +618,24 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
                             counts.record(f.class);
                             findings_list.push(f);
                         }
-                        if let Some(entry) = compare.digest_entry {
-                            digest_entries.push(entry);
-                        }
-                    }
-                    content_volumes.push(ContentDigestsVolume {
-                        volume_index: vol.volume_index,
-                        path: vol.path.clone(),
-                        messages: digest_entries,
-                    });
-                } else if matches!(input.level, QcLevel::Sample | QcLevel::Full) && !content_capable
-                {
-                    // Persist output digests only for structure+sample path without sources.
-                    let mut digest_entries = Vec::new();
-                    if let Ok(mut pst) = pst_reader::PstFile::open(&path) {
-                        if let Ok(folders) = pst.folders() {
-                            for folder in &folders {
-                                for &nid in &folder.message_nids {
-                                    if let Ok(detail) = message_content_detail(&mut pst, nid.0) {
-                                        digest_entries.push(ContentDigestEntry {
-                                            export_message_index: 0,
-                                            source_path: String::new(),
-                                            source_nid: nid.0,
-                                            message_id_norm: detail.message_id.clone(),
-                                            content_digest: detail.digest,
-                                            attaches: detail
-                                                .attaches
-                                                .into_iter()
-                                                .map(|(f, s, _, h)| AttachDigestEntry {
-                                                    filename: f,
-                                                    size: s,
-                                                    payload_sha256: h,
-                                                })
-                                                .collect(),
-                                        });
-                                    }
-                                }
+                        // Persist digests only from source-side reads (export path).
+                        if input.source_differential {
+                            if let Some(entry) = compare.digest_entry {
+                                digest_entries.push(entry);
                             }
                         }
                     }
-                    content_volumes.push(ContentDigestsVolume {
-                        volume_index: vol.volume_index,
-                        path: vol.path.clone(),
-                        messages: digest_entries,
-                    });
+                    if input.source_differential && !digest_entries.is_empty() {
+                        content_volumes.push(ContentDigestsVolume {
+                            volume_index: vol.volume_index,
+                            path: vol.path.clone(),
+                            messages: digest_entries,
+                        });
+                    }
                 }
+                // Output-only without source digests: structural only — do NOT write
+                // output digests as content_digests.json (would falsely enable
+                // content_digest_backed on a later qc-pst run).
             }
             Err(e) => {
                 error = Some(e);
@@ -654,7 +666,8 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
         });
     }
 
-    // BCC known_gap counts from candidates with non-empty display_bcc meta.
+    // BCC known_gap counts from candidates with non-empty display_bcc meta
+    // (plumbed from CanonicalMessage; not written to output).
     for c in input.candidates {
         if !c.display_bcc.trim().is_empty() {
             let (class, _) = contract.classify("display_bcc", false);
@@ -673,8 +686,25 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
         }
     }
 
+    // Test/diagnostic: force one allowlist-miss classification into the pipeline.
+    if let Some(prop) = input.probe_unexplained_property {
+        if !prop.is_empty() {
+            let (class, _) = contract.classify(prop, false);
+            counts.record(class);
+            findings_list.push(QcFinding {
+                class,
+                property: prop.into(),
+                volume_index: 0,
+                source_path: String::new(),
+                source_nid: 0,
+                message_id_norm: String::new(),
+                detail: format!("probe property '{prop}' classified as {class:?}"),
+            });
+        }
+    }
+
     // External sidecars (skip-safe).
-    let independent_reader = if let Some(tool) = input.external_reader {
+    let mut independent_reader = if let Some(tool) = input.external_reader {
         if let Some(vol) = input.volumes.first() {
             run_independent_reader(tool, Path::new(&vol.path), DEFAULT_EXTERNAL_TIMEOUT)
         } else {
@@ -683,6 +713,73 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
     } else {
         IndependentReaderResult::skipped("no --qc-external-reader path")
     };
+
+    // When external reader returns Ok counts, compare to expected volume counts.
+    if independent_reader.status == ExternalStatus::Ok {
+        if let Some(vol) = input.volumes.first() {
+            let expected_msgs = vol.messages_written;
+            if let Some(reader_msgs) = independent_reader.message_count {
+                if reader_msgs != expected_msgs {
+                    counts.record(FindingClass::Defect);
+                    findings_list.push(QcFinding {
+                        class: FindingClass::Defect,
+                        property: "independent_reader_message_count".into(),
+                        volume_index: vol.volume_index,
+                        source_path: String::new(),
+                        source_nid: 0,
+                        message_id_norm: String::new(),
+                        detail: format!(
+                            "independent reader message_count={reader_msgs} expected={expected_msgs}"
+                        ),
+                    });
+                    independent_reader.reason = Some(format!(
+                        "message_count mismatch: reader={reader_msgs} expected={expected_msgs}"
+                    ));
+                }
+            }
+            let expected_folder_leaves = input
+                .export_rows
+                .iter()
+                .filter(|r| r.volume_index == vol.volume_index)
+                .map(|r| r.folder_path.to_ascii_lowercase())
+                .collect::<BTreeSet<_>>()
+                .len() as u64;
+            if expected_folder_leaves > 0 {
+                if let Some(reader_folders) = independent_reader.folder_count {
+                    // Allow reader folder_count >= expected leaves (IPM hierarchy overhead).
+                    // Hard fail only when reader reports fewer folders than distinct export leaves
+                    // or an exact expected when both are comparable and clearly wrong (0 vs N).
+                    if reader_folders == 0 && expected_folder_leaves > 0 {
+                        counts.record(FindingClass::Defect);
+                        findings_list.push(QcFinding {
+                            class: FindingClass::Defect,
+                            property: "independent_reader_folder_count".into(),
+                            volume_index: vol.volume_index,
+                            source_path: String::new(),
+                            source_nid: 0,
+                            message_id_norm: String::new(),
+                            detail: format!(
+                                "independent reader folder_count=0 expected_leaf_folders>={expected_folder_leaves}"
+                            ),
+                        });
+                    } else if reader_folders < expected_folder_leaves {
+                        counts.record(FindingClass::Defect);
+                        findings_list.push(QcFinding {
+                            class: FindingClass::Defect,
+                            property: "independent_reader_folder_count".into(),
+                            volume_index: vol.volume_index,
+                            source_path: String::new(),
+                            source_nid: 0,
+                            message_id_norm: String::new(),
+                            detail: format!(
+                                "independent reader folder_count={reader_folders} < expected_leaf_folders={expected_folder_leaves}"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     let mut scanpst = if input.run_scanpst {
         if let Some(vol) = input.volumes.first() {
@@ -740,9 +837,16 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
     // Write artifacts.
     let _ = write_qc_report(input.report_dir, &report);
     let _ = write_qc_findings_csv(input.report_dir, &findings_list);
-    if matches!(input.level, QcLevel::Sample | QcLevel::Full) && !content_volumes.is_empty() {
+    // Persist content_digests.json only for source-side digests (export with live sources).
+    // Never write output-only digests under this schema — they must not enable
+    // content_digest_backed on a later run (DoD-21).
+    if input.source_differential
+        && matches!(input.level, QcLevel::Sample | QcLevel::Full)
+        && !content_volumes.is_empty()
+    {
         let digests = ContentDigestsFile {
             schema: "content_digests_v1".into(),
+            origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
             qc_level: input.level.as_str().into(),
             volumes: content_volumes,
         };
@@ -1134,6 +1238,39 @@ fn index_output_by_mid(path: &Path) -> BTreeMap<String, MessageContentDetail> {
     map
 }
 
+/// Normalize folder path for case-insensitive segment comparison.
+fn normalize_folder_key(p: &str) -> String {
+    p.trim()
+        .trim_matches(|c| c == '/' || c == '\\')
+        .replace('\\', "/")
+        .to_ascii_lowercase()
+}
+
+/// True when `out_path` equals `leaf` or ends with `leaf` as a path suffix/segment chain.
+fn folder_leaf_matches(out_path: &str, leaf: &str) -> bool {
+    let out = normalize_folder_key(out_path);
+    let leaf = normalize_folder_key(leaf);
+    if leaf.is_empty() {
+        return true;
+    }
+    if out.is_empty() {
+        return false;
+    }
+    out == leaf || out.ends_with(&format!("/{leaf}")) || out.contains(&format!("/{leaf}/"))
+}
+
+/// Residual catch-all folder used by flat / residual routing (not wholesale collapse).
+fn is_residual_unique_mail(path: &str) -> bool {
+    let n = normalize_folder_key(path);
+    n == "unique mail" || n.ends_with("/unique mail")
+}
+
+/// Every expected leaf folder must match an output path (suffix or equality,
+/// case-insensitive). Missing leaf ⇒ false.
+///
+/// **Residual Unique Mail allowance** (documented only): an expected path that
+/// *is itself* residual Unique Mail may match an output Unique Mail folder.
+/// Wholesale collapse (multi-leaf expected → single unrelated residual) fails.
 fn folder_tree_matches(
     digest: &VolumeStructuralDigest,
     expected_leaf_folders: &BTreeSet<String>,
@@ -1145,8 +1282,6 @@ fn folder_tree_matches(
     if digest.message_count != expected_count {
         return false;
     }
-    // Every expected leaf should appear as a suffix of some output folder path
-    // (allows multi-source prefixes and IPM hierarchy prefixes).
     if expected_leaf_folders.is_empty() {
         return true;
     }
@@ -1155,26 +1290,40 @@ fn folder_tree_matches(
         .iter()
         .map(|p| p.to_ascii_lowercase())
         .collect();
+    let out_has_residual = out_lower.iter().any(|p| is_residual_unique_mail(p));
+
     for leaf in expected_leaf_folders {
-        if leaf.is_empty() {
+        if leaf.trim().is_empty() {
             continue;
         }
-        let found = out_lower.iter().any(|p| {
-            p == leaf
-                || p.ends_with(&format!("/{leaf}"))
-                || p.ends_with(&format!("\\{leaf}"))
-                || p.contains(&format!("/{leaf}/"))
-                || p.contains(leaf.as_str())
-        });
-        if !found {
-            // Residual Unique Mail routing may rename — soft: if we have folders and counts match, accept
-            // only when at least one expected leaf is empty residual.
+        if out_lower.iter().any(|p| folder_leaf_matches(p, leaf)) {
             continue;
         }
+        // Residual Unique Mail: only when the *expected* path maps to residual,
+        // not when any missing leaf is waved through because Unique Mail exists.
+        if is_residual_unique_mail(leaf) && out_has_residual {
+            continue;
+        }
+        return false;
     }
-    // Require at least as many non-empty folders as expected distinct leaves (approx tree).
-    let out_nonempty = out_lower.iter().filter(|p| !p.is_empty()).count();
-    out_nonempty > 0 || expected_leaf_folders.is_empty()
+    true
+}
+
+/// Source-origin digests only enable content_digest_backed (DoD-21).
+fn content_digests_are_source_origin(file: &ContentDigestsFile) -> bool {
+    let origin = file.origin.trim().to_ascii_lowercase();
+    if origin == CONTENT_DIGEST_ORIGIN_OUTPUT {
+        return false;
+    }
+    if origin == CONTENT_DIGEST_ORIGIN_SOURCE {
+        return true;
+    }
+    // Legacy files without origin: accept only when entries carry source_path
+    // (export-time source digests). Output-only stubs had empty source_path.
+    file.volumes
+        .iter()
+        .flat_map(|v| v.messages.iter())
+        .any(|m| !m.source_path.trim().is_empty())
 }
 
 fn load_content_digests(path: &Path) -> Option<ContentDigestsFile> {
@@ -1257,6 +1406,9 @@ pub fn run_qc_pst(
         .iter()
         .any(|r| Path::new(&r.source_path).is_file());
 
+    // Honor parents_only when summary/digests indicate no-attachments export.
+    let parents_only = load_parents_only_for_qc(report_dir);
+
     Ok(run_unique_pst_qc(QcRunInput {
         level,
         sample_max,
@@ -1268,8 +1420,37 @@ pub fn run_qc_pst(
         run_scanpst,
         max_open_psts,
         source_differential,
-        parents_only: false,
+        parents_only,
+        probe_unexplained_property: None,
     }))
+}
+
+/// Detect parents_only / no-attachments export from summary.json.
+fn load_parents_only_for_qc(report_dir: &Path) -> bool {
+    let summary_path = report_dir.join("summary.json");
+    let Ok(text) = fs::read_to_string(&summary_path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let family = v
+        .get("family_policy")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if family == "parents_only" {
+        return true;
+    }
+    if let Some(n) = v
+        .pointer("/export/attachments_omitted_by_policy")
+        .and_then(|x| x.as_u64())
+    {
+        if n > 0 {
+            return true;
+        }
+    }
+    false
 }
 
 fn load_volumes_for_qc(report_dir: &Path, out_pst: &Path) -> Result<Vec<VolumeReportRow>, String> {
@@ -1473,6 +1654,83 @@ mod tests {
         assert!(sel.contains(&1));
         assert!(sel.contains(&2));
         assert!(sel.contains(&3));
+    }
+
+    #[test]
+    fn sample_cap_preserves_volume_last_stratum() {
+        // Many candidates: volume-last has high export index and would be dropped
+        // by naive sort-then-truncate; stratum preference must keep it.
+        let mut cands: Vec<_> = (0..20)
+            .map(|i| cand(i, 100 + i as usize, 0, &format!("s{i}")))
+            .collect();
+        // Make index 19 the volume-last (already is) and not win any other extreme
+        // except volume-last / source uniqueness.
+        for c in &mut cands {
+            c.volume_index = 1;
+            c.source_path = "C:/same.pst".into();
+        }
+        cands[0].body_plain_len = 1; // smallest body
+        cands[1].body_plain_len = 99999; // largest body
+        let sel = select_sample_indices(&cands, 3);
+        assert!(
+            sel.contains(&19) || sel.contains(&0) && sel.contains(&1),
+            "cap must prefer stratum reps; got {sel:?}"
+        );
+        // With cap 3: largest body, smallest body, volume first/last — last must survive.
+        let sel3 = select_sample_indices(&cands, 3);
+        assert!(
+            sel3.contains(&19),
+            "volume-last (idx 19) must survive sample_max=3, got {sel3:?}"
+        );
+    }
+
+    #[test]
+    fn folder_tree_rejects_collapsed_multi_leaf() {
+        let digest = VolumeStructuralDigest {
+            message_count: 2,
+            folder_paths: vec!["Unique Mail".into()],
+            message_digests: vec!["a".into(), "b".into()],
+        };
+        let expected: BTreeSet<String> = ["inbox".into(), "sent items".into()].into();
+        assert!(
+            !folder_tree_matches(&digest, &expected, 2),
+            "collapsed tree must not match multi-leaf expected"
+        );
+    }
+
+    #[test]
+    fn folder_tree_accepts_suffix_and_residual_self() {
+        let digest = VolumeStructuralDigest {
+            message_count: 1,
+            folder_paths: vec!["IPM_SUBTREE/Inbox".into()],
+            message_digests: vec!["a".into()],
+        };
+        let expected: BTreeSet<String> = ["inbox".into()].into();
+        assert!(folder_tree_matches(&digest, &expected, 1));
+
+        let residual = VolumeStructuralDigest {
+            message_count: 1,
+            folder_paths: vec!["Unique Mail".into()],
+            message_digests: vec!["a".into()],
+        };
+        let expected_res: BTreeSet<String> = ["unique mail".into()].into();
+        assert!(folder_tree_matches(&residual, &expected_res, 1));
+    }
+
+    #[test]
+    fn content_digests_origin_guards() {
+        let src = ContentDigestsFile {
+            schema: "content_digests_v1".into(),
+            origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
+            qc_level: "sample".into(),
+            volumes: vec![],
+        };
+        assert!(content_digests_are_source_origin(&src));
+        let out = ContentDigestsFile {
+            origin: CONTENT_DIGEST_ORIGIN_OUTPUT.into(),
+            ..src.clone()
+        };
+        assert!(!content_digests_are_source_origin(&out));
     }
 
     #[test]

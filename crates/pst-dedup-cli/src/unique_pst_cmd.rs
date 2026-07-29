@@ -596,6 +596,9 @@ struct PreparedWinner {
     content_hash_hex: String,
     subject: String,
     write_msg: WriteMessage,
+    /// Source-side BCC retained for QC known_gap accounting (not written to PST).
+    /// Populated from `CanonicalMessage.display_bcc` / adapter `dropped` (0080 DoD-15).
+    display_bcc: String,
 }
 
 /// Adapter: `PstAttachStreamSource` → `pst_writer::AttachStreamSource`.
@@ -1925,6 +1928,7 @@ pub fn run_unique_pst_with_options(
                     write_msg: &p.write_msg,
                     has_degraded,
                     has_ledger_fail: false,
+                    display_bcc: &p.display_bcc,
                 },
             )
         })
@@ -2483,6 +2487,7 @@ pub fn run_unique_pst_with_options(
             max_open_psts: args.max_open_psts,
             source_differential: true,
             parents_only,
+            probe_unexplained_property: None,
         });
         phase_timings.qc_ms = t_qc.elapsed().as_millis() as u64;
         // Never lower an exit already set; only force verify failure on hard findings.
@@ -2913,8 +2918,17 @@ fn prepared_winner_from_canonical(
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
 
-    let (write_msg, _dropped) = from_canonical_message_owned(msg);
+    // Capture BCC before adapter drop — QC counts known_gap; writer does not emit BCC.
+    let display_bcc = msg.display_bcc.clone().unwrap_or_default();
+    let (write_msg, adapter_dropped) = from_canonical_message_owned(msg);
     let subject = write_msg.subject.clone();
+    // Adapter `dropped` must not be discarded silently (0080 known_gap accounting).
+    let display_bcc = if adapter_dropped > 0 && display_bcc.trim().is_empty() {
+        // Defensive: adapter counted a drop; keep a sentinel so QC still records known_gap.
+        "(dropped)".to_string()
+    } else {
+        display_bcc
+    };
     Ok(PreparedWinner {
         source_path,
         folder_path,
@@ -2924,6 +2938,7 @@ fn prepared_winner_from_canonical(
         content_hash_hex,
         subject,
         write_msg,
+        display_bcc,
     })
 }
 

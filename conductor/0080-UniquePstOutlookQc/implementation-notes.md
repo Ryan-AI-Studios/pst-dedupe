@@ -1,7 +1,7 @@
 # 0080 Implementation Notes — Unique PST Output QC
 
 Branch: `track/0080-unique-pst-outlook-qc`  
-Pending ledger tx: `2ca8160c-1909-4f79-98ab-af2ac3e54c6f` (`crates/pst-dedup-cli`)
+Ledger tx (review fixes): `6a02f056-cc09-4ed9-bb5e-164326f601d5`
 
 ## What shipped
 
@@ -29,26 +29,70 @@ Pending ledger tx: `2ca8160c-1909-4f79-98ab-af2ac3e54c6f` (`crates/pst-dedup-cli
 
 ### Standalone `qc-pst`
 - CLI name **`qc-pst`** (not `qc` — matter-produce)
-- Output-only when sources gone; `content_digest_backed` when digests present
+- Output-only when sources gone; `content_digest_backed` only when loaded digests are **source-origin**
 
 ### Phases 5–6 — sidecars
 - `qc_external.rs`: BYOB independent reader (counts only); scanpst discovery + local temp + `-no repair` + log parse + timeout/kill + `.bak` hard error
 - Stub `.cmd` tests — CI needs no Outlook/libpff
+- Independent reader Ok counts compared to expected volume message count (and folder leaf floor)
 
 ### Phase 9
 - `qc_attestation.rs` — load/record only; never self-attests
 - `docs/unique-pst-export.md` client-retirement section (dated 2026-07-28)
 - `docs/deferred.md`: D-0068-02 / D-0071-operator-outlook / D-0074-e2e-fixture closed; D-0080-* residuals present
 
+## Review fixes (validated internal review)
+
+### 1. `folder_tree_matches` (DoD-4 Q3)
+- Every expected leaf must match (suffix or equality, case-insensitive); **missing leaf ⇒ false**
+- Residual Unique Mail allowance only when the *expected* path is itself residual Unique Mail
+- No wholesale collapse acceptance (multi-leaf expected vs single Unique Mail fails)
+- Tests: unit collapse reject; integration `folder_tree_collapsed_multi_leaf_hard_fails`
+
+### 2. `content_digests` honesty (DoD-21)
+- Persist `content_digests.json` **only** for source-side digests (`source_differential` + live source reads)
+- File carries `"origin": "source"`; `origin=output` never enables `content_digest_backed`
+- Output-only qc-pst without prior source digests: structural only; does **not** write output digests as `content_digests.json`
+- Test: two output-only runs never set `content_digest_backed`
+
+### 3. Independent reader counts (DoD-12)
+- When reader returns Ok + message_count, mismatch vs volume `messages_written` ⇒ defect
+- Folder count: defect if reader reports 0 / fewer than expected export leaf folders
+- Stub test: wrong message count hard-fails
+
+### 4. BCC `known_gap` on production path (DoD-15)
+- `PreparedWinner.display_bcc` plumbed from `CanonicalMessage` before adapter drop
+- Adapter `dropped` not discarded (sentinel if needed); `candidate_from_write_msg` carries BCC
+- QC counts `known_gap` for non-empty BCC; never hard-fails alone
+- Test: candidate with BCC ⇒ `known_gap > 0`, `hard_fail == false`
+
+### 5. DoD-9 pipeline negatives
+- `probe_unexplained_property` hook exercises unexplained_loss → hard_fail + CSV artifacts
+- CC strip source-differential defect test
+- Attach payload mismatch defect test
+- `flip_byte` asserts hard_fail/defect (header flips)
+
+### 6. Default-on safety
+- Full QC green path **with attachments** (`fixture_unique_pst_qc_full_with_attachments_zero_hard_findings`)
+- Uses `--allow-partial-fidelity` for fixture soft attach fails; asserts QC hard findings zero
+
+### 7. Sampling cap
+- When truncating to `sample_max`, **stratum representatives first** (volume-last / extremes survive)
+- Test: `sample_cap_prefers_stratum_over_index_truncate`
+
+### Also
+- `qc-pst` honors `parents_only` from `summary.json` (`family_policy` / `attachments_omitted_by_policy`)
+
 ## Tests
-- `crates/pst-dedup-cli/tests/unique_pst_qc_0080.rs` — negative truncate, sample determinism, fixture sample/full zero hard findings, qc-off skip
-- Unit: fidelity contract, sampling, scanpst stubs, attestation
+- `crates/pst-dedup-cli/tests/unique_pst_qc_0080.rs` — collapse tree, digest honesty, BCC known_gap, reader counts, attach/CC negatives, full+attach green, sample cap
+- Unit: folder_tree, content origin, sampling strata, fidelity contract, scanpst stubs
 
 ## Residuals
 - D-0080-scanpst-arg (real Outlook build token confirm)
 - D-0080-external-reader-matrix
 - D-0080-cloud-attachments (named-prop resolution)
 - D-0080-bcc-policy / recipient-table / newoutlook / com-declined
+- Fixture `aspose_outlook.pst` still has soft attach/CRC noise (partial fidelity) — QC explains ledger soft-fails; product export_risk remains separate
 
 ## Operator smoke (DoD-19)
 - scanpst: **absent in CI** — skip-safe with reason; stub tests cover bak/timeout/ok paths
