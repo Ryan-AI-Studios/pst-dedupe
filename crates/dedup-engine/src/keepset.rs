@@ -3486,6 +3486,142 @@ mod tests {
             .any(|r| r == "ATTACH_META_FAILED"));
     }
 
+    /// 0079 DoD-7: hard-fail promotion + first-materialize soft reasons only.
+    ///
+    /// Peer A hard-fails → promote to peer B. Soft reasons on B diverge if
+    /// materialize is called a second time (call counter adds an extra reason
+    /// on the 2nd success). Keep-set / on_winner must see **only** the first
+    /// materialize soft set — the class of bug a prepare re-materialize would
+    /// introduce when the merge point moves with D1.
+    #[test]
+    fn promote_first_materialize_soft_reasons_only_no_second_call_pollution() {
+        struct CountingSoftMat {
+            /// Successful materialize calls for nid 2 (peer B).
+            b_ok_calls: u32,
+        }
+        impl MessageMaterializer for CountingSoftMat {
+            fn materialize(
+                &mut self,
+                locus: &MessageLocus,
+            ) -> Result<CanonicalMessage, MaterializeError> {
+                match locus.nid {
+                    1 => Err(MaterializeError::Hard("peer A hard-fail".into())),
+                    2 => {
+                        self.b_ok_calls = self.b_ok_calls.saturating_add(1);
+                        // First success: attach soft fail only (realistic materialize soft).
+                        // Second success would also claim CRC_SUSPECT — pre-D1 prepare
+                        // re-materialize divergence class.
+                        let reasons = if self.b_ok_calls == 1 {
+                            vec![IntegrityReason::AttachMetaFailed]
+                        } else {
+                            vec![
+                                IntegrityReason::AttachMetaFailed,
+                                IntegrityReason::CrcSuspect,
+                            ]
+                        };
+                        Ok(CanonicalMessage {
+                            locus: locus.clone(),
+                            message_id: None,
+                            subject: Some("s".into()),
+                            sender: None,
+                            display_to: None,
+                            display_cc: None,
+                            display_bcc: None,
+                            submit_time: None,
+                            size: Some(10),
+                            message_class: None,
+                            body_plain: Some("body".into()),
+                            body_html: None,
+                            attachments: Vec::new(),
+                            fidelity: RecoverableIntegrity::with_degraded(reasons, false),
+                            message_id_norm: None,
+                            content_hash: [0; 32],
+                            edrm_mih_hex: None,
+                            body_incomplete: false,
+                            body_unavailable: false,
+                        })
+                    }
+                    _ => Err(MaterializeError::Hard(format!("unknown nid={}", locus.nid))),
+                }
+            }
+        }
+
+        let mid = Some("promo-soft@x");
+        let a = item("C:/a.pst", "a.pst", "I", 1, mid, [1; 32], 100, 0, false);
+        let b = item("C:/b.pst", "b.pst", "I", 2, mid, [1; 32], 100, 1, false);
+        let mut mat = CountingSoftMat { b_ok_calls: 0 };
+        let mut on_winner_reasons: Option<Vec<IntegrityReason>> = None;
+        let (ks, dec, count) = build_keep_set_materialized(
+            vec![a, b],
+            MaterializeBuildOpts {
+                policy: KeepPolicy::FirstSeen,
+                family_policy: FamilyPolicy::default(),
+                prefer_path: &[],
+                tier2_enabled: true,
+                created_from: None,
+                rank_ctx: None,
+                grouping_ctx: None,
+            },
+            &mut mat,
+            |msg| {
+                on_winner_reasons = Some(msg.fidelity.degraded_reasons.clone());
+                Ok(())
+            },
+        )
+        .expect("promote materialize");
+
+        // Single winner, single successful materialize (messages_materialized style).
+        assert_eq!(count, 1, "materialized winner count must equal unique");
+        assert_eq!(ks.stats.unique, 1);
+        assert_eq!(
+            mat.b_ok_calls, 1,
+            "finalize must call materialize once on winner B"
+        );
+        assert_eq!(ks.winners[0].locus.nid, 2);
+        assert!(ks.winners[0].promoted_from_failure);
+
+        // Keep-set + on_winner see first-call soft set only.
+        let expected_first = vec![IntegrityReason::AttachMetaFailed];
+        assert_eq!(
+            ks.winners[0].integrity.degraded_reasons, expected_first,
+            "keep-set must not pick up second-materialize-only soft reasons"
+        );
+        assert_eq!(
+            on_winner_reasons.expect("on_winner fired"),
+            expected_first,
+            "on_winner fidelity must match first materialize soft reasons"
+        );
+        let uniq = dec.iter().find(|d| d.nid == 2).expect("B unique");
+        assert!(uniq.degraded);
+        assert_eq!(
+            uniq.degraded_reasons,
+            vec!["ATTACH_META_FAILED".to_string()]
+        );
+        assert!(uniq.promoted_from_failure);
+
+        // Prove the divergence class: a second materialize of B would add CRC_SUSPECT.
+        let locus_b = MessageLocus {
+            source_path: "C:/b.pst".into(),
+            source_pst: "b.pst".into(),
+            folder_path: "I".into(),
+            nid: 2,
+            is_orphaned: false,
+        };
+        let second = mat.materialize(&locus_b).expect("second call succeeds");
+        assert_eq!(mat.b_ok_calls, 2);
+        assert!(
+            second
+                .fidelity
+                .degraded_reasons
+                .contains(&IntegrityReason::CrcSuspect),
+            "second materialize would add CRC_SUSPECT — pre-D1 prepare re-call hazard"
+        );
+        assert_ne!(
+            second.fidelity.degraded_reasons, ks.winners[0].integrity.degraded_reasons,
+            "second-call reasons must diverge from keep-set first-call set"
+        );
+    }
+
     #[test]
     fn write_decisions_csv_streams_without_to_decisions() {
         let a = item(

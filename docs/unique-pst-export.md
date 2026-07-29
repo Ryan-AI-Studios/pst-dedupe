@@ -136,6 +136,12 @@ Additive fields (always present; older tools may ignore):
 
 Soft warning when `prepared_bytes_peak` exceeds **1 GiB** (stability; see D-0079-stream-prepare).
 
+**Oracle allowlist:** structural pack compare (`export_oracle`) strips the additive
+measurement fields above (plus paths/hashes/timings) so a **pre-0079 parent** pack
+without them still compares equal to HEAD when product semantics match. Operator
+parent-vs-HEAD gate: build parent binary, set `PST_DEDUPE_BASELINE_BIN`, run
+`unique_pst_parent_baseline_oracle_when_env_set` (or call `compare_export_packs`).
+
 ### Sensitivity (handoff)
 
 The entire **`report-dir` is operator-sensitive**: absolute paths, folder names, subjects, and attachment filenames can leak PII or privilege context. Do **not** post report packs to untrusted third parties without redaction. Prefer sharing the summary histogram + reason codes first. Primary join key that avoids path strings: **`source_id`** (0-based index into `summary.inputs`). Optional basename redaction mode is residual (**D-0073-basename**).

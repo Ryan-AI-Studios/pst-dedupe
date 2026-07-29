@@ -5,9 +5,11 @@
 | Track | 0079-MaterializeWritePerformance |
 | Branch | `track/0079-materialize-write-performance` |
 | Ledger tx | `c305c426-c4a9-4cf8-9b55-628fcedb5204` (REFACTOR) |
-| Machine | Desktop / Windows NT 10.0.26200.0 |
+| Machine | Desktop / DESKTOP / Windows NT 10.0.26200.0 |
 | Fixture | `fixtures/aspose_outlook.pst` (~3.2 MiB, 17 unique) |
+| Parent | `9c8be49` worktree `.wt-0079-baseline` |
 | Date | 2026-07-28 |
+| Status | **In Progress — Codex P1 fix round** (not Completed until final Codex PASS) |
 
 ## Scope
 
@@ -17,21 +19,27 @@ one shared bounded PST handle LRU, concurrent post-write hashing, phase
 instrumentation + export equivalence oracle. **No** `--jobs`, **no** mmap,
 **no** verify weakening.
 
-## Honesty: pre-opt instrumented baseline
+## Parent baseline + oracle (Codex P1-1)
 
-Phases 0–5 landed as one change set on this branch. A pure pre-optimization
-instrumented run on this machine is **not reconstructible**. Do **not** invent
-per-phase attribution of the historical INC ~**275 s** wall (scan ~3 s, 3728
-winners, 366 attach fails — operator evidence; source PSTs not in git).
+Phases 0–5 landed as one change set; a pure pre-opt *instrumented* parent does
+not exist. Codex required **parent binary vs HEAD** under the structural oracle:
 
-What we can claim:
+1. Worktree at `C:\dev\Dedupe\.wt-0079-baseline` from `9c8be49`.
+2. `cargo build -p pst-dedup-cli` (debug) in worktree + HEAD.
+3. `unique-pst` on aspose twice (`--no-attachments` and attachments-on).
+4. HEAD `export_oracle::compare_export_packs` — **pass** (allowlist equalizes
+   parent packs missing `PhaseTimings` / `messages_materialized` / etc.).
+5. Numbers + paths in `baseline.md`. HEAD-only: `messages_materialized == unique`.
+6. Optional CI: `PST_DEDUPE_BASELINE_BIN` → `unique_pst_parent_baseline_oracle_when_env_set`.
 
-1. **Structural pre-D1:** every winner was materialized twice
-   (`finalize_with_materialize` + prepare re-materialize).
-2. **Structural post-D1:** `messages_materialized == unique` (fixture 17==17).
-3. **Post-change fixture phase split** in `baseline.md` (attributable going
-   forward). `unaccounted_ms` is honest setup overhead on short runs — not
-   zeroed.
+### Measured parent vs HEAD (warm debug medians)
+
+| Mode | parent duration_ms | HEAD duration_ms | HEAD wall_ms band |
+|---|---:|---:|---|
+| `--no-attachments` | **265** | **249** | ~281–291 |
+| attachments on | **299** | **268** | ~303–309 |
+
+Exact n=3 table: see `baseline.md`. Both remain **sub-second** on the fixture.
 
 ## What shipped (Phases 0–5) — structural evidence
 
@@ -40,14 +48,16 @@ What we can claim:
 - Counters: `source_pst_opens`, `messages_materialized`, `bytes_written_total`,
   `prepared_bytes_peak`, `hash_ms`
 - `pst_dedup_cli::export_oracle` structural pack compare (not byte-identical — D10)
-- Evidence: `baseline.md`; test `unique_pst_oracle_self_test_two_runs`
+- Allowlist docs + unit test for parent-without-0079-fields
+- Evidence: `baseline.md`; tests `unique_pst_oracle_self_test_two_runs`,
+  `unique_pst_parent_baseline_oracle_when_env_set` (env-gated)
 
 ### Phase 1 — D1 single materialize + D11 by-value
 - `on_winner` → `PreparedWinner` via `from_canonical_message_owned` (move bodies/payloads)
 - Prepare is pure re-order by keep-set item index — **no second materialize**
 - Missing prepared winners **hard-fail before write** (unless cancel)
-- Evidence: `unique_pst_messages_materialized_equals_unique` asserts
-  `messages_materialized == unique` and `source_pst_opens == 1`
+- Evidence: `unique_pst_messages_materialized_equals_unique`;
+  mock `promote_first_materialize_soft_reasons_only_no_second_call_pollution`
 
 ### Phase 2 — O(1) AMap
 - `stubbed_upto` watermark; `amap_page_offsets: HashSet<u64>`
@@ -67,31 +77,42 @@ What we can claim:
 - mmap declined (sources and output temp)
 - Evidence: `concurrent_hash_file_hex_matches_sequential` (pst-writer)
 
-## Why `--jobs` was **not** shipped (DoD-13)
+## Why `--jobs` was **not** shipped (DoD-13) — measured skip
 
-After Phases 1–5 on the fixture:
+After Phases 1–5:
 
 | Signal | Value |
 |---|---|
-| Fixture wall (debug) | ~300 ms residual |
+| Fixture residual (debug HEAD) | **sub-second** (`duration_ms` ~250–270) |
+| Parent vs HEAD fixture | modest win; parent already sub-second |
 | D1 | `messages_materialized == unique` (double source read gone) |
 | AMap | operation-count linear amortized (multi-GB scale fix) |
 | D4 / handle opens | shared LRU; single-source opens == 1 |
-| Operator multi-GB | **residual** `D-0079-operator-multigb` (not measured here) |
+| Operator multi-GB | **residual** `D-0079-operator-multigb` — **not measured**; no invented numbers |
 
-Shipping `--jobs` would trade 0077 per-source CRC attribution
-(`crc_attribution: aggregate` when N>1) for a win fixtures do not require and
-that multi-GB operator data has not yet shown is needed. Revisit only after
-`D-0079-operator-multigb` proves Phases 1–5 miss the target.
+**Decision:** `--jobs` **not shipped** because fixture residual is already
+sub-second after Phases 1–5 structural fixes. Shipping `--jobs` would trade
+0077 per-source CRC attribution (`crc_attribution: aggregate` when N>1) without
+a measured multi-GB miss. Revisit only after `D-0079-operator-multigb` proves
+Phases 1–5 miss the operator target.
+
+## DoD-7 fidelity (Codex P1-2)
+
+1. **Mock materializer** (`dedup-engine`): peer A hard-fails → promote B;
+   second materialize of B would add extra soft reason; keep-set / on_winner
+   see **first-call only**; count == 1 unique.
+2. **Attachments-on path:** aspose yields `attachments_failed=4`
+   (`ATTACH_EMBEDDED_UNPARSED`); degraded reason maps non-empty + stable across
+   two runs (`unique_pst_attachments_on_degraded_and_attach_fails_stable`).
+3. **CRC:** aspose winners carry `CRC_SUSPECT` (scan/finalize path); same
+   single-materialize merge as attach soft reasons. Mock covers double-call
+   divergence class. No separate CRC-suspect-only fixture required beyond aspose
+   + mock.
 
 ## Cancel latency (DoD-16 honesty)
 
-- **Behavioral gate retained:** 0078 `export_exit_0078` suite (exit 130,
-  quarantine, `artifact_state`) remains the contract.
-- **Numeric cancel latency** (ms before/after on multi-GB mid-write) is **not**
-  measured on this machine — residual with operator multi-GB. No code path was
-  introduced that intentionally defers cancel checks across long non-checkpoint
-  regions for `--jobs` (jobs not shipped).
+- **Behavioral gate retained:** 0078 `export_exit_0078` suite.
+- **Numeric cancel latency** on multi-GB: residual with operator multi-GB.
 
 ## DoD matrix (abbreviated)
 
@@ -99,55 +120,43 @@ that multi-GB operator data has not yet shown is needed. Revisit only after
 |---|---|---|
 | 1 PhaseTimings + unaccounted_ms | **Met** | unaccounted large on short fixtures (honest) |
 | 2 Counters reported | **Met** | |
-| 3 Oracle helper + self-test | **Met** | structural only (D10) |
-| 4 baseline.md | **Partial** | post-change only; pre-opt instrumented N/A |
-| 5 messages_materialized == unique | **Met** | |
+| 3 Oracle + parent gate | **Met** | parent worktree + env optional test + allowlist |
+| 4 baseline.md | **Met** | parent vs HEAD numbers + machine |
+| 5 messages_materialized == unique | **Met** | HEAD only field |
 | 6 second materialize gone | **Met** | |
 | 6a by-value convert | **Met** | |
 | 6b prepared_bytes_peak + warn | **Met** | |
-| 7 reason-set equivalence | **Partial** | post-D1 stability test + finalize-only structural proof; pre-D1 binary reason compare not reconstructible |
+| 7 reason-set / promote / attach / CRC | **Met** | mock + attachments-on + aspose CRC_SUSPECT |
 | 8 AMap O(1) op-count | **Met** | |
 | 9 positioned writes / no BufWriter | **Met** | |
 | 10 shared LRU + max-open-psts | **Met** | D-0074-mat-lru closed |
 | 11 verify not weakened; hash/verify ms | **Met** | |
 | 12/12a --jobs | **N/A** | not shipped (DoD-13) |
-| 13 why no --jobs | **Met** | this document |
-| 14 measured speedup per phase | **Partial** | structural wins + fixture split; no false 275s phase attribution |
-| 15 0071/73/74/77/78 suites | **Met** when gate green | re-run commands below |
+| 13 why no --jobs | **Met** | measured fixture + structural + multi-GB residual |
+| 14 measured speedup | **Partial** | parent vs HEAD fixture recorded; multi-GB residual |
+| 15 0071/73/74/77/78 suites | **Gate** | re-run commands below |
 | 16 cancel latency | **Partial** | behavioral 0078 retained; numeric residual |
 | 17 no unjustified default dep | **Met** | |
-| 18 deferred.md | **Met** | |
-| 19 conductor/sequencing/review | **Met** | |
-| 20 fmt/clippy/test workspace | **Gate** | see verification |
-
-## Review fixes landed post-implementation (this pass)
-
-1. GUI `UniquePstCliArgs` missing `max_open_psts` (compile break)
-2. DoD-7 test via `degraded_reasons_by_winner` + D1 structural proof
-3. D1 asserts `source_pst_opens == 1`; attachments-on oracle/D1; concurrent hash unit test
-4. Prepare incomplete → hard-fail before write (unless cancel)
-5. Removed fake `FILE_FLAG_SEQUENTIAL_SCAN` claim on `hash_file_hex`
-6. `.gitignore`: root scratch is `/review.md` only; conductor stays `/conductor/`
-   (historical force-add policy). Orchestrator: `git add -f` baseline,
-   implementation-notes, review.md
+| 18 deferred.md | **Met** | In Progress header |
+| 19 conductor/sequencing/review | **In Progress** | until final Codex PASS |
+| 20 fmt/clippy/test | **Gate** | see verification |
 
 ## Residuals
 
-- `D-0079-operator-multigb` — operator multi-GB before/after with phase split
+- `D-0079-operator-multigb` — operator multi-GB before/after with phase split (**blocks shipping --jobs**)
 - Numeric cancel latency on multi-GB (DoD-16)
-- `D-0079-seq-scan` — optional Windows sequential-scan at CreateFile (not std-open)
-- `D-0079-stream-prepare` — streaming prepare→write when `prepared_bytes_peak` warns
-- Pre-opt instrumented baseline forever missing on this branch (documented)
+- `D-0079-seq-scan` — optional Windows sequential-scan at CreateFile
+- `D-0079-stream-prepare` — streaming prepare→write when peak warns
+- Per-phase wall attribution of historical INC 275 s forever missing (parent was uninstrumented)
 
-## Gate commands to re-run
+## Gate commands
 
 ```powershell
 cargo fmt --all --check
-cargo check -p pst-dedup-gui
-cargo test -p pst-writer --lib
+cargo test -p dedup-engine --lib
 cargo test -p pst-dedup-cli --lib
 cargo test -p pst-dedup-cli --test unique_pst
-cargo test -p pst-dedup-cli --test export_exit_0078
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test -p pst-writer --lib
+cargo check -p pst-dedup-gui
+cargo clippy -p pst-dedup-cli -p pst-writer -p pst-dedup-gui -p dedup-engine --all-targets -- -D warnings
 ```

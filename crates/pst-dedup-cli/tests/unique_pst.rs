@@ -1312,10 +1312,11 @@ fn unique_pst_attachments_on_d1_and_oracle() {
 /// 0079 DoD-7: per-winner `degraded_reasons` are stable across two runs and match
 /// keepset integrity written at finalize (prepare path does not re-materialize).
 ///
-/// Full pre-D1 binary compare of reason sets is not reconstructible on this
-/// branch (Phases 0–5 landed together). Regression catch: two post-D1 runs
-/// produce identical reason maps, and `messages_materialized == unique` proves
-/// finalize-only soft fidelity (no second materialize that could add reasons).
+/// Parent-vs-HEAD reason-set compare is the operator/orchestrator gate recorded
+/// in `baseline.md`. Unit coverage for hard-fail promotion + first-call-only soft
+/// reasons lives in `dedup-engine` (`promote_first_materialize_soft_reasons_only_*`).
+/// CRC soft reasons are set during finalize materialize (same single-call path);
+/// aspose exposes `CRC_SUSPECT` on winners below.
 #[test]
 fn unique_pst_degraded_reasons_stable_finalize_only() {
     let sample = fixture_sample();
@@ -1369,11 +1370,18 @@ fn unique_pst_degraded_reasons_stable_finalize_only() {
         "keepset must list winners (reason map non-empty keys)"
     );
 
-    // Fixture is known to carry BODY_UNAVAILABLE degraded sole winners (keep_set tests).
+    // Fixture is known to carry BODY_UNAVAILABLE / CRC_SUSPECT on winners.
     let any_degraded = reasons_a.values().any(|r| !r.is_empty());
     assert!(
         any_degraded,
         "aspose fixture should expose at least one degraded_reasons entry for DoD-7 coverage; map={reasons_a:?}"
+    );
+    let any_crc = reasons_a
+        .values()
+        .any(|r| r.iter().any(|s| s == "CRC_SUSPECT"));
+    assert!(
+        any_crc,
+        "aspose fixture should expose CRC_SUSPECT on at least one winner; map={reasons_a:?}"
     );
 
     // Integrity on keepset is what finalize wrote — prepare cannot re-merge fresh soft reasons.
@@ -1407,4 +1415,214 @@ fn unique_pst_degraded_reasons_stable_finalize_only() {
             "helper must match keepset integrity.degraded_reasons for {key}"
         );
     }
+}
+
+/// 0079 DoD-7 (attachments-on): aspose produces attach soft fails; reason map
+/// and attach-fail counters are non-empty and stable across two runs.
+#[test]
+fn unique_pst_attachments_on_degraded_and_attach_fails_stable() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out_a = dir.path().join("a.pst");
+    let report_a = dir.path().join("report_a");
+    let out_b = dir.path().join("b.pst");
+    let report_b = dir.path().join("report_b");
+
+    let mut fail_counts = Vec::new();
+    for (out, report) in [(&out_a, &report_a), (&out_b, &report_b)] {
+        let result = Command::new(bin())
+            .args([
+                "unique-pst",
+                sample.to_str().expect("utf8"),
+                "--out",
+                out.to_str().expect("utf8"),
+                "--report-dir",
+                report.to_str().expect("utf8"),
+                "--json",
+                "--allow-partial-fidelity",
+            ])
+            .output()
+            .expect("run unique-pst attachments-on");
+        assert!(
+            result.status.success(),
+            "stderr={} stdout={}",
+            String::from_utf8_lossy(&result.stderr),
+            String::from_utf8_lossy(&result.stdout)
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("json");
+        let unique = v["keep_set"]["stats"]["unique"].as_u64().unwrap_or(0);
+        let mat = v["messages_materialized"].as_u64().unwrap_or(u64::MAX);
+        assert_eq!(
+            mat, unique,
+            "attachments-on D1: messages_materialized == unique"
+        );
+        let failed = v["export"]["attachments_failed"].as_u64().unwrap_or(0);
+        assert!(
+            failed > 0,
+            "aspose attachments-on should soft-fail some attaches; failed={failed}"
+        );
+        fail_counts.push(failed);
+    }
+    assert_eq!(
+        fail_counts[0], fail_counts[1],
+        "attachments_failed must be stable across two runs"
+    );
+
+    let reasons_a =
+        pst_dedup_cli::export_oracle::degraded_reasons_by_winner(&report_a).expect("reasons A");
+    let reasons_b =
+        pst_dedup_cli::export_oracle::degraded_reasons_by_winner(&report_b).expect("reasons B");
+    assert_eq!(
+        reasons_a, reasons_b,
+        "attachments-on per-winner degraded_reasons must be stable"
+    );
+    assert!(
+        reasons_a.values().any(|r| !r.is_empty()),
+        "attachments-on must expose non-empty degraded_reasons; map={reasons_a:?}"
+    );
+
+    let diff =
+        pst_dedup_cli::export_oracle::compare_export_packs(&report_a, &out_a, &report_b, &out_b);
+    diff.assert_equivalent();
+}
+
+/// Optional operator gate: parent binary vs current `pst-dedup` under the
+/// structural oracle. Set `PST_DEDUPE_BASELINE_BIN` to a pre-0079 (or parent
+/// commit) `pst-dedup.exe`. Skips when unset — parent-vs-HEAD numbers live in
+/// `conductor/0079-MaterializeWritePerformance/baseline.md`.
+#[test]
+fn unique_pst_parent_baseline_oracle_when_env_set() {
+    let baseline_bin = match std::env::var("PST_DEDUPE_BASELINE_BIN") {
+        Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
+        _ => {
+            eprintln!(
+                "skip: PST_DEDUPE_BASELINE_BIN not set (operator parent-vs-HEAD oracle gate)"
+            );
+            return;
+        }
+    };
+    if !baseline_bin.is_file() {
+        panic!(
+            "PST_DEDUPE_BASELINE_BIN is not a file: {}",
+            baseline_bin.display()
+        );
+    }
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out_parent = dir.path().join("parent.pst");
+    let report_parent = dir.path().join("report_parent");
+    let out_head = dir.path().join("head.pst");
+    let report_head = dir.path().join("report_head");
+
+    let parent_out = Command::new(&baseline_bin)
+        .args([
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out_parent.to_str().expect("utf8"),
+            "--report-dir",
+            report_parent.to_str().expect("utf8"),
+            "--json",
+            "--no-attachments",
+        ])
+        .output()
+        .expect("run baseline unique-pst");
+    assert!(
+        parent_out.status.success(),
+        "baseline stderr={} stdout={}",
+        String::from_utf8_lossy(&parent_out.stderr),
+        String::from_utf8_lossy(&parent_out.stdout)
+    );
+
+    let head_out = Command::new(bin())
+        .args([
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out_head.to_str().expect("utf8"),
+            "--report-dir",
+            report_head.to_str().expect("utf8"),
+            "--json",
+            "--no-attachments",
+        ])
+        .output()
+        .expect("run HEAD unique-pst");
+    assert!(
+        head_out.status.success(),
+        "head stderr={} stdout={}",
+        String::from_utf8_lossy(&head_out.stderr),
+        String::from_utf8_lossy(&head_out.stdout)
+    );
+
+    let head_v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&head_out.stdout)).expect("head json");
+    let unique = head_v["keep_set"]["stats"]["unique"].as_u64().unwrap_or(0);
+    let mat = head_v["messages_materialized"].as_u64().unwrap_or(u64::MAX);
+    assert_eq!(
+        mat, unique,
+        "HEAD messages_materialized must equal unique (parent may omit field)"
+    );
+
+    let diff = pst_dedup_cli::export_oracle::compare_export_packs(
+        &report_parent,
+        &out_parent,
+        &report_head,
+        &out_head,
+    );
+    diff.assert_equivalent();
+
+    // Attachments-on family as well when baseline is available.
+    let out_p_att = dir.path().join("parent_att.pst");
+    let report_p_att = dir.path().join("report_parent_att");
+    let out_h_att = dir.path().join("head_att.pst");
+    let report_h_att = dir.path().join("report_head_att");
+    let head_bin = bin();
+    for (bin_path, out, report) in [
+        (
+            baseline_bin.as_path(),
+            out_p_att.as_path(),
+            report_p_att.as_path(),
+        ),
+        (
+            head_bin.as_path(),
+            out_h_att.as_path(),
+            report_h_att.as_path(),
+        ),
+    ] {
+        let r = Command::new(bin_path)
+            .args([
+                "unique-pst",
+                sample.to_str().expect("utf8"),
+                "--out",
+                out.to_str().expect("utf8"),
+                "--report-dir",
+                report.to_str().expect("utf8"),
+                "--json",
+                "--allow-partial-fidelity",
+            ])
+            .output()
+            .expect("run unique-pst att");
+        assert!(
+            r.status.success(),
+            "att stderr={} stdout={}",
+            String::from_utf8_lossy(&r.stderr),
+            String::from_utf8_lossy(&r.stdout)
+        );
+    }
+    let diff_att = pst_dedup_cli::export_oracle::compare_export_packs(
+        &report_p_att,
+        &out_p_att,
+        &report_h_att,
+        &out_h_att,
+    );
+    diff_att.assert_equivalent();
 }

@@ -9,6 +9,16 @@
 //! - `summary.json` modulo timing / path / hash fields
 //! - Per-volume structural digests (message count, folder paths, body+attach digests)
 //! - Integrity counters / `degraded_reasons` via summary + keep-set
+//!
+//! # Parent vs HEAD / pre-0079 packs
+//!
+//! The allowlist includes **additive 0079 measurement fields** so a parent
+//! (pre-instrumentation) pack without `phase_timings` / `messages_materialized`
+//! / etc. still compares equal to a HEAD pack when product semantics match.
+//! Operator gate: build parent binary in a worktree, run both, call
+//! [`compare_export_packs`]. Optional CI: set `PST_DEDUPE_BASELINE_BIN` (see
+//! `unique_pst` integration test). Parent-oracle results are also recorded in
+//! `conductor/0079-MaterializeWritePerformance/baseline.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -18,7 +28,12 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-/// Fields stripped / ignored when comparing `summary.json` (volatile or path-local).
+/// Fields stripped / ignored when comparing `summary.json` (volatile, path-local,
+/// or **additive measurement** that parent packs may lack).
+///
+/// Keep this list in sync with `docs/unique-pst-export.md` phase-timings section
+/// and any new 0079-style counters. Product fields (keep_set, export fidelity
+/// counters, exit_code, degraded_reasons) are **not** allowlisted.
 const SUMMARY_ALLOWLIST_KEYS: &[&str] = &[
     "duration_ms",
     "duration_secs",
@@ -37,7 +52,8 @@ const SUMMARY_ALLOWLIST_KEYS: &[&str] = &[
     "md5",
     "path",
     "bytes",
-    // Handle open counts / peak RAM are measurement, not product.
+    // Handle open counts / peak RAM / materialize counters are measurement, not product.
+    // Parent (pre-0079) packs omit these; strip so parent↔HEAD oracle compares equal.
     "source_pst_opens",
     "prepared_bytes_peak",
     "messages_materialized",
@@ -626,6 +642,44 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert_eq!(v["export"]["volumes"][0]["path"], "");
         assert_eq!(v["export"]["volumes"][0]["messages_written"], 1);
+    }
+
+    /// Parent (pre-0079) summary lacks additive measurement fields; HEAD has them.
+    /// After allowlist strip both must compare equal on product fields.
+    #[test]
+    fn allowlist_equalizes_parent_without_0079_counters() {
+        let mut parent = json!({
+            "ok": true,
+            "export": {
+                "messages_written_total": 17,
+                "attachments_failed": 0,
+                "volumes": [{ "path": "C:/p.pst", "sha256_hex": "aa", "md5_hex": "bb", "messages_written": 17 }]
+            },
+            "keep_set": { "stats": { "unique": 17, "degraded_winners": 2 } },
+            "duration_ms": 265
+        });
+        let mut head = json!({
+            "ok": true,
+            "export": {
+                "messages_written_total": 17,
+                "attachments_failed": 0,
+                "volumes": [{ "path": "C:/h.pst", "sha256_hex": "cc", "md5_hex": "dd", "messages_written": 17 }]
+            },
+            "keep_set": { "stats": { "unique": 17, "degraded_winners": 2 } },
+            "duration_ms": 249,
+            "phase_timings": { "scan_ms": 18, "materialize_ms": 7, "total_ms": 249 },
+            "messages_materialized": 17,
+            "source_pst_opens": 1,
+            "bytes_written_total": 194000,
+            "prepared_bytes_peak": 137815,
+            "hash_ms": 11
+        });
+        normalize_summary_for_oracle(&mut parent);
+        normalize_summary_for_oracle(&mut head);
+        assert_eq!(
+            parent, head,
+            "parent without 0079 counters must equal HEAD after allowlist strip"
+        );
     }
 
     #[test]

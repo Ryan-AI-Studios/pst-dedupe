@@ -1,7 +1,8 @@
 # 0079 Implementation notes
 
-Branch: `track/0079-materialize-write-performance`  
-Ledger tx: `c305c426-c4a9-4cf8-9b55-628fcedb5204` (REFACTOR; not committed here)
+Branch: `track/0079-materialize-write-performance`
+Ledger tx: `c305c426-c4a9-4cf8-9b55-628fcedb5204` (REFACTOR)
+Status: **In Progress — Codex P1 fix round**
 
 ## What shipped (Phases 0–5)
 
@@ -12,9 +13,10 @@ Ledger tx: `c305c426-c4a9-4cf8-9b55-628fcedb5204` (REFACTOR; not committed here)
 - Instant timers for scan / deep_attach_preflight / resolve / materialize /
   prepare / write / report / verify / quarantine; `unaccounted_ms` computed
 - Export equivalence oracle: `pst_dedup_cli::export_oracle` (structural, not
-  byte-identical — D10)
+  byte-identical — D10); allowlist equalizes pre-0079 parent packs
 - Oracle self-test: two fixture runs compare equal
-- `baseline.md` recorded
+- Parent (`9c8be49` worktree) vs HEAD unique-pst + oracle; numbers in `baseline.md`
+- Optional env gate: `PST_DEDUPE_BASELINE_BIN`
 
 ### Phase 1 — D1 single materialize + D11 by-value
 - `on_winner` builds `PreparedWinner` via `from_canonical_message_owned` (moves
@@ -48,31 +50,35 @@ Ledger tx: `c305c426-c4a9-4cf8-9b55-628fcedb5204` (REFACTOR; not committed here)
 - Phase 5 `verify_volumes` unchanged; `verify_ms` reported
 - mmap declined (sources and output temp)
 
-## Phase 6 — `--jobs` **SKIPPED**
+## Phase 6 — `--jobs` **SKIPPED** (measured)
 
-Fixture evidence after Phases 1–5:
+Parent vs HEAD fixture (Desktop/DESKTOP, debug, warm medians):
 
-- Single-source fixture completes in **~300 ms** wall (debug), with
-  `messages_materialized == unique` and `source_pst_opens == 1`.
-- Leading INC cost candidate (double materialize) is gone structurally.
-- AMap quadratic is fixed by operation-count proof (multi-GB regime).
-- Handle double-open (D4) closed by shared LRU.
+- `--no-attachments`: parent `duration_ms` **265** vs HEAD **249**
+- attachments-on: parent **299** vs HEAD **268**
+- Both sub-second; `messages_materialized == unique`, `source_pst_opens == 1`
+- AMap op-count linear amortized (multi-GB regime structural fix)
 
-Shipping `--jobs` would trade 0077 per-source CRC attribution
-(`crc_attribution: aggregate`) for a win that fixtures do not require and that
-the multi-GB operator residual (D-0079-operator-multigb) has not yet shown is
-needed. Prefer **not** shipping until an operator multi-GB run proves Phases
-1–5 miss the target.
+Multi-GB operator evidence **absent** → residual `D-0079-operator-multigb`.
+**`--jobs` not shipped**: would trade 0077 per-source CRC attribution without a
+measured multi-GB miss.
 
-## Measurements (post-change fixture)
+## Codex P1 fixes
 
-See `baseline.md`. Headline fixture facts:
+- Parent worktree baseline + oracle allowlist + env optional test
+- Mock: hard-fail promote + first-materialize soft reasons only (DoD-7)
+- Attachments-on attach-fail + degraded_reasons stability test
+- Governance: plan 0–5 checked; Phase 6 skip note; deferred/conductor In Progress
+
+## Measurements
+
+See `baseline.md`. Headline:
 
 | Fact | Value |
 |---|---|
-| D1 assertion | `messages_materialized == unique` (17 == 17) |
-| Shared opens | `source_pst_opens == 1` for single-source export |
-| Oracle | two baseline runs compare equal |
+| D1 | `messages_materialized == unique` (17 == 17) on HEAD |
+| Shared opens | `source_pst_opens == 1` |
+| Parent oracle | green (`PST_DEDUPE_BASELINE_BIN` / worktree) |
 | AMap steps | linear amortized (unit test) |
 
 ## Files touched (primary)
