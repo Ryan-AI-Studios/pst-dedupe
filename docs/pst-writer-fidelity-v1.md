@@ -30,12 +30,13 @@ single-block only; keep using it only for existing fixture callers.
 | Multi-GB streaming write | **Yes (v1.2 / 0070)** | `write_unicode_pst_streaming`: AMap-aware layout, chunked attach stream, progress + `stop_and_finalize`, SHA-256/MD5 report; see **Scale** section. |
 | Encrypted / Permute output | **No** | Residual; unencrypted only. |
 | ANSI PST | **No** | Never. |
-| Recipient table / named-prop set beyond the store stub | **No** | Minimal named-property map stub only, sufficient for the properties this writer emits (none of which require named props). |
+| Recipient table | **Yes (0082)** | Store template NID **`0x692`** (zero rows, **14 MUST columns** per MS-PST Recipient Table Template). Every written message gets a per-message recipient TC subnode (may be **zero rows** when source had none / unreadable — empty TC still present). One row per **included** recipient; optional extra column `PidTagSmtpAddress` (`0x39FE`) when known. Structural columns synthesized when source omits them (`ObjectType=6`, Responsibility, RecordKey/EntryId/SearchKey patterns, etc.). |
+| Named-prop set beyond the store stub | **No** | Minimal named-property map stub only, sufficient for the properties this writer emits (none of which require named props). Residual: full named-prop map (cloud attach detection, etc.). |
 | RTF | **No** | v1 never writes `PidTagRtfCompressed` or any RTF-native hint — there is nothing RTF-related to clear because nothing RTF-related is ever produced. |
 | `PidTagMessageFlags` | `MSGFLAG_READ` (0x1); `\| MSGFLAG_HASATTACH` (0x10) when ≥1 attach written | Paperclip + read default (0069). |
 | `PidTagDisplayTo` | Yes, when present | Written from source display To string. |
 | `PidTagDisplayCc` | **Yes (0080 §3.11)** | Written when present; previously silently dropped. |
-| `PidTagDisplayBcc` | **No (0080)** | Dropped by design (disclosure); counted via adapter `dropped` return. Opt-in is D-0080-bcc-policy. |
+| `PidTagDisplayBcc` | **Opt-in (0082)** | Default **OFF** (`include_bcc_recipients: false`): omit Bcc TC rows and `PidTagDisplayBcc` (disclosure policy on consolidated unique-PST). Opt-in via `WritePstOpts::include_bcc_recipients` / CLI `--include-bcc-recipients` writes Bcc rows + display BCC when source provided them. Export ledger column `bcc_suppressed` records omissions. |
 | `PidTagCreationTime` / `PidTagLastModificationTime` | Set to `submit_time` when present; omitted otherwise | This is a synthetically-written export item, not a live mailbox object, so `submit_time` is a defensible stand-in for both when no better source exists. Never invented — omitted entirely when `submit_time` is `None`. |
 
 ## v1.1 — Attachments + folder fidelity (Track 0069)
@@ -139,7 +140,7 @@ report `Vec` for tests. Invariant: fail-severity event count == `attachments_fai
 | `unique-pst` CLI + multi-volume product UX | **0071** (uses 0070 physical size / stop / hashes) |
 | scanpst / Outlook operator proof | D-0068-02 (carry) — recommend on multi-GB operator run |
 | Cloud attach download | D-0067-cloud |
-| Recipient table / full named props | residual |
+| Full named props (cloud attach provider type, etc.) | residual — recipient TC closed in **0082**; named-prop map remains |
 | `PidTagAttachDataObject` (PtypObject) on embeds | residual — nested message is linked as an attach subnode leaf entry with method=5; PC builder has no PtypObject; reader binary open path correctly fails |
 | Per-folder contents-table RowIndex BTH | not required this track (attach table only) |
 | Eager spill of all leaf block `Vec`s from `Layout` | **Closed in 0070 P1** — `EagerWriteCtx` spills leaves (`on_disk=true`); residual RAM is small internal blocks (XBLOCK/PC heaps) only |
@@ -231,7 +232,8 @@ Search Root                    (NID_TYPE_SEARCH_FOLDER; NOT a hierarchy child of
 Fixed template objects (NID_HIERARCHY_TABLE_TEMPLATE 0x60D,
   NID_CONTENTS_TABLE_TEMPLATE 0x60E, NID_ASSOC_CONTENTS_TABLE_TEMPLATE 0x60F,
   NID_SEARCH_CONTENTS_TABLE_TEMPLATE 0x610,
-  NID_ATTACHMENT_TABLE_TEMPLATE 0x671) — always zero data rows
+  NID_ATTACHMENT_TABLE_TEMPLATE 0x671,
+  NID_RECIPIENT_TABLE_TEMPLATE 0x692) — always zero data rows
 ```
 
 Root's own contents table is always empty — every message lives under

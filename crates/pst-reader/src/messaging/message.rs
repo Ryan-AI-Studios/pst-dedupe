@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{PstError, Result};
 use crate::ltp::pc;
+use crate::messaging::recipient::{message_flags_is_unsent, Recipient};
 use crate::ndb::nid::{self, NodeId};
 use crate::PstFile;
 
@@ -66,12 +67,26 @@ pub struct MessageProperties {
     /// performed under a separate message scope may also set this when ORed by
     /// the caller (scan/extract).
     pub crc_suspect: bool,
+    /// Structured recipients from the message recipient TC (0082).
+    /// Empty when table missing/unreadable — **never** invented from Display*.
+    pub recipients: Vec<Recipient>,
+    /// `PidTagMessageFlags` (0x0E07) when present and readable; soft-fail → None.
+    pub message_flags: Option<u32>,
+}
+
+impl MessageProperties {
+    /// True when `MSGFLAG_UNSENT` is set. False when flags absent or bit clear.
+    pub fn is_unsent(&self) -> bool {
+        self.message_flags.is_some_and(message_flags_is_unsent)
+    }
 }
 
 /// Full extract-oriented message properties (Desk / `extract-pst`).
 ///
-/// Body text is **not** truncated. Recipients use Display* PIDs; BCC is never
-/// invented — may be `None` when the property is absent.
+/// Body text is **not** truncated. Display* PIDs (`display_to` / `display_cc` /
+/// `display_bcc`) remain soft-read strings; structured TC rows live in
+/// [`Self::recipients`] (0082) and are **never** invented from Display*.
+/// `display_bcc` may be `None` when the property is absent.
 #[derive(Debug, Clone)]
 pub struct ExtractedMessage {
     /// The message's NID within this PST.
@@ -121,6 +136,18 @@ pub struct ExtractedMessage {
     /// True when any **block** CRC or BID mismatch was counted while reading
     /// this message (0077 `CRC_SUSPECT`). Page CRC is excluded (poly-class).
     pub crc_suspect: bool,
+    /// Structured recipients from the message recipient TC (0082).
+    /// Empty when table missing/unreadable — **never** invented from Display*.
+    pub recipients: Vec<Recipient>,
+    /// `PidTagMessageFlags` (0x0E07) when present and readable; soft-fail → None.
+    pub message_flags: Option<u32>,
+}
+
+impl ExtractedMessage {
+    /// True when `MSGFLAG_UNSENT` is set. False when flags absent or bit clear.
+    pub fn is_unsent(&self) -> bool {
+        self.message_flags.is_some_and(message_flags_is_unsent)
+    }
 }
 
 /// Whether a body property error is truncation/CRC corruption (BODY_TRUNCATED path).
@@ -268,6 +295,14 @@ impl PstFile {
         let display_to = prop_ctx.get_string(nid::PID_TAG_DISPLAY_TO)?;
         let message_size = prop_ctx.get_i32(nid::PID_TAG_MESSAGE_SIZE)?;
         let has_attachments = prop_ctx.get_bool(nid::PID_TAG_HAS_ATTACHMENTS)?;
+        // Soft-read flags (0082 zero-recip anomaly): decode errors → None, do not invent UNSENT.
+        let message_flags: Option<u32> = prop_ctx
+            .get_i32(nid::PID_TAG_MESSAGE_FLAGS)
+            .ok()
+            .flatten()
+            .map(|v| v as u32);
+        // Structured recipients: missing/corrupt TC → empty; never invent from Display*.
+        let recipients = self.list_recipients(message_nid).unwrap_or_default();
         let crc_suspect = scope.exit();
 
         Ok(MessageProperties {
@@ -288,6 +323,8 @@ impl PstFile {
             body_sha256,
             body_char_len,
             crc_suspect,
+            recipients,
+            message_flags,
         })
     }
 
@@ -335,6 +372,14 @@ impl PstFile {
         let end_date = prop_ctx.get_time(nid::PID_TAG_END_DATE)?;
         // Best-effort standard location tag; PidLidLocation is residual when absent.
         let location = prop_ctx.get_string(nid::PID_TAG_LOCATION)?;
+        // Soft-read flags (0082 zero-recip anomaly): decode errors → None, do not invent UNSENT.
+        let message_flags: Option<u32> = prop_ctx
+            .get_i32(nid::PID_TAG_MESSAGE_FLAGS)
+            .ok()
+            .flatten()
+            .map(|v| v as u32);
+        // Structured recipients: missing/corrupt TC → empty; never invent from Display*.
+        let recipients = self.list_recipients(message_nid).unwrap_or_default();
         let crc_suspect = scope.exit();
 
         Ok(ExtractedMessage {
@@ -361,6 +406,8 @@ impl PstFile {
             end_date,
             location,
             crc_suspect,
+            recipients,
+            message_flags,
         })
     }
 }

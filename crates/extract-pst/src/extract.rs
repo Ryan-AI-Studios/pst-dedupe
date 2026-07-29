@@ -1310,6 +1310,8 @@ mod tests {
             start_date: None,
             end_date: None,
             location: None,
+            recipients: Vec::new(),
+            message_flags: None,
             crc_suspect: false,
         };
         let (irt, refs, topic, ci) = thread_header_fields(&msg);
@@ -1352,6 +1354,8 @@ mod tests {
             start_date: None,
             end_date: None,
             location: None,
+            recipients: Vec::new(),
+            message_flags: None,
             crc_suspect: false,
         };
         let (a, b, c, d) = thread_header_fields(&msg);
@@ -1383,6 +1387,8 @@ mod tests {
             start_date: None,
             end_date: None,
             location: Some("Room 1".into()),
+            recipients: Vec::new(),
+            message_flags: None,
             crc_suspect: false,
         };
         let (text, truncated) = synthesize_calendar_review_text(
@@ -1428,6 +1434,8 @@ mod tests {
             start_date: None,
             end_date: None,
             location: None,
+            recipients: Vec::new(),
+            message_flags: None,
             crc_suspect: false,
         };
         let (text, truncated) = synthesize_calendar_review_text(&msg, &[], None, None);
@@ -1567,6 +1575,8 @@ mod tests {
             start_date: None,
             end_date: None,
             location: None,
+            recipients: Vec::new(),
+            message_flags: None,
             crc_suspect: false,
         };
         refresh_thread_headers(&matter, &parent.id, &extracted).expect("refresh");

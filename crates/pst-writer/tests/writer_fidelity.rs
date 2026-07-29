@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use pst_writer::{
     write_unicode_pst, write_unicode_pst_with_streams, AttachRead, AttachStreamSource,
     AttachmentFidelityKind, FolderLayoutPolicy, WriteAttachment, WriteMessage, WritePstOpts,
+    WriteRecipient, WriteRecipientType,
 };
 
 fn scratch_path(name: &str) -> PathBuf {
@@ -1021,6 +1022,336 @@ fn per_message_attachment_table_rows_and_row_index() {
         .expect("string")
         .expect("filename present");
     assert_eq!(fname, "row.txt");
+
+    cleanup(&path);
+}
+
+// ── Recipient table template at NBT 0x692 (0082) ──────────────────────────────
+
+#[test]
+fn recipient_table_template_present_empty_at_0x692() {
+    let path = scratch_path("recip_template");
+    cleanup(&path);
+
+    write_unicode_pst(&path, Vec::new(), &[], &WritePstOpts::default()).expect("write");
+
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let raw = pst
+        .read_node_data(pst_reader::NodeId(0x692))
+        .expect("NBT template 0x692 must be readable");
+    let table = pst_reader::ltp::tc::TableContext::load(raw, None).expect("TC load");
+    assert_eq!(table.row_count(), 0, "template must have zero rows");
+    assert_eq!(
+        table.columns().len(),
+        15,
+        "recipient table template: 14 MUST + SmtpAddress"
+    );
+    let props: Vec<u16> = table.columns().iter().map(|c| c.prop_id).collect();
+    for expected in [
+        0x0C15u16, 0x0E0F, 0x0FF9, 0x0FFE, 0x0FFF, 0x3001, 0x3002, 0x3003, 0x300B, 0x3900, 0x39FE,
+        0x39FF, 0x3A40, 0x67F2, 0x67F3,
+    ] {
+        assert!(
+            props.contains(&expected),
+            "missing column 0x{expected:04X} in {props:?}"
+        );
+    }
+
+    cleanup(&path);
+}
+
+// ── Every message has recipient subnode 0x692 (zero-row OK) ───────────────────
+
+#[test]
+fn every_message_has_recipient_table_subnode_0x692() {
+    let path = scratch_path("msg_recip_empty");
+    cleanup(&path);
+
+    // No structured recipients → still emit empty TC (MS-PST MUST).
+    let msg = base_msg("<recip0@ex.com>", "No recip rows");
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+
+    let msg_nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let table_raw = pst
+        .read_subnode_data(msg_nid, pst_reader::NodeId(0x692))
+        .expect("message subnode 0x692 recipient table");
+    let table = pst_reader::ltp::tc::TableContext::load(table_raw, None).expect("TC");
+    assert_eq!(table.row_count(), 0, "zero-row recipient TC still present");
+    assert_eq!(table.columns().len(), 15);
+
+    let recips = pst.list_recipients(msg_nid).expect("list_recipients");
+    assert!(recips.is_empty());
+
+    cleanup(&path);
+}
+
+// ── Display* present + empty recipient table: never invent rows (0082 P2-3) ───
+
+/// Message with DisplayTo but **empty** structured recipients:
+/// - `list_recipients` / extract.recipients stay empty
+/// - Display* still present on extract / props
+/// - reader does **not** invent TC rows from Display*
+#[test]
+fn display_to_with_empty_recipients_does_not_invent_rows() {
+    let path = scratch_path("msg_recip_display_only");
+    cleanup(&path);
+
+    let mut msg = base_msg("<recip-disp@ex.com>", "Display only, empty table");
+    msg.display_to = Some("Alice <alice@example.com>; Bob <bob@example.com>".into());
+    msg.display_cc = Some("Carol <carol@example.com>".into());
+    msg.recipients = vec![]; // explicit empty — writer emits zero-row TC
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+
+    let msg_nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+
+    let recips = pst.list_recipients(msg_nid).expect("list_recipients");
+    assert!(
+        recips.is_empty(),
+        "empty structured table must not invent rows from Display*, got {recips:?}"
+    );
+
+    let extract = pst.read_message_extract(msg_nid).expect("extract");
+    assert_eq!(
+        extract.display_to.as_deref(),
+        Some("Alice <alice@example.com>; Bob <bob@example.com>")
+    );
+    assert_eq!(
+        extract.display_cc.as_deref(),
+        Some("Carol <carol@example.com>")
+    );
+    assert!(
+        extract.recipients.is_empty(),
+        "extract.recipients must stay empty when TC has no rows"
+    );
+
+    let props = pst.read_message_properties(msg_nid).expect("props");
+    assert_eq!(
+        props.display_to.as_deref(),
+        Some("Alice <alice@example.com>; Bob <bob@example.com>")
+    );
+    assert!(props.recipients.is_empty());
+
+    cleanup(&path);
+}
+
+/// Soft-fail: unreadable / missing message NID returns empty recipients (not hard error).
+#[test]
+fn list_recipients_soft_fail_missing_nid_returns_empty() {
+    let path = scratch_path("msg_recip_soft_fail");
+    cleanup(&path);
+
+    let msg = base_msg("<recip-soft@ex.com>", "soft fail probe");
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    // Non-existent message NID: soft path → Ok(empty), never invents Display*.
+    let missing = pst_reader::NodeId(0x00FF_FF00);
+    let recips = pst
+        .list_recipients(missing)
+        .expect("list_recipients soft-fails to empty");
+    assert!(recips.is_empty());
+
+    cleanup(&path);
+}
+
+// ── Multi-recipient To/Cc round-trip via list_recipients ─────────────────────
+
+#[test]
+fn multi_recipient_to_cc_round_trip() {
+    let path = scratch_path("msg_recip_multi");
+    cleanup(&path);
+
+    let mut msg = base_msg("<recip1@ex.com>", "To+Cc");
+    msg.display_to = Some("Alice <alice@example.com>".into());
+    msg.display_cc = Some("Bob <bob@example.com>".into());
+    msg.recipients = vec![
+        WriteRecipient {
+            recipient_type: WriteRecipientType::To,
+            display_name: Some("Alice".into()),
+            address_type: Some("SMTP".into()),
+            email_address: Some("alice@example.com".into()),
+            smtp_address: Some("alice@example.com".into()),
+        },
+        WriteRecipient {
+            recipient_type: WriteRecipientType::Cc,
+            display_name: Some("Bob".into()),
+            address_type: Some("SMTP".into()),
+            email_address: Some("bob@example.com".into()),
+            smtp_address: Some("bob@example.com".into()),
+        },
+    ];
+
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+
+    let msg_nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let recips = pst.list_recipients(msg_nid).expect("list_recipients");
+    assert_eq!(recips.len(), 2, "To+Cc rows");
+    assert_eq!(recips[0].recipient_type, pst_reader::RecipientType::To);
+    assert_eq!(
+        recips[0].email_address.as_deref(),
+        Some("alice@example.com")
+    );
+    assert_eq!(recips[0].smtp_address.as_deref(), Some("alice@example.com"));
+    assert_eq!(recips[1].recipient_type, pst_reader::RecipientType::Cc);
+    assert_eq!(recips[1].email_address.as_deref(), Some("bob@example.com"));
+
+    let extract = pst.read_message_extract(msg_nid).expect("extract");
+    assert_eq!(
+        extract.display_to.as_deref(),
+        Some("Alice <alice@example.com>")
+    );
+    assert_eq!(extract.display_cc.as_deref(), Some("Bob <bob@example.com>"));
+
+    cleanup(&path);
+}
+
+// ── BCC off: Bcc not in table, no DisplayBcc prop ────────────────────────────
+
+#[test]
+fn bcc_omitted_by_default() {
+    let path = scratch_path("msg_recip_bcc_off");
+    cleanup(&path);
+
+    let mut msg = base_msg("<recip2@ex.com>", "BCC off");
+    msg.display_to = Some("alice@example.com".into());
+    msg.display_bcc = Some("secret@example.com".into());
+    msg.recipients = vec![
+        WriteRecipient {
+            recipient_type: WriteRecipientType::To,
+            display_name: Some("Alice".into()),
+            address_type: Some("SMTP".into()),
+            email_address: Some("alice@example.com".into()),
+            smtp_address: Some("alice@example.com".into()),
+        },
+        WriteRecipient {
+            recipient_type: WriteRecipientType::Bcc,
+            display_name: Some("Secret".into()),
+            address_type: Some("SMTP".into()),
+            email_address: Some("secret@example.com".into()),
+            smtp_address: Some("secret@example.com".into()),
+        },
+    ];
+
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+
+    let msg_nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let recips = pst.list_recipients(msg_nid).expect("list");
+    assert_eq!(recips.len(), 1, "Bcc row filtered when flag off");
+    assert_eq!(recips[0].recipient_type, pst_reader::RecipientType::To);
+    assert_ne!(
+        recips[0].email_address.as_deref(),
+        Some("secret@example.com")
+    );
+
+    let extract = pst.read_message_extract(msg_nid).expect("extract");
+    assert!(
+        extract
+            .display_bcc
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty(),
+        "PidTagDisplayBcc must not be written when include_bcc_recipients=false"
+    );
+
+    cleanup(&path);
+}
+
+// ── BCC on: Bcc rows + DisplayBcc present ────────────────────────────────────
+
+#[test]
+fn bcc_included_when_flag_on() {
+    let path = scratch_path("msg_recip_bcc_on");
+    cleanup(&path);
+
+    let mut msg = base_msg("<recip3@ex.com>", "BCC on");
+    msg.display_to = Some("alice@example.com".into());
+    msg.display_bcc = Some("secret@example.com".into());
+    msg.recipients = vec![
+        WriteRecipient {
+            recipient_type: WriteRecipientType::To,
+            display_name: Some("Alice".into()),
+            address_type: Some("SMTP".into()),
+            email_address: Some("alice@example.com".into()),
+            smtp_address: Some("alice@example.com".into()),
+        },
+        WriteRecipient {
+            recipient_type: WriteRecipientType::Bcc,
+            display_name: Some("Secret".into()),
+            address_type: Some("SMTP".into()),
+            email_address: Some("secret@example.com".into()),
+            smtp_address: Some("secret@example.com".into()),
+        },
+    ];
+
+    let opts = WritePstOpts {
+        include_bcc_recipients: true,
+        ..WritePstOpts::default()
+    };
+    write_unicode_pst(&path, vec![msg], &[], &opts).expect("write");
+
+    let msg_nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let recips = pst.list_recipients(msg_nid).expect("list");
+    assert_eq!(recips.len(), 2, "To+Bcc when flag on");
+    assert!(
+        recips
+            .iter()
+            .any(|r| r.recipient_type == pst_reader::RecipientType::Bcc
+                && r.email_address.as_deref() == Some("secret@example.com")),
+        "Bcc row present: {recips:?}"
+    );
+
+    let extract = pst.read_message_extract(msg_nid).expect("extract");
+    assert_eq!(
+        extract.display_bcc.as_deref(),
+        Some("secret@example.com"),
+        "PidTagDisplayBcc written when include_bcc_recipients=true"
+    );
+
+    cleanup(&path);
+}
+
+// ── EX-typed row without SMTP recovers address_type EX + email DN ────────────
+
+#[test]
+fn ex_typed_recipient_without_smtp_round_trip() {
+    let path = scratch_path("msg_recip_ex");
+    cleanup(&path);
+
+    let dn = "/o=First Organization/ou=Exchange Administrative Group/cn=Recipients/cn=alice";
+    let mut msg = base_msg("<recip4@ex.com>", "EX only");
+    msg.recipients = vec![WriteRecipient {
+        recipient_type: WriteRecipientType::To,
+        display_name: Some("Alice Example (noisy)".into()),
+        address_type: Some("EX".into()),
+        email_address: Some(dn.into()),
+        smtp_address: None,
+    }];
+
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+
+    let msg_nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let recips = pst.list_recipients(msg_nid).expect("list");
+    assert_eq!(recips.len(), 1);
+    assert_eq!(recips[0].recipient_type, pst_reader::RecipientType::To);
+    assert_eq!(recips[0].address_type.as_deref(), Some("EX"));
+    assert_eq!(recips[0].email_address.as_deref(), Some(dn));
+    assert!(
+        recips[0].smtp_address.is_none(),
+        "SmtpAddress must stay absent when source had none"
+    );
+    // Identity cascade prefers EX DN over display noise.
+    let key = recips[0].identity_key().expect("identity");
+    assert!(
+        key.contains("/O=") || key.contains("/o="),
+        "identity key should be EX DN form, got {key}"
+    );
 
     cleanup(&path);
 }

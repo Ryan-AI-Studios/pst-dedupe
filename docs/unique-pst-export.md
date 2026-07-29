@@ -65,6 +65,7 @@ Source PSTs are **read-only**. The writer never mutates inputs.
 | `--max-attach-fail-rate` | Preflight escalate when attach fail rate exceeds (default **0.05**) |
 | `--json` | Summary JSON on **stdout**; human progress on **stderr** |
 | `--max-open-psts <N>` | **0079** — max sticky source PST handles for materialize + attach stream (default **32**, LRU) |
+| `--include-bcc-recipients` | **0082** — write Bcc TC rows + `PidTagDisplayBcc` into the unique-PST (default **OFF**). Default suppresses BCC on the deliverable so consolidating custodians does not over-disclose relative to a single custodian's outward view. **Identity hashing still includes BCC** when the source recipient table is present (internal only). See [BCC disclosure](#bcc-disclosure-0082). |
 
 ### Deep attach preflight (0074) — honesty
 
@@ -165,10 +166,10 @@ Free-text cells in `export_attachments.csv` and `export_messages.csv` neutralize
 
 ### `export_messages.csv` (mandatory)
 
-Fixed columns (prefix locked; **0073**/**0075**/**0081** append only):
+Fixed columns (prefix locked; **0073**/**0075**/**0081**/**0082** append only):
 
 ```text
-source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources,source_id
+source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources,source_id,bcc_suppressed
 ```
 
 One row per **successfully written** unique winner. **No body text** columns.
@@ -178,6 +179,8 @@ One row per **successfully written** unique winner. **No body text** columns.
 `duplicate_source_count` / `duplicate_sources` (**0075**): “All Custodians” aggregate — distinct **source PST basenames** (not absolute paths) that held a suppressed copy of this winner, `|`-delimited, capped at 8 (same values as decision CSV unique rows and `keep_set_v1` JSON).
 
 `source_id` (**0081**): 0-based index into `summary.inputs` (decimal string; empty when unmapped — never invented as `0`). Join key under `--ledger-path-mode basename` when multiple inputs share a basename.
+
+`bcc_suppressed` (**0082**): `true` when the source had one or more Bcc recipients (recipient-table Bcc row **or** non-empty `display_bcc`) **and** the write path omitted them (default; `--include-bcc-recipients` not set). `false` when BCC was written, or the source had no BCC.
 
 ## Winner policies
 
@@ -381,8 +384,23 @@ Dedup identity is tiered. Defaults may only **split** groups relative to pre-007
 |---|---|---|
 | Body | Full `PR_BODY` with CR/LF/space/tab stripped | First **4096 characters** of whitespace-normalized body (spaces kept) |
 | Header | Subject + sender name/email + ClientSubmitTime | Subject + sender email + submit FILETIME (no separate display name) |
-| Recipients | All recipients incl. BCC (address-oriented) | **Absent at v1**; opt-in at `body-recip` via display strings |
+| Recipients | All recipients incl. BCC (address-oriented) | **Absent at v1**; opt-in at `body-recip` via structured table keys when present, else display strings (**0082**) |
 | Attachments | Per-attachment **content** SHA-256 | Name + size metadata only (content digests deferred or opt-in attach level) |
+
+### Tier-2.5 recipient identity (0082)
+
+When `--strong-content-hash body-recip` (or higher when available) is on **and** the source message has a **non-empty recipient table**, Tier-2.5 fingerprints recipients from structured TC rows — not display-name strings alone.
+
+**Per-row identity key cascade** (exactly one key per row, then sort + `;`-join over **To+Cc+Bcc**):
+
+1. `PidTagSmtpAddress` if non-empty
+2. `PidTagEmailAddress` if address type is SMTP (or the address is SMTP-shaped and type is missing/empty)
+3. `PidTagEmailAddress` if address type is **EX** / LegacyExchangeDN (`/O=…`, `/OU=…`, `/CN=…` forms kept; case-folded; **not** dropped to display) — typed `EX` counts even without `/O=`
+4. Normalized **display name** only when no structured address key exists
+
+Messages with **no readable recipient table** still use the pre-0082 display-string path (`display_to` / `cc` / `bcc`). The reader **never invents** TC rows from Display* props.
+
+**No distribution-list expansion:** fidelity is to the **PST file**. If the source stored only a DL display name / EX address without expanded members, the unique-PST **replicates that row** and does **not** resolve GAL membership.
 
 ### Split-only guards (default on)
 
@@ -391,7 +409,17 @@ Dedup identity is tiered. Defaults may only **split** groups relative to pre-007
 
 **Bulk-mail warning:** blocking cross-MID merges inflates unique counts most for newsletters, HR templates, and automated mailers (each dispatch has its own Message-ID). Read `cross_mid_blocked_max_group` in the run summary first. Use `--allow-cross-mid-tier2` only when aggressive bulk culling is intentional and recipient-level evidence is not at issue.
 
-**Recipient warning (`body-recip`):** `display_to` / `cc` / `bcc` are *display names*, not SMTP addresses, and vary between copies (`"Smith, John"` vs `"John Smith"` vs `/O=EXCHANGELABS/…`). Check `tier2_5_splits_recipients_only` and `x500_recipient_items` before trusting results. Long-term fix is recipient-table reads (**D-0076-recipient-table**).
+**Recipient warning (`body-recip`):** when a recipient table is present, identity uses the SMTP → EX DN → display cascade above (**shipped in 0082**; closes **D-0076-recipient-table**). Table-less messages still fall back to `display_to` / `cc` / `bcc` *display names*, which can vary between copies (`"Smith, John"` vs `"John Smith"`). Check `tier2_5_splits_recipients_only` and `x500_recipient_items` when diagnosing splits.
+
+### BCC disclosure (0082)
+
+| Surface | Default | Opt-in |
+|---|---|---|
+| **Write** (deliverable) | To + Cc TC rows only; no Bcc rows / no `PidTagDisplayBcc` | `--include-bcc-recipients` writes Bcc when source had them |
+| **Identity** (Tier-2.5 hash) | To+Cc+**Bcc** participate when the table is present | Always on for identity when table present — not a disclosure surface |
+| **Audit** | `export_messages.csv` column `bcc_suppressed`; summary `bcc_suppressed_message_count` | — |
+
+**Reviewer note:** two near-identical messages in the unique-PST with `bcc_suppressed=true` are **not** a dedupe failure — BCC variance was kept for identity and omitted from the deliverable by policy. See the [runbook](unique-pst-ediscovery-runbook.md).
 
 **Inline attachments:** signature logos can false-split attachment-parity comparisons. `--identity-ignore-inline-attachments` (opt-in, merge-increasing) uses MAPI flags (`PidTagAttachContentId` / rendered-in-body / hidden), not a size threshold.
 
@@ -472,6 +500,15 @@ Integrity thresholds, export partials, verification failures, and **`attachments
 - **`invalid_in_place`**: bytes still at `--out` but **must not ship** — cancel quarantine failed, **or** hard-fail after write (incomplete / untrustworthy). Purge or quarantine manually before retry.
 - Spec has no `failed_retained`; hard-fail with retained bytes uses `invalid_in_place`.
 
+**`retryable` (0082):** boolean on summary JSON only — **not** a new exit integer. `true` only for clearly transient classes (operator cancel, matter/transient IO). Permanent failures (usage, risk gate, partial fidelity, verify/count/report hard fails, schema/passphrase/audit) stay `false`. Still **no blanket retry of exit 5** — classify first (see [runbook](unique-pst-ediscovery-runbook.md) §6).
+
+**0082 summary counters (telemetry):**
+
+| Field | Meaning |
+|---|---|
+| `bcc_suppressed_message_count` | Winners where source BCC was omitted from the written PST by policy |
+| `sent_message_with_no_recipients_count` | Empty recipient TC on a non-draft (`MSGFLAG_UNSENT` clear) — **telemetry only**; does not invent a new `export_risk` value or hard-fail the export |
+
 ### Cancel quarantine
 
 On cancel after bytes written, volumes are renamed to
@@ -530,8 +567,9 @@ corroboration only.
 | `full` | Structure + every written message compared |
 
 Hard findings (`defect`, `unexplained_loss`) set `verify_ok = false` → existing
-`VERIFY_FAILED` / exit **1**. `known_gap` (e.g. BCC dropped by design) is counted and
-never fails. No new exit integers.
+`VERIFY_FAILED` / exit **1**. `known_gap` (e.g. BCC dropped by design unless
+`--include-bcc-recipients`) is counted and never fails. `recipient_table` is
+**Preserved** (0082) — a source↔output structure mismatch is a defect. No new exit integers.
 
 Standalone re-check:
 

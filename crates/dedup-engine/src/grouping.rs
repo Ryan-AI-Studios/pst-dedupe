@@ -365,6 +365,103 @@ impl GroupingStats {
     }
 }
 
+/// Structured recipient row for keep-set / write / identity (0082).
+///
+/// Mirrors `pst_reader::Recipient` so Tier-2.5 and unique-pst share one type
+/// without inventing Display* rows.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct CanonicalRecipient {
+    pub recipient_type: CanonicalRecipientType,
+    pub display_name: Option<String>,
+    pub address_type: Option<String>,
+    pub email_address: Option<String>,
+    pub smtp_address: Option<String>,
+}
+
+/// MAPI recipient type on the canonical pipeline (0082).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum CanonicalRecipientType {
+    #[default]
+    To,
+    Cc,
+    Bcc,
+    Other(u32),
+}
+
+impl CanonicalRecipientType {
+    pub fn from_reader(t: pst_reader::RecipientType) -> Self {
+        match t {
+            pst_reader::RecipientType::To => Self::To,
+            pst_reader::RecipientType::Cc => Self::Cc,
+            pst_reader::RecipientType::Bcc => Self::Bcc,
+            pst_reader::RecipientType::Other(v) => Self::Other(v),
+        }
+    }
+
+    pub fn to_mapi(self) -> u32 {
+        match self {
+            Self::To => 1,
+            Self::Cc => 2,
+            Self::Bcc => 3,
+            Self::Other(v) => v,
+        }
+    }
+
+    pub fn is_bcc(self) -> bool {
+        matches!(self, Self::Bcc)
+    }
+}
+
+impl CanonicalRecipient {
+    /// Map a reader TC row into the keep-set type.
+    pub fn from_reader(r: &pst_reader::Recipient) -> Self {
+        Self {
+            recipient_type: CanonicalRecipientType::from_reader(r.recipient_type),
+            display_name: r.display_name.clone(),
+            address_type: r.address_type.clone(),
+            email_address: r.email_address.clone(),
+            smtp_address: r.smtp_address.clone(),
+        }
+    }
+
+    /// Identity key cascade for Tier-2.5 (§2.5 rule 4) — delegates to reader logic.
+    pub fn identity_key(&self) -> Option<String> {
+        let tmp = pst_reader::Recipient {
+            recipient_type: match self.recipient_type {
+                CanonicalRecipientType::To => pst_reader::RecipientType::To,
+                CanonicalRecipientType::Cc => pst_reader::RecipientType::Cc,
+                CanonicalRecipientType::Bcc => pst_reader::RecipientType::Bcc,
+                CanonicalRecipientType::Other(v) => pst_reader::RecipientType::Other(v),
+            },
+            display_name: self.display_name.clone(),
+            address_type: self.address_type.clone(),
+            email_address: self.email_address.clone(),
+            smtp_address: self.smtp_address.clone(),
+        };
+        tmp.identity_key()
+    }
+
+    /// True when this row should count as EX / X.500 for telemetry (0082 P2-2).
+    ///
+    /// Typed `EX` address type counts even when the DN lacks `/O=` (e.g. `/CN=…`).
+    /// Path-like email / identity keys (`/O=`, `/OU=`, `/CN=`) also count.
+    pub fn identity_is_x500(&self) -> bool {
+        let tmp = pst_reader::Recipient {
+            recipient_type: match self.recipient_type {
+                CanonicalRecipientType::To => pst_reader::RecipientType::To,
+                CanonicalRecipientType::Cc => pst_reader::RecipientType::Cc,
+                CanonicalRecipientType::Bcc => pst_reader::RecipientType::Bcc,
+                CanonicalRecipientType::Other(v) => pst_reader::RecipientType::Other(v),
+            },
+            display_name: self.display_name.clone(),
+            address_type: self.address_type.clone(),
+            email_address: self.email_address.clone(),
+            smtp_address: self.smtp_address.clone(),
+        };
+        tmp.identity_is_x500()
+    }
+}
+
 /// Normalize a display recipient string for Tier-2.5: trim, lowercase, split on
 /// `;`, sort tokens, rejoin. Display names — not SMTP addresses.
 pub fn normalize_recipients(s: &str) -> String {
@@ -377,9 +474,26 @@ pub fn normalize_recipients(s: &str) -> String {
     parts.join(";")
 }
 
-/// Cheap detector: recipient string contains an `/O=`-prefixed X.500 segment.
+/// Normalize structured recipient identity keys for Tier-2.5 (0082 §2.5 rule 4).
+///
+/// Collects each row's `identity_key()` over **To+Cc+Bcc**, drops empties,
+/// sorts, and joins with `;`. Call only when the recipient table is non-empty;
+/// table-less messages keep the display-string path.
+pub fn normalize_recipient_identity_keys(keys: impl IntoIterator<Item = String>) -> String {
+    let mut parts: Vec<String> = keys
+        .into_iter()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+    parts.sort();
+    parts.join(";")
+}
+
+/// Cheap detector: recipient string looks like LegacyExchangeDN / X.500.
+///
+/// Recognizes `/O=`, `/OU=`, and `/CN=` path segments (case-insensitive).
 pub fn recipient_has_x500(s: &str) -> bool {
-    s.to_ascii_uppercase().contains("/O=")
+    pst_reader::looks_like_x500_dn(s)
 }
 
 /// MID compatibility for Tier-2 join (§3.4 table).
@@ -440,7 +554,23 @@ mod tests {
     #[test]
     fn x500_detect() {
         assert!(recipient_has_x500("/O=EXCHANGELABS/OU=…"));
+        assert!(recipient_has_x500("/CN=Recipients/CN=alice"));
+        assert!(recipient_has_x500("/ou=AG/cn=Recipients/cn=x"));
         assert!(!recipient_has_x500("Smith, John"));
+    }
+
+    /// Typed EX without `/O=` still counts as X.500 telemetry and keeps email key.
+    #[test]
+    fn typed_ex_without_o_equals_is_x500_and_uses_email_key() {
+        let r = CanonicalRecipient {
+            recipient_type: CanonicalRecipientType::To,
+            display_name: Some("Alice Example (noisy)".into()),
+            address_type: Some("EX".into()),
+            email_address: Some("/CN=Recipients/CN=alice".into()),
+            smtp_address: None,
+        };
+        assert_eq!(r.identity_key().as_deref(), Some("/CN=RECIPIENTS/CN=ALICE"));
+        assert!(r.identity_is_x500());
     }
 
     #[test]

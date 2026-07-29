@@ -192,11 +192,29 @@ pub const PID_TAG_DISPLAY_CC: u16 = 0x0E03;
 /// PidTagDisplayBcc (PtypString) — formatted Bcc recipients
 pub const PID_TAG_DISPLAY_BCC: u16 = 0x0E02;
 
+/// PidTagMessageFlags (PtypInteger32) — MSGFLAG_* bits
+pub const PID_TAG_MESSAGE_FLAGS: u16 = 0x0E07;
+
+/// `MSGFLAG_UNSENT` — message has not been sent (draft).
+pub const MSGFLAG_UNSENT: u32 = 0x0000_0008;
+
 /// PidTagMessageDeliveryTime (PtypTime / FILETIME) — received time
 pub const PID_TAG_MESSAGE_DELIVERY_TIME: u16 = 0x0E06;
 
 /// PidTagMessageSize (PtypInteger32)
 pub const PID_TAG_MESSAGE_SIZE: u16 = 0x0E08;
+
+/// PidTagRecipientType (PtypInteger32) — MAPI_TO=1, MAPI_CC=2, MAPI_BCC=3
+pub const PID_TAG_RECIPIENT_TYPE: u16 = 0x0C15;
+
+/// PidTagAddressType (PtypString) — e.g. SMTP, EX
+pub const PID_TAG_ADDRESS_TYPE: u16 = 0x3002;
+
+/// PidTagEmailAddress (PtypString) — address in address-type form
+pub const PID_TAG_EMAIL_ADDRESS: u16 = 0x3003;
+
+/// PidTagSmtpAddress (PtypString) — SMTP form when known (extra recipient col)
+pub const PID_TAG_SMTP_ADDRESS: u16 = 0x39FE;
 
 /// PidTagHasAttachments (PtypBoolean)
 pub const PID_TAG_HAS_ATTACHMENTS: u16 = 0x0E1B;

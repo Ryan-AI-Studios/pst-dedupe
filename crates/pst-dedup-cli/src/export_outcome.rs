@@ -242,6 +242,94 @@ pub fn classify_export(
     }
 }
 
+/// Whether automation may **retry** this unique-export outcome (0082 D-0078-retryable).
+///
+/// `true` only for clearly transient classes:
+/// - operator cancel (`CliExit::Cancelled` / `cancelled`)
+/// - matter/transient IO (`CliExit::MatterIo`)
+/// - summary error codes that denote disk / write IO (not integrity)
+///
+/// `false` for permanent failures: usage, risk gate, partial fidelity exit,
+/// verify/count/report hard fails, schema/passphrase/audit-style codes, and success.
+///
+/// **Writer IO:** production maps [`pst_writer::WriterError::Io`] (and local disk
+/// prep failures) to error code `write_io`. Classify still records
+/// [`reason::COUNT_MISMATCH`] for incomplete writes, so transient codes are
+/// checked **before** permanent reason codes — otherwise `write_io` would
+/// incorrectly stay non-retryable.
+///
+/// **No new exit integers** — this is a summary JSON field only.
+pub fn summary_is_retryable(
+    exit: CliExit,
+    cancelled: bool,
+    exit_reasons: &[&str],
+    error_code: Option<&str>,
+) -> bool {
+    // Cancel-retry class.
+    if cancelled || exit == CliExit::Cancelled {
+        return true;
+    }
+    // Permanent: risk gate, partial fidelity, usage, busy, job failed.
+    if matches!(
+        exit,
+        CliExit::ExportRiskBlocked
+            | CliExit::PartialFidelity
+            | CliExit::Usage
+            | CliExit::Busy
+            | CliExit::JobFailed
+            | CliExit::Success
+    ) {
+        return false;
+    }
+    // Explicit permanent error codes (schema / passphrase / audit / fidelity).
+    if let Some(code) = error_code {
+        let c = code.to_ascii_lowercase();
+        if matches!(
+            c.as_str(),
+            "auditchainbroken"
+                | "audit_chain_broken"
+                | "schema"
+                | "passphrase"
+                | "export_risk"
+                | "fidelity"
+                | "partial_fidelity"
+                | "usage"
+                | "risk_gate"
+                | "export"
+        ) {
+            return false;
+        }
+        // Transient IO / cancel classes — before permanent *reason* codes so
+        // write_io remains retryable when COUNT_MISMATCH is also recorded for
+        // an incomplete volume write.
+        if matches!(
+            c.as_str(),
+            "io" | "disk" | "write_io" | "cancelled" | "cancel" | "matter_io" | "matter-io"
+        ) {
+            return true;
+        }
+    }
+    // Permanent reason codes even under Generic (when no transient error code).
+    if exit_reasons.iter().any(|r| {
+        matches!(
+            *r,
+            reason::RISK_GATE
+                | reason::VERIFY_FAILED
+                | reason::COUNT_MISMATCH
+                | reason::SCAN_FAILED
+                | reason::REPORT_WRITE_FAILED
+        )
+    }) {
+        return false;
+    }
+    // MatterIo is the dedicated transient IO band (exit 5).
+    if exit == CliExit::MatterIo {
+        return true;
+    }
+    // Default: permanent (do not loop automation on unknown Generic hard fails).
+    false
+}
+
 /// Derive [`ArtifactState`] from classified outcome + on-disk disposition.
 ///
 /// **Hard-fail + bytes at `--out` → [`ArtifactState::InvalidInPlace`]** (not
@@ -660,5 +748,108 @@ mod tests {
             artifact_state_for(&cancelled, true, QuarantineResult::NoVolumes),
             ArtifactState::Absent
         );
+    }
+
+    /// 0082 DoD-8: retryable true/false boundaries (no new exit integers).
+    #[test]
+    fn retryable_cancel_true() {
+        assert!(summary_is_retryable(
+            CliExit::Cancelled,
+            true,
+            &[reason::CANCELLED],
+            Some("cancelled")
+        ));
+        assert!(summary_is_retryable(CliExit::Cancelled, false, &[], None));
+    }
+
+    #[test]
+    fn retryable_matter_io_true() {
+        assert!(summary_is_retryable(CliExit::MatterIo, false, &[], None));
+        assert!(summary_is_retryable(
+            CliExit::Generic,
+            false,
+            &[],
+            Some("write_io")
+        ));
+    }
+
+    /// Writer Io hard-fail path: classify records COUNT_MISMATCH for incomplete
+    /// write, but `write_io` / `io` summary codes must still be retryable.
+    #[test]
+    fn retryable_write_io_true_even_with_count_mismatch_reason() {
+        assert!(summary_is_retryable(
+            CliExit::Generic,
+            false,
+            &[reason::COUNT_MISMATCH],
+            Some("write_io")
+        ));
+        assert!(summary_is_retryable(
+            CliExit::Generic,
+            false,
+            &[reason::COUNT_MISMATCH],
+            Some("io")
+        ));
+        assert!(summary_is_retryable(
+            CliExit::Generic,
+            false,
+            &[reason::COUNT_MISMATCH],
+            Some("disk")
+        ));
+    }
+
+    #[test]
+    fn retryable_permanent_false() {
+        assert!(!summary_is_retryable(CliExit::Success, false, &[], None));
+        assert!(!summary_is_retryable(
+            CliExit::ExportRiskBlocked,
+            false,
+            &[reason::RISK_GATE],
+            None
+        ));
+        assert!(!summary_is_retryable(
+            CliExit::PartialFidelity,
+            false,
+            &[reason::ATTACH_SOFT_FAIL],
+            None
+        ));
+        assert!(!summary_is_retryable(
+            CliExit::Generic,
+            false,
+            &[reason::VERIFY_FAILED],
+            None
+        ));
+        // Permanent layout/export failure: COUNT_MISMATCH + untyped "export".
+        assert!(!summary_is_retryable(
+            CliExit::Generic,
+            false,
+            &[reason::COUNT_MISMATCH],
+            Some("export")
+        ));
+        // True count mismatch without transient code.
+        assert!(!summary_is_retryable(
+            CliExit::Generic,
+            false,
+            &[reason::COUNT_MISMATCH],
+            None
+        ));
+        assert!(!summary_is_retryable(
+            CliExit::Generic,
+            false,
+            &[],
+            Some("audit_chain_broken")
+        ));
+        assert!(!summary_is_retryable(
+            CliExit::Generic,
+            false,
+            &[],
+            Some("passphrase")
+        ));
+        assert!(!summary_is_retryable(
+            CliExit::Generic,
+            false,
+            &[],
+            Some("schema")
+        ));
+        assert!(!summary_is_retryable(CliExit::Usage, false, &[], None));
     }
 }

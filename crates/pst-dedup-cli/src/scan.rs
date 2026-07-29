@@ -867,6 +867,12 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                             }
                         }
 
+                        // Map structured TC rows for Tier-2.5 identity (0082).
+                        let structured_recips: Vec<dedup_engine::CanonicalRecipient> = props
+                            .recipients
+                            .iter()
+                            .map(dedup_engine::CanonicalRecipient::from_reader)
+                            .collect();
                         let strong_in = StrongHashInput {
                             identity: grouping.identity,
                             body_sha256: props.body_sha256.as_ref(),
@@ -874,6 +880,11 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                             display_to: props.display_to.as_deref(),
                             display_cc: props.display_cc.as_deref(),
                             display_bcc: props.display_bcc.as_deref(),
+                            recipients: if structured_recips.is_empty() {
+                                None
+                            } else {
+                                Some(structured_recips.as_slice())
+                            },
                             ignore_inline_attachments: grouping.ignore_inline_attachments,
                         };
                         let keys = hasher::compute_dedup_keys_ex(
@@ -888,19 +899,23 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                         if keys.preview_bytes_over_budget {
                             index.record_preview_over_budget();
                         }
-                        // X.500-looking display strings (honesty signal; any level).
-                        let x500 = props
-                            .display_to
-                            .as_deref()
-                            .is_some_and(dedup_engine::recipient_has_x500)
-                            || props
-                                .display_cc
+                        // X.500 telemetry: table-sourced EX keys preferred; else display /O=.
+                        let x500 = if !structured_recips.is_empty() {
+                            structured_recips.iter().any(|r| r.identity_is_x500())
+                        } else {
+                            props
+                                .display_to
                                 .as_deref()
                                 .is_some_and(dedup_engine::recipient_has_x500)
-                            || props
-                                .display_bcc
-                                .as_deref()
-                                .is_some_and(dedup_engine::recipient_has_x500);
+                                || props
+                                    .display_cc
+                                    .as_deref()
+                                    .is_some_and(dedup_engine::recipient_has_x500)
+                                || props
+                                    .display_bcc
+                                    .as_deref()
+                                    .is_some_and(dedup_engine::recipient_has_x500)
+                        };
                         if x500 {
                             index.record_x500_recipient_item();
                         }
@@ -1004,11 +1019,15 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                         // Deep attach preflight needs loci even when keep-set candidates
                         // are not otherwise retained (0074).
                         if opts.retain_candidates || opts.deep_attach_preflight {
+                            // Display BCC or structured MAPI_BCC row (0082).
                             let has_bcc = props
                                 .display_bcc
                                 .as_deref()
                                 .map(|s| !s.trim().is_empty())
-                                .unwrap_or(false);
+                                .unwrap_or(false)
+                                || props.recipients.iter().any(|r| {
+                                    matches!(r.recipient_type, pst_reader::RecipientType::Bcc)
+                                });
                             candidates.push(RecoverableScanItem {
                                 locus: MessageLocus {
                                     source_path: path_str.clone(),

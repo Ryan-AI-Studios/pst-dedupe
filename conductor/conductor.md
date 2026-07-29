@@ -186,6 +186,16 @@ Operator evidence (2026-07-26): multi-mailbox `INC0102784.pst` + `-2.pst` -> uni
 **Maps prior improvement list:**
 1 attach ledger -> 0073 | 2 deep preflight -> 0074 | 3 first_seen/date -> 0075 | 4 tier2 -> 0076 | 5 folder class -> 0075 | 6 near-dup -> use existing 0022/0023 matter jobs (not re-opened here) | 7 CRC noise -> 0077 | 8 exit codes -> 0078 | 9 export risk -> 0077 | 10 multi-volume exists (0070/0071) | 11 Outlook QC -> 0080 | perf -> 0079 | deps/docs -> 0081
 
+## Series M — Unique export fidelity residuals (post–Series L)
+
+After 0073–0081, the highest-value deferred cluster is **structured MAPI recipients** (read + write + identity), which three deferreds already name as one track. Later Series M tracks can take Mode A promote, named props / cloud attach, deterministic record keys, etc.
+
+| Track | Status | Summary |
+|---|---|---|
+| [0082-RecipientTableFidelity](0082-RecipientTableFidelity/spec.md) | **Completed** | Read/write recipient TC (MS-PST MUST `0x692`); SMTP+EX Tier-2.5 identity; BCC write opt-in + `bcc_suppressed`; `retryable` summary; closes D-0080/D-0076 recip + D-0078-retryable; Codex luna PASS |
+
+**Suggested order:** 0082 first (fidelity foundation for identity + deliverable honesty). Next candidates (not yet specified): D-0073-promote (P1), D-0080-cloud-attachments / named props, D-0079-deterministic-key (product), D-0073-eml.
+
 ## Notes
 
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.

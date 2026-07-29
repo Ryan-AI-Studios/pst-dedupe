@@ -83,6 +83,7 @@ fn export_row_folder(mid: &str, nid: u64, idx: u64, folder: &str) -> ExportMessa
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
         source_id: String::new(),
+        bcc_suppressed: false,
         subject: "subj".into(),
     }
 }
@@ -181,6 +182,25 @@ fn qc_input<'a>(
     source_differential: bool,
     parents_only: bool,
 ) -> QcRunInput<'a> {
+    qc_input_ex(
+        level,
+        report_dir,
+        volumes,
+        export_rows,
+        candidates,
+        (source_differential, parents_only, false),
+    )
+}
+
+fn qc_input_ex<'a>(
+    level: QcLevel,
+    report_dir: &'a Path,
+    volumes: &'a [VolumeReportRow],
+    export_rows: &'a [ExportMessageRow],
+    candidates: &'a [QcSampleCandidate],
+    flags: (bool, bool, bool), // source_differential, parents_only, include_bcc_recipients
+) -> QcRunInput<'a> {
+    let (source_differential, parents_only, include_bcc_recipients) = flags;
     QcRunInput {
         level,
         sample_max: 64,
@@ -193,6 +213,7 @@ fn qc_input<'a>(
         max_open_psts: 4,
         source_differential,
         parents_only,
+        include_bcc_recipients,
         probe_unexplained_property: None,
     }
 }
@@ -433,6 +454,7 @@ fn display_cc_strip_is_defect_when_source_has_cc() {
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
         source_id: String::new(),
+        bcc_suppressed: false,
         subject: "CC roundtrip".into(),
     }];
     let mut c = cand(1, 12);
@@ -513,6 +535,7 @@ fn attach_payload_mismatch_is_defect() {
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
         source_id: String::new(),
+        bcc_suppressed: false,
         subject: "Attach".into(),
     }];
     let mut c = cand(1, 11);
@@ -1192,6 +1215,7 @@ fn degraded_message_stripped_cc_still_defects() {
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
         source_id: String::new(),
+        bcc_suppressed: false,
         subject: "Deg CC".into(),
     }];
     let mut c = cand(1, 8);
@@ -1253,6 +1277,7 @@ fn degraded_body_unavailable_stripped_body_still_defects_when_not_flagged() {
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
         source_id: String::new(),
+        bcc_suppressed: false,
         subject: "Body loss".into(),
     }];
     let mut c = cand(1, 26);
@@ -1304,6 +1329,7 @@ fn corrupt_existing_source_hard_fails_not_skip() {
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
         source_id: String::new(),
+        bcc_suppressed: false,
         subject: "Corrupt src".into(),
     }];
     let mut c = cand(1, 4);
@@ -1417,6 +1443,7 @@ fn multi_volume_external_reader_called_for_each_volume() {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: String::new(),
+            bcc_suppressed: false,
             subject: "V1".into(),
         },
         ExportMessageRow {
@@ -1433,6 +1460,7 @@ fn multi_volume_external_reader_called_for_each_volume() {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: String::new(),
+            bcc_suppressed: false,
             subject: "V2".into(),
         },
     ];
@@ -1640,6 +1668,7 @@ fn no_mid_message_green_when_digests_match() {
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
         source_id: String::new(),
+        bcc_suppressed: false,
         subject: "NoMid Subject".into(),
     }];
     let mut c = cand(1, detail.body_plain_len);
@@ -1717,6 +1746,7 @@ fn attach_ledger_fail_does_not_explain_unrelated_missing_attach() {
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
         source_id: String::new(),
+        bcc_suppressed: false,
         subject: "TwoAttaches".into(),
     }];
     let mut c = cand(1, 18);
@@ -2037,6 +2067,7 @@ fn no_mid_duplicate_subjects_do_not_misassociate() {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: String::new(),
+            bcc_suppressed: false,
             subject: "Same Subject".into(),
         },
         ExportMessageRow {
@@ -2053,6 +2084,7 @@ fn no_mid_duplicate_subjects_do_not_misassociate() {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: String::new(),
+            bcc_suppressed: false,
             subject: "Same Subject".into(),
         },
     ];
@@ -2131,6 +2163,7 @@ fn fixture_matrix_multi_volume_structure_green() {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: String::new(),
+            bcc_suppressed: false,
             subject: "Vol1".into(),
         },
         ExportMessageRow {
@@ -2147,6 +2180,7 @@ fn fixture_matrix_multi_volume_structure_green() {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: String::new(),
+            bcc_suppressed: false,
             subject: "Vol2".into(),
         },
     ];
@@ -2556,6 +2590,7 @@ fn duplicate_attach_filename_multiset_missing_is_defect() {
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
         source_id: String::new(),
+        bcc_suppressed: false,
         subject: "DupAtt".into(),
     }];
     let mut c = cand(1, 12);
@@ -2775,6 +2810,7 @@ fn orphan_volume_index_rows_hard_fail_via_qc_pipeline() {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: String::new(),
+            bcc_suppressed: false,
             subject: "Ghost".into(),
         },
     ];
@@ -2865,6 +2901,7 @@ fn multi_volume_external_one_skipped_aggregate_not_ok() {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: String::new(),
+            bcc_suppressed: false,
             subject: "Agg1".into(),
         },
         ExportMessageRow {
@@ -2881,6 +2918,7 @@ fn multi_volume_external_one_skipped_aggregate_not_ok() {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: String::new(),
+            bcc_suppressed: false,
             subject: "Agg2".into(),
         },
     ];
@@ -3198,6 +3236,7 @@ fn production_multi_volume_full_qc_green() {
                 duplicate_source_count: 0,
                 duplicate_sources: String::new(),
                 source_id: String::new(),
+                bcc_suppressed: false,
                 subject: "SynV1".into(),
             },
             ExportMessageRow {
@@ -3214,6 +3253,7 @@ fn production_multi_volume_full_qc_green() {
                 duplicate_source_count: 0,
                 duplicate_sources: String::new(),
                 source_id: String::new(),
+                bcc_suppressed: false,
                 subject: "SynV2".into(),
             },
         ];
@@ -3264,4 +3304,233 @@ fn _touch_btreemap() -> BTreeMap<u64, u64> {
 #[allow(dead_code)]
 fn _touch_digest_entry() -> ContentDigestEntry {
     digest_entry(1, "x", "s", "d", 0)
+}
+
+/// Shared multi-recipient fixture: To+Cc+Bcc on source write input.
+fn multi_recip_msg() -> pst_writer::WriteMessage {
+    use pst_writer::{WriteRecipient, WriteRecipientType};
+    let mut src_msg = base_msg("<recip@ex.com>", "Multi recip", "body recip");
+    src_msg.display_to = Some("Alice <alice@example.com>".into());
+    src_msg.display_cc = Some("Bob <bob@example.com>".into());
+    src_msg.display_bcc = Some("Secret <secret@example.com>".into());
+    src_msg.recipients = vec![
+        WriteRecipient {
+            recipient_type: WriteRecipientType::To,
+            display_name: Some("Alice".into()),
+            address_type: Some("SMTP".into()),
+            email_address: Some("alice@example.com".into()),
+            smtp_address: Some("alice@example.com".into()),
+        },
+        WriteRecipient {
+            recipient_type: WriteRecipientType::Cc,
+            display_name: Some("Bob".into()),
+            address_type: Some("SMTP".into()),
+            email_address: Some("bob@example.com".into()),
+            smtp_address: Some("bob@example.com".into()),
+        },
+        WriteRecipient {
+            recipient_type: WriteRecipientType::Bcc,
+            display_name: Some("Secret".into()),
+            address_type: Some("SMTP".into()),
+            email_address: Some("secret@example.com".into()),
+            smtp_address: Some("secret@example.com".into()),
+        },
+    ];
+    src_msg
+}
+
+/// 0082 DoD-7: multi-recipient source vs output structure respects BCC write filter.
+#[test]
+fn recipient_table_source_output_respects_bcc_filter() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let src_msg = multi_recip_msg();
+    // Source includes BCC.
+    write_unicode_pst(
+        &src,
+        vec![src_msg.clone()],
+        &[],
+        &WritePstOpts {
+            include_bcc_recipients: true,
+            ..WritePstOpts::default()
+        },
+    )
+    .expect("write src");
+    // Output omits BCC (default unique-pst policy).
+    write_unicode_pst(
+        &out,
+        vec![src_msg],
+        &[],
+        &WritePstOpts {
+            include_bcc_recipients: false,
+            ..WritePstOpts::default()
+        },
+    )
+    .expect("write out");
+
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let out_nid = first_message_nid(&out).expect("out nid");
+
+    let mut src_pst = pst_reader::PstFile::open(&src).expect("open src");
+    let mut out_pst = pst_reader::PstFile::open(&out).expect("open out");
+    let src_recips = src_pst
+        .list_recipients(pst_reader::NodeId(src_nid))
+        .expect("src recips");
+    let out_recips = out_pst
+        .list_recipients(pst_reader::NodeId(out_nid))
+        .expect("out recips");
+    assert_eq!(src_recips.len(), 3, "source To+Cc+Bcc");
+    assert_eq!(out_recips.len(), 2, "output To+Cc only (BCC filtered)");
+    assert!(out_recips
+        .iter()
+        .all(|r| r.recipient_type != pst_reader::RecipientType::Bcc));
+
+    // QC path: source-differential full compare must not defect on recipient_table
+    // when written set matches (To+Cc) and include_bcc is false.
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "recip@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 0,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        source_id: String::new(),
+        bcc_suppressed: true,
+        subject: "Multi recip".into(),
+    }];
+    let mut c = cand(1, 10);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "recip@ex.com".into();
+    c.subject = "Multi recip".into();
+    c.display_bcc = "secret@example.com".into();
+
+    let report = run_unique_pst_qc(qc_input_ex(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c.clone()],
+        (true, false, false), // source_diff, parents_only, include_bcc
+    ));
+    // Findings are written to CSV (report has counts only).
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    assert!(
+        !csv.contains("recipient_table"),
+        "To+Cc written set must match; findings={csv} defect_count={}",
+        report.findings.defect
+    );
+    assert!(
+        report.findings.known_gap > 0,
+        "display_bcc known_gap when BCC suppressed: {:?}",
+        report.findings
+    );
+    assert!(
+        report.messages_compared >= 1,
+        "expected at least one message compared"
+    );
+}
+
+/// 0082 P1: QC with include_bcc true must not false-defect recipient_table / known_gap.
+#[test]
+fn recipient_table_qc_include_bcc_true_matches_full_set() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let src_msg = multi_recip_msg();
+    // Both sides write full To+Cc+Bcc.
+    for path in [&src, &out] {
+        write_unicode_pst(
+            path,
+            vec![src_msg.clone()],
+            &[],
+            &WritePstOpts {
+                include_bcc_recipients: true,
+                ..WritePstOpts::default()
+            },
+        )
+        .expect("write pst");
+    }
+
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let out_nid = first_message_nid(&out).expect("out nid");
+    let mut src_pst = pst_reader::PstFile::open(&src).expect("open src");
+    let mut out_pst = pst_reader::PstFile::open(&out).expect("open out");
+    let src_n = src_pst
+        .list_recipients(pst_reader::NodeId(src_nid))
+        .expect("src")
+        .len();
+    let out_n = out_pst
+        .list_recipients(pst_reader::NodeId(out_nid))
+        .expect("out")
+        .len();
+    assert_eq!(src_n, 3);
+    assert_eq!(out_n, 3, "include_bcc writes Bcc to output");
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "recip@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 0,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        source_id: String::new(),
+        bcc_suppressed: false,
+        subject: "Multi recip".into(),
+    }];
+    let mut c = cand(1, 10);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "recip@ex.com".into();
+    c.subject = "Multi recip".into();
+    c.display_bcc = "secret@example.com".into();
+
+    let report = run_unique_pst_qc(qc_input_ex(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        (true, false, true), // source_diff, parents_only, include_bcc
+    ));
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    assert!(
+        !csv.contains("recipient_table"),
+        "full To+Cc+Bcc set must match when include_bcc; findings={csv} defect={}",
+        report.findings.defect
+    );
+    assert!(
+        !csv.contains("display_bcc"),
+        "include_bcc must not emit display_bcc known_gap; findings={csv}"
+    );
+    assert_eq!(
+        report.findings.defect, 0,
+        "no defects expected: {:?}",
+        report.findings
+    );
+    assert!(
+        report.messages_compared >= 1,
+        "expected at least one message compared"
+    );
 }

@@ -1255,6 +1255,8 @@ mod tests {
             display_to: Some("c@d.com".into()),
             display_cc: None,
             display_bcc: None,
+            recipients: Vec::new(),
+            message_flags: None,
             // 2006-01-02 15:04:05 UTC as FILETIME
             submit_time: Some({
                 let unix = Utc

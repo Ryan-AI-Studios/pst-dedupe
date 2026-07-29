@@ -6,7 +6,9 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::grouping::{normalize_recipients, IdentityLevel};
+use crate::grouping::{
+    normalize_recipient_identity_keys, normalize_recipients, CanonicalRecipient, IdentityLevel,
+};
 
 /// Dedup keys computed for a single message.
 #[derive(Debug, Clone)]
@@ -58,6 +60,11 @@ pub struct StrongHashInput<'a> {
     pub display_to: Option<&'a str>,
     pub display_cc: Option<&'a str>,
     pub display_bcc: Option<&'a str>,
+    /// Structured recipient TC rows (0082). When non-empty, Tier-2.5 uses each
+    /// row's identity key (SMTP → EX DN → display) over To+Cc+Bcc instead of
+    /// display strings. Table-less messages leave this empty/None and keep the
+    /// display-string path.
+    pub recipients: Option<&'a [CanonicalRecipient]>,
     /// When true, inline attachments are omitted from the attachment component.
     pub ignore_inline_attachments: bool,
 }
@@ -105,8 +112,12 @@ pub fn compute_dedup_keys_ex(
         strong.ignore_inline_attachments,
     );
 
-    let fp_recipients =
-        recipients_fingerprint(strong.display_to, strong.display_cc, strong.display_bcc);
+    let fp_recipients = recipients_fingerprint_ex(
+        strong.display_to,
+        strong.display_cc,
+        strong.display_bcc,
+        strong.recipients,
+    );
 
     let strong_content_hash = if strong.identity.is_strong() {
         Some(compute_strong_content_hash(
@@ -244,19 +255,65 @@ pub fn compute_content_hash_detailed(
     )
 }
 
-/// Compute recipient-component fingerprint (attribution).
+/// Compute recipient-component fingerprint (attribution) from display strings.
 pub fn recipients_fingerprint(
     display_to: Option<&str>,
     display_cc: Option<&str>,
     display_bcc: Option<&str>,
 ) -> u64 {
+    recipients_fingerprint_ex(display_to, display_cc, display_bcc, None)
+}
+
+/// Recipient fingerprint preferring structured identity keys when present (0082).
+///
+/// When the table is non-empty but every `identity_key()` is `None`, fall back to
+/// the display-string path (never hash an empty structured fingerprint).
+pub fn recipients_fingerprint_ex(
+    display_to: Option<&str>,
+    display_cc: Option<&str>,
+    display_bcc: Option<&str>,
+    recipients: Option<&[CanonicalRecipient]>,
+) -> u64 {
     let mut h = Sha256::new();
+    if let Some(rows) = recipients {
+        if !rows.is_empty() {
+            let keys: Vec<String> = rows.iter().filter_map(|r| r.identity_key()).collect();
+            if !keys.is_empty() {
+                h.update(normalize_recipient_identity_keys(keys).as_bytes());
+                return fingerprint64(&h.finalize());
+            }
+            // All identity keys empty — fall through to display path.
+        }
+    }
     h.update(normalize_recipients(display_to.unwrap_or("")).as_bytes());
     h.update(b"|");
     h.update(normalize_recipients(display_cc.unwrap_or("")).as_bytes());
     h.update(b"|");
     h.update(normalize_recipients(display_bcc.unwrap_or("")).as_bytes());
     fingerprint64(&h.finalize())
+}
+
+/// Build the Tier-2.5 recipient preimage fragment (display or structured).
+///
+/// Empty-identity table rows fall back to display strings (same as fingerprint path).
+fn recipient_strong_preimage(strong: &StrongHashInput<'_>) -> String {
+    if let Some(rows) = strong.recipients {
+        if !rows.is_empty() {
+            let keys: Vec<String> = rows.iter().filter_map(|r| r.identity_key()).collect();
+            if !keys.is_empty() {
+                // Single sorted join (To+Cc+Bcc together) — BCC participates in identity.
+                return normalize_recipient_identity_keys(keys);
+            }
+            // All identity keys empty — fall through to display path.
+        }
+    }
+    // Table-less / empty-identity path: three display fields, same as pre-0082.
+    format!(
+        "{}|{}|{}",
+        normalize_recipients(strong.display_to.unwrap_or("")),
+        normalize_recipients(strong.display_cc.unwrap_or("")),
+        normalize_recipients(strong.display_bcc.unwrap_or(""))
+    )
 }
 
 /// v2 preimage = v1 preimage bytes, then layered extras. equal-v2 ⇒ equal-v1.
@@ -308,11 +365,10 @@ fn compute_strong_content_hash(
         hasher.update(b"|");
     }
     if strong.identity.includes_recipients() {
-        hasher.update(normalize_recipients(strong.display_to.unwrap_or("")).as_bytes());
-        hasher.update(b"|");
-        hasher.update(normalize_recipients(strong.display_cc.unwrap_or("")).as_bytes());
-        hasher.update(b"|");
-        hasher.update(normalize_recipients(strong.display_bcc.unwrap_or("")).as_bytes());
+        // Structured table: one sorted identity-key join (includes BCC).
+        // Display path: three normalized fields joined with '|' (pre-0082).
+        let recip = recipient_strong_preimage(strong);
+        hasher.update(recip.as_bytes());
         hasher.update(b"|");
     }
     if strong.identity.includes_attach_content() {
@@ -695,6 +751,7 @@ mod tests {
                 display_to: recip,
                 display_cc: None,
                 display_bcc: if i % 5 == 0 { Some("bcc@x.com") } else { None },
+                recipients: None,
                 ignore_inline_attachments: false,
             };
             let k = compute_dedup_keys_ex(
@@ -768,5 +825,348 @@ mod tests {
         let k1 = compute_dedup_keys_ex(None, Some("S"), None, None, Some("hello"), &[], &s1);
         let k2 = compute_dedup_keys_ex(None, Some("S"), None, None, Some("hello"), &[], &s2);
         assert_eq!(k1.strong_content_hash, k2.strong_content_hash);
+    }
+
+    /// Typed EX with `/CN=…` only (no `/O=`) still uses email identity, not display.
+    #[test]
+    fn tier2_5_typed_ex_cn_only_uses_email_identity() {
+        let (sha, len) = hash_full_body("body");
+        let r = CanonicalRecipient {
+            recipient_type: crate::grouping::CanonicalRecipientType::To,
+            display_name: Some("Alice Example (noisy)".into()),
+            address_type: Some("EX".into()),
+            email_address: Some("/CN=Recipients/CN=alice".into()),
+            smtp_address: None,
+        };
+        assert!(r.identity_is_x500());
+        assert_eq!(r.identity_key().as_deref(), Some("/CN=RECIPIENTS/CN=ALICE"));
+        let recips = [r];
+        let s = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("Alice Example (noisy)"),
+            recipients: Some(&recips),
+            ..Default::default()
+        };
+        let keys = compute_dedup_keys_ex(
+            None,
+            Some("S"),
+            Some(1),
+            Some("s@x.com"),
+            Some("body"),
+            &[],
+            &s,
+        );
+        assert!(keys.strong_content_hash.is_some());
+    }
+
+    /// DoD-5: EX-only recipients (no SmtpAddress) with different display formatting merge.
+    #[test]
+    fn tier2_5_ex_only_recipients_merge_despite_display_noise() {
+        let (sha, len) = hash_full_body("same body");
+        let ex_dn = "/o=First Organization/ou=Exchange Administrative Group/cn=Recipients/cn=alice";
+        let r1 = CanonicalRecipient {
+            recipient_type: crate::grouping::CanonicalRecipientType::To,
+            display_name: Some("Alice Example (noisy A)".into()),
+            address_type: Some("EX".into()),
+            email_address: Some(ex_dn.into()),
+            smtp_address: None,
+        };
+        let r2 = CanonicalRecipient {
+            recipient_type: crate::grouping::CanonicalRecipientType::To,
+            display_name: Some("ALICE / Different Format".into()),
+            address_type: Some("EX".into()),
+            email_address: Some(ex_dn.to_ascii_uppercase()),
+            smtp_address: None,
+        };
+        // Same DN identity keys.
+        assert_eq!(r1.identity_key(), r2.identity_key());
+        assert!(r1.identity_is_x500());
+        assert!(r2.identity_is_x500());
+        let recips_a = [r1];
+        let recips_b = [r2];
+        let s_a = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("Alice Example (noisy A)"),
+            display_cc: None,
+            display_bcc: None,
+            recipients: Some(&recips_a),
+            ignore_inline_attachments: false,
+        };
+        let s_b = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("ALICE / Different Format"),
+            display_cc: None,
+            display_bcc: None,
+            recipients: Some(&recips_b),
+            ignore_inline_attachments: false,
+        };
+        let k_a = compute_dedup_keys_ex(
+            None,
+            Some("S"),
+            Some(1),
+            Some("s@x.com"),
+            Some("same body"),
+            &[],
+            &s_a,
+        );
+        let k_b = compute_dedup_keys_ex(
+            None,
+            Some("S"),
+            Some(1),
+            Some("s@x.com"),
+            Some("same body"),
+            &[],
+            &s_b,
+        );
+        assert_eq!(
+            k_a.strong_content_hash, k_b.strong_content_hash,
+            "EX DN keys must merge despite display noise"
+        );
+        // Pure display path would split (different display strings).
+        let s_disp_a = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("Alice Example (noisy A)"),
+            ..Default::default()
+        };
+        let s_disp_b = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("ALICE / Different Format"),
+            ..Default::default()
+        };
+        let k_da = compute_dedup_keys_ex(
+            None,
+            Some("S"),
+            Some(1),
+            Some("s@x.com"),
+            Some("same body"),
+            &[],
+            &s_disp_a,
+        );
+        let k_db = compute_dedup_keys_ex(
+            None,
+            Some("S"),
+            Some(1),
+            Some("s@x.com"),
+            Some("same body"),
+            &[],
+            &s_disp_b,
+        );
+        assert_ne!(
+            k_da.strong_content_hash, k_db.strong_content_hash,
+            "display-only path must still split on display noise"
+        );
+    }
+
+    /// SMTP case-fold still merges under structured table path.
+    #[test]
+    fn tier2_5_smtp_structured_case_fold_merges() {
+        let (sha, len) = hash_full_body("body");
+        let a = [CanonicalRecipient {
+            recipient_type: crate::grouping::CanonicalRecipientType::To,
+            display_name: Some("Bob".into()),
+            address_type: Some("SMTP".into()),
+            email_address: Some("Bob@Example.COM".into()),
+            smtp_address: Some("Bob@Example.COM".into()),
+        }];
+        let b = [CanonicalRecipient {
+            recipient_type: crate::grouping::CanonicalRecipientType::To,
+            display_name: Some("bob".into()),
+            address_type: Some("SMTP".into()),
+            email_address: Some("bob@example.com".into()),
+            smtp_address: None,
+        }];
+        let s1 = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            recipients: Some(&a),
+            ..Default::default()
+        };
+        let s2 = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            recipients: Some(&b),
+            ..Default::default()
+        };
+        let k1 = compute_dedup_keys_ex(None, Some("S"), None, None, Some("body"), &[], &s1);
+        let k2 = compute_dedup_keys_ex(None, Some("S"), None, None, Some("body"), &[], &s2);
+        assert_eq!(k1.strong_content_hash, k2.strong_content_hash);
+    }
+
+    /// Empty structured table falls back to display-string path (no behavior change).
+    #[test]
+    fn tier2_5_empty_table_uses_display_path() {
+        let (sha, len) = hash_full_body("body");
+        let empty: [CanonicalRecipient; 0] = [];
+        let s_table = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("a@x.com; b@y.com"),
+            recipients: Some(&empty),
+            ..Default::default()
+        };
+        let s_disp = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("b@y.com;a@x.com"),
+            recipients: None,
+            ..Default::default()
+        };
+        let k1 = compute_dedup_keys_ex(None, Some("S"), None, None, Some("body"), &[], &s_table);
+        let k2 = compute_dedup_keys_ex(None, Some("S"), None, None, Some("body"), &[], &s_disp);
+        assert_eq!(k1.strong_content_hash, k2.strong_content_hash);
+    }
+
+    /// Non-empty table with no usable identity keys falls back to display path.
+    #[test]
+    fn tier2_5_empty_identity_keys_fall_back_to_display() {
+        let (sha, len) = hash_full_body("body");
+        // Rows with no smtp/email/display → identity_key() is None.
+        let blank = [CanonicalRecipient {
+            recipient_type: crate::grouping::CanonicalRecipientType::To,
+            display_name: None,
+            address_type: None,
+            email_address: None,
+            smtp_address: None,
+        }];
+        let s_blank_table = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("alice@example.com"),
+            display_cc: None,
+            display_bcc: None,
+            recipients: Some(&blank),
+            ignore_inline_attachments: false,
+        };
+        let s_display = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("alice@example.com"),
+            recipients: None,
+            ..Default::default()
+        };
+        let k_blank = compute_dedup_keys_ex(
+            None,
+            Some("S"),
+            None,
+            None,
+            Some("body"),
+            &[],
+            &s_blank_table,
+        );
+        let k_disp =
+            compute_dedup_keys_ex(None, Some("S"), None, None, Some("body"), &[], &s_display);
+        assert_eq!(
+            k_blank.strong_content_hash, k_disp.strong_content_hash,
+            "empty identity keys must not produce empty structured fingerprint"
+        );
+        // Fingerprint helper agrees.
+        let fp_blank =
+            recipients_fingerprint_ex(Some("alice@example.com"), None, None, Some(&blank));
+        let fp_disp = recipients_fingerprint_ex(Some("alice@example.com"), None, None, None);
+        assert_eq!(fp_blank, fp_disp);
+        // Distinct display still splits under the fallback path.
+        let s_other = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("bob@example.com"),
+            recipients: Some(&blank),
+            ..Default::default()
+        };
+        let k_other =
+            compute_dedup_keys_ex(None, Some("S"), None, None, Some("body"), &[], &s_other);
+        assert_ne!(k_blank.strong_content_hash, k_other.strong_content_hash);
+    }
+
+    /// Dual BCC policy: identical messages except structured Bcc → different Tier-2.5.
+    #[test]
+    fn tier2_5_structured_bcc_participates_in_identity() {
+        let (sha, len) = hash_full_body("same body");
+        let to_only = [CanonicalRecipient {
+            recipient_type: crate::grouping::CanonicalRecipientType::To,
+            display_name: Some("Alice".into()),
+            address_type: Some("SMTP".into()),
+            email_address: Some("alice@example.com".into()),
+            smtp_address: Some("alice@example.com".into()),
+        }];
+        let to_and_bcc = [
+            CanonicalRecipient {
+                recipient_type: crate::grouping::CanonicalRecipientType::To,
+                display_name: Some("Alice".into()),
+                address_type: Some("SMTP".into()),
+                email_address: Some("alice@example.com".into()),
+                smtp_address: Some("alice@example.com".into()),
+            },
+            CanonicalRecipient {
+                recipient_type: crate::grouping::CanonicalRecipientType::Bcc,
+                display_name: Some("Secret".into()),
+                address_type: Some("SMTP".into()),
+                email_address: Some("secret@example.com".into()),
+                smtp_address: Some("secret@example.com".into()),
+            },
+        ];
+        let s_to = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("Alice <alice@example.com>"),
+            display_cc: None,
+            display_bcc: None,
+            recipients: Some(&to_only),
+            ignore_inline_attachments: false,
+        };
+        let s_bcc = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("Alice <alice@example.com>"),
+            display_cc: None,
+            // Display BCC absent — identity difference comes from structured table.
+            display_bcc: None,
+            recipients: Some(&to_and_bcc),
+            ignore_inline_attachments: false,
+        };
+        let k_to = compute_dedup_keys_ex(
+            None,
+            Some("S"),
+            Some(1),
+            Some("s@x.com"),
+            Some("same body"),
+            &[],
+            &s_to,
+        );
+        let k_bcc = compute_dedup_keys_ex(
+            None,
+            Some("S"),
+            Some(1),
+            Some("s@x.com"),
+            Some("same body"),
+            &[],
+            &s_bcc,
+        );
+        assert_ne!(
+            k_to.strong_content_hash, k_bcc.strong_content_hash,
+            "structured Bcc must change Tier-2.5 hash when table path is used"
+        );
+        assert_ne!(
+            k_to.fp_recipients, k_bcc.fp_recipients,
+            "recipient fingerprint must differ when Bcc row present"
+        );
     }
 }

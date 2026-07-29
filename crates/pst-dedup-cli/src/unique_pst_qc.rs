@@ -200,6 +200,9 @@ pub struct QcRunInput<'a> {
     /// When true, attachments were omitted by policy (`parents_only` / `--no-attachments`).
     /// Missing attach payloads are then `explained`, not `defect`.
     pub parents_only: bool,
+    /// When true, BCC rows / `PidTagDisplayBcc` were written (`--include-bcc-recipients`).
+    /// Recipient-table compare and display_bcc known_gap accounting honor this (0082).
+    pub include_bcc_recipients: bool,
     /// Test / diagnostic hook: when set, classify this property once and record the finding
     /// (exercises `unexplained_loss` → hard_fail wiring beyond unit-only `classify`).
     pub probe_unexplained_property: Option<&'a str>,
@@ -813,6 +816,7 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
                                 .filter(|d| content_digests_are_source_origin(d)),
                             contract: &contract,
                             parents_only: input.parents_only,
+                            include_bcc_recipients: input.include_bcc_recipients,
                         });
                         vol_msgs_compared = vol_msgs_compared.saturating_add(1);
                         messages_compared = messages_compared.saturating_add(1);
@@ -879,22 +883,24 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
         });
     }
 
-    // BCC known_gap counts from candidates with non-empty display_bcc meta
-    // (plumbed from CanonicalMessage; not written to output).
-    for c in input.candidates {
-        if !c.display_bcc.trim().is_empty() {
-            let (class, _) = contract.classify("display_bcc", false);
-            if class == FindingClass::KnownGap {
-                counts.record(class);
-                findings_list.push(QcFinding {
-                    class,
-                    property: "display_bcc".into(),
-                    volume_index: c.volume_index,
-                    source_path: c.source_path.clone(),
-                    source_nid: c.source_nid,
-                    message_id_norm: c.message_id_norm.clone(),
-                    detail: "BCC dropped_by_design (disclosure)".into(),
-                });
+    // BCC known_gap: non-empty display_bcc meta plumbed from CanonicalMessage when
+    // default policy omits BCC. Skip when `--include-bcc-recipients` wrote BCC.
+    if !input.include_bcc_recipients {
+        for c in input.candidates {
+            if !c.display_bcc.trim().is_empty() {
+                let (class, _) = contract.classify("display_bcc", false);
+                if class == FindingClass::KnownGap {
+                    counts.record(class);
+                    findings_list.push(QcFinding {
+                        class,
+                        property: "display_bcc".into(),
+                        volume_index: c.volume_index,
+                        source_path: c.source_path.clone(),
+                        source_nid: c.source_nid,
+                        message_id_norm: c.message_id_norm.clone(),
+                        detail: "BCC dropped_by_design (disclosure)".into(),
+                    });
+                }
             }
         }
     }
@@ -1413,6 +1419,7 @@ struct CompareOneArgs<'a> {
     existing: Option<&'a ContentDigestsFile>,
     contract: &'a FidelityContract,
     parents_only: bool,
+    include_bcc_recipients: bool,
 }
 
 fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
@@ -1425,6 +1432,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
         existing,
         contract,
         parents_only,
+        include_bcc_recipients,
     } = args;
     let mut findings = Vec::new();
     let mut attachments_compared = 0u64;
@@ -1541,6 +1549,8 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                         })
                         .collect(),
                     attach_list_error: None,
+                    // Content-digest path has no structured recipients; empty = skip table compare.
+                    recipients: Vec::new(),
                 }
             })
     } else {
@@ -1631,6 +1641,45 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             message_id_norm: cand.message_id_norm.clone(),
             detail: format!("cc src={:?} out={:?}", src.display_cc, out.display_cc),
         });
+    }
+
+    // 0082: structured recipient table — compare **written** set.
+    // Default policy omits BCC (filter both sides to To+Cc). With
+    // `--include-bcc-recipients`, compare full To+Cc+Bcc sets.
+    // Only when source had a non-empty table (empty is valid).
+    if !src.recipients.is_empty() {
+        let written_key = |r: &crate::export_oracle::RecipientFingerprint| -> Option<String> {
+            if !include_bcc_recipients && r.recipient_type == 3 {
+                // MAPI_BCC omitted by default write policy.
+                return None;
+            }
+            Some(format!("{}:{}", r.recipient_type, r.identity_key))
+        };
+        let mut src_keys: Vec<String> = src.recipients.iter().filter_map(written_key).collect();
+        src_keys.sort();
+        let mut out_keys: Vec<String> = out.recipients.iter().filter_map(written_key).collect();
+        out_keys.sort();
+        if src_keys != out_keys {
+            let set_label = if include_bcc_recipients {
+                "full To+Cc+Bcc set"
+            } else {
+                "written To+Cc set"
+            };
+            let (class, _) = contract.classify("recipient_table", false);
+            findings.push(QcFinding {
+                class,
+                property: "recipient_table".into(),
+                volume_index: cand.volume_index,
+                source_path: cand.source_path.clone(),
+                source_nid: cand.source_nid,
+                message_id_norm: cand.message_id_norm.clone(),
+                detail: format!(
+                    "recipient table mismatch ({set_label}) src={src_keys:?} out={out_keys:?} src_total={} out_total={}",
+                    src.recipients.len(),
+                    out.recipients.len()
+                ),
+            });
+        }
     }
 
     // Attachment list failure must not look like empty attaches.
@@ -2308,6 +2357,9 @@ pub fn run_qc_pst(
     // Honor parents_only when summary/digests indicate no-attachments export.
     let parents_only = load_parents_only_for_qc(report_dir);
 
+    // Infer include-bcc write policy from export CSV (bcc_suppressed never true when included).
+    let include_bcc_recipients = load_include_bcc_for_qc(report_dir, &export_rows);
+
     Ok(run_unique_pst_qc(QcRunInput {
         level,
         sample_max,
@@ -2320,8 +2372,35 @@ pub fn run_qc_pst(
         max_open_psts,
         source_differential,
         parents_only,
+        include_bcc_recipients,
         probe_unexplained_property: None,
     }))
+}
+
+/// Infer `--include-bcc-recipients` from export report for clean-room re-QC.
+///
+/// Prefer explicit summary flag when present; else: if any row has `bcc_suppressed`
+/// then BCC was omitted (false). If summary records zero suppressed and no row is
+/// suppressed, default false (fail-closed for known_gap — safer than silent pass).
+fn load_include_bcc_for_qc(report_dir: &Path, export_rows: &[ExportMessageRow]) -> bool {
+    let summary_path = report_dir.join("summary.json");
+    if let Ok(text) = fs::read_to_string(&summary_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(b) = v
+                .pointer("/export/include_bcc_recipients")
+                .and_then(|x| x.as_bool())
+                .or_else(|| v.get("include_bcc_recipients").and_then(|x| x.as_bool()))
+            {
+                return b;
+            }
+        }
+    }
+    // Export CSV: any bcc_suppressed=true ⇒ policy omitted BCC.
+    if export_rows.iter().any(|r| r.bcc_suppressed) {
+        return false;
+    }
+    // Fail-closed: without positive evidence BCC was included, assume default omit.
+    false
 }
 
 /// Fill empty export-row subjects from source-origin content digests.
@@ -2578,14 +2657,10 @@ fn load_export_rows_for_qc(report_dir: &Path) -> Result<Vec<ExportMessageRow>, S
     let i_attach_fails = col("attachments_failed_count");
     let i_dup_count = col("duplicate_source_count");
     let i_dup_sources = col("duplicate_sources");
-    // 0081: optional trailing source_id (by name, else last column when header includes it).
-    let i_source_id = col("source_id").or_else(|| {
-        if headers.iter().any(|h| h == "source_id") {
-            Some(headers.len().saturating_sub(1))
-        } else {
-            None
-        }
-    });
+    // 0081: optional trailing source_id (by name).
+    let i_source_id = col("source_id");
+    // 0082: optional bcc_suppressed column.
+    let i_bcc = col("bcc_suppressed");
     let mut rows = Vec::new();
     let mut seen_idx: BTreeSet<u64> = BTreeSet::new();
     for (i, rec) in rdr.records().enumerate() {
@@ -2660,6 +2735,13 @@ fn load_export_rows_for_qc(report_dir: &Path) -> Result<Vec<ExportMessageRow>, S
                 .unwrap_or("")
                 .to_string(),
             source_id,
+            bcc_suppressed: i_bcc
+                .and_then(|idx| rec.get(idx))
+                .map(|s| {
+                    let t = s.trim().to_ascii_lowercase();
+                    t == "true" || t == "1"
+                })
+                .unwrap_or(false),
             subject: String::new(),
         });
     }
@@ -2982,6 +3064,7 @@ mod tests {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: String::new(),
+            bcc_suppressed: false,
             subject: "s".into(),
         }];
         let contract = FidelityContract::v1();
@@ -3023,6 +3106,7 @@ mod tests {
                 duplicate_source_count: 0,
                 duplicate_sources: String::new(),
                 source_id: String::new(),
+                bcc_suppressed: false,
                 subject: "s1".into(),
             },
             // Orphan: volume_index 99 not declared — per-vol1 count still matches (=1).
@@ -3040,6 +3124,7 @@ mod tests {
                 duplicate_source_count: 0,
                 duplicate_sources: String::new(),
                 source_id: String::new(),
+                bcc_suppressed: false,
                 subject: "s2".into(),
             },
         ];

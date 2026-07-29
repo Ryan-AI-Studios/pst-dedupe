@@ -367,6 +367,8 @@ fn unique_eml_production_writer_attach_soft_fail_classifies_64() {
         display_to: None,
         display_cc: None,
         display_bcc: None,
+        recipients: Vec::new(),
+        message_flags: None,
         submit_time: None,
         size: Some(10),
         message_class: None,
@@ -496,6 +498,7 @@ fn cancel_exit_130_and_summary() {
         qc_sample_max: 64,
         qc_external_reader: None,
         qc_scanpst: false,
+        include_bcc_recipients: false,
     };
     let outcome = pst_dedup_cli::run_unique_pst_with_options(
         args,

@@ -6,4 +6,5 @@
 pub mod attachment;
 pub mod folder;
 pub mod message;
+pub mod recipient;
 pub mod store;
