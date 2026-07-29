@@ -14,8 +14,9 @@ use pst_dedup_cli::export_oracle::structural_digest_pst;
 use pst_dedup_cli::fidelity_contract::{FidelityContract, FindingClass};
 use pst_dedup_cli::unique_export_report::{ExportMessageRow, VolumeReportRow};
 use pst_dedup_cli::unique_pst_qc::{
-    corrupt_pst_flip_byte, corrupt_pst_truncate, run_unique_pst_qc, select_sample_indices, QcLevel,
-    QcRunInput, QcSampleCandidate, DEFAULT_QC_SAMPLE_MAX,
+    corrupt_pst_flip_byte, corrupt_pst_truncate, run_unique_pst_qc, select_sample_indices,
+    AttachDigestEntry, ContentDigestEntry, ContentDigestsFile, ContentDigestsVolume, QcLevel,
+    QcRunInput, QcSampleCandidate, CONTENT_DIGEST_ORIGIN_SOURCE, DEFAULT_QC_SAMPLE_MAX,
 };
 use pst_writer::{
     write_unicode_pst, FolderLayoutPolicy, WriteAttachment, WriteMessage, WritePstOpts,
@@ -820,6 +821,162 @@ fn output_only_qc_pst_never_sets_content_digest_backed() {
     assert!(
         !r2.content_digest_backed,
         "second output-only run must still not be content_digest_backed"
+    );
+}
+
+/// Clean-room with prior source digests + parents_only must body-match via
+/// persisted subject/lens fields (DoD-21) — not false-defect on zeroed reconstruction.
+#[test]
+fn clean_room_parents_only_with_source_digests_is_green() {
+    use pst_dedup_cli::export_oracle::message_content_detail;
+    use pst_reader::PstFile;
+
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("out.pst");
+    let body = "clean room body parents_only";
+    write_simple_pst(&path, vec![base_msg("<cr@ex.com>", "CleanRoom", body)]);
+
+    // Read output message detail to build a matching source-side digest file
+    // (simulates export-time content_digests.json with origin=source).
+    let mut pst = PstFile::open(&path).expect("open out");
+    let folders = pst.folders().expect("folders");
+    let nid = folders
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("one msg");
+    let detail = message_content_detail(&mut pst, nid.0).expect("detail");
+    drop(pst);
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let digests = ContentDigestsFile {
+        schema: "content_digests_v1".into(),
+        origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
+        qc_level: "sample".into(),
+        volumes: vec![ContentDigestsVolume {
+            volume_index: 1,
+            path: path.display().to_string(),
+            messages: vec![ContentDigestEntry {
+                export_message_index: 1,
+                source_path: r"C:\src\a.pst".into(),
+                source_nid: 1,
+                message_id_norm: "cr@ex.com".into(),
+                content_digest: detail.digest.clone(),
+                subject: detail.subject.clone(),
+                display_to: detail.display_to.clone(),
+                display_cc: detail.display_cc.clone(),
+                body_plain_len: detail.body_plain_len,
+                body_html_len: detail.body_html_len,
+                attaches: detail
+                    .attaches
+                    .iter()
+                    .map(|(f, s, _, h)| AttachDigestEntry {
+                        filename: f.clone(),
+                        size: *s,
+                        payload_sha256: h.clone(),
+                    })
+                    .collect(),
+            }],
+        }],
+    };
+    fs::write(
+        report_dir.join("content_digests.json"),
+        serde_json::to_string_pretty(&digests).expect("json"),
+    )
+    .expect("write digests");
+
+    let volumes = vec![vol_row(&path, 1)];
+    let export_rows = vec![export_row("cr@ex.com", nid.0, 1)];
+    let mut candidate = cand(1, body.len());
+    candidate.message_id_norm = "cr@ex.com".into();
+    candidate.subject = "CleanRoom".into();
+    candidate.source_nid = nid.0;
+    let candidates = vec![candidate];
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Sample,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &candidates,
+        false, // no live sources
+        true,  // parents_only
+    ));
+    assert!(
+        report.content_digest_backed,
+        "prior source digests must enable content_digest_backed"
+    );
+    assert!(
+        !report.hard_fail,
+        "clean-room parents_only must not false-defect: {:?}",
+        report.findings
+    );
+    assert_eq!(report.findings.defect, 0);
+    assert_eq!(report.findings.unexplained_loss, 0);
+}
+
+/// Clean-room must still defect when persisted source digest does not match output.
+#[test]
+fn clean_room_parents_only_mismatched_body_is_defect() {
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("out.pst");
+    write_simple_pst(
+        &path,
+        vec![base_msg("<cr2@ex.com>", "CleanRoom2", "actual body")],
+    );
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    // Persisted digests claim a different body length / subject → body_match fails.
+    let digests = ContentDigestsFile {
+        schema: "content_digests_v1".into(),
+        origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
+        qc_level: "sample".into(),
+        volumes: vec![ContentDigestsVolume {
+            volume_index: 1,
+            path: path.display().to_string(),
+            messages: vec![ContentDigestEntry {
+                export_message_index: 1,
+                source_path: r"C:\src\a.pst".into(),
+                source_nid: 1,
+                message_id_norm: "cr2@ex.com".into(),
+                content_digest: "deadbeef".into(),
+                subject: "ExpectedDifferent".into(),
+                display_to: "bob@example.com".into(),
+                display_cc: "carol@example.com".into(),
+                body_plain_len: 9999,
+                body_html_len: 0,
+                attaches: vec![],
+            }],
+        }],
+    };
+    fs::write(
+        report_dir.join("content_digests.json"),
+        serde_json::to_string_pretty(&digests).expect("json"),
+    )
+    .expect("write digests");
+
+    let volumes = vec![vol_row(&path, 1)];
+    let export_rows = vec![export_row("cr2@ex.com", 1, 1)];
+    let mut candidate = cand(1, 11);
+    candidate.message_id_norm = "cr2@ex.com".into();
+    candidate.subject = "CleanRoom2".into();
+    let candidates = vec![candidate];
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Sample,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &candidates,
+        false,
+        true,
+    ));
+    assert!(report.content_digest_backed);
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "mismatched clean-room digests must hard-fail: {:?}",
+        report.findings
     );
 }
 

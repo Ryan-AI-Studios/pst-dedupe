@@ -471,6 +471,18 @@ pub struct ContentDigestEntry {
     pub source_nid: u64,
     pub message_id_norm: String,
     pub content_digest: String,
+    /// Field-level payload for clean-room body/recipient compare under `parents_only`
+    /// (full `content_digest` includes attach bytes; reconstructed digests must not zero these).
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub display_to: String,
+    #[serde(default)]
+    pub display_cc: String,
+    #[serde(default)]
+    pub body_plain_len: usize,
+    #[serde(default)]
+    pub body_html_len: usize,
     pub attaches: Vec<AttachDigestEntry>,
 }
 
@@ -941,11 +953,13 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             .map(|m| MessageContentDetail {
                 digest: m.content_digest.clone(),
                 message_id: m.message_id_norm.clone(),
-                subject: String::new(),
-                display_to: String::new(),
-                display_cc: String::new(),
-                body_plain_len: 0,
-                body_html_len: 0,
+                // Prefer persisted field-level data so clean-room under parents_only
+                // can body-match (DoD-21); never silently zero these when present.
+                subject: m.subject.clone(),
+                display_to: m.display_to.clone(),
+                display_cc: m.display_cc.clone(),
+                body_plain_len: m.body_plain_len,
+                body_html_len: m.body_html_len,
                 attaches: m
                     .attaches
                     .iter()
@@ -1003,6 +1017,11 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
         source_nid: cand.source_nid,
         message_id_norm: cand.message_id_norm.clone(),
         content_digest: src.digest.clone(),
+        subject: src.subject.clone(),
+        display_to: src.display_to.clone(),
+        display_cc: src.display_cc.clone(),
+        body_plain_len: src.body_plain_len,
+        body_html_len: src.body_html_len,
         attaches: src
             .attaches
             .iter()
