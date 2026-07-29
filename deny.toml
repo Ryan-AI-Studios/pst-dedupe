@@ -23,12 +23,7 @@ ignore = [
     { id = "RUSTSEC-2023-0071", reason = "D-0062-audit-rsa: rsa 0.9.x Marvin timing; transitive via openidconnect 4.x; SSO opt-in only; no fixed upgrade" },
     # ttf-parser unmaintained via lopdf → pdf-extract (PDF text path). No safe upgrade; skrifa is alt but not drop-in for lopdf.
     { id = "RUSTSEC-2026-0192", reason = "D-0062-audit-warnings: ttf-parser unmaintained via lopdf/pdf-extract; no safe upgrade" },
-    # Unsound warnings treated as residual polish (D-0062-audit-warnings); not exploitable RC blockers for our call sites.
-    { id = "RUSTSEC-2026-0190", reason = "D-0062-audit-warnings: anyhow Error::downcast_mut unsound; transitive" },
-    { id = "RUSTSEC-2026-0186", reason = "D-0062-audit-warnings: memmap2 unchecked offset; transitive (tantivy/mmap)" },
-    # quick-xml may appear if graph expands; Windows-only targets usually prune wayland-scanner.
-    { id = "RUSTSEC-2026-0194", reason = "D-0062-audit-quickxml: quick-xml via wayland (Linux); Windows product path" },
-    { id = "RUSTSEC-2026-0195", reason = "D-0062-audit-quickxml: quick-xml via wayland (Linux); Windows product path" },
+    # Dead advisory-not-detected ignores pruned in 0081 (0186, 0190, 0194, 0195).
 ]
 
 [licenses]

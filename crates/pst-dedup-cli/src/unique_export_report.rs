@@ -24,8 +24,8 @@ use crate::export_outcome::{ArtifactState, ExportFidelity};
 /// Schema id for the unique-export summary JSON.
 pub const UNIQUE_EXPORT_REPORT_SCHEMA: &str = "unique_export_report_v1";
 
-/// Fixed header for mandatory `export_messages.csv` (prefix locked; 0073/0075 append).
-pub const EXPORT_MESSAGES_CSV_HEADER: &str = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources";
+/// Fixed header for mandatory `export_messages.csv` (prefix locked; 0073/0075/0081 append).
+pub const EXPORT_MESSAGES_CSV_HEADER: &str = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources,source_id";
 
 /// Pre-0075 export_messages header prefix (10 columns).
 pub const EXPORT_MESSAGES_CSV_HEADER_V1: &str = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count";
@@ -74,6 +74,78 @@ impl AttachLedgerMode {
     }
 }
 
+/// How `source_path` columns are written to handoff CSVs (track 0081).
+///
+/// Default `full` preserves absolute/workstation paths. `basename` strips
+/// directory prefixes for handoff copies only — join origin via `source_id`
+/// and a non-produced Matter Archive mapping. Does **not** affect in-memory
+/// keys (msg fail counts, QC during the same run) or `source_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LedgerPathMode {
+    /// Write the full source path as resolved at export time (default).
+    #[default]
+    Full,
+    /// Write only the file basename (e.g. `custodian.pst`).
+    Basename,
+}
+
+impl LedgerPathMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Basename => "basename",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "full" => Some(Self::Full),
+            "basename" | "base" | "file" => Some(Self::Basename),
+            _ => None,
+        }
+    }
+}
+
+/// Format a source path for ledger/export CSV path columns.
+///
+/// - Empty input stays empty in both modes.
+/// - Basename mode: `Path::file_name`; when the full path was non-empty the
+///   result is never empty (falls back to the full string if `file_name` is
+///   missing — e.g. trailing separator edge cases).
+pub fn format_ledger_source_path(path: &str, mode: LedgerPathMode) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    match mode {
+        LedgerPathMode::Full => path.to_string(),
+        LedgerPathMode::Basename => {
+            let base = Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .filter(|s| !s.is_empty());
+            match base {
+                Some(b) => b.to_string(),
+                None => path.to_string(),
+            }
+        }
+    }
+}
+
+/// Resolve 0-based `source_id` for a source path against CLI input order.
+///
+/// Returns `None` when unmapped — callers write an **empty** field (never invent
+/// decimal `0`). Matches exact path first, then case-insensitive equality
+/// (same honesty as [`AttachLedgerSink`]).
+pub fn resolve_input_source_id(source_path: &str, inputs: &[String]) -> Option<u32> {
+    if let Some(i) = inputs.iter().position(|p| p == source_path) {
+        return Some(i as u32);
+    }
+    inputs
+        .iter()
+        .position(|p| p.eq_ignore_ascii_case(source_path))
+        .map(|i| i as u32)
+}
+
 /// One completed PST volume row.
 #[derive(Debug, Clone, Serialize)]
 pub struct VolumeReportRow {
@@ -105,6 +177,10 @@ pub struct ExportMessageRow {
     pub duplicate_source_count: u64,
     /// `|`-delimited basenames, capped at 8 (0075).
     pub duplicate_sources: String,
+    /// 0-based index into `summary.inputs` as a decimal string; empty when
+    /// unmapped (0081 — never invent `"0"`). Join key under `--ledger-path-mode
+    /// basename` when multiple sources share a basename.
+    pub source_id: String,
     /// In-memory only: used for sample verification when MID is empty.
     /// Not written to `export_messages.csv` (header locked).
     #[serde(skip)]
@@ -589,15 +665,18 @@ impl AttachLedgerRow {
 /// Build a ledger row from a writer fidelity event + CLI enrichment.
 ///
 /// `source_id` is the decimal index into inputs, or empty when unmapped (never a fake `0`).
+/// `path_mode` formats the CSV `source_path` column only; resolution of `source_id`
+/// must use the full `event.source_path` before this call.
 pub fn ledger_row_from_event(
     event: &AttachmentFidelityEvent,
     source_id: Option<u32>,
     volume_path: &str,
     volume_index: u32,
+    path_mode: LedgerPathMode,
 ) -> AttachLedgerRow {
     AttachLedgerRow {
         source_id: source_id.map(|id| id.to_string()).unwrap_or_default(),
-        source_path: event.source_path.clone(),
+        source_path: format_ledger_source_path(&event.source_path, path_mode),
         folder_path: event.folder_path.clone(),
         msg_nid: event.msg_nid,
         attach_nid: event.attach_nid.map(|n| n.to_string()).unwrap_or_default(),
@@ -732,11 +811,14 @@ impl AttachLedgerCsvWriter {
 /// are suppressed in Off; CSV enqueue only when mode=full and under the row cap.
 pub struct AttachLedgerSink {
     pub mode: AttachLedgerMode,
+    /// How `source_path` is written to the CSV (0081); internal keys stay full.
+    pub path_mode: LedgerPathMode,
     pub max_rows: u64,
     /// Fail-severity histogram (never truncated; not updated when mode=Off).
     pub failed_by_reason: BTreeMap<String, u64>,
     pub omitted_by_policy: u64,
     /// Per (source_path, msg_nid) fail counts for export_messages column (all modes).
+    /// Keys use the **full** event source_path (never basenamed).
     pub msg_fail_counts: HashMap<(String, u64), u64>,
     /// Per (source_path, msg_nid) failed attachment filenames (case-preserving; match case-insensitive).
     pub msg_fail_filenames: HashMap<(String, u64), BTreeSet<String>>,
@@ -760,6 +842,7 @@ impl AttachLedgerSink {
         max_rows: u64,
         report_dir: &Path,
         input_paths: &[String],
+        path_mode: LedgerPathMode,
     ) -> Result<Self> {
         let mut source_ids = HashMap::new();
         for (i, p) in input_paths.iter().enumerate() {
@@ -773,6 +856,7 @@ impl AttachLedgerSink {
         };
         Ok(Self {
             mode,
+            path_mode,
             max_rows: max_rows.max(1),
             failed_by_reason: BTreeMap::new(),
             omitted_by_policy: 0,
@@ -858,8 +942,15 @@ impl AttachLedgerSink {
             return;
         }
 
+        // Resolve source_id from full path; basename only the CSV path column.
         let source_id = self.resolve_source_id(&event.source_path);
-        let row = ledger_row_from_event(event, source_id, &self.volume_path, self.volume_index);
+        let row = ledger_row_from_event(
+            event,
+            source_id,
+            &self.volume_path,
+            self.volume_index,
+            self.path_mode,
+        );
         if let Some(csv) = self.csv.as_ref() {
             if csv.enqueue(row).is_ok() {
                 self.rows_written = self.rows_written.saturating_add(1);
@@ -1013,7 +1104,15 @@ impl AttachLedgerFinish {
 }
 
 /// Write mandatory `export_messages.csv`.
-pub fn write_export_messages_csv(path: &Path, rows: &[ExportMessageRow]) -> Result<()> {
+///
+/// `path_mode` formats the `source_path` column only at serialization time.
+/// Callers that keep full paths in-memory (QC / fail-count join) pass
+/// [`LedgerPathMode::Full`] for verification, or the operator mode for handoff.
+pub fn write_export_messages_csv(
+    path: &Path,
+    rows: &[ExportMessageRow],
+    path_mode: LedgerPathMode,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
             CliError::Msg(format!(
@@ -1032,10 +1131,11 @@ pub fn write_export_messages_csv(path: &Path, rows: &[ExportMessageRow]) -> Resu
         source: Box::new(e),
     })?;
     for r in rows {
+        let source_path = format_ledger_source_path(&r.source_path, path_mode);
         writeln!(
             w,
-            "{},{},{},{},{},{},{},{},{},{},{},{}",
-            csv_escape_cell(&r.source_path),
+            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            csv_escape_cell(&source_path),
             csv_escape_cell(&r.folder_path),
             r.nid,
             csv_escape_cell(&r.message_id_norm),
@@ -1047,6 +1147,7 @@ pub fn write_export_messages_csv(path: &Path, rows: &[ExportMessageRow]) -> Resu
             r.attachments_failed_count,
             r.duplicate_source_count,
             csv_escape_cell(&r.duplicate_sources),
+            csv_escape_cell(&r.source_id),
         )
         .map_err(|e| CliError::CsvWrite {
             path: path.to_path_buf(),
@@ -1193,6 +1294,11 @@ mod tests {
         );
         assert!(EXPORT_MESSAGES_CSV_HEADER.contains("duplicate_source_count"));
         assert!(EXPORT_MESSAGES_CSV_HEADER.contains("duplicate_sources"));
+        // 0081: source_id is a trailing append (never reorders locked prefix).
+        assert!(
+            EXPORT_MESSAGES_CSV_HEADER.ends_with(",source_id"),
+            "source_id must be trailing append; got {EXPORT_MESSAGES_CSV_HEADER}"
+        );
     }
 
     #[test]
@@ -1213,6 +1319,7 @@ mod tests {
             attachments_failed_count: 0,
             duplicate_source_count: dup_count,
             duplicate_sources: joined.clone(),
+            source_id: "0".into(),
             subject: String::new(),
         };
         assert_eq!(row.duplicate_source_count, dup_count);
@@ -1220,17 +1327,17 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tmp");
         let path = dir.path().join("export_messages.csv");
-        write_export_messages_csv(&path, &[row]).expect("write");
+        write_export_messages_csv(&path, &[row], LedgerPathMode::Full).expect("write");
         let text = std::fs::read_to_string(&path).expect("read");
         let mut lines = text.lines();
         let header = lines.next().expect("header");
         assert_eq!(header, EXPORT_MESSAGES_CSV_HEADER);
         let data = lines.next().expect("data");
         assert!(
-            data.ends_with(&format!(",{dup_count},{joined}"))
-                || data.contains(&format!(",{dup_count},\"{joined}\""))
-                || data.contains(&format!(",{dup_count},{joined}")),
-            "export row must carry All-Custodians columns; got {data}"
+            data.ends_with(&format!(",{dup_count},{joined},0"))
+                || data.contains(&format!(",{dup_count},\"{joined}\",0"))
+                || data.contains(&format!(",{dup_count},{joined},0")),
+            "export row must carry All-Custodians columns + source_id; got {data}"
         );
         assert!(data.contains("cust0.pst") && data.contains("cust2.pst"));
     }
@@ -1268,6 +1375,221 @@ mod tests {
         assert_eq!(AttachLedgerMode::parse("nope"), None);
     }
 
+    #[test]
+    fn ledger_path_mode_parse() {
+        assert_eq!(LedgerPathMode::parse("full"), Some(LedgerPathMode::Full));
+        assert_eq!(
+            LedgerPathMode::parse("basename"),
+            Some(LedgerPathMode::Basename)
+        );
+        assert_eq!(
+            LedgerPathMode::parse("BASE"),
+            Some(LedgerPathMode::Basename)
+        );
+        assert_eq!(LedgerPathMode::parse("nope"), None);
+        assert_eq!(LedgerPathMode::Full.as_str(), "full");
+        assert_eq!(LedgerPathMode::Basename.as_str(), "basename");
+    }
+
+    #[test]
+    fn format_ledger_source_path_full_vs_basename() {
+        let multi_a = r"C:\evidence\matter1\custodian_a.pst";
+        let multi_b = r"D:\other\folder\custodian_b.pst";
+        assert_eq!(
+            format_ledger_source_path(multi_a, LedgerPathMode::Full),
+            multi_a
+        );
+        assert_eq!(
+            format_ledger_source_path(multi_b, LedgerPathMode::Full),
+            multi_b
+        );
+        assert_eq!(
+            format_ledger_source_path(multi_a, LedgerPathMode::Basename),
+            "custodian_a.pst"
+        );
+        assert_eq!(
+            format_ledger_source_path(multi_b, LedgerPathMode::Basename),
+            "custodian_b.pst"
+        );
+        // Empty stays empty.
+        assert_eq!(format_ledger_source_path("", LedgerPathMode::Full), "");
+        assert_eq!(format_ledger_source_path("", LedgerPathMode::Basename), "");
+        // Basename non-empty when full had a non-empty path.
+        let full = r"C:\mail\inbox.pst";
+        let base = format_ledger_source_path(full, LedgerPathMode::Basename);
+        assert!(
+            !base.is_empty(),
+            "basename must be non-empty when full had path"
+        );
+        assert_eq!(base, "inbox.pst");
+    }
+
+    #[test]
+    fn export_messages_csv_basename_source_path_column() {
+        let row = ExportMessageRow {
+            source_path: r"C:\evidence\custA\mailbox.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 0x2001,
+            message_id_norm: "<m@x>".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: "ab".repeat(32),
+            volume_path: r"C:\out\unique.pst".into(),
+            volume_index: 1,
+            export_message_index: 1,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            source_id: "0".into(),
+            subject: String::new(),
+        };
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("export_messages.csv");
+        write_export_messages_csv(&path, std::slice::from_ref(&row), LedgerPathMode::Basename)
+            .expect("write");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let data = text.lines().nth(1).expect("data");
+        assert!(
+            data.starts_with("mailbox.pst,"),
+            "basename mode must write basename only; row={data}"
+        );
+        assert!(
+            !data.contains(r"C:\evidence"),
+            "absolute path must not appear in CSV under basename mode; row={data}"
+        );
+        assert!(
+            data.ends_with(",0") || data.contains(",0\n") || data.ends_with(",0\r"),
+            "source_id column must be present; row={data}"
+        );
+        // Full mode retains absolute path.
+        write_export_messages_csv(&path, std::slice::from_ref(&row), LedgerPathMode::Full)
+            .expect("write full");
+        let full_text = std::fs::read_to_string(&path).expect("read full");
+        let full_data = full_text.lines().nth(1).expect("data");
+        assert!(
+            full_data.contains(r"C:\evidence\custA\mailbox.pst"),
+            "full mode keeps absolute path; row={full_data}"
+        );
+    }
+
+    /// Basename mode with two distinct full paths that share a basename must keep
+    /// distinct `source_id` while writing the same basenamed `source_path`.
+    #[test]
+    fn export_messages_basename_same_basename_distinct_source_id() {
+        let row_a = ExportMessageRow {
+            source_path: r"C:\evidence\custA\mailbox.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 0x2001,
+            message_id_norm: "<a@x>".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: "aa".repeat(32),
+            volume_path: r"C:\out\unique.pst".into(),
+            volume_index: 1,
+            export_message_index: 1,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            source_id: "0".into(),
+            subject: String::new(),
+        };
+        let row_b = ExportMessageRow {
+            source_path: r"D:\other\custB\mailbox.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 0x2002,
+            message_id_norm: "<b@x>".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: "bb".repeat(32),
+            volume_path: r"C:\out\unique.pst".into(),
+            volume_index: 1,
+            export_message_index: 2,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            source_id: "1".into(),
+            subject: String::new(),
+        };
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("export_messages.csv");
+        write_export_messages_csv(&path, &[row_a, row_b], LedgerPathMode::Basename).expect("write");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let mut lines = text.lines();
+        let header = lines.next().expect("header");
+        assert_eq!(header, EXPORT_MESSAGES_CSV_HEADER);
+        assert!(header.ends_with(",source_id"));
+        let data_a = lines.next().expect("row a");
+        let data_b = lines.next().expect("row b");
+        assert!(
+            data_a.starts_with("mailbox.pst,"),
+            "row a basenamed; got {data_a}"
+        );
+        assert!(
+            data_b.starts_with("mailbox.pst,"),
+            "row b basenamed; got {data_b}"
+        );
+        assert!(
+            !data_a.contains(r"C:\evidence") && !data_b.contains(r"D:\other"),
+            "absolute paths must not appear under basename; a={data_a} b={data_b}"
+        );
+        // Trailing source_id disambiguates same basename.
+        assert!(data_a.ends_with(",0"), "row a source_id=0; got {data_a}");
+        assert!(data_b.ends_with(",1"), "row b source_id=1; got {data_b}");
+        // Resolve helper matches AttachLedgerSink honesty.
+        let inputs = vec![
+            r"C:\evidence\custA\mailbox.pst".to_string(),
+            r"D:\other\custB\mailbox.pst".to_string(),
+        ];
+        assert_eq!(
+            resolve_input_source_id(r"C:\evidence\custA\mailbox.pst", &inputs),
+            Some(0)
+        );
+        assert_eq!(
+            resolve_input_source_id(r"D:\other\custB\mailbox.pst", &inputs),
+            Some(1)
+        );
+        assert_eq!(
+            resolve_input_source_id(r"Z:\missing\mailbox.pst", &inputs),
+            None,
+            "unmapped must not invent 0"
+        );
+    }
+
+    #[test]
+    fn attach_ledger_csv_basename_source_path_column() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let inputs = vec![
+            r"C:\evidence\matter\a.pst".to_string(),
+            r"D:\other\b.pst".to_string(),
+        ];
+        let mut sink = AttachLedgerSink::new(
+            AttachLedgerMode::Full,
+            100,
+            dir.path(),
+            &inputs,
+            LedgerPathMode::Basename,
+        )
+        .expect("sink");
+        sink.set_volume(r"C:\out\u.pst", 1);
+        let mut ev = synth_event(
+            AttachmentFidelityKind::StreamOpenFailed,
+            AttachEventSeverity::Fail,
+        );
+        ev.source_path = r"D:\other\b.pst".into();
+        sink.ingest(&ev);
+        // Internal keys still full-path for fail_count join.
+        assert_eq!(sink.fail_count_for(r"D:\other\b.pst", 42), 1);
+        let _ = sink.finish().expect("finish");
+        let csv = fs::read_to_string(dir.path().join(EXPORT_ATTACHMENTS_CSV_NAME)).expect("csv");
+        let data = csv.lines().nth(1).expect("row");
+        // source_id for second input is 1; source_path basenamed.
+        assert!(
+            data.starts_with("1,b.pst,"),
+            "basename ledger: source_id=1, path=b.pst; row={data}"
+        );
+        assert!(
+            !data.contains(r"D:\other"),
+            "absolute path must not appear under basename mode; row={data}"
+        );
+    }
+
     fn synth_event(
         kind: AttachmentFidelityKind,
         severity: AttachEventSeverity,
@@ -1291,8 +1613,14 @@ mod tests {
     fn row_cap_truncation_marker_and_histogram_continues() {
         let dir = tempfile::tempdir().expect("tmp");
         let inputs = vec![r"C:\in\a.pst".to_string()];
-        let mut sink =
-            AttachLedgerSink::new(AttachLedgerMode::Full, 2, dir.path(), &inputs).expect("sink");
+        let mut sink = AttachLedgerSink::new(
+            AttachLedgerMode::Full,
+            2,
+            dir.path(),
+            &inputs,
+            LedgerPathMode::Full,
+        )
+        .expect("sink");
         sink.set_volume(r"C:\out\u.pst", 1);
 
         // max_rows=2 → 1 data row + 1 marker, then drop further CSV but keep histogram.
@@ -1326,9 +1654,14 @@ mod tests {
     fn summary_only_no_csv_histogram_present() {
         let dir = tempfile::tempdir().expect("tmp");
         let inputs = vec![r"C:\in\a.pst".to_string()];
-        let mut sink =
-            AttachLedgerSink::new(AttachLedgerMode::SummaryOnly, 500_000, dir.path(), &inputs)
-                .expect("sink");
+        let mut sink = AttachLedgerSink::new(
+            AttachLedgerMode::SummaryOnly,
+            500_000,
+            dir.path(),
+            &inputs,
+            LedgerPathMode::Full,
+        )
+        .expect("sink");
         sink.ingest(&synth_event(
             AttachmentFidelityKind::MethodUnsupported,
             AttachEventSeverity::Fail,
@@ -1369,8 +1702,14 @@ mod tests {
     fn source_id_from_inputs_order() {
         let dir = tempfile::tempdir().expect("tmp");
         let inputs = vec![r"C:\a.pst".into(), r"C:\b.pst".into()];
-        let mut sink =
-            AttachLedgerSink::new(AttachLedgerMode::Full, 100, dir.path(), &inputs).expect("sink");
+        let mut sink = AttachLedgerSink::new(
+            AttachLedgerMode::Full,
+            100,
+            dir.path(),
+            &inputs,
+            LedgerPathMode::Full,
+        )
+        .expect("sink");
         sink.set_volume("out.pst", 1);
         let mut ev = synth_event(
             AttachmentFidelityKind::StreamReadFailed,
@@ -1391,8 +1730,14 @@ mod tests {
     fn unmapped_source_id_is_empty_not_zero() {
         let dir = tempfile::tempdir().expect("tmp");
         let inputs = vec![r"C:\a.pst".into()];
-        let mut sink =
-            AttachLedgerSink::new(AttachLedgerMode::Full, 100, dir.path(), &inputs).expect("sink");
+        let mut sink = AttachLedgerSink::new(
+            AttachLedgerMode::Full,
+            100,
+            dir.path(),
+            &inputs,
+            LedgerPathMode::Full,
+        )
+        .expect("sink");
         sink.set_volume("out.pst", 1);
         let mut ev = synth_event(
             AttachmentFidelityKind::StreamOpenFailed,
@@ -1417,8 +1762,14 @@ mod tests {
     fn off_mode_still_tracks_msg_fail_counts() {
         let dir = tempfile::tempdir().expect("tmp");
         let inputs = vec![r"C:\in\a.pst".to_string()];
-        let mut sink = AttachLedgerSink::new(AttachLedgerMode::Off, 500_000, dir.path(), &inputs)
-            .expect("sink");
+        let mut sink = AttachLedgerSink::new(
+            AttachLedgerMode::Off,
+            500_000,
+            dir.path(),
+            &inputs,
+            LedgerPathMode::Full,
+        )
+        .expect("sink");
         sink.ingest(&synth_event(
             AttachmentFidelityKind::StreamOpenFailed,
             AttachEventSeverity::Fail,
@@ -1572,8 +1923,14 @@ mod tests {
     fn volume_buffer_discard_does_not_pollute_global() {
         let dir = tempfile::tempdir().expect("tmp");
         let inputs = vec![r"C:\in\a.pst".to_string()];
-        let mut global =
-            AttachLedgerSink::new(AttachLedgerMode::Full, 100, dir.path(), &inputs).expect("sink");
+        let mut global = AttachLedgerSink::new(
+            AttachLedgerMode::Full,
+            100,
+            dir.path(),
+            &inputs,
+            LedgerPathMode::Full,
+        )
+        .expect("sink");
         global.set_volume("vol1.pst", 1);
 
         // Simulated failed volume: buffer then drop.

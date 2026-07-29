@@ -49,8 +49,8 @@ use crate::scan::{
 use crate::unique_export_report::{
     default_report_dir, volume_path_for, write_export_messages_csv, write_summary_json,
     write_volumes_csv, AttachLedgerMode, AttachLedgerSink, ExportMessageRow, ExportSection,
-    PhaseTimings, SummaryError, UniqueExportSummary, VerificationReport, VolumeAttachBuffer,
-    VolumeReportRow, VolumeVerification, DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+    LedgerPathMode, PhaseTimings, SummaryError, UniqueExportSummary, VerificationReport,
+    VolumeAttachBuffer, VolumeReportRow, VolumeVerification, DEFAULT_ATTACH_LEDGER_MAX_ROWS,
     PREPARED_BYTES_PEAK_WARN_THRESHOLD, UNIQUE_EXPORT_REPORT_SCHEMA,
 };
 use std::cell::RefCell;
@@ -151,6 +151,10 @@ pub struct UniquePstClapArgs {
     /// Max rows written to `export_attachments.csv` (default 500000). Histogram is never truncated.
     #[arg(long = "attach-ledger-max-rows", default_value_t = DEFAULT_ATTACH_LEDGER_MAX_ROWS)]
     pub attach_ledger_max_rows: u64,
+    /// How `source_path` columns are written in export CSVs: `full` (default) or `basename` (0081).
+    /// Basename is presentation-only for handoff; join origin via `source_id` + Matter Archive.
+    #[arg(long = "ledger-path-mode", default_value = "full", value_parser = parse_ledger_path_mode_arg)]
+    pub ledger_path_mode: LedgerPathMode,
     /// Opt-in budgeted deep attach stream preflight before keep-set resolve (0074). Default off.
     #[arg(long = "deep-attach-preflight")]
     pub deep_attach_preflight: bool,
@@ -262,6 +266,8 @@ pub struct UniquePstCliArgs {
     pub attach_ledger: AttachLedgerMode,
     /// Max CSV rows for attach ledger (0073). Default 500_000.
     pub attach_ledger_max_rows: u64,
+    /// Path column mode for export CSVs (0081). Default `full`.
+    pub ledger_path_mode: LedgerPathMode,
     /// Opt-in deep attach preflight (0074). Default off.
     pub deep_attach_preflight: bool,
     pub deep_attach_level: String,
@@ -444,6 +450,7 @@ impl UniquePstClapArgs {
             skip_limit: self.skip_limit,
             attach_ledger: self.attach_ledger,
             attach_ledger_max_rows: self.attach_ledger_max_rows,
+            ledger_path_mode: self.ledger_path_mode,
             deep_attach_preflight: self.deep_attach_preflight,
             deep_attach_level: self.deep_attach_level,
             deep_attach_max_attaches: self.deep_attach_max_attaches,
@@ -543,6 +550,11 @@ fn parse_deep_attach_level_arg(s: &str) -> std::result::Result<String, String> {
 fn parse_attach_ledger_mode_arg(s: &str) -> std::result::Result<AttachLedgerMode, String> {
     AttachLedgerMode::parse(s)
         .ok_or_else(|| format!("invalid attach-ledger '{s}': expected full, summary-only, or off"))
+}
+
+fn parse_ledger_path_mode_arg(s: &str) -> std::result::Result<LedgerPathMode, String> {
+    LedgerPathMode::parse(s)
+        .ok_or_else(|| format!("invalid ledger-path-mode '{s}': expected full or basename"))
 }
 
 fn parse_strong_content_hash_arg(s: &str) -> std::result::Result<String, String> {
@@ -1971,7 +1983,9 @@ pub fn run_unique_pst_with_options(
 
     let protected: Vec<PathBuf> = paths.clone();
     // 0073: attach ledger (histogram always unless off; CSV when full).
-    // Input path strings must match `summary.inputs` / export_messages source_path.
+    // Input path strings match `summary.inputs` and in-memory export_messages
+    // `source_path` (full). On-disk CSV `source_path` may be basenamed (0081);
+    // join origin via `source_id` (0-based index into this list).
     let input_path_strings: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
     // Ledger init failure with mode != Off is a report-pack error (fail closed).
     let mut ledger_init_error: Option<String> = None;
@@ -1980,6 +1994,7 @@ pub fn run_unique_pst_with_options(
         args.attach_ledger_max_rows,
         &report_dir,
         &input_path_strings,
+        args.ledger_path_mode,
     ) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -2193,6 +2208,13 @@ pub fn run_unique_pst_with_options(
                         })
                         .map(|w| (w.duplicate_source_count, w.duplicate_sources.join("|")))
                         .unwrap_or((0, String::new()));
+                    // source_id: decimal index into inputs, or empty when unmapped (0081).
+                    let source_id = crate::unique_export_report::resolve_input_source_id(
+                        &p.source_path,
+                        &input_path_strings,
+                    )
+                    .map(|id| id.to_string())
+                    .unwrap_or_default();
                     export_rows.push(ExportMessageRow {
                         source_path: p.source_path.clone(),
                         folder_path: p.folder_path.clone(),
@@ -2206,6 +2228,7 @@ pub fn run_unique_pst_with_options(
                         attachments_failed_count: attach_fails,
                         duplicate_source_count: dup_count,
                         duplicate_sources: dup_sources,
+                        source_id,
                         subject: p.subject.clone(),
                     });
                     // Bind pre-write QC meta to this export index / volume.
@@ -2424,15 +2447,20 @@ pub fn run_unique_pst_with_options(
     }
 
     // export_messages.csv mandatory (always attempt; empty header when zero winners).
+    // Basename is applied only at CSV serialization; in-memory rows keep full paths for QC.
     let export_messages_path = report_dir.join("export_messages.csv");
     if messages_written_total > 0 || !export_rows.is_empty() {
-        if let Err(e) = write_export_messages_csv(&export_messages_path, &export_rows) {
+        if let Err(e) =
+            write_export_messages_csv(&export_messages_path, &export_rows, args.ledger_path_mode)
+        {
             let msg = format!("export_messages.csv write failed: {e}");
             tracing::warn!("{msg}");
             emit_log(stderr, &on_log, &format!("warning: {msg}"));
             report_write_errors.push(msg);
         }
-    } else if let Err(e) = write_export_messages_csv(&export_messages_path, &[]) {
+    } else if let Err(e) =
+        write_export_messages_csv(&export_messages_path, &[], args.ledger_path_mode)
+    {
         let msg = format!("export_messages.csv write failed: {e}");
         tracing::warn!("{msg}");
         emit_log(stderr, &on_log, &format!("warning: {msg}"));
@@ -3576,6 +3604,7 @@ mod tests {
             skip_limit: 10_000,
             attach_ledger: AttachLedgerMode::Full,
             attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+            ledger_path_mode: LedgerPathMode::Full,
             deep_attach_preflight: false,
             deep_attach_level: "head".into(),
             deep_attach_max_attaches: 50_000,
@@ -3680,6 +3709,7 @@ mod tests {
             skip_limit: 10_000,
             attach_ledger: AttachLedgerMode::Full,
             attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+            ledger_path_mode: LedgerPathMode::Full,
             deep_attach_preflight: false,
             deep_attach_level: "head".into(),
             deep_attach_max_attaches: 50_000,
@@ -3791,6 +3821,7 @@ mod tests {
             skip_limit: 10_000,
             attach_ledger: AttachLedgerMode::Full,
             attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+            ledger_path_mode: LedgerPathMode::Full,
             deep_attach_preflight: false,
             deep_attach_level: "head".into(),
             deep_attach_max_attaches: 50_000,
@@ -3893,6 +3924,7 @@ mod tests {
             skip_limit: 10_000,
             attach_ledger: AttachLedgerMode::Full,
             attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+            ledger_path_mode: LedgerPathMode::Full,
             deep_attach_preflight: false,
             deep_attach_level: "head".into(),
             deep_attach_max_attaches: 50_000,

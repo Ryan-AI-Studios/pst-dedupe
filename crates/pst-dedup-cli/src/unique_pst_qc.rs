@@ -2292,6 +2292,9 @@ pub fn run_qc_pst(
     // Load volumes from summary or invent single volume; honor positional out.pst.
     let volumes = load_volumes_for_qc(report_dir, out_pst)?;
     let mut export_rows = load_export_rows_for_qc(report_dir)?;
+    // After basename handoff, basenamed `source_path` may not open; prefer
+    // `summary.inputs[source_id]` when the CSV path is missing (0081 P2-B).
+    resolve_export_source_paths_from_summary(report_dir, &mut export_rows);
     // Hydrate subjects from content_digests (export CSV has no subject column).
     hydrate_export_subjects_from_digests(report_dir, &mut export_rows);
     let mut candidates = candidates_from_export_and_meta(&export_rows, &BTreeMap::new());
@@ -2560,6 +2563,29 @@ fn load_export_rows_for_qc(report_dir: &Path) -> Result<Vec<ExportMessageRow>, S
         .flexible(true)
         .from_path(&path)
         .map_err(|e| e.to_string())?;
+    let headers = rdr.headers().map_err(|e| e.to_string())?.clone();
+    let col = |name: &str| headers.iter().position(|h| h == name);
+    // Prefer header names; fall back to locked prefix positions for older packs.
+    let i_source_path = col("source_path").unwrap_or(0);
+    let i_folder_path = col("folder_path").unwrap_or(1);
+    let i_nid = col("nid").unwrap_or(2);
+    let i_mid = col("message_id_norm").unwrap_or(3);
+    let i_edrm = col("edrm_mih").unwrap_or(4);
+    let i_hash = col("content_hash_hex").unwrap_or(5);
+    let i_vol_path = col("volume_path").unwrap_or(6);
+    let i_vol_idx = col("volume_index").unwrap_or(7);
+    let i_export_idx = col("export_message_index").unwrap_or(8);
+    let i_attach_fails = col("attachments_failed_count");
+    let i_dup_count = col("duplicate_source_count");
+    let i_dup_sources = col("duplicate_sources");
+    // 0081: optional trailing source_id (by name, else last column when header includes it).
+    let i_source_id = col("source_id").or_else(|| {
+        if headers.iter().any(|h| h == "source_id") {
+            Some(headers.len().saturating_sub(1))
+        } else {
+            None
+        }
+    });
     let mut rows = Vec::new();
     let mut seen_idx: BTreeSet<u64> = BTreeSet::new();
     for (i, rec) in rdr.records().enumerate() {
@@ -2572,50 +2598,118 @@ fn load_export_rows_for_qc(report_dir: &Path) -> Result<Vec<ExportMessageRow>, S
                 rec.len()
             ));
         }
-        let nid_raw = rec.get(2).unwrap_or("").trim();
+        let nid_raw = rec.get(i_nid).unwrap_or("").trim();
         let nid = parse_nid_strict(nid_raw).map_err(|e| {
             format!(
                 "export_messages.csv row {}: invalid nid '{nid_raw}': {e}",
                 i + 1
             )
         })?;
-        let volume_index = rec.get(7).and_then(|s| s.parse().ok()).ok_or_else(|| {
-            format!(
-                "export_messages.csv row {}: invalid volume_index {:?}",
-                i + 1,
-                rec.get(7)
-            )
-        })?;
-        let export_message_index = rec.get(8).and_then(|s| s.parse().ok()).ok_or_else(|| {
-            format!(
-                "export_messages.csv row {}: invalid export_message_index {:?}",
-                i + 1,
-                rec.get(8)
-            )
-        })?;
+        let volume_index = rec
+            .get(i_vol_idx)
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| {
+                format!(
+                    "export_messages.csv row {}: invalid volume_index {:?}",
+                    i + 1,
+                    rec.get(i_vol_idx)
+                )
+            })?;
+        let export_message_index = rec
+            .get(i_export_idx)
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| {
+                format!(
+                    "export_messages.csv row {}: invalid export_message_index {:?}",
+                    i + 1,
+                    rec.get(i_export_idx)
+                )
+            })?;
         if !seen_idx.insert(export_message_index) {
             return Err(format!(
                 "export_messages.csv row {}: duplicate export_message_index {export_message_index}",
                 i + 1
             ));
         }
+        // source_id: present only when column exists; empty when blank — never invent "0".
+        let source_id = i_source_id
+            .and_then(|idx| rec.get(idx))
+            .unwrap_or("")
+            .trim()
+            .to_string();
         rows.push(ExportMessageRow {
-            source_path: rec.get(0).unwrap_or("").to_string(),
-            folder_path: rec.get(1).unwrap_or("").to_string(),
+            source_path: rec.get(i_source_path).unwrap_or("").to_string(),
+            folder_path: rec.get(i_folder_path).unwrap_or("").to_string(),
             nid,
-            message_id_norm: rec.get(3).unwrap_or("").to_string(),
-            edrm_mih: rec.get(4).unwrap_or("").to_string(),
-            content_hash_hex: rec.get(5).unwrap_or("").to_string(),
-            volume_path: rec.get(6).unwrap_or("").to_string(),
+            message_id_norm: rec.get(i_mid).unwrap_or("").to_string(),
+            edrm_mih: rec.get(i_edrm).unwrap_or("").to_string(),
+            content_hash_hex: rec.get(i_hash).unwrap_or("").to_string(),
+            volume_path: rec.get(i_vol_path).unwrap_or("").to_string(),
             volume_index,
             export_message_index,
-            attachments_failed_count: rec.get(9).and_then(|s| s.parse().ok()).unwrap_or(0),
-            duplicate_source_count: 0,
-            duplicate_sources: String::new(),
+            attachments_failed_count: i_attach_fails
+                .and_then(|idx| rec.get(idx))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+            duplicate_source_count: i_dup_count
+                .and_then(|idx| rec.get(idx))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+            duplicate_sources: i_dup_sources
+                .and_then(|idx| rec.get(idx))
+                .unwrap_or("")
+                .to_string(),
+            source_id,
             subject: String::new(),
         });
     }
     Ok(rows)
+}
+
+/// Load `summary.json` → `inputs` array (full paths at export time).
+fn load_summary_inputs(report_dir: &Path) -> Option<Vec<String>> {
+    let summary_path = report_dir.join("summary.json");
+    let text = fs::read_to_string(&summary_path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let arr = v.get("inputs")?.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .collect(),
+    )
+}
+
+/// For standalone `qc-pst` after basename handoff: when CSV `source_path` is not an
+/// existing file and `source_id` is present and in range of `summary.inputs`, open
+/// via the full path from `inputs[source_id]` when that file exists.
+///
+/// - Does **not** invent `source_id` 0 when the column is missing/empty.
+/// - Leaves `source_path` unchanged when the CSV path already exists (CWD-relative
+///   basename that is a real file still wins — operator can re-map via Matter Archive).
+/// - On successful resolve, replaces in-memory `source_path` so source differential
+///   opens the correct PST; the on-disk CSV remains basenamed (honest handoff copy).
+pub fn resolve_export_source_paths_from_summary(report_dir: &Path, rows: &mut [ExportMessageRow]) {
+    let Some(inputs) = load_summary_inputs(report_dir) else {
+        return;
+    };
+    for row in rows.iter_mut() {
+        if Path::new(&row.source_path).is_file() {
+            continue;
+        }
+        if row.source_id.is_empty() {
+            // Do not invent source_id 0 when missing.
+            continue;
+        }
+        let Ok(id) = row.source_id.parse::<usize>() else {
+            continue;
+        };
+        let Some(full) = inputs.get(id) else {
+            continue;
+        };
+        if Path::new(full).is_file() {
+            row.source_path = full.clone();
+        }
+    }
 }
 
 fn parse_nid_strict(s: &str) -> Result<u64, String> {
@@ -2887,6 +2981,7 @@ mod tests {
             attachments_failed_count: 0,
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
+            source_id: String::new(),
             subject: "s".into(),
         }];
         let contract = FidelityContract::v1();
@@ -2927,6 +3022,7 @@ mod tests {
                 attachments_failed_count: 0,
                 duplicate_source_count: 0,
                 duplicate_sources: String::new(),
+                source_id: String::new(),
                 subject: "s1".into(),
             },
             // Orphan: volume_index 99 not declared — per-vol1 count still matches (=1).
@@ -2943,6 +3039,7 @@ mod tests {
                 attachments_failed_count: 0,
                 duplicate_source_count: 0,
                 duplicate_sources: String::new(),
+                source_id: String::new(),
                 subject: "s2".into(),
             },
         ];
@@ -3057,5 +3154,83 @@ mod tests {
         assert_eq!(QcLevel::parse("sample").unwrap(), QcLevel::Sample);
         assert_eq!(QcLevel::parse("FULL").unwrap(), QcLevel::Full);
         assert!(QcLevel::parse("nope").is_err());
+    }
+
+    /// Basename-mode CSV + summary.inputs: distinct source_id resolves to full paths
+    /// when basenamed source_path is not an existing file.
+    #[test]
+    fn resolve_export_source_paths_from_summary_basename_source_id() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let report = dir.path().join("report");
+        fs::create_dir_all(&report).expect("report");
+        // Two real files with different directories, same basename.
+        let a_dir = dir.path().join("custA");
+        let b_dir = dir.path().join("custB");
+        fs::create_dir_all(&a_dir).expect("a");
+        fs::create_dir_all(&b_dir).expect("b");
+        let path_a = a_dir.join("mailbox.pst");
+        let path_b = b_dir.join("mailbox.pst");
+        fs::write(&path_a, b"a").expect("touch a");
+        fs::write(&path_b, b"b").expect("touch b");
+        let path_a_s = path_a.display().to_string();
+        let path_b_s = path_b.display().to_string();
+
+        fs::write(
+            report.join("summary.json"),
+            serde_json::json!({
+                "inputs": [path_a_s, path_b_s],
+            })
+            .to_string(),
+        )
+        .expect("summary");
+
+        // CSV as basename handoff would write it.
+        let header = crate::unique_export_report::EXPORT_MESSAGES_CSV_HEADER;
+        let csv = format!(
+            "{header}\n\
+             mailbox.pst,Inbox,8193,a@x,,,out.pst,1,1,0,0,,0\n\
+             mailbox.pst,Inbox,8194,b@x,,,out.pst,1,2,0,0,,1\n"
+        );
+        fs::write(report.join("export_messages.csv"), csv).expect("csv");
+
+        let mut rows = load_export_rows_for_qc(&report).expect("load");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].source_path, "mailbox.pst");
+        assert_eq!(rows[0].source_id, "0");
+        assert_eq!(rows[1].source_id, "1");
+        // Before resolve, basenames are not absolute files (unless CWD collision).
+        // Resolve via summary.inputs.
+        resolve_export_source_paths_from_summary(&report, &mut rows);
+        assert_eq!(rows[0].source_path, path_a_s, "source_id 0 → inputs[0]");
+        assert_eq!(rows[1].source_path, path_b_s, "source_id 1 → inputs[1]");
+        assert!(Path::new(&rows[0].source_path).is_file());
+        assert!(Path::new(&rows[1].source_path).is_file());
+    }
+
+    /// Missing source_id must not invent 0 even when summary.inputs is present.
+    #[test]
+    fn resolve_export_source_paths_does_not_invent_source_id_zero() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let report = dir.path().join("report");
+        fs::create_dir_all(&report).expect("report");
+        let real = dir.path().join("real.pst");
+        fs::write(&real, b"x").expect("touch");
+        let real_s = real.display().to_string();
+        fs::write(
+            report.join("summary.json"),
+            serde_json::json!({ "inputs": [real_s] }).to_string(),
+        )
+        .expect("summary");
+        // Pre-0081 header: no source_id column.
+        let csv = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count\n\
+                   mailbox.pst,Inbox,8193,a@x,,,out.pst,1,1,0\n";
+        fs::write(report.join("export_messages.csv"), csv).expect("csv");
+        let mut rows = load_export_rows_for_qc(&report).expect("load");
+        assert_eq!(rows[0].source_id, "", "missing column → empty, not 0");
+        resolve_export_source_paths_from_summary(&report, &mut rows);
+        assert_eq!(
+            rows[0].source_path, "mailbox.pst",
+            "must not invent source_id 0 resolve when column missing"
+        );
     }
 }

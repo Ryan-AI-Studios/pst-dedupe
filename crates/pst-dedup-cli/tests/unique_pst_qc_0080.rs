@@ -82,6 +82,7 @@ fn export_row_folder(mid: &str, nid: u64, idx: u64, folder: &str) -> ExportMessa
         attachments_failed_count: 0,
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
+        source_id: String::new(),
         subject: "subj".into(),
     }
 }
@@ -431,6 +432,7 @@ fn display_cc_strip_is_defect_when_source_has_cc() {
         attachments_failed_count: 0,
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
+        source_id: String::new(),
         subject: "CC roundtrip".into(),
     }];
     let mut c = cand(1, 12);
@@ -510,6 +512,7 @@ fn attach_payload_mismatch_is_defect() {
         attachments_failed_count: 0,
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
+        source_id: String::new(),
         subject: "Attach".into(),
     }];
     let mut c = cand(1, 11);
@@ -1188,6 +1191,7 @@ fn degraded_message_stripped_cc_still_defects() {
         attachments_failed_count: 1,
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
+        source_id: String::new(),
         subject: "Deg CC".into(),
     }];
     let mut c = cand(1, 8);
@@ -1248,6 +1252,7 @@ fn degraded_body_unavailable_stripped_body_still_defects_when_not_flagged() {
         attachments_failed_count: 0,
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
+        source_id: String::new(),
         subject: "Body loss".into(),
     }];
     let mut c = cand(1, 26);
@@ -1298,6 +1303,7 @@ fn corrupt_existing_source_hard_fails_not_skip() {
         attachments_failed_count: 0,
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
+        source_id: String::new(),
         subject: "Corrupt src".into(),
     }];
     let mut c = cand(1, 4);
@@ -1410,6 +1416,7 @@ fn multi_volume_external_reader_called_for_each_volume() {
             attachments_failed_count: 0,
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
+            source_id: String::new(),
             subject: "V1".into(),
         },
         ExportMessageRow {
@@ -1425,6 +1432,7 @@ fn multi_volume_external_reader_called_for_each_volume() {
             attachments_failed_count: 0,
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
+            source_id: String::new(),
             subject: "V2".into(),
         },
     ];
@@ -1631,6 +1639,7 @@ fn no_mid_message_green_when_digests_match() {
         attachments_failed_count: 0,
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
+        source_id: String::new(),
         subject: "NoMid Subject".into(),
     }];
     let mut c = cand(1, detail.body_plain_len);
@@ -1707,6 +1716,7 @@ fn attach_ledger_fail_does_not_explain_unrelated_missing_attach() {
         attachments_failed_count: 1,
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
+        source_id: String::new(),
         subject: "TwoAttaches".into(),
     }];
     let mut c = cand(1, 18);
@@ -2026,6 +2036,7 @@ fn no_mid_duplicate_subjects_do_not_misassociate() {
             attachments_failed_count: 0,
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
+            source_id: String::new(),
             subject: "Same Subject".into(),
         },
         ExportMessageRow {
@@ -2041,6 +2052,7 @@ fn no_mid_duplicate_subjects_do_not_misassociate() {
             attachments_failed_count: 0,
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
+            source_id: String::new(),
             subject: "Same Subject".into(),
         },
     ];
@@ -2118,6 +2130,7 @@ fn fixture_matrix_multi_volume_structure_green() {
             attachments_failed_count: 0,
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
+            source_id: String::new(),
             subject: "Vol1".into(),
         },
         ExportMessageRow {
@@ -2133,6 +2146,7 @@ fn fixture_matrix_multi_volume_structure_green() {
             attachments_failed_count: 0,
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
+            source_id: String::new(),
             subject: "Vol2".into(),
         },
     ];
@@ -2541,6 +2555,7 @@ fn duplicate_attach_filename_multiset_missing_is_defect() {
         attachments_failed_count: 0,
         duplicate_source_count: 0,
         duplicate_sources: String::new(),
+        source_id: String::new(),
         subject: "DupAtt".into(),
     }];
     let mut c = cand(1, 12);
@@ -2759,6 +2774,7 @@ fn orphan_volume_index_rows_hard_fail_via_qc_pipeline() {
             attachments_failed_count: 0,
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
+            source_id: String::new(),
             subject: "Ghost".into(),
         },
     ];
@@ -2848,6 +2864,7 @@ fn multi_volume_external_one_skipped_aggregate_not_ok() {
             attachments_failed_count: 0,
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
+            source_id: String::new(),
             subject: "Agg1".into(),
         },
         ExportMessageRow {
@@ -2863,6 +2880,7 @@ fn multi_volume_external_one_skipped_aggregate_not_ok() {
             attachments_failed_count: 0,
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
+            source_id: String::new(),
             subject: "Agg2".into(),
         },
     ];
@@ -3179,6 +3197,7 @@ fn production_multi_volume_full_qc_green() {
                 attachments_failed_count: 0,
                 duplicate_source_count: 0,
                 duplicate_sources: String::new(),
+                source_id: String::new(),
                 subject: "SynV1".into(),
             },
             ExportMessageRow {
@@ -3194,6 +3213,7 @@ fn production_multi_volume_full_qc_green() {
                 attachments_failed_count: 0,
                 duplicate_source_count: 0,
                 duplicate_sources: String::new(),
+                source_id: String::new(),
                 subject: "SynV2".into(),
             },
         ];

@@ -12,7 +12,7 @@ use dedup_engine::keepset::{FamilyPolicy, KeepPolicy};
 use pst_dedup_cli::paths::{is_same_or_under, is_same_or_under_resolved, paths_equal};
 use pst_dedup_cli::pst_materializer::DEFAULT_MAX_OPEN_PSTS;
 use pst_dedup_cli::unique_export_report::{
-    volume_path_for, AttachLedgerMode, DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+    volume_path_for, AttachLedgerMode, LedgerPathMode, DEFAULT_ATTACH_LEDGER_MAX_ROWS,
 };
 use pst_dedup_cli::unique_pst_cmd::{FolderLayoutArg, UniquePstCliArgs};
 
@@ -377,6 +377,7 @@ impl UniqueWizardForm {
             skip_limit: 10_000,
             attach_ledger: AttachLedgerMode::Full,
             attach_ledger_max_rows: DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+            ledger_path_mode: LedgerPathMode::Full,
             // Deep attach preflight is CLI opt-in; GUI residual D-0074-gui.
             deep_attach_preflight: false,
             deep_attach_level: "head".into(),

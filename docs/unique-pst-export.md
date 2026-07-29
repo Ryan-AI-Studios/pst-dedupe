@@ -2,6 +2,9 @@
 
 Headless operator path (Series K / track **0071**): multi-input PSTs → keep-set winners → streaming unique PST volume(s) → defensible report pack + verification.
 
+> **Operator eDiscovery runbook (0081):** collection → process → handoff → disposition, exit codes, integrity thresholds, ScanPST-on-copy count-diff, and basename custody —  
+> [`unique-pst-ediscovery-runbook.md`](unique-pst-ediscovery-runbook.md). This page remains the **flag encyclopedia**.
+
 ## One-liner
 
 ```powershell
@@ -50,6 +53,7 @@ Source PSTs are **read-only**. The writer never mutates inputs.
 | `--also-eml <dir>` | Soft residual (accepted; co-export may be ignored — see deferred) |
 | `--attach-ledger full\|summary-only\|off` | **0073** — attachment failure ledger (default **`full`**) |
 | `--attach-ledger-max-rows <N>` | Cap on `export_attachments.csv` rows (default **500000**); histogram never truncated |
+| `--ledger-path-mode full\|basename` | **0081** — how `source_path` is written in export CSVs (default **`full`**). Basename is handoff-only; join via `source_id` + Matter Archive (see [runbook](unique-pst-ediscovery-runbook.md) §7) |
 | `--deep-attach-preflight` | **0074** — opt-in budgeted attach stream probe before keep-set resolve (default **off**) |
 | `--deep-attach-level head\|full` | Probe depth: **`head`** (L2, default) or **`full`** (L3). L2 ≠ full verify. Unknown level is a usage error. Under **`--mode strict`**, probe fails **skip** the message (same as attach-meta/body strict); best-effort **degrades** only. |
 | `--deep-attach-max-attaches` | Hard stop on attach count probed (default **50000**) |
@@ -153,7 +157,7 @@ parent-vs-HEAD gate: build parent binary, set `PST_DEDUPE_BASELINE_BIN`, run
 
 ### Sensitivity (handoff)
 
-The entire **`report-dir` is operator-sensitive**: absolute paths, folder names, subjects, and attachment filenames can leak PII or privilege context. Do **not** post report packs to untrusted third parties without redaction. Prefer sharing the summary histogram + reason codes first. Primary join key that avoids path strings: **`source_id`** (0-based index into `summary.inputs`). Optional basename redaction mode is residual (**D-0073-basename**).
+The entire **`report-dir` is operator-sensitive**: absolute paths, folder names, subjects, and attachment filenames can leak PII or privilege context. Do **not** post report packs to untrusted third parties without redaction. Prefer sharing the summary histogram + reason codes first. Primary join key that avoids path strings: **`source_id`** (0-based index into `summary.inputs`). Optional basename redaction: `--ledger-path-mode basename` (**closed D-0073-basename** in 0081; default remains `full` — see [runbook](unique-pst-ediscovery-runbook.md) §7).
 
 ### CSV open safety
 
@@ -161,10 +165,10 @@ Free-text cells in `export_attachments.csv` and `export_messages.csv` neutralize
 
 ### `export_messages.csv` (mandatory)
 
-Fixed columns (prefix locked; **0073**/**0075** append only):
+Fixed columns (prefix locked; **0073**/**0075**/**0081** append only):
 
 ```text
-source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources
+source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources,source_id
 ```
 
 One row per **successfully written** unique winner. **No body text** columns.
@@ -172,6 +176,8 @@ One row per **successfully written** unique winner. **No body text** columns.
 `attachments_failed_count` is the number of **fail-severity** attach outcomes for that message on the write path (left-join alternative: count fail rows in `export_attachments.csv` for the same `source_path` + `msg_nid`).
 
 `duplicate_source_count` / `duplicate_sources` (**0075**): “All Custodians” aggregate — distinct **source PST basenames** (not absolute paths) that held a suppressed copy of this winner, `|`-delimited, capped at 8 (same values as decision CSV unique rows and `keep_set_v1` JSON).
+
+`source_id` (**0081**): 0-based index into `summary.inputs` (decimal string; empty when unmapped — never invented as `0`). Join key under `--ledger-path-mode basename` when multiple inputs share a basename.
 
 ## Winner policies
 
@@ -537,14 +543,14 @@ When sources are gone, `qc-pst` is structural-only unless `content_digests.json`
 persisted at export time (`content_digest_backed: true`). The tool never self-attests a
 human Outlook open — operators may drop `qc_attestation_v1.json` into the report dir.
 
-### Client-retirement honesty (dated 2026-07-28)
+### Client-retirement honesty (re-verified 2026-07-29)
 
 | Fact | Detail |
 |---|---|
-| Classic Outlook | Opt-out-default since **April 2026**; retires **Q1–Q2 2028**; **EOL Q2 2029** |
-| New Outlook | Default client; **import, not mount** for PST; **no COM/VSTO/VBA** object model planned |
-| Microsoft PST roadmap | Once bulk import ships, Microsoft has stated **no plans to continue developing .PST support** |
-| Consequence for proof | Tier C (`scanpst`) has a shelf life; “open it in Outlook” will stop being available before this product stops emitting PSTs. **PST remains a correct deliverable** (Purview exports it; eDiscovery consumes it) — but the durable QC signal is **source-differential reader QC**, not a Microsoft client. |
+| Classic Outlook | Opt-out-default since **April 2026**; retires **Q1–Q2 2028**; **EOL Q2 2029**. `scanpst.exe` is classic-only. |
+| New Outlook | Default client. **Can open/add** `.pst` (Settings → Files → Outlook Data Files → Add file) per Microsoft Support (access date **2026-07-29**); classic Outlook must also be installed, same bitness. **No COM/VSTO/VBA** object model planned. Stale “import-only / not mount” claims are **incorrect** for current open/add email browse. |
+| Microsoft PST roadmap | Microsoft has stated limited future investment in `.PST` once bulk import ships. Human client open is still available today but is **not** a durable automation surface. |
+| Consequence for proof | Tier C (`scanpst`) has a shelf life; do not treat “open it in Outlook” as the primary proof. **PST remains a correct deliverable** (Purview exports it; eDiscovery consumes it) — durable QC is **source-differential reader QC**, not a Microsoft client. |
 | COM automation | Declined (D-0080-com-declined): no future on new Outlook; mutates operator env; scanpst is strictly better for format validation. |
 
 Cross-link: **0081** runbook depends on both the exit contract (0078) and this QC pack.
