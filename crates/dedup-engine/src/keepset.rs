@@ -804,7 +804,9 @@ pub struct SoftSkipAttachRecord {
 ///
 /// **0084:** attachment-table cloud/modern link-only attaches set `is_cloud_link`
 /// (and typically `stream_available=false`) so Mode A can prefer a physical peer.
-/// Body-only inline SharePoint URLs remain undetected (D-0084-body-cloud-links).
+/// **0085:** body-only document-shaped cloud URLs are ledged via
+/// `export_body_cloud_links.csv` but **must not** set this predicate (Mode A
+/// known gap — physical attach peer is not preferred over HTML-inline-only).
 pub fn is_attach_incomplete(msg: &CanonicalMessage) -> bool {
     if msg
         .attachments

@@ -109,8 +109,8 @@ Default keep-set grouping unites messages **across custodians** (global scope). 
 ### Honesty ceilings
 
 - **Cloud / modern attachment-table web-ref attaches (0084):** Offline-only — this tool does **not** download OneDrive/SharePoint file bytes. It **detects** attachment-table cloud/modern attaches (NPMAP `PidNameAttachmentProviderType` and/or non-portable/web-ref method + no payload), marks them **attach-incomplete** for Mode A, ledgers `ATTACH_CLOUD_LINK` with `cloud_provider` / `cloud_url` for native re-collection (e.g. Purview “Access links (cloud attachments)”), and **preserves pointer metadata** on the unique-PST when available so the deliverable is not a silent empty attach. Payload is never claimed preserved.
-- **Body-only / inline paste cloud links** (SharePoint/OneDrive URLs in HTML/plain body without a MAPI attachment-table row) are **not** classified as `ATTACH_CLOUD_LINK` (**D-0084-body-cloud-links**). Downstream review platforms or a future body-scan residual must handle those.
-- Mode A does **not** change grouping (who is a peer) — only which peer wins export after grouping. With 0084, Mode A can prefer a peer with **physical** attach bytes over a link-only winner in the same keep-set group. Future attach-byte identity (**D-0076-attach-content**) can fracture incomplete vs complete into different groups; Mode A cannot cross that split.
+- **Body-only / inline paste cloud links (0085):** document-shaped SharePoint/OneDrive URLs in HTML/plain body (no MAPI attachment-table row) are **detected offline** and ledged in **`export_body_cloud_links.csv`** (reason `BODY_CLOUD_LINK`) with full query string preserved for as-sent native re-collection. Count on `export_messages.body_cloud_link_count`. **Not** classified as `ATTACH_CLOUD_LINK` and **not** `is_attach_incomplete` — Mode A will **not** promote solely for body hits. **Known gap:** physical attach on a peer is preferred over attachment-table CloudLink incompleteness, but physical attach is **not** preferred over HTML-inline-only via Mode A. Document-shaped filter only (not bare intranet site roots; folder `:f:` excluded). Commercial host allowlist; sovereign-cloud host residual **D-0085-sovereign-cloud-hosts**. Caps (defaults): 100k body window / 2048 URL / 50 links. No hydration / no invented attach objects.
+- Mode A does **not** change grouping (who is a peer) — only which peer wins export after grouping. With 0084, Mode A can prefer a peer with **physical** attach bytes over a link-only (attachment-table) winner in the same keep-set group. Future attach-byte identity (**D-0076-attach-content**) can fracture incomplete vs complete into different groups; Mode A cannot cross that split.
 - Peer order is existing keep-set `rank_key` only — **no** “least incomplete” re-rank.
 
 ```powershell
@@ -261,8 +261,9 @@ Typical `--report-dir` contents:
 
 | Artifact | Role |
 |---|---|
-| `summary.json` | `unique_export_report_v1` — fidelity, exit, `export_risk`, `phase_timings`, digests, `retryable`, `bcc_suppressed_message_count`, `sent_message_with_no_recipients_count` |
-| `export_messages.csv` | Winner → volume crosswalk (mandatory when messages written); includes `bcc_suppressed` (**0082**) |
+| `summary.json` | `unique_export_report_v1` — fidelity, exit, `export_risk`, `phase_timings`, digests, `retryable`, `bcc_suppressed_message_count`, body-cloud counters (**0085**) |
+| `export_messages.csv` | Winner → volume crosswalk (mandatory when messages written); includes `bcc_suppressed` (**0082**), `body_cloud_link_count` (**0085**) |
+| `export_body_cloud_links.csv` | Body-inline document-shaped cloud URL hit-list (**0085**; always when report pack written) |
 | `export_attachments.csv` | Attach failure ledger when `--attach-ledger=full` |
 | `volumes.csv` | Per-volume path/bytes/hashes |
 | `decisions.csv` / `keepset.json` | Keep-set provenance |
@@ -278,8 +279,8 @@ Typical `--report-dir` contents:
 ```
 
 - Default is **`full`** (absolute/workstation paths in CSV `source_path` columns).  
-- **`basename`** rewrites path columns in **both** `export_messages.csv` and `export_attachments.csv` for handoff copies.  
-- **`source_id` remains the join key** and is never basenamed away (present on both `export_messages.csv` and `export_attachments.csv`).  
+- **`basename`** rewrites path columns in **`export_messages.csv`**, **`export_attachments.csv`**, and **`export_body_cloud_links.csv`** for handoff copies.  
+- **`source_id` remains the join key** and is never basenamed away (present on messages, attachments, and body-cloud link CSVs).  
 - **Basename is not full de-identification** — custodian filenames and subjects remain.
 
 **Mandatory when using basename:** retain a non-produced **Matter Archive** mapping:

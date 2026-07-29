@@ -195,8 +195,9 @@ After 0073–0081, the highest-value deferred cluster is **structured MAPI recip
 | [0082-RecipientTableFidelity](0082-RecipientTableFidelity/spec.md) | **Completed** | Read/write recipient TC (MS-PST MUST `0x692`); SMTP+EX Tier-2.5 identity; BCC write opt-in + `bcc_suppressed`; `retryable` summary; closes D-0080/D-0076 recip + D-0078-retryable; Codex luna PASS |
 | [0083-PromoteOnAttachFail](0083-PromoteOnAttachFail/spec.md) | **Completed** | Mode A pre-write promote (`--promote-on-attach-fail`); Mode C default; Mode B declined; closes **D-0073-promote**; `winner_promoted` honesty; Codex luna PASS |
 | [0084-NamedPropCloudAttach](0084-NamedPropCloudAttach/spec.md) | **Completed** | MS-PST NPMAP (`0x61`) resolve + **attachment-table** cloud detect; `ATTACH_CLOUD_LINK` + ledger `cloud_url`/`cloud_provider`; pointer preserve (anti-ghost); Mode A incomplete; closes **D-0080** detect≠hydrate; residual body-inline links; Codex luna PASS |
+| [0085-BodyCloudLinks](0085-BodyCloudLinks/spec.md) | **Completed** | Body-inline **document-shaped** SharePoint/OneDrive URL scan (`:w:/:x:/:p:…`); `export_body_cloud_links.csv` (query preserved); closes **D-0084-body-cloud-links**; Mode A non-interaction + known gap; sovereign residual **D-0085-sovereign-cloud-hosts**; Codex luna PASS WITH DEFERRED P3 |
 
-**Suggested order:** 0082–0084 Completed. Later Series M residuals: D-0084-body-cloud-links, D-0076-attach-content, D-0079-deterministic-key (product), D-0073-eml full ledger, D-0084-cloud-named-prop-write.
+**Suggested order:** 0082–0085 Completed. Later Series M residuals: D-0076-attach-content, D-0079-deterministic-key (product), D-0073-eml full ledger, D-0084-cloud-named-prop-write, D-0085-sovereign-cloud-hosts.
 
 ## Notes
 

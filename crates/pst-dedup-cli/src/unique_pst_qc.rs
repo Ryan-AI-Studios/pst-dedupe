@@ -2661,6 +2661,8 @@ fn load_export_rows_for_qc(report_dir: &Path) -> Result<Vec<ExportMessageRow>, S
     let i_source_id = col("source_id");
     // 0082: optional bcc_suppressed column.
     let i_bcc = col("bcc_suppressed");
+    // 0085: optional body_cloud_link_count column.
+    let i_body_cloud = col("body_cloud_link_count");
     let mut rows = Vec::new();
     let mut seen_idx: BTreeSet<u64> = BTreeSet::new();
     for (i, rec) in rdr.records().enumerate() {
@@ -2742,6 +2744,10 @@ fn load_export_rows_for_qc(report_dir: &Path) -> Result<Vec<ExportMessageRow>, S
                     t == "true" || t == "1"
                 })
                 .unwrap_or(false),
+            body_cloud_link_count: i_body_cloud
+                .and_then(|idx| rec.get(idx))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
             subject: String::new(),
         });
     }
@@ -3065,6 +3071,7 @@ mod tests {
             duplicate_sources: String::new(),
             source_id: String::new(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: "s".into(),
         }];
         let contract = FidelityContract::v1();
@@ -3107,6 +3114,7 @@ mod tests {
                 duplicate_sources: String::new(),
                 source_id: String::new(),
                 bcc_suppressed: false,
+                body_cloud_link_count: 0,
                 subject: "s1".into(),
             },
             // Orphan: volume_index 99 not declared — per-vol1 count still matches (=1).
@@ -3125,6 +3133,7 @@ mod tests {
                 duplicate_sources: String::new(),
                 source_id: String::new(),
                 bcc_suppressed: false,
+                body_cloud_link_count: 0,
                 subject: "s2".into(),
             },
         ];

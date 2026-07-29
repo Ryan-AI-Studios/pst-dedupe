@@ -60,6 +60,7 @@ shape above without regressing XBLOCK bodies, IPM special folders, or safety.
 | **Embedded (`ATTACH_EMBEDDED_MSG` = 5)** | Nested message PC under attach **subnode** when `WriteAttachment.embedded_message` present; method=5; size reflects nested; **never** invent by-value file bytes. `open_attachment_data` binary path does **not** apply (no `PidTagAttachDataBinary`). Missing nested → `embedded_unparsed++` + `attachments_failed++` + fidelity event. |
 | **Depth cap** | `max_embedded_depth` default **3**, clamp `[1, 8]`. Deeper branches halt; `embedded_depth_limit_hits++` + fidelity event (DoD-8 surface — not a MAPI property on the item). |
 | **CloudLink (classified)** | Write **metadata/pointer row** (classic tags: method, long pathname/URL when known, filename when known — **no invented name**, **no** `PidTagAttachDataBinary`). Emit fail-severity `ATTACH_CLOUD_LINK` (payload not collected offline). Full named-prop re-emit residual: **D-0084-cloud-named-prop-write**. Network hydration never. |
+| **Body-inline cloud URLs (0085)** | **Not** an Attachment Table fidelity surface. unique-pst report pack detects document-shaped body URLs offline (`export_body_cloud_links.csv`); does **not** invent attach rows or change writer attach behavior. |
 | **Non-cloud OLE / ref methods** | Still **omit** + fail `ATTACH_METHOD_UNSUPPORTED` (method ∉ {1, 5} and not CloudLink-classified). |
 
 `from_canonical_message` **maps** `CanonicalAttachment` metadata (and small `data`

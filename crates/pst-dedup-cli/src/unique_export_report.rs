@@ -24,8 +24,8 @@ use crate::export_outcome::{ArtifactState, ExportFidelity};
 /// Schema id for the unique-export summary JSON.
 pub const UNIQUE_EXPORT_REPORT_SCHEMA: &str = "unique_export_report_v1";
 
-/// Fixed header for mandatory `export_messages.csv` (prefix locked; 0073/0075/0081 append).
-pub const EXPORT_MESSAGES_CSV_HEADER: &str = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources,source_id,bcc_suppressed";
+/// Fixed header for mandatory `export_messages.csv` (prefix locked; 0073/0075/0081/0082/0085 append).
+pub const EXPORT_MESSAGES_CSV_HEADER: &str = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources,source_id,bcc_suppressed,body_cloud_link_count";
 
 /// Pre-0075 export_messages header prefix (10 columns).
 pub const EXPORT_MESSAGES_CSV_HEADER_V1: &str = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count";
@@ -39,6 +39,17 @@ pub const EXPORT_ATTACHMENTS_CSV_HEADER: &str = "source_id,source_path,folder_pa
 
 /// On-disk name for the attach failure ledger.
 pub const EXPORT_ATTACHMENTS_CSV_NAME: &str = "export_attachments.csv";
+
+/// Fixed header for `export_body_cloud_links.csv` (track 0085).
+pub const EXPORT_BODY_CLOUD_LINKS_CSV_HEADER: &str = "source_id,source_path,folder_path,msg_nid,link_index,cloud_url,url_source,truncated,message_subject,reason";
+
+/// On-disk name for the body-inline cloud link hit-list (0085).
+pub const EXPORT_BODY_CLOUD_LINKS_CSV_NAME: &str = "export_body_cloud_links.csv";
+
+/// Row kind for a kept document-shaped body cloud URL (0085).
+pub const REASON_BODY_CLOUD_LINK: &str = "BODY_CLOUD_LINK";
+/// Message-level marker when body scan caps drop additional candidates (0085).
+pub const REASON_BODY_CLOUD_LINK_TRUNCATED: &str = "BODY_CLOUD_LINK_TRUNCATED";
 
 /// Default CSV row cap (fail + info rows that would be written).
 pub const DEFAULT_ATTACH_LEDGER_MAX_ROWS: u64 = 500_000;
@@ -184,6 +195,8 @@ pub struct ExportMessageRow {
     /// True when source had BCC (table Bcc row or non-empty display_bcc) and the
     /// write path omitted them (`include_bcc_recipients == false`) — 0082 rule 7.
     pub bcc_suppressed: bool,
+    /// Document-shaped body cloud link hits kept for this message (0085; not attach-incomplete).
+    pub body_cloud_link_count: u64,
     /// In-memory only: used for sample verification when MID is empty.
     /// Not written to `export_messages.csv` (header locked).
     #[serde(skip)]
@@ -576,6 +589,15 @@ pub struct UniqueExportSummary {
     /// Mode A all-peers-incomplete Mode C fallback count (0083).
     #[serde(default)]
     pub mode_c_fallback_all_peers_incomplete_count: u64,
+    /// Messages with ≥1 kept body-inline document-shaped cloud link (0085).
+    #[serde(default)]
+    pub messages_with_body_cloud_links: u64,
+    /// Total kept body-inline cloud link hits across written winners (0085).
+    #[serde(default)]
+    pub body_cloud_links_total: u64,
+    /// Messages where body scan caps truncated additional candidates (0085).
+    #[serde(default)]
+    pub body_cloud_link_truncated_messages: u64,
 }
 
 /// Structured error on the summary / JSON stdout.
@@ -1228,6 +1250,114 @@ impl AttachLedgerFinish {
     }
 }
 
+/// One body-inline cloud link ledger row (0085).
+#[derive(Debug, Clone)]
+pub struct BodyCloudLinkRow {
+    pub source_id: String,
+    pub source_path: String,
+    pub folder_path: String,
+    pub msg_nid: u64,
+    pub link_index: u32,
+    pub cloud_url: String,
+    pub url_source: String,
+    pub truncated: bool,
+    pub message_subject: String,
+    pub reason: String,
+}
+
+impl BodyCloudLinkRow {
+    /// Format one CSV data line.
+    pub fn to_csv_line(&self) -> String {
+        format!(
+            "{},{},{},{},{},{},{},{},{},{}",
+            csv_escape_cell(&self.source_id),
+            csv_escape_cell(&self.source_path),
+            csv_escape_cell(&self.folder_path),
+            self.msg_nid,
+            self.link_index,
+            csv_escape_cell(&self.cloud_url),
+            csv_escape_cell(&self.url_source),
+            if self.truncated { "true" } else { "false" },
+            csv_escape_cell(&self.message_subject),
+            csv_escape_cell(&self.reason),
+        )
+    }
+
+    /// Message-level truncation marker when caps drop additional candidates.
+    pub fn truncated_marker(
+        source_id: String,
+        source_path: String,
+        folder_path: String,
+        msg_nid: u64,
+        message_subject: String,
+    ) -> Self {
+        Self {
+            source_id,
+            source_path,
+            folder_path,
+            msg_nid,
+            link_index: 0,
+            cloud_url: String::new(),
+            url_source: String::new(),
+            truncated: true,
+            message_subject,
+            reason: REASON_BODY_CLOUD_LINK_TRUNCATED.into(),
+        }
+    }
+}
+
+/// Write `export_body_cloud_links.csv` (always when report pack is written; 0085).
+///
+/// `path_mode` formats the `source_path` column only.
+pub fn write_body_cloud_links_csv(
+    path: &Path,
+    rows: &[BodyCloudLinkRow],
+    path_mode: LedgerPathMode,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            CliError::Msg(format!(
+                "create export_body_cloud_links parent {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    let f = File::create(path).map_err(|e| CliError::CsvWrite {
+        path: path.to_path_buf(),
+        source: Box::new(e),
+    })?;
+    let mut w = BufWriter::new(f);
+    writeln!(w, "{EXPORT_BODY_CLOUD_LINKS_CSV_HEADER}").map_err(|e| CliError::CsvWrite {
+        path: path.to_path_buf(),
+        source: Box::new(e),
+    })?;
+    for r in rows {
+        let source_path = format_ledger_source_path(&r.source_path, path_mode);
+        let line = format!(
+            "{},{},{},{},{},{},{},{},{},{}",
+            csv_escape_cell(&r.source_id),
+            csv_escape_cell(&source_path),
+            csv_escape_cell(&r.folder_path),
+            r.msg_nid,
+            r.link_index,
+            csv_escape_cell(&r.cloud_url),
+            csv_escape_cell(&r.url_source),
+            if r.truncated { "true" } else { "false" },
+            csv_escape_cell(&r.message_subject),
+            csv_escape_cell(&r.reason),
+        );
+        writeln!(w, "{line}").map_err(|e| CliError::CsvWrite {
+            path: path.to_path_buf(),
+            source: Box::new(e),
+        })?;
+    }
+    w.flush().map_err(|e| CliError::CsvWrite {
+        path: path.to_path_buf(),
+        source: Box::new(e),
+    })?;
+    Ok(())
+}
+
 /// Write mandatory `export_messages.csv`.
 ///
 /// `path_mode` formats the `source_path` column only at serialization time.
@@ -1259,7 +1389,7 @@ pub fn write_export_messages_csv(
         let source_path = format_ledger_source_path(&r.source_path, path_mode);
         writeln!(
             w,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             csv_escape_cell(&source_path),
             csv_escape_cell(&r.folder_path),
             r.nid,
@@ -1274,6 +1404,7 @@ pub fn write_export_messages_csv(
             csv_escape_cell(&r.duplicate_sources),
             csv_escape_cell(&r.source_id),
             if r.bcc_suppressed { "true" } else { "false" },
+            r.body_cloud_link_count,
         )
         .map_err(|e| CliError::CsvWrite {
             path: path.to_path_buf(),
@@ -1426,8 +1557,12 @@ mod tests {
             "source_id must remain after locked prefix; got {EXPORT_MESSAGES_CSV_HEADER}"
         );
         assert!(
-            EXPORT_MESSAGES_CSV_HEADER.ends_with(",bcc_suppressed"),
-            "bcc_suppressed must be trailing append; got {EXPORT_MESSAGES_CSV_HEADER}"
+            EXPORT_MESSAGES_CSV_HEADER.ends_with(",body_cloud_link_count"),
+            "body_cloud_link_count must be trailing append; got {EXPORT_MESSAGES_CSV_HEADER}"
+        );
+        assert!(
+            EXPORT_MESSAGES_CSV_HEADER.contains(",bcc_suppressed,body_cloud_link_count"),
+            "0085 append must follow bcc_suppressed: {EXPORT_MESSAGES_CSV_HEADER}"
         );
     }
 
@@ -1451,6 +1586,7 @@ mod tests {
             duplicate_sources: joined.clone(),
             source_id: "0".into(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: String::new(),
         };
         assert_eq!(row.duplicate_source_count, dup_count);
@@ -1604,6 +1740,7 @@ mod tests {
             duplicate_sources: String::new(),
             source_id: "0".into(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: String::new(),
         };
         let dir = tempfile::tempdir().expect("tmp");
@@ -1621,8 +1758,8 @@ mod tests {
             "absolute path must not appear in CSV under basename mode; row={data}"
         );
         assert!(
-            data.contains(",0,false") || data.ends_with(",0,false"),
-            "source_id column must be present; row={data}"
+            data.contains(",0,false,0") || data.ends_with(",0,false,0"),
+            "source_id + bcc + body_cloud_link_count columns must be present; row={data}"
         );
         // Full mode retains absolute path.
         write_export_messages_csv(&path, std::slice::from_ref(&row), LedgerPathMode::Full)
@@ -1654,6 +1791,7 @@ mod tests {
             duplicate_sources: String::new(),
             source_id: "0".into(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: String::new(),
         };
         let row_b = ExportMessageRow {
@@ -1671,6 +1809,7 @@ mod tests {
             duplicate_sources: String::new(),
             source_id: "1".into(),
             bcc_suppressed: false,
+            body_cloud_link_count: 0,
             subject: String::new(),
         };
         let dir = tempfile::tempdir().expect("tmp");
@@ -1680,7 +1819,7 @@ mod tests {
         let mut lines = text.lines();
         let header = lines.next().expect("header");
         assert_eq!(header, EXPORT_MESSAGES_CSV_HEADER);
-        assert!(header.ends_with(",bcc_suppressed"));
+        assert!(header.ends_with(",body_cloud_link_count"));
         let data_a = lines.next().expect("row a");
         let data_b = lines.next().expect("row b");
         assert!(
@@ -1695,13 +1834,13 @@ mod tests {
             !data_a.contains(r"C:\evidence") && !data_b.contains(r"D:\other"),
             "absolute paths must not appear under basename; a={data_a} b={data_b}"
         );
-        // source_id disambiguates same basename (penultimate before bcc_suppressed).
+        // source_id disambiguates same basename (before bcc_suppressed + body_cloud_link_count).
         assert!(
-            data_a.contains(",0,false") || data_a.ends_with(",0,false"),
+            data_a.contains(",0,false,0") || data_a.ends_with(",0,false,0"),
             "row a source_id=0; got {data_a}"
         );
         assert!(
-            data_b.contains(",1,false") || data_b.ends_with(",1,false"),
+            data_b.contains(",1,false,0") || data_b.ends_with(",1,false,0"),
             "row b source_id=1; got {data_b}"
         );
         // Resolve helper matches AttachLedgerSink honesty.
@@ -2229,6 +2368,7 @@ mod tests {
             duplicate_sources: String::new(),
             source_id: "0".into(),
             bcc_suppressed: true,
+            body_cloud_link_count: 0,
             subject: String::new(),
         };
         let row_false = ExportMessageRow {
@@ -2242,9 +2382,51 @@ mod tests {
         write_export_messages_csv(&path, &[row_true, row_false], LedgerPathMode::Full)
             .expect("write");
         let text = std::fs::read_to_string(&path).expect("read");
-        assert!(text.lines().next().unwrap().ends_with(",bcc_suppressed"));
+        assert!(text
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with(",body_cloud_link_count"));
         let lines: Vec<_> = text.lines().skip(1).collect();
-        assert!(lines[0].ends_with(",true"), "row0={}", lines[0]);
-        assert!(lines[1].ends_with(",false"), "row1={}", lines[1]);
+        assert!(lines[0].ends_with(",true,0"), "row0={}", lines[0]);
+        assert!(lines[1].ends_with(",false,0"), "row1={}", lines[1]);
+    }
+
+    #[test]
+    fn export_body_cloud_links_header_locked() {
+        assert!(
+            EXPORT_BODY_CLOUD_LINKS_CSV_HEADER.starts_with("source_id,source_path,"),
+            "{EXPORT_BODY_CLOUD_LINKS_CSV_HEADER}"
+        );
+        assert!(EXPORT_BODY_CLOUD_LINKS_CSV_HEADER.contains("cloud_url"));
+        assert!(EXPORT_BODY_CLOUD_LINKS_CSV_HEADER.contains("url_source"));
+        assert!(EXPORT_BODY_CLOUD_LINKS_CSV_HEADER.ends_with(",reason"));
+    }
+
+    #[test]
+    fn body_cloud_link_csv_injection_neutralized_without_rewrite() {
+        let dangerous = "https://contoso.sharepoint.com/:x:/s/L/=cmd.xlsx?d=1";
+        // Formula-dangerous leading char is not typical for https URLs; test + prefix case.
+        let formula_url = "+https://contoso.sharepoint.com/:x:/s/L/a.xlsx";
+        let row = BodyCloudLinkRow {
+            source_id: "0".into(),
+            source_path: r"C:\a.pst".into(),
+            folder_path: "Inbox".into(),
+            msg_nid: 1,
+            link_index: 0,
+            cloud_url: formula_url.into(),
+            url_source: "html_href".into(),
+            truncated: false,
+            message_subject: "subj".into(),
+            reason: REASON_BODY_CLOUD_LINK.into(),
+        };
+        let line = row.to_csv_line();
+        assert!(
+            line.contains("'+https://") || line.contains("\"'+https://"),
+            "formula-leading URL must be neutralized: {line}"
+        );
+        // Structure of the URL path/query must remain after the leading quote.
+        assert!(line.contains("sharepoint.com/:x:/s/L/a.xlsx"));
+        let _ = dangerous;
     }
 }

@@ -2055,6 +2055,7 @@ fn unique_pst_mode_a_promote_qc_sample_keys_final_winner() {
         duplicate_sources: "aaa_incomplete.pst".into(),
         source_id: "1".into(),
         bcc_suppressed: false,
+        body_cloud_link_count: 0,
         subject: "FINAL_WINNER".into(),
     }];
     let cand_final = QcSampleCandidate {
@@ -2137,6 +2138,7 @@ fn unique_pst_mode_a_promote_qc_sample_keys_final_winner() {
         duplicate_sources: String::new(),
         source_id: "0".into(),
         bcc_suppressed: false,
+        body_cloud_link_count: 0,
         subject: "PRE_PROMOTE".into(),
     }];
     let cand_wrong = QcSampleCandidate {
@@ -2187,5 +2189,263 @@ fn unique_pst_mode_a_promote_qc_sample_keys_final_winner() {
             || qc_wrong.findings.unexplained_loss > 0,
         "QC vs pre-promote incomplete locus must hard-find (locus sensitivity); findings={:?}",
         qc_wrong.findings
+    );
+}
+
+// ── 0085 body-inline cloud link detect ──────────────────────────────────────
+
+/// Synthetic unique-pst: HTML body with document-shaped SharePoint URL (+ query)
+/// → export_body_cloud_links.csv + messages body_cloud_link_count; attach-complete.
+#[test]
+fn body_cloud_links_unique_pst_csv_and_count() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src_body_cloud.pst");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+
+    let cloud_url =
+        "https://contoso.sharepoint.com/:x:/s/Legal/Shared%20Documents/exhibit.xlsx?d=wABC&csf=1";
+    let html = format!(r#"<html><body><p>See <a href="{cloud_url}">exhibit</a></p></body></html>"#);
+    let msg = WriteMessage {
+        message_id: Some("<body-cloud-0085@ex.com>".into()),
+        subject: "Body cloud link".into(),
+        sender: Some("alice@example.com".into()),
+        display_to: Some("bob@example.com".into()),
+        // Put URL in plain as well so scan hits even if HTML props are soft-missing.
+        body_plain: Some(format!("See exhibit {cloud_url}")),
+        body_html: Some(html.into_bytes()),
+        source_folder_path: Some("Inbox".into()),
+        ..WriteMessage::default()
+    };
+    write_unicode_pst(&src, vec![msg], &[], &WritePstOpts::default()).expect("write src");
+
+    // Prove reader+scanner see the URL on the synthetic source before unique-pst.
+    {
+        let mut pst = pst_reader::PstFile::open(&src).expect("open src");
+        let folders = pst.folders().expect("folders");
+        let nid = folders
+            .iter()
+            .flat_map(|f| f.message_nids.iter().copied())
+            .next()
+            .expect("nid");
+        let ex = pst.read_message_extract(nid).expect("extract");
+        let pre =
+            dedup_engine::scan_body_cloud_links(ex.body_html.as_deref(), ex.body_text.as_deref());
+        assert!(
+            !pre.hits.is_empty(),
+            "precondition: source body must scan to ≥1 hit; plain={:?} html={:?}",
+            ex.body_text,
+            ex.body_html
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+        );
+    }
+
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            src.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--json",
+            "--no-attachments",
+            "--qc-level",
+            "off",
+        ])
+        .output()
+        .expect("run unique-pst");
+    assert!(
+        result.status.success(),
+        "exit={} stderr={} stdout={}",
+        result.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("json");
+    assert_eq!(v["ok"], true, "stdout={}", result.status);
+    let body_csv_dbg = report
+        .join("export_body_cloud_links.csv")
+        .exists()
+        .then(|| fs::read_to_string(report.join("export_body_cloud_links.csv")).ok())
+        .flatten()
+        .unwrap_or_default();
+    assert_eq!(
+        v["body_cloud_links_total"].as_u64().unwrap_or(0),
+        1,
+        "summary body_cloud_links_total; keys={:?}; body_csv={body_csv_dbg}; stdout={}",
+        v.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()),
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert_eq!(v["messages_with_body_cloud_links"].as_u64().unwrap_or(0), 1);
+    assert_eq!(
+        v["body_cloud_link_truncated_messages"]
+            .as_u64()
+            .unwrap_or(999),
+        0
+    );
+    // Body-only must not force exit 64 / attach fails.
+    assert_eq!(v["export"]["attachments_failed"].as_u64().unwrap_or(999), 0);
+
+    let body_csv_path = report.join("export_body_cloud_links.csv");
+    assert!(
+        body_csv_path.is_file(),
+        "export_body_cloud_links.csv required"
+    );
+    let body_csv = fs::read_to_string(&body_csv_path).expect("body csv");
+    assert!(
+        body_csv.contains("cloud_url") && body_csv.contains("BODY_CLOUD_LINK"),
+        "header/reason missing: {body_csv}"
+    );
+    assert!(
+        body_csv.contains("exhibit.xlsx") && body_csv.contains("d=wABC"),
+        "full query must be preserved: {body_csv}"
+    );
+    assert!(
+        body_csv.contains("html_href") || body_csv.contains("safelinks"),
+        "url_source: {body_csv}"
+    );
+
+    let msg_csv = fs::read_to_string(report.join("export_messages.csv")).expect("messages");
+    assert!(
+        msg_csv.contains("body_cloud_link_count"),
+        "messages header must append body_cloud_link_count: {msg_csv}"
+    );
+    let data = msg_csv.lines().nth(1).expect("data row");
+    assert!(
+        data.ends_with(",1") || data.contains(",1\n") || data.ends_with(",1\r"),
+        "body_cloud_link_count must be 1; row={data}"
+    );
+
+    // No invented attach rows from body URLs.
+    let attach_csv = report.join("export_attachments.csv");
+    if attach_csv.is_file() {
+        let att = fs::read_to_string(&attach_csv).expect("att");
+        assert!(
+            !att.contains("BODY_CLOUD_LINK"),
+            "body hits must not invent attach ledger rows"
+        );
+    }
+}
+
+/// Body-only document-shaped cloud URL must not set attach-incomplete / Mode A promote.
+#[test]
+fn body_cloud_only_not_attach_incomplete_mode_a() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src_body_only.pst");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+
+    let cloud_url = "https://contoso.sharepoint.com/:w:/s/Legal/memo.docx?d=xyz";
+    let html = format!(r#"<html><a href="{cloud_url}">memo</a></html>"#);
+    // True body-only: zero Attachment Table rows + HTML cloud link. Mode A must not
+    // treat this as attach-incomplete (would soft-skip / invent promote pressure).
+    let msg = WriteMessage {
+        message_id: Some("<body-only-mode-a@ex.com>".into()),
+        subject: "Body only cloud".into(),
+        sender: Some("alice@example.com".into()),
+        display_to: Some("bob@example.com".into()),
+        body_plain: Some(format!("memo {cloud_url}")),
+        body_html: Some(html.into_bytes()),
+        source_folder_path: Some("Inbox".into()),
+        attachments: vec![],
+        ..WriteMessage::default()
+    };
+    write_unicode_pst(&src, vec![msg], &[], &WritePstOpts::default()).expect("write src");
+
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            src.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--json",
+            "--promote-on-attach-fail",
+            "--qc-level",
+            "off",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        result.status.success(),
+        "body-only must not fail export; stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("json");
+    assert_eq!(v["ok"], true);
+    assert!(
+        v["body_cloud_links_total"].as_u64().unwrap_or(0) >= 1,
+        "body link must still be detected"
+    );
+    assert_eq!(
+        v["promoted_after_attach_incomplete_count"]
+            .as_u64()
+            .unwrap_or(999),
+        0,
+        "body-only must not drive Mode A promote"
+    );
+    assert_eq!(
+        v["export"]["attachments_failed"].as_u64().unwrap_or(999),
+        0,
+        "body-only must not count as attach fail"
+    );
+    // Exit 64 is attach-fail class; body-only must remain success (exit 0).
+    assert_eq!(v["exit_code"].as_u64().unwrap_or(999), 0);
+
+    let msg_csv = fs::read_to_string(report.join("export_messages.csv")).expect("messages");
+    let data = msg_csv.lines().nth(1).expect("row");
+    // attachments_failed_count is column index 9 (0-based) — value 0 for complete attach.
+    assert!(
+        data.contains(",0,"),
+        "attachments_failed_count should be 0; row={data}"
+    );
+}
+
+#[test]
+fn is_attach_incomplete_ignores_body_cloud_urls() {
+    // Unit-level: body URL with **zero** Attachment Table rows is still attach-complete
+    // (incomplete is attach-table stream/cloud only — 0085 Mode A non-interaction).
+    use dedup_engine::integrity::RecoverableIntegrity;
+    use dedup_engine::{is_attach_incomplete, CanonicalMessage, MessageLocus};
+
+    let html = br#"<a href="https://contoso.sharepoint.com/:x:/s/L/a.xlsx">x</a>"#;
+    let msg = CanonicalMessage {
+        locus: MessageLocus {
+            source_path: "t.pst".into(),
+            source_pst: "t.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 0x2001,
+            is_orphaned: false,
+        },
+        message_id: Some("<m@x>".into()),
+        subject: Some("s".into()),
+        sender: Some("a@x".into()),
+        display_to: None,
+        display_cc: None,
+        display_bcc: None,
+        recipients: vec![],
+        message_flags: None,
+        submit_time: None,
+        size: None,
+        message_class: None,
+        body_plain: Some("plain".into()),
+        body_html: Some(html.to_vec()),
+        attachments: vec![],
+        fidelity: RecoverableIntegrity::clean(),
+        message_id_norm: Some("m@x".into()),
+        content_hash: [0u8; 32],
+        edrm_mih_hex: None,
+        body_incomplete: false,
+        body_unavailable: false,
+    };
+    assert!(
+        !is_attach_incomplete(&msg),
+        "body cloud URL alone must not mark attach-incomplete"
     );
 }
