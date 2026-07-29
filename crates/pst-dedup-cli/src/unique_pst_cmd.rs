@@ -22,9 +22,9 @@ use dedup_engine::integrity::{
     SCAN_INTEGRITY_SCHEMA,
 };
 use dedup_engine::keepset::{
-    finalize_with_materialize, recoverable_items_hint, resolve_groups_with_grouping,
+    finalize_with_materialize_opts, recoverable_items_hint, resolve_groups_with_grouping,
     sort_input_paths, write_keep_set_json, DecisionCsvWriter, FamilyPolicy, KeepPolicy, KeepSet,
-    KeepSetProvenance, KeepSetStats, KEEP_SET_SCHEMA,
+    KeepSetProvenance, KeepSetStats, MaterializeFinalizeOpts, KEEP_SET_SCHEMA,
 };
 use pst_reader::PstFile;
 use pst_writer::{
@@ -251,6 +251,13 @@ pub struct UniquePstClapArgs {
     /// the source table is present.
     #[arg(long = "include-bcc-recipients", action = clap::ArgAction::SetTrue)]
     pub include_bcc_recipients: bool,
+    /// Mode A pre-write promote when keep-set winner materializes with incomplete
+    /// attachments and a ranked peer is complete (0083). Default **off** (Mode C
+    /// ledger-only). Write-time mid-message promote (Mode B) is not supported.
+    /// Under default global dedupe scope this may select another custodian's complete
+    /// copy (cross-custodian de-duplication); see the eDiscovery runbook.
+    #[arg(long = "promote-on-attach-fail", action = clap::ArgAction::SetTrue)]
+    pub promote_on_attach_fail: bool,
 }
 
 /// Runtime options for `unique-pst` orchestration.
@@ -330,6 +337,8 @@ pub struct UniquePstCliArgs {
     pub qc_scanpst: bool,
     /// Write Bcc rows + PidTagDisplayBcc (0082). Default false.
     pub include_bcc_recipients: bool,
+    /// Mode A pre-write promote-on-attach-fail (0083). Default false.
+    pub promote_on_attach_fail: bool,
 }
 
 /// Run options / hooks for GUI and library callers (0072).
@@ -506,6 +515,7 @@ impl UniquePstClapArgs {
             qc_external_reader: self.qc_external_reader,
             qc_scanpst: self.qc_scanpst,
             include_bcc_recipients: self.include_bcc_recipients,
+            promote_on_attach_fail: self.promote_on_attach_fail,
         })
     }
 }
@@ -871,6 +881,8 @@ struct CancelledSummaryCtx<'a> {
     source_pst_opens: u64,
     messages_materialized: u64,
     artifact_state: crate::export_outcome::ArtifactState,
+    /// Operator-requested Mode A flag (echo into cancelled summary; 0083).
+    promote_on_attach_fail: bool,
 }
 
 /// Quarantine written volumes after cancel: rename each volume to
@@ -1146,6 +1158,9 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
         sent_message_with_no_recipients_count: 0,
         // Cancel is a retryable class (0082 D-0078-retryable).
         retryable: true,
+        promote_on_attach_fail: ctx.promote_on_attach_fail,
+        promoted_after_attach_incomplete_count: 0,
+        mode_c_fallback_all_peers_incomplete_count: 0,
     };
     if let Err(e) = write_summary_json(ctx.summary_path, &summary) {
         tracing::warn!(
@@ -1349,6 +1364,7 @@ pub fn run_unique_pst_with_options(
             source_pst_opens,
             messages_materialized,
             artifact_state,
+            promote_on_attach_fail: args.promote_on_attach_fail,
         });
         return Ok(cancelled_outcome(
             report_dir,
@@ -1523,6 +1539,7 @@ pub fn run_unique_pst_with_options(
                 source_pst_opens,
                 messages_materialized,
                 artifact_state,
+                promote_on_attach_fail: args.promote_on_attach_fail,
             });
             return Ok(cancelled_outcome(
                 report_dir,
@@ -1598,6 +1615,7 @@ pub fn run_unique_pst_with_options(
                 source_pst_opens,
                 messages_materialized,
                 artifact_state,
+                promote_on_attach_fail: args.promote_on_attach_fail,
             });
             return Ok(cancelled_outcome(
                 report_dir,
@@ -1845,17 +1863,21 @@ pub fn run_unique_pst_with_options(
     // Keyed by (source_path, nid); write order still follows keep_set.winners (item index).
     let mut prepared_by_locus: HashMap<(String, u64), PreparedWinner> = HashMap::new();
     let t_materialize = Instant::now();
-    let materialized_count = finalize_with_materialize(&mut resolved, &mut mat, &mut |msg| {
-        let key = (msg.locus.source_path.clone(), msg.locus.nid);
-        match prepared_winner_from_canonical(msg) {
-            Ok(p) => {
-                prepared_by_locus.insert(key, p);
-                Ok(())
+    let mat_opts = MaterializeFinalizeOpts {
+        promote_on_attach_fail: args.promote_on_attach_fail,
+    };
+    let materialized_count =
+        finalize_with_materialize_opts(&mut resolved, &mut mat, &mat_opts, &mut |msg| {
+            let key = (msg.locus.source_path.clone(), msg.locus.nid);
+            match prepared_winner_from_canonical(msg) {
+                Ok(p) => {
+                    prepared_by_locus.insert(key, p);
+                    Ok(())
+                }
+                Err(e) => Err(dedup_engine::keepset::KeepSetError::Other(e)),
             }
-            Err(e) => Err(dedup_engine::keepset::KeepSetError::Other(e)),
-        }
-    })
-    .map_err(|e| CliError::Msg(format!("materialize/promote: {e}")))?;
+        })
+        .map_err(|e| CliError::Msg(format!("materialize/promote: {e}")))?;
     phase_timings.materialize_ms = t_materialize.elapsed().as_millis() as u64;
     messages_materialized = mat.messages_materialized();
     // finalize count and materializer counter should agree.
@@ -2050,6 +2072,54 @@ pub fn run_unique_pst_with_options(
             None
         }
     };
+
+    // 0083 Mode A honesty: mark promoted winners + emit soft-skip incomplete rows.
+    if let Some(ledger) = attach_ledger.as_mut() {
+        for w in &keep_set.winners {
+            if w.promoted_from_failure {
+                ledger.mark_promoted_winner(&w.locus.source_path, w.locus.nid);
+            }
+        }
+        for rec in &resolved.soft_skip_attach_records {
+            let source_id = crate::unique_export_report::resolve_input_source_id(
+                &rec.source_path,
+                &input_path_strings,
+            );
+            let peer_source_id = crate::unique_export_report::resolve_input_source_id(
+                &rec.peer_source_path,
+                &input_path_strings,
+            )
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+            let row = crate::unique_export_report::AttachLedgerRow {
+                source_id: source_id.map(|id| id.to_string()).unwrap_or_default(),
+                source_path: crate::unique_export_report::format_ledger_source_path(
+                    &rec.source_path,
+                    args.ledger_path_mode,
+                ),
+                folder_path: rec.folder_path.clone(),
+                msg_nid: rec.msg_nid,
+                attach_nid: rec.attach_nid.map(|n| n.to_string()).unwrap_or_default(),
+                attach_index: rec.attach_index,
+                filename: rec.filename.clone(),
+                size: if rec.size == 0 {
+                    String::new()
+                } else {
+                    rec.size.to_string()
+                },
+                attach_method: rec.attach_method,
+                reason_code: rec.reason_code.clone(),
+                severity: "fail".into(),
+                volume_path: String::new(),
+                volume_index: String::new(),
+                winner_promoted: true,
+                peer_source_id,
+                peer_msg_nid: rec.peer_msg_nid.to_string(),
+                message_subject: String::new(),
+            };
+            ledger.enqueue_soft_skip_row(row);
+        }
+    }
 
     if cancelled {
         export_partial = true;
@@ -2835,6 +2905,13 @@ pub fn run_unique_pst_with_options(
         bcc_suppressed_message_count,
         sent_message_with_no_recipients_count,
         retryable,
+        promote_on_attach_fail: args.promote_on_attach_fail,
+        promoted_after_attach_incomplete_count: keep_set
+            .stats
+            .promoted_after_attach_incomplete_count,
+        mode_c_fallback_all_peers_incomplete_count: keep_set
+            .stats
+            .mode_c_fallback_all_peers_incomplete_count,
     };
 
     // Fail-closed: if summary.json itself fails, force non-success exit even if
@@ -3768,6 +3845,7 @@ mod tests {
             qc_external_reader: None,
             qc_scanpst: false,
             include_bcc_recipients: false,
+            promote_on_attach_fail: false,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3874,6 +3952,7 @@ mod tests {
             qc_external_reader: None,
             qc_scanpst: false,
             include_bcc_recipients: false,
+            promote_on_attach_fail: false,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3987,6 +4066,7 @@ mod tests {
             qc_external_reader: None,
             qc_scanpst: false,
             include_bcc_recipients: false,
+            promote_on_attach_fail: false,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -4091,6 +4171,7 @@ mod tests {
             qc_external_reader: None,
             qc_scanpst: false,
             include_bcc_recipients: false,
+            promote_on_attach_fail: false,
         };
         let outcome = run_unique_pst_with_options(
             args,

@@ -19,7 +19,7 @@ Headless operator path (Series K / track **0071**): multi-input PSTs → keep-se
 ## Pipeline (no re-dedupe)
 
 1. **Integrity scan** (same modes/thresholds as `scan` / `unique-eml`)
-2. **`keep_set_v1` resolve** + **`finalize_with_materialize`** (promote only)
+2. **`keep_set_v1` resolve** + **`finalize_with_materialize`** (hard promote; optional Mode A attach-incomplete promote when `--promote-on-attach-fail`)
 3. **Streaming write** via `write_unicode_pst_streaming` (attachments streamed; never re-dedupe)
 4. **Report pack** under `--report-dir`
 5. **Verify** each completed volume (open + count + sample MID; optional `--verify-hash`)
@@ -66,6 +66,7 @@ Source PSTs are **read-only**. The writer never mutates inputs.
 | `--json` | Summary JSON on **stdout**; human progress on **stderr** |
 | `--max-open-psts <N>` | **0079** — max sticky source PST handles for materialize + attach stream (default **32**, LRU) |
 | `--include-bcc-recipients` | **0082** — write Bcc TC rows + `PidTagDisplayBcc` into the unique-PST (default **OFF**). Default suppresses BCC on the deliverable so consolidating custodians does not over-disclose relative to a single custodian's outward view. **Identity hashing still includes BCC** when the source recipient table is present (internal only). See [BCC disclosure](#bcc-disclosure-0082). |
+| `--promote-on-attach-fail` | **0083 Mode A** — pre-write promote when a keep-set peer materializes with incomplete attaches and a ranked peer is complete (default **off** = Mode C ledger-only). Mode B write-time mid-message promote is **not** supported. Under default global scope may perform **cross-custodian de-duplication** — see [runbook](unique-pst-ediscovery-runbook.md). Pair with `--deep-attach-preflight` for richer incomplete detection. |
 
 ### Deep attach preflight (0074) — honesty
 
@@ -288,7 +289,15 @@ Cross-links: **0078** exit codes from `export_risk`; **0081** operator runbook.
 
 Decision CSV appends (end of row): `folder_class`, `folder_class_rank`, `source_rank`, `has_bcc`, `date_filetime_utc`, `date_source`, `decided_by`, `duplicate_source_count`, `duplicate_sources`.
 
-**`decided_by` vocabulary:** `sole_member`, `fidelity`, `bcc_completeness`, `source_rank`, `folder_class`, `policy_first_seen`, `policy_keep_largest`, `policy_prefer_path`, `policy_earliest_date`, `path_order`, `nid`, `promoted_after_materialize_fail`.
+**`decided_by` vocabulary:** `sole_member`, `fidelity`, `bcc_completeness`, `source_rank`, `folder_class`, `policy_first_seen`, `policy_keep_largest`, `policy_prefer_path`, `policy_earliest_date`, `path_order`, `nid`, plus promote strings (0083):
+
+| Token | Meaning |
+|---|---|
+| `promoted_after_materialize_fail` | Hard materialize fail on earlier peer(s); later peer accepted |
+| `promoted_after_attach_incomplete` | Mode A: incomplete attach on earlier peer(s); later **complete** peer accepted |
+| `mode_c_fallback_all_peers_incomplete` | Mode A flag on; every materializable peer was attach-incomplete; exported highest-ranked materializable |
+
+Filter `mode_c_fallback_all_peers_incomplete` when Mode A could not recover a complete copy.
 
 **`date_source`:** `submit` | `delivery` | `none`.
 
@@ -308,7 +317,8 @@ source_id,source_path,folder_path,msg_nid,attach_nid,attach_index,filename,size,
 | `source_path` | **Same string** as `export_messages.csv` for join |
 | `severity` | `fail` increments `attachments_failed`; `info` does not (policy omit, truncation marker) |
 | `reason_code` | Stable `SCREAMING_SNAKE` — see reason→action below |
-| `winner_promoted` | Always `false` in P0 (Mode A promote residual **D-0073-promote**) |
+| `winner_promoted` | `true` when Mode A (or hard materialize promote) selected a later peer: soft-skip incomplete rows and write-time fails on promoted winners (0083) |
+| `peer_source_id` / `peer_msg_nid` | Final accepted winner locus when `winner_promoted` is set on a soft-skipped incomplete peer |
 
 **Modes:**
 
@@ -457,9 +467,9 @@ Desk wizard: single **Strong content hash** checkbox → `body` level. Full enum
 - Operator residual: Outlook / `scanpst.exe` structural check on multi-GB artifacts (not CI DoD).
 - Count invariant (full success): sum of messages across volumes == `keep_set.stats.unique`.
 - **Attach soft-fail invariant:** `export.attachments_failed` == sum of fail-severity ledger accounting (histogram always complete; CSV may be truncated under the row cap).
-- **Promote-on-attach-fail (Mode A):** not shipped in 0073 — default is **Mode C ledger-only** (write best-effort message, ledger fails, `ok=false`). Residual **D-0073-promote**. Write-time mid-message promote is out.
-- **unique-eml:** no attach ledger CSV in this track — residual **D-0073-eml** (operators use unique-pst ledger or re-run unique-eml with pack logs).
-- **GUI:** no attach-ledger UI controls — residual **D-0073-gui** (CLI flags work via shared args).
+- **Promote-on-attach-fail (Mode A, 0083):** `--promote-on-attach-fail` (default **off**). Pre-write only: when a keep-set peer materializes with incomplete attaches (`stream_available == false` or fail-severity attach fidelity) and a ranked peer is complete, promote the complete peer **before** PST/EML write commits that family. Default remains **Mode C** (write best-effort, ledger fails). **Mode B** write-time mid-message promote is **permanently declined**. All peers incomplete → Mode C fallback on highest-ranked materializable (`decided_by=mode_c_fallback_all_peers_incomplete`); group is not dropped for soft attach incompleteness alone. Under default global scope this may select another custodian’s complete copy (**cross-custodian de-duplication** — Sedona term); see the eDiscovery runbook. `duplicate_sources` on Unique rows still lists the full group after promote. Cloud/modern link-only attaches are not detectable without named props (**D-0080-cloud-attachments**). Identity levels that hash attach payloads (**D-0076-attach-content**, not live) can fracture incomplete vs complete into different groups — Mode A only walks within one keep-set group.
+- **unique-eml:** Mode A flag threads the shared materialize finalizer; full attach-ledger CSV remains residual **D-0073-eml**.
+- **GUI:** no attach-ledger / Mode A UI controls — residual **D-0073-gui** (CLI flags; wizard pass-through default false).
 - CRC stderr noise is **0077**; ledger is not a dump of page CRCs.
 - Deep attach preflight before export is **0074** (shared reason code strings with **0073**).
 - **GUI deep-attach checkbox:** residual **D-0074-gui** (CLI `--deep-attach-preflight` works; wizard defaults off).

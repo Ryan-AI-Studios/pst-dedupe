@@ -567,6 +567,15 @@ pub struct UniqueExportSummary {
     /// failures (risk gate, fidelity, schema, passphrase, audit) stay `false`.
     #[serde(default)]
     pub retryable: bool,
+    /// Whether Mode A `--promote-on-attach-fail` was enabled (0083). Default false.
+    #[serde(default)]
+    pub promote_on_attach_fail: bool,
+    /// Mode A successful soft-attach promote count (0083).
+    #[serde(default)]
+    pub promoted_after_attach_incomplete_count: u64,
+    /// Mode A all-peers-incomplete Mode C fallback count (0083).
+    #[serde(default)]
+    pub mode_c_fallback_all_peers_incomplete_count: u64,
 }
 
 /// Structured error on the summary / JSON stdout.
@@ -686,12 +695,41 @@ impl AttachLedgerRow {
 /// `source_id` is the decimal index into inputs, or empty when unmapped (never a fake `0`).
 /// `path_mode` formats the CSV `source_path` column only; resolution of `source_id`
 /// must use the full `event.source_path` before this call.
+///
+/// `winner_promoted` / peer locus: set when Mode A promoted away from this locus (0083).
 pub fn ledger_row_from_event(
     event: &AttachmentFidelityEvent,
     source_id: Option<u32>,
     volume_path: &str,
     volume_index: u32,
     path_mode: LedgerPathMode,
+) -> AttachLedgerRow {
+    ledger_row_from_event_ex(
+        event,
+        source_id,
+        volume_path,
+        volume_index,
+        path_mode,
+        &LedgerPromoteContext::default(),
+    )
+}
+
+/// Mode A promote honesty fields for attach ledger rows (0083).
+#[derive(Debug, Clone, Default)]
+pub struct LedgerPromoteContext {
+    pub winner_promoted: bool,
+    pub peer_source_id: String,
+    pub peer_msg_nid: String,
+}
+
+/// Extended ledger row builder with Mode A promote honesty fields (0083).
+pub fn ledger_row_from_event_ex(
+    event: &AttachmentFidelityEvent,
+    source_id: Option<u32>,
+    volume_path: &str,
+    volume_index: u32,
+    path_mode: LedgerPathMode,
+    promote: &LedgerPromoteContext,
 ) -> AttachLedgerRow {
     AttachLedgerRow {
         source_id: source_id.map(|id| id.to_string()).unwrap_or_default(),
@@ -711,9 +749,9 @@ pub fn ledger_row_from_event(
         } else {
             volume_index.to_string()
         },
-        winner_promoted: false,
-        peer_source_id: String::new(),
-        peer_msg_nid: String::new(),
+        winner_promoted: promote.winner_promoted,
+        peer_source_id: promote.peer_source_id.clone(),
+        peer_msg_nid: promote.peer_msg_nid.clone(),
         message_subject: event.message_subject.clone(),
     }
 }
@@ -852,6 +890,9 @@ pub struct AttachLedgerSink {
     /// Current volume enrichment (set before each volume write).
     pub volume_path: String,
     pub volume_index: u32,
+    /// Export winners that were selected via promote (hard or Mode A soft; 0083).
+    /// Write-time fail rows for these loci get `winner_promoted=true`.
+    pub promoted_winner_loci: BTreeSet<(String, u64)>,
 }
 
 impl AttachLedgerSink {
@@ -888,7 +929,52 @@ impl AttachLedgerSink {
             source_ids,
             volume_path: String::new(),
             volume_index: 0,
+            promoted_winner_loci: BTreeSet::new(),
         })
+    }
+
+    /// Mark an export winner locus as promoted (Mode A / hard materialize promote).
+    pub fn mark_promoted_winner(&mut self, source_path: &str, msg_nid: u64) {
+        self.promoted_winner_loci
+            .insert((source_path.to_string(), msg_nid));
+    }
+
+    /// Enqueue a soft-skipped incomplete attach row (0083 Mode A honesty).
+    ///
+    /// Does not increment `attachments_failed` writer totals (those are write-path);
+    /// still records fail severity in the ledger histogram so operators see the skip.
+    pub fn enqueue_soft_skip_row(&mut self, row: AttachLedgerRow) {
+        if self.mode == AttachLedgerMode::Off {
+            return;
+        }
+        if row.severity == "fail" {
+            *self
+                .failed_by_reason
+                .entry(row.reason_code.clone())
+                .or_insert(0) += 1;
+        }
+        if self.mode != AttachLedgerMode::Full {
+            return;
+        }
+        if self.truncated {
+            self.rows_dropped = self.rows_dropped.saturating_add(1);
+            return;
+        }
+        if self.rows_written >= self.max_rows.saturating_sub(1) && self.max_rows > 0 {
+            let marker = AttachLedgerRow::truncated_marker(None);
+            if let Some(csv) = self.csv.as_ref() {
+                let _ = csv.enqueue(marker);
+            }
+            self.rows_written = self.rows_written.saturating_add(1);
+            self.truncated = true;
+            self.rows_dropped = self.rows_dropped.saturating_add(1);
+            return;
+        }
+        if let Some(csv) = self.csv.as_ref() {
+            if csv.enqueue(row).is_ok() {
+                self.rows_written = self.rows_written.saturating_add(1);
+            }
+        }
     }
 
     pub fn set_volume(&mut self, volume_path: &str, volume_index: u32) {
@@ -963,12 +1049,21 @@ impl AttachLedgerSink {
 
         // Resolve source_id from full path; basename only the CSV path column.
         let source_id = self.resolve_source_id(&event.source_path);
-        let row = ledger_row_from_event(
+        let winner_promoted = event.severity == AttachEventSeverity::Fail
+            && self
+                .promoted_winner_loci
+                .contains(&(event.source_path.clone(), event.msg_nid));
+        let row = ledger_row_from_event_ex(
             event,
             source_id,
             &self.volume_path,
             self.volume_index,
             self.path_mode,
+            &LedgerPromoteContext {
+                winner_promoted,
+                peer_source_id: String::new(),
+                peer_msg_nid: String::new(),
+            },
         );
         if let Some(csv) = self.csv.as_ref() {
             if csv.enqueue(row).is_ok() {
@@ -1834,6 +1929,66 @@ mod tests {
         finish.apply_to_export_section(&mut export);
         assert!(export.attachments_failed_by_reason.is_none());
         assert_eq!(export.attachments_omitted_by_policy, Some(9));
+    }
+
+    /// 0083: soft-skip incomplete rows + write-time fails on promoted winners set
+    /// `winner_promoted=true`.
+    #[test]
+    fn mode_a_winner_promoted_ledger_honesty() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let inputs = vec![r"C:\in\a.pst".to_string(), r"C:\in\b.pst".to_string()];
+        let mut sink = AttachLedgerSink::new(
+            AttachLedgerMode::Full,
+            500_000,
+            dir.path(),
+            &inputs,
+            LedgerPathMode::Full,
+        )
+        .expect("sink");
+        // Soft-skipped incomplete peer A; final winner B.
+        sink.enqueue_soft_skip_row(AttachLedgerRow {
+            source_id: "0".into(),
+            source_path: r"C:\in\a.pst".into(),
+            folder_path: "Inbox".into(),
+            msg_nid: 10,
+            attach_nid: "99".into(),
+            attach_index: 0,
+            filename: "missing.bin".into(),
+            size: "100".into(),
+            attach_method: 1,
+            reason_code: "ATTACH_STREAM_OPEN_FAILED".into(),
+            severity: "fail".into(),
+            volume_path: String::new(),
+            volume_index: String::new(),
+            winner_promoted: true,
+            peer_source_id: "1".into(),
+            peer_msg_nid: "20".into(),
+            message_subject: String::new(),
+        });
+        // Mode C fallback incomplete winner that was promoted: write-time fail.
+        sink.mark_promoted_winner(r"C:\in\b.pst", 20);
+        sink.set_volume(r"C:\out\u.pst", 1);
+        let mut ev = synth_event(
+            AttachmentFidelityKind::StreamOpenFailed,
+            AttachEventSeverity::Fail,
+        );
+        ev.source_path = r"C:\in\b.pst".into();
+        ev.msg_nid = 20;
+        sink.ingest(&ev);
+        let _ = sink.finish().expect("finish");
+        let csv = fs::read_to_string(dir.path().join(EXPORT_ATTACHMENTS_CSV_NAME)).expect("csv");
+        let rows: Vec<&str> = csv.lines().skip(1).collect();
+        assert!(rows.len() >= 2, "soft-skip + write fail rows; csv={csv}");
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("true") && r.contains("missing.bin")),
+            "soft-skip row must have winner_promoted=true: {csv}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains(r"C:\in\b.pst") && r.contains(",true,")),
+            "write-time fail on promoted winner: {csv}"
+        );
     }
 
     #[test]

@@ -193,8 +193,9 @@ After 0073–0081, the highest-value deferred cluster is **structured MAPI recip
 | Track | Status | Summary |
 |---|---|---|
 | [0082-RecipientTableFidelity](0082-RecipientTableFidelity/spec.md) | **Completed** | Read/write recipient TC (MS-PST MUST `0x692`); SMTP+EX Tier-2.5 identity; BCC write opt-in + `bcc_suppressed`; `retryable` summary; closes D-0080/D-0076 recip + D-0078-retryable; Codex luna PASS |
+| [0083-PromoteOnAttachFail](0083-PromoteOnAttachFail/spec.md) | **Completed** | Mode A pre-write promote (`--promote-on-attach-fail`); Mode C default; Mode B declined; closes **D-0073-promote**; `winner_promoted` honesty; Codex luna PASS |
 
-**Suggested order:** 0082 first (fidelity foundation for identity + deliverable honesty). Next candidates (not yet specified): D-0073-promote (P1), D-0080-cloud-attachments / named props, D-0079-deterministic-key (product), D-0073-eml.
+**Suggested order:** 0082–0083 Completed. Later Series M: named props / cloud attach (D-0080-cloud-attachments), D-0076-attach-content, D-0079-deterministic-key (product), D-0073-eml full ledger.
 
 ## Notes
 
