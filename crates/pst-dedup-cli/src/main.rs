@@ -22,7 +22,7 @@ use pst_dedup_cli::scan::{
 };
 use pst_dedup_cli::{
     convenience, inspect, job_cmd, keep_set_cmd, matter_cmd, platform_cmd, production_profile_cmd,
-    profile_cmd, service_cmd, unique_eml_cmd, unique_pst_cmd, workflow_cmd,
+    profile_cmd, service_cmd, unique_eml_cmd, unique_pst_cmd, unique_pst_qc, workflow_cmd,
 };
 
 #[derive(Debug, Parser)]
@@ -419,6 +419,29 @@ enum Commands {
     /// `write_unicode_pst_streaming` → report pack + verification. Source PSTs are read-only.
     #[command(name = "unique-pst")]
     UniquePst(unique_pst_cmd::UniquePstClapArgs),
+
+    /// Re-run unique-PST QC on an existing pack (0080). Name is `qc-pst` (not `qc`).
+    #[command(name = "qc-pst")]
+    QcPst {
+        /// Output PST path (volume 1).
+        out: PathBuf,
+        /// Report pack directory (reads export_messages / content_digests; writes qc_report_v1).
+        #[arg(long)]
+        report_dir: PathBuf,
+        /// QC depth: structure|sample|full (default sample). `off` is rejected.
+        #[arg(long = "qc-level", default_value = "sample")]
+        qc_level: String,
+        #[arg(long = "qc-sample-max", default_value_t = 64)]
+        qc_sample_max: usize,
+        #[arg(long = "qc-external-reader")]
+        qc_external_reader: Option<PathBuf>,
+        #[arg(long = "qc-scanpst", action = clap::ArgAction::SetTrue)]
+        qc_scanpst: bool,
+        #[arg(long = "max-open-psts", default_value_t = 32)]
+        max_open_psts: usize,
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Matter lifecycle.
     Matter {
@@ -822,6 +845,7 @@ fn command_wants_json(cmd: &Commands) -> bool {
         | Commands::UniqueEml { json, .. }
         | Commands::Ingest { json, .. } => *json,
         Commands::UniquePst(a) => a.json,
+        Commands::QcPst { json, .. } => *json,
         Commands::Matter { cmd } => match cmd {
             MatterCmd::Create { json, .. }
             | MatterCmd::Info { json, .. }
@@ -1242,6 +1266,54 @@ fn run(cli: Cli) -> Result<CliExit> {
         Commands::UniquePst(clap_args) => {
             let args = clap_args.into_cli_args()?;
             return unique_pst_cmd::run_unique_pst(args);
+        }
+        Commands::QcPst {
+            out,
+            report_dir,
+            qc_level,
+            qc_sample_max,
+            qc_external_reader,
+            qc_scanpst,
+            max_open_psts,
+            json,
+        } => {
+            let level =
+                unique_pst_qc::QcLevel::parse(&qc_level).map_err(CliError::Usage)?;
+            if level == unique_pst_qc::QcLevel::Off {
+                return Err(CliError::Usage(
+                    "qc-pst requires --qc-level other than off".into(),
+                ));
+            }
+            let report = unique_pst_qc::run_qc_pst(
+                &out,
+                &report_dir,
+                level,
+                qc_sample_max.max(1),
+                qc_external_reader.as_deref(),
+                qc_scanpst,
+                max_open_psts.max(1),
+            )
+            .map_err(CliError::Msg)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_default()
+                );
+            } else {
+                eprintln!(
+                    "qc-pst: hard_fail={} defect={} unexplained_loss={} known_gap={} source_differential={}",
+                    report.hard_fail,
+                    report.findings.defect,
+                    report.findings.unexplained_loss,
+                    report.findings.known_gap,
+                    report.source_differential
+                );
+            }
+            return Ok(if report.hard_fail {
+                CliExit::Generic
+            } else {
+                CliExit::Success
+            });
         }
         Commands::Matter { cmd } => match cmd {
             MatterCmd::Create {

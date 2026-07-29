@@ -20,6 +20,7 @@ Headless operator path (Series K / track **0071**): multi-input PSTs → keep-se
 3. **Streaming write** via `write_unicode_pst_streaming` (attachments streamed; never re-dedupe)
 4. **Report pack** under `--report-dir`
 5. **Verify** each completed volume (open + count + sample MID; optional `--verify-hash`)
+6. **QC** (0080) — source-differential reader checks at `--qc-level` (default **sample**)
 
 Source PSTs are **read-only**. The writer never mutates inputs.
 
@@ -30,6 +31,10 @@ Source PSTs are **read-only**. The writer never mutates inputs.
 | `--out <path>` | **Required** — primary PST (volume 1) |
 | `--report-dir <dir>` | Default: sibling of `--out` stem + `_report` (e.g. `unique.pst` → `unique_report`) |
 | `--input` / positionals | One or more source PSTs |
+| `--qc-level off\|structure\|sample\|full` | **0080** — QC depth (default **`sample`**) |
+| `--qc-sample-max <N>` | Risk-weighted sample cap (default **64**) |
+| `--qc-external-reader <path>` | BYOB path to `pffinfo` / `readpst` (counts only; never auto-download) |
+| `--qc-scanpst` | Attempt local `scanpst.exe -no repair` on a temp copy when discoverable |
 | Keep-set / integrity | Same family as `unique-eml` (`--policy`, `--family-policy`, `--mode`, thresholds, …) |
 | `--policy earliest_date` | Prefer earliest submit time (delivery fallback; missing last). See [Winner policies](#winner-policies). |
 | `--prefer-bcc-copy` | Prefer copy with non-empty PidTagDisplayBcc (sender-copy completeness) |
@@ -107,6 +112,10 @@ If volume *k* fails fatally (disk full, path unwritable, layout hard fail):
   keepset.json              # winners + stats (no bodies)
   volumes.csv               # one row per completed volume (+ sha256/md5)
   export_messages.csv       # MANDATORY winner → volume cross-reference
+  qc_report_v1.json         # 0080 QC summary (when --qc-level ≠ off)
+  qc_findings.csv           # 0080 row-level findings
+  content_digests.json      # 0080 source-side digests for clean-room re-verify
+  qc_attestation_v1.json    # optional human-signed operator attestation (never auto-written)
   export_attachments.csv    # 0073 attach failure ledger (mode=full)
   integrity.csv             # optional / if requested
 ```
@@ -500,3 +509,42 @@ Operators who prefer a desktop UI can run the **same** orchestration without CLI
 | Legacy EML | Still available on Results as **Export Unique EML (legacy scan path)**; unique-PST is preferred (**D-0067-gui-keepset** soft-closed) |
 
 See also CLI flags above — wizard maps to the same `UniquePstCliArgs` fields.
+
+## Output QC (track 0080)
+
+Source-differential QC replaces self-referential verify as the durable proof that the
+deliverable matches its sources. External tools (scanpst, libpff/libpst) are optional
+corroboration only.
+
+| Level | What it does |
+|---|---|
+| `off` | Legacy open+count+sample only |
+| `structure` | Folder **tree** + message counts vs expected keep-set layout |
+| `sample` *(default)* | Structure + risk-weighted source↔output content/attach compare (cap `--qc-sample-max`) |
+| `full` | Structure + every written message compared |
+
+Hard findings (`defect`, `unexplained_loss`) set `verify_ok = false` → existing
+`VERIFY_FAILED` / exit **1**. `known_gap` (e.g. BCC dropped by design) is counted and
+never fails. No new exit integers.
+
+Standalone re-check:
+
+```powershell
+.\target\release\pst-dedup.exe qc-pst C:\export\unique.pst --report-dir C:\export\unique_report --json
+```
+
+When sources are gone, `qc-pst` is structural-only unless `content_digests.json` was
+persisted at export time (`content_digest_backed: true`). The tool never self-attests a
+human Outlook open — operators may drop `qc_attestation_v1.json` into the report dir.
+
+### Client-retirement honesty (dated 2026-07-28)
+
+| Fact | Detail |
+|---|---|
+| Classic Outlook | Opt-out-default since **April 2026**; retires **Q1–Q2 2028**; **EOL Q2 2029** |
+| New Outlook | Default client; **import, not mount** for PST; **no COM/VSTO/VBA** object model planned |
+| Microsoft PST roadmap | Once bulk import ships, Microsoft has stated **no plans to continue developing .PST support** |
+| Consequence for proof | Tier C (`scanpst`) has a shelf life; “open it in Outlook” will stop being available before this product stops emitting PSTs. **PST remains a correct deliverable** (Purview exports it; eDiscovery consumes it) — but the durable QC signal is **source-differential reader QC**, not a Microsoft client. |
+| COM automation | Declined (D-0080-com-declined): no future on new Outlook; mutates operator env; scanpst is strictly better for format validation. |
+
+Cross-link: **0081** runbook depends on both the exit contract (0078) and this QC pack.

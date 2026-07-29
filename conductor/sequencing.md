@@ -146,5 +146,5 @@
 | 3 | **0075** Winner policies | **Completed** — ladder fidelity→bcc→source→folder→policy + `decided_by` + All Custodians; D-0075-* residual |
 | 4 | **0076** Tier-2 hardening | **Completed** — char-clamp, split-only guards, BoundBy, Tier 2.5 body/body-recip, `--dedupe-scope` (closes D-0075-scope); Codex luna PASS WITH DEFERRED P3 |
 | 5 | **0079** Performance | **Completed** — Codex luna PASS WITH DEFERRED P3. Phases 0–5; `--jobs` skipped (D-0079-operator-multigb). |
-| 6 | **0080** Outlook QC | After unique-pst stable |
+| 6 | **0080** Output QC | **Completed** — Codex luna PASS WITH DEFERRED P3 — source-differential QC + `fidelity_contract_v1` allowlist; risk-weighted deterministic sample; scanpst `-no repair` (closes **D-0068-02** automatable half) + optional libpff/libpst counts-only sidecar; **COM declined** (new Outlook has no object model; classic EOL 2029). Folds into 0078 `VERIFY_FAILED` — no new exit integers. Contract-before-default-on gate; default `--qc-level sample` after fixture matrix green |
 | 7 | **0081** Deps + runbook | Can draft early; finalize after 0073/0077 |
