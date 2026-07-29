@@ -56,7 +56,7 @@ pub enum IdentityLevel {
     Body,
     /// Body + normalized display_to/cc/bcc.
     BodyRecip,
-    /// Body + recipients + per-attachment content digests (may be deferred).
+    /// Body + recipients + per-attachment content digests (0086; opt-in).
     BodyRecipAttach,
 }
 
@@ -99,8 +99,6 @@ impl IdentityLevel {
             "off" | "v1" => Some(Self::Off),
             "body" => Some(Self::Body),
             "body-recip" | "body_recip" => Some(Self::BodyRecip),
-            // Accepted in the enum for future wire-up / tests; CLI rejects this
-            // value until D-0076-attach-content (see grouping_cli::parse_identity_level).
             "body-recip-attach" | "body_recip_attach" => Some(Self::BodyRecipAttach),
             _ => None,
         }
@@ -322,6 +320,15 @@ pub struct GroupingStats {
     pub inline_attachments_ignored: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub strong_hash_attach_unread: u64,
+    /// Attachments successfully full-stream digested under body-recip-attach (0086).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub strong_hash_attach_digested: u64,
+    /// Total bytes fed into attach-content digests (real success only) (0086).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub strong_hash_attach_bytes: u64,
+    /// Attach-content digest run hit budget/cancel truncation (0086; 0 or 1 typically).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub strong_hash_attach_truncated: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub tier2_preview_bytes_over_budget: u64,
 }
@@ -351,6 +358,9 @@ impl GroupingStats {
         self.x500_recipient_items += other.x500_recipient_items;
         self.inline_attachments_ignored += other.inline_attachments_ignored;
         self.strong_hash_attach_unread += other.strong_hash_attach_unread;
+        self.strong_hash_attach_digested += other.strong_hash_attach_digested;
+        self.strong_hash_attach_bytes += other.strong_hash_attach_bytes;
+        self.strong_hash_attach_truncated += other.strong_hash_attach_truncated;
         self.tier2_preview_bytes_over_budget += other.tier2_preview_bytes_over_budget;
     }
 

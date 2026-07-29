@@ -758,6 +758,30 @@ pub fn classify_attach_meta_fail(
     }
 }
 
+/// Classify attachment **enumeration** failure when building identity.
+///
+/// When `need_attach_content` is true (`body-recip-attach`), always **Skip**
+/// (fail closed) regardless of scan mode. An empty attach list after
+/// `list_attachments` failure would otherwise produce a strong hash with zero
+/// attach slots and false-merge with a no-attachment peer (Choice B hijack).
+///
+/// When attach content is not required, delegates to [`classify_attach_meta_fail`].
+pub fn classify_attach_enum_for_identity(
+    need_attach_content: bool,
+    mode: ScanMode,
+    detail: impl Into<String>,
+) -> MessageClassification {
+    let detail = detail.into();
+    if need_attach_content {
+        MessageClassification::Skip {
+            reason: IntegrityReason::AttachMetaFailed,
+            detail: format!("body-recip-attach requires attachment enumeration: {detail}"),
+        }
+    } else {
+        classify_attach_meta_fail(mode, detail)
+    }
+}
+
 /// Classify orphaned hierarchy under mode.
 pub fn classify_orphaned(mode: ScanMode) -> MessageClassification {
     match mode {
@@ -1381,6 +1405,47 @@ mod tests {
         match o {
             MessageClassification::Skip { reason, .. } => {
                 assert_eq!(reason, IntegrityReason::OrphanedNode);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_attach_enum_for_identity_fail_closed_when_need_content() {
+        // body-recip-attach: always Skip, even BestEffort — never empty attach slots.
+        for mode in [ScanMode::BestEffort, ScanMode::Strict] {
+            let c = classify_attach_enum_for_identity(true, mode, "list boom");
+            match c {
+                MessageClassification::Skip { reason, detail } => {
+                    assert_eq!(reason, IntegrityReason::AttachMetaFailed);
+                    assert!(
+                        detail.contains("body-recip-attach requires attachment enumeration"),
+                        "detail={detail}"
+                    );
+                    assert!(detail.contains("list boom"), "detail={detail}");
+                }
+                other => panic!("mode={mode:?} expected Skip, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn classify_attach_enum_for_identity_delegates_when_meta_only() {
+        // Without attach-content identity: BestEffort Recoverable, Strict Skip.
+        let be = classify_attach_enum_for_identity(false, ScanMode::BestEffort, "x");
+        match be {
+            MessageClassification::Recoverable { integrity } => {
+                assert!(integrity
+                    .degraded_reasons
+                    .contains(&IntegrityReason::AttachMetaFailed));
+            }
+            other => panic!("{other:?}"),
+        }
+        let st = classify_attach_enum_for_identity(false, ScanMode::Strict, "x");
+        match st {
+            MessageClassification::Skip { reason, detail } => {
+                assert_eq!(reason, IntegrityReason::AttachMetaFailed);
+                assert_eq!(detail, "x");
             }
             other => panic!("{other:?}"),
         }

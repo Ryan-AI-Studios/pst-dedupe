@@ -413,6 +413,24 @@ impl DedupIndex {
         self.stats.x500_recipient_items += 1;
     }
 
+    /// Count an attach-content unread sentinel (Choice B; 0086).
+    pub fn record_strong_hash_attach_unread(&mut self) {
+        self.stats.strong_hash_attach_unread += 1;
+    }
+
+    /// Count a successfully full-stream digested attachment (0086).
+    pub fn record_strong_hash_attach_digested(&mut self, bytes: u64) {
+        self.stats.strong_hash_attach_digested += 1;
+        self.stats.strong_hash_attach_bytes =
+            self.stats.strong_hash_attach_bytes.saturating_add(bytes);
+    }
+
+    /// Record that attach-content digests hit budget/cancel truncation this run (0086).
+    pub fn record_strong_hash_attach_truncated(&mut self) {
+        self.stats.strong_hash_attach_truncated =
+            self.stats.strong_hash_attach_truncated.saturating_add(1);
+    }
+
     /// Note: `--tier1-backfill` merge is a keep-set / `group_candidates` post-pass.
     /// Streaming insert cannot retroactively merge already-emitted uniques; CLI
     /// rejects the flag on `scan`/`dups`. Callers that need merges must re-group via

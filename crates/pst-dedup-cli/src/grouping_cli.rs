@@ -4,20 +4,56 @@ use dedup_engine::{DedupeScope, GroupingContext, GroupingStats, IdentityLevel, T
 
 /// Parse `--strong-content-hash` value.
 ///
-/// Live levels: `off|body|body-recip`. `body-recip-attach` is rejected until
-/// **D-0076-attach-content** wires 0074 attach digests (do not silently accept).
+/// Live levels: `off|body|body-recip|body-recip-attach` (0086 enables attach content).
 pub fn parse_identity_level(s: &str) -> Result<IdentityLevel, String> {
-    match s {
-        "body-recip-attach" | "body_recip_attach" => Err(
-            "strong-content-hash 'body-recip-attach' is not enabled yet \
-             (deferred D-0076-attach-content: attachment content digests via 0074 probe). \
-             Use off|body|body-recip"
-                .into(),
-        ),
-        other => IdentityLevel::parse(other).ok_or_else(|| {
-            format!("invalid strong-content-hash '{other}': expected off|body|body-recip")
-        }),
+    IdentityLevel::parse(s).ok_or_else(|| {
+        format!("invalid strong-content-hash '{s}': expected off|body|body-recip|body-recip-attach")
+    })
+}
+
+/// Warning text when attach-content identity is combined with
+/// `--identity-ignore-inline-attachments` (softens the byte-strict promise).
+///
+/// Returns `None` when no warning should be emitted. Pure helper for unit tests;
+/// [`warn_ignore_inline_with_attach_content`] is the eprintln wrapper.
+pub fn ignore_inline_with_attach_content_warning(
+    identity: IdentityLevel,
+    ignore_inline: bool,
+) -> Option<&'static str> {
+    if identity.includes_attach_content() && ignore_inline {
+        Some(
+            "warning: --identity-ignore-inline-attachments with body-recip-attach omits inline \
+             attaches from both name:size and content digests (softens byte-strict identity; \
+             logos/signatures still filtered)",
+        )
+    } else {
+        None
     }
+}
+
+/// One-line stderr warning when attach-content identity is combined with
+/// `--identity-ignore-inline-attachments` (softens the byte-strict promise).
+pub fn warn_ignore_inline_with_attach_content(identity: IdentityLevel, ignore_inline: bool) {
+    if let Some(msg) = ignore_inline_with_attach_content_warning(identity, ignore_inline) {
+        eprintln!("{msg}");
+    }
+}
+
+/// Reject `--no-attachments` with `body-recip-attach` (Choice B: cannot omit attach slots).
+///
+/// Returns `Err` when the combination would silently disable attach-content identity.
+pub fn reject_no_attachments_with_attach_content(
+    identity: IdentityLevel,
+    no_attachments: bool,
+) -> Result<(), String> {
+    if identity.includes_attach_content() && no_attachments {
+        return Err(
+            "strong-content-hash body-recip-attach requires attachment enumeration; \
+             remove --no-attachments (or use off|body|body-recip)"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 pub fn parse_dedupe_scope(s: &str) -> Result<DedupeScope, String> {
@@ -42,10 +78,13 @@ pub fn grouping_context_from_cli(
     allow_crc_suspect_tier2: bool,
     tier1_backfill: bool,
     ignore_inline_attachments: bool,
+    no_attachments: bool,
 ) -> Result<GroupingContext, String> {
     let identity = parse_identity_level(strong_content_hash)?;
+    reject_no_attachments_with_attach_content(identity, no_attachments)?;
     let scope = parse_dedupe_scope(dedupe_scope)?;
     let tier1_verify = parse_tier1_verify(tier1_verify)?;
+    warn_ignore_inline_with_attach_content(identity, ignore_inline_attachments);
     Ok(GroupingContext {
         tier2_enabled: !no_tier2,
         scope,
@@ -156,6 +195,18 @@ pub fn format_grouping_stats_human(stats: &GroupingStats) -> Vec<String> {
             stats.strong_hash_attach_unread
         ));
     }
+    if stats.strong_hash_attach_digested > 0 {
+        lines.push(format!(
+            "  strong-hash attach digested: {} ({} bytes)",
+            stats.strong_hash_attach_digested, stats.strong_hash_attach_bytes
+        ));
+    }
+    if stats.strong_hash_attach_truncated > 0 {
+        lines.push(format!(
+            "  strong-hash attach digest truncated (budget/cancel): {}",
+            stats.strong_hash_attach_truncated
+        ));
+    }
     lines
 }
 
@@ -164,10 +215,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_body_recip_attach() {
-        let err = parse_identity_level("body-recip-attach").unwrap_err();
-        assert!(err.contains("D-0076-attach-content"), "{err}");
-        assert!(err.contains("off|body|body-recip"), "{err}");
+    fn accepts_body_recip_attach() {
+        assert_eq!(
+            parse_identity_level("body-recip-attach").unwrap(),
+            IdentityLevel::BodyRecipAttach
+        );
+        assert_eq!(
+            parse_identity_level("body_recip_attach").unwrap(),
+            IdentityLevel::BodyRecipAttach
+        );
     }
 
     #[test]
@@ -178,5 +234,54 @@ mod tests {
             parse_identity_level("body-recip").unwrap(),
             IdentityLevel::BodyRecip
         );
+    }
+
+    #[test]
+    fn rejects_unknown_identity() {
+        let err = parse_identity_level("bogus").unwrap_err();
+        assert!(
+            err.contains("off|body|body-recip|body-recip-attach"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn warn_helper_no_panic() {
+        // eprintln wrapper: ensure call paths do not panic (stderr side effect).
+        warn_ignore_inline_with_attach_content(IdentityLevel::BodyRecipAttach, true);
+        warn_ignore_inline_with_attach_content(IdentityLevel::BodyRecipAttach, false);
+        warn_ignore_inline_with_attach_content(IdentityLevel::Body, true);
+    }
+
+    #[test]
+    fn rejects_no_attachments_with_body_recip_attach() {
+        let err = reject_no_attachments_with_attach_content(IdentityLevel::BodyRecipAttach, true)
+            .unwrap_err();
+        assert!(err.contains("body-recip-attach"), "{err}");
+        assert!(err.contains("--no-attachments"), "{err}");
+        assert!(
+            reject_no_attachments_with_attach_content(IdentityLevel::BodyRecipAttach, false)
+                .is_ok()
+        );
+        assert!(reject_no_attachments_with_attach_content(IdentityLevel::Body, true).is_ok());
+        assert!(reject_no_attachments_with_attach_content(IdentityLevel::Off, true).is_ok());
+    }
+
+    #[test]
+    fn ignore_inline_attach_content_warning_text() {
+        let msg = ignore_inline_with_attach_content_warning(IdentityLevel::BodyRecipAttach, true)
+            .expect("warn when body-recip-attach + ignore-inline");
+        assert!(
+            msg.contains("--identity-ignore-inline-attachments"),
+            "{msg}"
+        );
+        assert!(msg.contains("body-recip-attach"), "{msg}");
+        assert!(msg.contains("softens byte-strict identity"), "{msg}");
+        assert!(
+            ignore_inline_with_attach_content_warning(IdentityLevel::BodyRecipAttach, false)
+                .is_none()
+        );
+        assert!(ignore_inline_with_attach_content_warning(IdentityLevel::Body, true).is_none());
+        assert!(ignore_inline_with_attach_content_warning(IdentityLevel::Off, true).is_none());
     }
 }

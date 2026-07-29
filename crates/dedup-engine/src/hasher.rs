@@ -35,7 +35,13 @@ pub struct AttachmentInfo {
     pub size: u32,
     /// True when MAPI marks this as inline/embedded (content-id / rendered-in-body / hidden).
     pub is_inline: bool,
-    /// Optional content SHA-256 when `--strong-content-hash body-recip-attach` and probe succeeded.
+    /// Content digest slot for `--strong-content-hash body-recip-attach`.
+    ///
+    /// When the identity level includes attach content, every non-ignored attach
+    /// must contribute a 32-byte slot: real `SHA-256(stream_bytes)` or a Choice B
+    /// unread sentinel ([`attach_unread_sentinel`]). Prefer filling this before
+    /// strong-hash construction; [`compute_strong_content_hash`] also synthesizes
+    /// the sentinel when `None` so slots are never omitted.
     pub content_sha256: Option<[u8; 32]>,
 }
 
@@ -48,6 +54,50 @@ impl AttachmentInfo {
             content_sha256: None,
         }
     }
+}
+
+/// Domain tag for Choice B unread attach-content sentinels (0086).
+///
+/// Exact preimage:
+/// `SHA-256( b"pst-dedup/attach-unread/v1\0" || name_lower_utf8 || b"\0" || size_le_u32 )`
+pub const ATTACH_UNREAD_DOMAIN: &[u8] = b"pst-dedup/attach-unread/v1\0";
+
+/// SHA-256 of the empty string (legitimate zero-byte by-value attach).
+pub const EMPTY_CONTENT_SHA256: [u8; 32] = [
+    0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
+    0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
+];
+
+/// Choice B domain-separated unread sentinel for one attachment slot.
+///
+/// Incorporates normalized filename + declared size so unread `Contract.pdf` ≠
+/// unread `Financials.xlsx` ≠ empty-file digest ≠ real content digests.
+pub fn attach_unread_sentinel(filename: &str, size: u32) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(ATTACH_UNREAD_DOMAIN);
+    hasher.update(filename.to_lowercase().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(size.to_le_bytes());
+    hasher.finalize().into()
+}
+
+/// Resolve the 32-byte attach-content slot for strong identity (Choice B).
+///
+/// - When `content_sha256` is `Some`, use it (real digest or pre-filled sentinel).
+/// - When `None` (or `is_unread`), produce [`attach_unread_sentinel`].
+///
+/// Callers that digest streams should pass `Some(real)` on success and either
+/// `Some(sentinel)` or `None` on failure — both yield a non-omitted slot.
+pub fn attach_content_slot(
+    filename: &str,
+    size: u32,
+    content_sha256: Option<[u8; 32]>,
+    is_unread: bool,
+) -> [u8; 32] {
+    if is_unread {
+        return attach_unread_sentinel(filename, size);
+    }
+    content_sha256.unwrap_or_else(|| attach_unread_sentinel(filename, size))
 }
 
 /// Inputs for content-hash / strong-hash computation beyond the classic v1 fields.
@@ -372,10 +422,13 @@ fn compute_strong_content_hash(
         hasher.update(b"|");
     }
     if strong.identity.includes_attach_content() {
+        // Choice B (0086): every non-ignored attach contributes exactly one
+        // 32-byte slot (real digest or name+size domain-separated unread
+        // sentinel). Never omit missing digests; never tier-downgrade.
         let mut digests: Vec<[u8; 32]> = attachments
             .iter()
             .filter(|a| !(strong.ignore_inline_attachments && a.is_inline))
-            .filter_map(|a| a.content_sha256)
+            .map(|a| attach_content_slot(&a.filename, a.size, a.content_sha256, false))
             .collect();
         digests.sort_unstable();
         for d in &digests {
@@ -1168,5 +1221,309 @@ mod tests {
             k_to.fp_recipients, k_bcc.fp_recipients,
             "recipient fingerprint must differ when Bcc row present"
         );
+    }
+
+    // ── 0086 attach-content identity ─────────────────────────────────────────
+
+    fn keys_attach(body: &str, atts: &[AttachmentInfo], ignore_inline: bool) -> DedupKeys {
+        let (sha, len) = hash_full_body(body);
+        let strong = StrongHashInput {
+            identity: IdentityLevel::BodyRecipAttach,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("a@x.com"),
+            ignore_inline_attachments: ignore_inline,
+            ..Default::default()
+        };
+        compute_dedup_keys_ex(
+            None,
+            Some("Subject"),
+            Some(1),
+            Some("s@x.com"),
+            Some(body),
+            atts,
+            &strong,
+        )
+    }
+
+    fn keys_body_recip(body: &str, atts: &[AttachmentInfo]) -> DedupKeys {
+        let (sha, len) = hash_full_body(body);
+        let strong = StrongHashInput {
+            identity: IdentityLevel::BodyRecip,
+            body_sha256: Some(&sha),
+            body_char_len: Some(len),
+            display_to: Some("a@x.com"),
+            ..Default::default()
+        };
+        compute_dedup_keys_ex(
+            None,
+            Some("Subject"),
+            Some(1),
+            Some("s@x.com"),
+            Some(body),
+            atts,
+            &strong,
+        )
+    }
+
+    fn digest_of(bytes: &[u8]) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(bytes);
+        h.finalize().into()
+    }
+
+    #[test]
+    fn attach_content_different_real_digests_split() {
+        let mut a = AttachmentInfo::new("file.bin", 4);
+        a.content_sha256 = Some(digest_of(b"AAAA"));
+        let mut b = AttachmentInfo::new("file.bin", 4);
+        b.content_sha256 = Some(digest_of(b"BBBB"));
+        let k_a = keys_attach("same body", &[a], false);
+        let k_b = keys_attach("same body", &[b], false);
+        assert_ne!(
+            k_a.strong_content_hash, k_b.strong_content_hash,
+            "different attach bytes must split at BodyRecipAttach"
+        );
+        // Equal digests merge.
+        let mut c = AttachmentInfo::new("file.bin", 4);
+        c.content_sha256 = Some(digest_of(b"AAAA"));
+        let mut d = AttachmentInfo::new("file.bin", 4);
+        d.content_sha256 = Some(digest_of(b"AAAA"));
+        let k_c = keys_attach("same body", &[c], false);
+        let k_d = keys_attach("same body", &[d], false);
+        assert_eq!(k_c.strong_content_hash, k_d.strong_content_hash);
+    }
+
+    #[test]
+    fn attach_content_order_independent() {
+        let mut a = AttachmentInfo::new("a.txt", 1);
+        a.content_sha256 = Some(digest_of(b"1"));
+        let mut b = AttachmentInfo::new("b.txt", 1);
+        b.content_sha256 = Some(digest_of(b"2"));
+        let k1 = keys_attach("body", &[a.clone(), b.clone()], false);
+        let k2 = keys_attach("body", &[b, a], false);
+        assert_eq!(
+            k1.strong_content_hash, k2.strong_content_hash,
+            "attach digest order must not affect strong hash"
+        );
+    }
+
+    #[test]
+    fn choice_b_unread_sentinel_formula_and_distinctness() {
+        // Exact formula freeze.
+        let mut expected = Sha256::new();
+        expected.update(ATTACH_UNREAD_DOMAIN);
+        expected.update(b"contract.pdf");
+        expected.update(b"\0");
+        expected.update(100u32.to_le_bytes());
+        let expected: [u8; 32] = expected.finalize().into();
+        assert_eq!(
+            attach_unread_sentinel("Contract.pdf", 100),
+            expected,
+            "sentinel must use lowercase name + LE size + domain tag"
+        );
+        assert_eq!(
+            attach_unread_sentinel("Contract.pdf", 100),
+            attach_unread_sentinel("contract.PDF", 100),
+            "name case must fold"
+        );
+
+        let unread_pdf = attach_unread_sentinel("Contract.pdf", 100);
+        let unread_xlsx = attach_unread_sentinel("Financials.xlsx", 100);
+        let empty = EMPTY_CONTENT_SHA256;
+        let real = digest_of(b"real-bytes");
+        assert_ne!(unread_pdf, unread_xlsx);
+        assert_ne!(unread_pdf, empty);
+        assert_ne!(unread_xlsx, empty);
+        assert_ne!(unread_pdf, real);
+        assert_ne!(unread_xlsx, real);
+        assert_ne!(empty, real);
+        // Same name+size unreads match.
+        assert_eq!(
+            attach_unread_sentinel("Contract.pdf", 100),
+            attach_unread_sentinel("contract.pdf", 100)
+        );
+        // Slot helper: None → sentinel; is_unread forces sentinel even if Some.
+        assert_eq!(
+            attach_content_slot("Contract.pdf", 100, None, false),
+            unread_pdf
+        );
+        assert_eq!(
+            attach_content_slot("Contract.pdf", 100, Some(real), true),
+            unread_pdf
+        );
+        assert_eq!(
+            attach_content_slot("Contract.pdf", 100, Some(real), false),
+            real
+        );
+    }
+
+    #[test]
+    fn choice_b_no_tier_hijack_unread_vs_no_attach() {
+        // Message with unread attach must not share strong hash with no-attach peer
+        // that matches body+recip (Choice A regression guard).
+        let mut with_attach = AttachmentInfo::new("Contract.pdf", 100);
+        // content_sha256 None → sentinel at BodyRecipAttach.
+        with_attach.content_sha256 = None;
+        let k_unread = keys_attach("same body", &[with_attach], false);
+        let k_none = keys_attach("same body", &[], false);
+        assert_ne!(
+            k_unread.strong_content_hash, k_none.strong_content_hash,
+            "unread attach must not merge with no-attach body-recip peer"
+        );
+        // At body-recip alone they would still share the same strong hash
+        // (name:size is in v1 preimage so actually they differ at body-recip too
+        // because name:size is in v1). Use equal name:size path via empty digests
+        // omit-would-have-merged: two different unread names would collapse if
+        // omit-None were used with empty attach lists — already covered.
+        // Stronger check: body-recip without attach-content can share when meta
+        // matches; inject same name:size on both and ensure attach level still
+        // distinguishes unread sentinel from real empty only when policy says so.
+        let mut a = AttachmentInfo::new("f.bin", 0);
+        a.content_sha256 = None; // unread
+        let mut b = AttachmentInfo::new("f.bin", 0);
+        b.content_sha256 = Some(EMPTY_CONTENT_SHA256); // legitimate empty
+        let k_a = keys_attach("body", &[a], false);
+        let k_b = keys_attach("body", &[b], false);
+        assert_ne!(
+            k_a.strong_content_hash, k_b.strong_content_hash,
+            "unread size-0 must not equal legitimate empty digest"
+        );
+        // body-recip (no attach content) merges them (same name:size).
+        let mut a2 = AttachmentInfo::new("f.bin", 0);
+        a2.content_sha256 = None;
+        let mut b2 = AttachmentInfo::new("f.bin", 0);
+        b2.content_sha256 = Some(EMPTY_CONTENT_SHA256);
+        let br_a = keys_body_recip("body", &[a2]);
+        let br_b = keys_body_recip("body", &[b2]);
+        assert_eq!(
+            br_a.strong_content_hash, br_b.strong_content_hash,
+            "body-recip ignores content digests"
+        );
+    }
+
+    #[test]
+    fn empty_vs_length_mismatch_slot_policy() {
+        // Legitimate empty: size 0 + empty digest.
+        assert_eq!(digest_of(b""), EMPTY_CONTENT_SHA256);
+        let mut empty_ok = AttachmentInfo::new("empty.bin", 0);
+        empty_ok.content_sha256 = Some(EMPTY_CONTENT_SHA256);
+        // Length mismatch: size > 0, treat as unread (not empty digest).
+        let mut mismatch = AttachmentInfo::new("empty.bin", 10);
+        mismatch.content_sha256 = Some(attach_unread_sentinel("empty.bin", 10));
+        let k_empty = keys_attach("body", &[empty_ok], false);
+        let k_mm = keys_attach("body", &[mismatch], false);
+        assert_ne!(k_empty.strong_content_hash, k_mm.strong_content_hash);
+        // Direct sentinel ≠ empty digest.
+        assert_ne!(
+            attach_unread_sentinel("empty.bin", 10),
+            EMPTY_CONTENT_SHA256
+        );
+    }
+
+    #[test]
+    fn nist_sha256_multi_block_kat() {
+        // NIST/FIPS known-answer vectors on the same sha2::Sha256 path used for
+        // attach streaming (guards RUSTSEC-2021-0100-class multi-block miscompute).
+        // "abc"
+        let mut h = Sha256::new();
+        h.update(b"abc");
+        let abc: [u8; 32] = h.finalize().into();
+        assert_eq!(
+            hex(&abc),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // 1_000_000 × 'a' (multi-block)
+        let mut h = Sha256::new();
+        let chunk = vec![b'a'; 8192];
+        let mut remaining = 1_000_000usize;
+        while remaining > 0 {
+            let n = remaining.min(chunk.len());
+            h.update(&chunk[..n]);
+            remaining -= n;
+        }
+        let million_a: [u8; 32] = h.finalize().into();
+        assert_eq!(
+            hex(&million_a),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+        // Stream-style chunked hash matches one-shot for arbitrary payload.
+        let payload: Vec<u8> = (0u8..200).cycle().take(200_000).collect();
+        let one_shot = digest_of(&payload);
+        let mut h = Sha256::new();
+        for part in payload.chunks(64 * 1024) {
+            h.update(part);
+        }
+        let chunked: [u8; 32] = h.finalize().into();
+        assert_eq!(one_shot, chunked);
+    }
+
+    #[test]
+    fn attach_content_inline_ignored_when_flag_set() {
+        let mut inline = AttachmentInfo::new("logo.png", 50);
+        inline.is_inline = true;
+        inline.content_sha256 = Some(digest_of(b"logo-a"));
+        let mut inline_b = AttachmentInfo::new("logo.png", 50);
+        inline_b.is_inline = true;
+        inline_b.content_sha256 = Some(digest_of(b"logo-b"));
+        // With ignore: different inline digests must not split.
+        let k1 = keys_attach("body", &[inline.clone()], true);
+        let k2 = keys_attach("body", &[inline_b], true);
+        assert_eq!(
+            k1.strong_content_hash, k2.strong_content_hash,
+            "ignored inline must not participate in attach-content slots"
+        );
+        // Without ignore: different digests split.
+        let mut i1 = AttachmentInfo::new("logo.png", 50);
+        i1.is_inline = true;
+        i1.content_sha256 = Some(digest_of(b"logo-a"));
+        let mut i2 = AttachmentInfo::new("logo.png", 50);
+        i2.is_inline = true;
+        i2.content_sha256 = Some(digest_of(b"logo-b"));
+        let k3 = keys_attach("body", &[i1], false);
+        let k4 = keys_attach("body", &[i2], false);
+        assert_ne!(k3.strong_content_hash, k4.strong_content_hash);
+    }
+
+    #[test]
+    fn body_recip_attach_refines_body_recip() {
+        // Equal body-recip with different real digests → attach level subdivides.
+        let mut a = AttachmentInfo::new("doc.pdf", 4);
+        a.content_sha256 = Some(digest_of(b"AAAA"));
+        let mut b = AttachmentInfo::new("doc.pdf", 4);
+        b.content_sha256 = Some(digest_of(b"BBBB"));
+        let br_a = keys_body_recip("body", &[a.clone()]);
+        let br_b = keys_body_recip("body", &[b.clone()]);
+        assert_eq!(
+            br_a.strong_content_hash, br_b.strong_content_hash,
+            "body-recip ignores digests (same name:size)"
+        );
+        assert_eq!(br_a.content_hash, br_b.content_hash);
+        let att_a = keys_attach("body", &[a], false);
+        let att_b = keys_attach("body", &[b], false);
+        assert_ne!(att_a.strong_content_hash, att_b.strong_content_hash);
+        // equal-v2 ⇒ equal-v1 still holds for each side.
+        assert_eq!(att_a.content_hash, br_a.content_hash);
+        assert_eq!(att_b.content_hash, br_b.content_hash);
+    }
+
+    #[test]
+    fn none_content_sha256_fills_sentinel_not_omit() {
+        // Two messages with different unread attach names must not collapse
+        // via empty attach-content tails (omit-None regression).
+        let a = AttachmentInfo::new("Contract.pdf", 100);
+        let b = AttachmentInfo::new("Financials.xlsx", 100);
+        let k_a = keys_attach("body", &[a], false);
+        let k_b = keys_attach("body", &[b], false);
+        assert_ne!(
+            k_a.strong_content_hash, k_b.strong_content_hash,
+            "None digests must synthesize distinct name+size sentinels"
+        );
+        // Identical unread slots still match.
+        let c = AttachmentInfo::new("Contract.pdf", 100);
+        let d = AttachmentInfo::new("contract.PDF", 100);
+        let k_c = keys_attach("body", &[c], false);
+        let k_d = keys_attach("body", &[d], false);
+        assert_eq!(k_c.strong_content_hash, k_d.strong_content_hash);
     }
 }

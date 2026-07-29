@@ -387,7 +387,7 @@ Dedup identity is tiered. Defaults may only **split** groups relative to pre-007
 |---|---|---|
 | **1** | Normalized `InternetMessageId` | Always on; MID match is definitive |
 | **2** (v1) | SHA-256 of normalized subject \| submit FILETIME \| sender \| ≤4096 **chars** body preview \| sorted attach `name:size` | On (`--no-tier2` disables) |
-| **2.5** (v2) | v1 preimage **plus** layered extras | Off — `--strong-content-hash body\|body-recip` (`body-recip-attach` deferred **D-0076-attach-content**) |
+| **2.5** (v2) | v1 preimage **plus** layered extras | Off — `--strong-content-hash body\|body-recip\|body-recip-attach` (**0086** ships attach-content; default remains `off`) |
 
 **Named divergences from Relativity’s four-component hash:**
 
@@ -396,7 +396,42 @@ Dedup identity is tiered. Defaults may only **split** groups relative to pre-007
 | Body | Full `PR_BODY` with CR/LF/space/tab stripped | First **4096 characters** of whitespace-normalized body (spaces kept) |
 | Header | Subject + sender name/email + ClientSubmitTime | Subject + sender email + submit FILETIME (no separate display name) |
 | Recipients | All recipients incl. BCC (address-oriented) | **Absent at v1**; opt-in at `body-recip` via structured table keys when present, else display strings (**0082**) |
-| Attachments | Per-attachment **content** SHA-256 | Name + size metadata only (content digests deferred or opt-in attach level) |
+| Attachments | Per-attachment **content** SHA-256 (“normal standard SHA256 file hash”; **no published block size** — our stream chunk is an implementation detail) | Name + size at v1 / `body` / `body-recip`; full-stream content digests at **`body-recip-attach` (0086)** |
+
+### Attach-content identity (`body-recip-attach`, 0086)
+
+Opt-in only (expensive full-stream attach I/O). When set, every non-ignored attachment contributes a **32-byte slot** to the strong preimage:
+
+| Condition | Slot | Stats |
+|---|---|---|
+| By-value stream fully read; `bytes_read` matches declared size when size &gt; 0 | Real `SHA-256(stream_bytes)` | `strong_hash_attach_digested` / `_bytes` |
+| Declared size **0**, open succeeds, immediate EOF | Real `SHA-256("")` = `e3b0c442…` (legitimate empty file) | digested |
+| Length mismatch (size &gt; 0 but stream empty/short), open/CRC/IO fail, cancel, budget | **Choice B unread sentinel** (never omit; never tier-downgrade to `body-recip`) | `strong_hash_attach_unread` |
+| Cloud-link / no offline binary (`is_cloud_link`) | Unread sentinel (no open attempt) | unread |
+
+**Choice B unread sentinel (exact formula):**
+
+```text
+SHA-256( b"pst-dedup/attach-unread/v1\0" || name_lower_utf8 || b"\0" || size as little-endian u32 )
+```
+
+So unread `Contract.pdf` ≠ unread `Financials.xlsx` ≠ empty-file digest ≠ real content. Slots are **sorted** before folding (order-independent). **Forbidden:** omit missing digests; downgrade incomplete items to `body-recip` binding; use a static single `UNREAD` constant for all failures.
+
+**Budgets (dedicated flags; not 0074 L2 head caps):**
+
+| Flag | Default |
+|---|---|
+| `--strong-hash-attach-max-attaches` | 50_000 |
+| `--strong-hash-attach-max-bytes` | 1 GiB |
+| `--strong-hash-attach-per-attach-max-bytes` | 512 MiB |
+
+Identity always **full-streams** under these caps; 0074 deep-attach head probe is unrelated and must not be treated as digest equality.
+
+**`--identity-ignore-inline-attachments` + `body-recip-attach`:** soft **stderr warning** (not hard reject). Inline attaches are omitted from both name:size and content slots — softens the byte-strict promise (logo/signature variance still filterable).
+
+**Mode A interaction:** attach-content identity can place a complete physical copy and an incomplete/cloud copy into **different keep-set groups**. Mode A only promotes **within** a group — it is not a substitute for attach-content identity when attach-byte fidelity matters for grouping.
+
+**Embedded message attaches:** P0 hashes the **raw attach data stream** as a binary blob. Recursive Relativity-style four-component hash of embedded email is residual **D-0086-embedded-email-hash**.
 
 ### Tier-2.5 recipient identity (0082)
 
@@ -452,7 +487,8 @@ Related: **0080** (QC sampling per bind tier), **0081** (operator runbook).
 
 | Flag | Default | Direction |
 |---|---|---|
-| `--strong-content-hash <off\|body\|body-recip>` | `off` | split (`body-recip-attach` rejected until **D-0076-attach-content**) |
+| `--strong-content-hash <off\|body\|body-recip\|body-recip-attach>` | `off` | split (attach level is expensive full-stream I/O; **0086**) |
+| `--strong-hash-attach-max-attaches` / `-max-bytes` / `-per-attach-max-bytes` | 50k / 1 GiB / 512 MiB | budgets for attach-content digests only |
 | `--dedupe-scope <global\|per-source>` | `global` | split |
 | `--tier1-verify <off\|content\|body>` | `off` | split |
 | `--tier1-backfill` | off | **merge** (keep-set / unique-pst / unique-eml post-pass only; **rejected** on streaming `scan`/`dups` — DedupIndex cannot retro-merge already-emitted uniques) |
@@ -468,7 +504,7 @@ Desk wizard: single **Strong content hash** checkbox → `body` level. Full enum
 - Operator residual: Outlook / `scanpst.exe` structural check on multi-GB artifacts (not CI DoD).
 - Count invariant (full success): sum of messages across volumes == `keep_set.stats.unique`.
 - **Attach soft-fail invariant:** `export.attachments_failed` == sum of fail-severity ledger accounting (histogram always complete; CSV may be truncated under the row cap).
-- **Promote-on-attach-fail (Mode A, 0083/0084):** `--promote-on-attach-fail` (default **off**). Pre-write only: when a keep-set peer materializes with incomplete attaches (`stream_available == false`, explicit `is_cloud_link`, or fail-severity attach fidelity) and a ranked peer is complete, promote the complete peer **before** PST/EML write commits that family. Default remains **Mode C** (write best-effort, ledger fails). **Mode B** write-time mid-message promote is **permanently declined**. All peers incomplete → Mode C fallback on highest-ranked materializable (`decided_by=mode_c_fallback_all_peers_incomplete`); group is not dropped for soft attach incompleteness alone. Under default global scope this may select another custodian’s complete copy (**cross-custodian de-duplication** — Sedona term); see the eDiscovery runbook. `duplicate_sources` on Unique rows still lists the full group after promote. **0084 cloud/modern attaches (attachment-table only):** detected via NPMAP `AttachmentProviderType` and/or web-ref method signals → incomplete + ledger reason `ATTACH_CLOUD_LINK` with appended columns `cloud_provider`,`cloud_url`; unique-PST writes a **pointer/metadata attach row** (no invented binary; no network download). **0085 body-inline document-shaped cloud URLs** are ledged in `export_body_cloud_links.csv` and counted on `export_messages.body_cloud_link_count` — they do **not** set `is_attach_incomplete` / Mode A promote (**known gap:** Mode A will not prefer a peer with a physical attach over a peer that only has the same logical message as an HTML inline link). Identity levels that hash attach payloads (**D-0076-attach-content**, not live) can fracture incomplete vs complete into different groups — Mode A only walks within one keep-set group.
+- **Promote-on-attach-fail (Mode A, 0083/0084):** `--promote-on-attach-fail` (default **off**). Pre-write only: when a keep-set peer materializes with incomplete attaches (`stream_available == false`, explicit `is_cloud_link`, or fail-severity attach fidelity) and a ranked peer is complete, promote the complete peer **before** PST/EML write commits that family. Default remains **Mode C** (write best-effort, ledger fails). **Mode B** write-time mid-message promote is **permanently declined**. All peers incomplete → Mode C fallback on highest-ranked materializable (`decided_by=mode_c_fallback_all_peers_incomplete`); group is not dropped for soft attach incompleteness alone. Under default global scope this may select another custodian’s complete copy (**cross-custodian de-duplication** — Sedona term); see the eDiscovery runbook. `duplicate_sources` on Unique rows still lists the full group after promote. **0084 cloud/modern attaches (attachment-table only):** detected via NPMAP `AttachmentProviderType` and/or web-ref method signals → incomplete + ledger reason `ATTACH_CLOUD_LINK` with appended columns `cloud_provider`,`cloud_url`; unique-PST writes a **pointer/metadata attach row** (no invented binary; no network download). **0085 body-inline document-shaped cloud URLs** are ledged in `export_body_cloud_links.csv` and counted on `export_messages.body_cloud_link_count` — they do **not** set `is_attach_incomplete` / Mode A promote (**known gap:** Mode A will not prefer a peer with a physical attach over a peer that only has the same logical message as an HTML inline link). **0086 `body-recip-attach` is live** (closes **D-0076-attach-content**): full-stream attach digests bind into Tier-2.5 strong identity, so incomplete vs complete / different-bytes peers can split into different keep-set groups. Mode A only walks within one keep-set group and **cannot cross attach-content group splits**.
 - **`export_attachments.csv` cloud columns (0084):** header appends `cloud_provider,cloud_url` (right of existing columns; empty when not CloudLink). Formula injection neutralization applies to free-text URL cells.
 - **`export_body_cloud_links.csv` (0085):** multi-row hit-list of **document-shaped** commercial SharePoint/OneDrive body URLs (action tokens `:w:`/`:x:`/`:p:`/`:b:`/`:u:`; Office/PDF extensions; `1drv.ms`; SafeLinks unwrap when nested target is document-shaped). Caps: 100k body window, 2048 URL length, 50 links/message. Query strings are **never** stripped (as-sent share context). Bare site roots / `:f:` folder shares are misses. Always written when the report pack exists (independent of `--attach-ledger`). Summary: `messages_with_body_cloud_links`, `body_cloud_links_total`, `body_cloud_link_truncated_messages`. Sovereign-cloud hosts residual **D-0085-sovereign-cloud-hosts**. No network fetch; no invented Attachment Table rows; body-only hits do not alone force exit 64.
 - **unique-eml:** Mode A flag threads the shared materialize finalizer; full attach-ledger CSV remains residual **D-0073-eml**.
