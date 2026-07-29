@@ -14,7 +14,7 @@ use pst_dedup_cli::export_oracle::structural_digest_pst;
 use pst_dedup_cli::fidelity_contract::{FidelityContract, FindingClass};
 use pst_dedup_cli::unique_export_report::{ExportMessageRow, VolumeReportRow};
 use pst_dedup_cli::unique_pst_qc::{
-    corrupt_pst_flip_byte, corrupt_pst_truncate, run_unique_pst_qc, select_sample_indices,
+    record_classified_finding, run_qc_pst, run_unique_pst_qc, select_sample_indices,
     AttachDigestEntry, ContentDigestEntry, ContentDigestsFile, ContentDigestsVolume, QcLevel,
     QcRunInput, QcSampleCandidate, CONTENT_DIGEST_ORIGIN_SOURCE, DEFAULT_QC_SAMPLE_MAX,
 };
@@ -104,10 +104,40 @@ fn cand(i: u64, body: usize) -> QcSampleCandidate {
         has_embedded: false,
         has_degraded: false,
         has_ledger_fail: false,
+        body_unavailable: false,
+        body_incomplete: false,
+        crc_suspect: false,
         subject_non_ascii: false,
         display_cc: String::new(),
         display_bcc: String::new(),
     }
+}
+
+/// Test-only: truncate PST tail (negative fixture helper — not production surface).
+fn corrupt_pst_truncate(path: &Path, drop_tail: u64) -> Result<(), String> {
+    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
+    let new_len = meta.len().saturating_sub(drop_tail);
+    let f = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    f.set_len(new_len).map_err(|e| e.to_string())
+}
+
+/// Test-only: flip a byte for negative fixtures.
+fn corrupt_pst_flip_byte(path: &Path, offset: u64) -> Result<(), String> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut f = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    let mut b = [0u8; 1];
+    f.read_exact(&mut b).map_err(|e| e.to_string())?;
+    b[0] ^= 0xFF;
+    f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    f.write_all(&b).map_err(|e| e.to_string())
 }
 
 fn qc_input<'a>(
@@ -290,6 +320,54 @@ fn unexplained_loss_pipeline_via_probe_hook() {
         csv.contains("unexplained_loss"),
         "findings csv must list unexplained_loss"
     );
+}
+
+#[test]
+fn unexplained_loss_via_production_record_classified_finding() {
+    // DoD-9: production `record_classified_finding` path (same as run_unique_pst_qc uses).
+    let contract = FidelityContract::v1();
+    let mut counts = pst_dedup_cli::unique_pst_qc::QcFindingCounts::default();
+    let mut findings = Vec::new();
+    record_classified_finding(
+        &contract,
+        &mut counts,
+        &mut findings,
+        "never_heard_of_this_mapi_prop",
+        false,
+        pst_dedup_cli::unique_pst_qc::RecordFindingId {
+            volume_index: 1,
+            source_path: r"C:\src\a.pst",
+            source_nid: 0x100,
+            message_id_norm: "mid@ex.com",
+        },
+        "synthetic unknown property observed in comparison",
+    );
+    assert_eq!(counts.unexplained_loss, 1);
+    assert!(counts.hard_fail());
+    assert_eq!(findings[0].class, FindingClass::UnexplainedLoss);
+    // Also exercise through full QC pipeline (probe uses same record path).
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("clean.pst");
+    write_simple_pst(&path, vec![base_msg("<u2@ex.com>", "U2", "body")]);
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&path, 1)];
+    let export_rows = vec![export_row("u2@ex.com", 1, 1)];
+    let mut input = qc_input(
+        QcLevel::Structure,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[],
+        false,
+        false,
+    );
+    input.probe_unexplained_property = Some("totally_unknown_observed_prop");
+    let report = run_unique_pst_qc(input);
+    assert!(report.findings.unexplained_loss > 0);
+    assert!(report.hard_fail);
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).expect("csv");
+    assert!(csv.contains("unexplained_loss"));
 }
 
 #[test]
@@ -1031,6 +1109,499 @@ fn cloud_attachment_contract_entry_exists() {
         .get("cloud_modern_attachments")
         .expect("Q10 contract line");
     assert_ne!(format!("{:?}", p.status).to_ascii_lowercase(), "preserved");
+}
+
+#[test]
+fn degraded_message_stripped_cc_still_defects() {
+    // Broad degradation / ledger soft-fail must not suppress CC loss.
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+    let mut src_msg = base_msg("<deg@ex.com>", "Deg CC", "body deg");
+    src_msg.display_cc = Some("carol@example.com".into());
+    write_simple_pst(&src, vec![src_msg]);
+    let mut out_msg = base_msg("<deg@ex.com>", "Deg CC", "body deg");
+    out_msg.display_cc = None;
+    write_simple_pst(&out, vec![out_msg]);
+
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "deg@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 1,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        subject: "Deg CC".into(),
+    }];
+    let mut c = cand(1, 8);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "deg@ex.com".into();
+    c.subject = "Deg CC".into();
+    c.display_cc = "carol@example.com".into();
+    c.has_degraded = true;
+    c.has_ledger_fail = true;
+    c.body_unavailable = false;
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        true,
+        false,
+    ));
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "degraded+ledger soft-fail must not explain stripped CC: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn degraded_body_unavailable_stripped_body_still_defects_when_not_flagged() {
+    // has_degraded alone must not explain body loss without body_unavailable.
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+    write_simple_pst(
+        &src,
+        vec![base_msg(
+            "<bd@ex.com>",
+            "Body loss",
+            "full source body text here",
+        )],
+    );
+    write_simple_pst(&out, vec![base_msg("<bd@ex.com>", "Body loss", "x")]);
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "bd@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 0,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        subject: "Body loss".into(),
+    }];
+    let mut c = cand(1, 26);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "bd@ex.com".into();
+    c.subject = "Body loss".into();
+    c.has_degraded = true; // broad flag only
+    c.body_unavailable = false;
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        true,
+        false,
+    ));
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "has_degraded alone must not suppress body defect: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn corrupt_existing_source_hard_fails_not_skip() {
+    // Path exists but is malformed ⇒ defect / hard fail, not Explained skip.
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("corrupt_src.pst");
+    let out = dir.path().join("out.pst");
+    fs::write(&src, b"not-a-valid-pst-file-but-exists").expect("src");
+    write_simple_pst(&out, vec![base_msg("<cs@ex.com>", "Corrupt src", "body")]);
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: 0x100,
+        message_id_norm: "cs@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 0,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        subject: "Corrupt src".into(),
+    }];
+    let mut c = cand(1, 4);
+    c.source_path = src.display().to_string();
+    c.source_nid = 0x100;
+    c.message_id_norm = "cs@ex.com".into();
+    c.subject = "Corrupt src".into();
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        true,
+        false,
+    ));
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "corrupt existing source must hard-fail, not skip: {:?}",
+        report.findings
+    );
+    assert_eq!(
+        report.findings.skipped_source_unavailable, 0,
+        "must not count as skipped_source_unavailable: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn empty_volumes_still_emit_qc_report() {
+    let dir = TempDir::new().expect("tmp");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Structure,
+        &report_dir,
+        &[],
+        &[],
+        &[],
+        false,
+        false,
+    ));
+    assert!(
+        report_dir.join("qc_report_v1.json").is_file(),
+        "empty volumes must still write qc_report_v1"
+    );
+    assert!(
+        report_dir.join("qc_findings.csv").is_file(),
+        "empty volumes must still write qc_findings.csv"
+    );
+    assert_eq!(report.volumes.len(), 0);
+    assert!(!report.hard_fail, "zero winners structure should be green");
+}
+
+#[test]
+fn multi_volume_external_reader_called_for_each_volume() {
+    let dir = TempDir::new().expect("tmp");
+    let counter = dir.path().join("reader_calls.txt");
+    let stub = dir.path().join("pffinfo.cmd");
+    {
+        let mut f = fs::File::create(&stub).expect("stub");
+        // Append one line per invocation so we can count multi-volume calls.
+        let counter_s = counter.display().to_string();
+        writeln!(f, "@echo off").expect("w");
+        writeln!(f, "echo call>>\"{counter_s}\"").expect("w");
+        writeln!(f, "echo Number of folders : 1").expect("w");
+        writeln!(f, "echo Number of items : 1").expect("w");
+        writeln!(f, "exit /b 0").expect("w");
+    }
+    let v1 = dir.path().join("v1.pst");
+    let v2 = dir.path().join("v2.pst");
+    write_simple_pst(&v1, vec![base_msg("<mv1@ex.com>", "V1", "a")]);
+    write_simple_pst(&v2, vec![base_msg("<mv2@ex.com>", "V2", "b")]);
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![
+        VolumeReportRow {
+            volume_index: 1,
+            path: v1.display().to_string(),
+            bytes: fs::metadata(&v1).map(|m| m.len()).unwrap_or(0),
+            sha256_hex: String::new(),
+            md5_hex: String::new(),
+            messages_written: 1,
+            finalized_early: false,
+            volume_exceeded_soft_limit: false,
+        },
+        VolumeReportRow {
+            volume_index: 2,
+            path: v2.display().to_string(),
+            bytes: fs::metadata(&v2).map(|m| m.len()).unwrap_or(0),
+            sha256_hex: String::new(),
+            md5_hex: String::new(),
+            messages_written: 1,
+            finalized_early: false,
+            volume_exceeded_soft_limit: false,
+        },
+    ];
+    let export_rows = vec![
+        ExportMessageRow {
+            source_path: r"C:\src\a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 1,
+            message_id_norm: "mv1@ex.com".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: String::new(),
+            volume_path: v1.display().to_string(),
+            volume_index: 1,
+            export_message_index: 1,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            subject: "V1".into(),
+        },
+        ExportMessageRow {
+            source_path: r"C:\src\a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 2,
+            message_id_norm: "mv2@ex.com".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: String::new(),
+            volume_path: v2.display().to_string(),
+            volume_index: 2,
+            export_message_index: 2,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            subject: "V2".into(),
+        },
+    ];
+    let mut input = qc_input(
+        QcLevel::Structure,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[],
+        false,
+        false,
+    );
+    input.external_reader = Some(&stub);
+    let _report = run_unique_pst_qc(input);
+    let calls = fs::read_to_string(&counter).unwrap_or_default();
+    let n = calls.lines().filter(|l| !l.trim().is_empty()).count();
+    assert!(
+        n >= 2,
+        "external reader must run per volume (got {n} calls): {calls:?}"
+    );
+}
+
+#[test]
+fn folder_count_redistribution_hard_fails() {
+    // Same total messages and leaf names, but redistributed between folders.
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("redist.pst");
+    let m1 = WriteMessage {
+        message_id: Some("<r1@ex.com>".into()),
+        subject: "A".into(),
+        body_plain: Some("a".into()),
+        source_folder_path: Some("Inbox".into()),
+        source_path: Some(r"C:\src\a.pst".into()),
+        ..WriteMessage::default()
+    };
+    let m2 = WriteMessage {
+        message_id: Some("<r2@ex.com>".into()),
+        subject: "B".into(),
+        body_plain: Some("b".into()),
+        source_folder_path: Some("Inbox".into()),
+        source_path: Some(r"C:\src\a.pst".into()),
+        ..WriteMessage::default()
+    };
+    let m3 = WriteMessage {
+        message_id: Some("<r3@ex.com>".into()),
+        subject: "C".into(),
+        body_plain: Some("c".into()),
+        source_folder_path: Some("Sent Items".into()),
+        source_path: Some(r"C:\src\a.pst".into()),
+        ..WriteMessage::default()
+    };
+    write_unicode_pst(&out, vec![m1, m2, m3], &[], &WritePstOpts::default()).expect("write");
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 3)];
+    // Expect opposite distribution: Inbox=1, Sent=2 (output has Inbox=2, Sent=1).
+    let export_rows = vec![
+        export_row_folder("r1@ex.com", 1, 1, "Inbox"),
+        export_row_folder("r2@ex.com", 2, 2, "Sent Items"),
+        export_row_folder("r3@ex.com", 3, 3, "Sent Items"),
+    ];
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Structure,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[],
+        false,
+        false,
+    ));
+    assert!(
+        !report.volumes[0].folder_tree_match,
+        "redistributed folder counts must fail folder_tree_match"
+    );
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "redistributed counts must hard-fail: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn qc_pst_honors_moved_out_path() {
+    let dir = TempDir::new().expect("tmp");
+    let original = dir.path().join("original.pst");
+    let moved = dir.path().join("moved_out.pst");
+    write_simple_pst(
+        &original,
+        vec![base_msg("<mv@ex.com>", "Moved", "body moved")],
+    );
+    fs::copy(&original, &moved).expect("copy");
+    // Remove original so summary path is stale; positional out must be used.
+    fs::remove_file(&original).expect("rm");
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let summary = serde_json::json!({
+        "export": {
+            "volumes": [{
+                "volume_index": 1,
+                "path": original.display().to_string(),
+                "bytes": 0,
+                "sha256_hex": "",
+                "md5_hex": "",
+                "messages_written": 1,
+                "finalized_early": false,
+                "volume_exceeded_soft_limit": false
+            }]
+        }
+    });
+    fs::write(
+        report_dir.join("summary.json"),
+        serde_json::to_string_pretty(&summary).expect("json"),
+    )
+    .expect("summary");
+
+    let report =
+        run_qc_pst(&moved, &report_dir, QcLevel::Structure, 64, None, false, 4).expect("qc-pst");
+    assert!(
+        report.volumes[0].open_ok,
+        "moved out path must be remapped and open: {:?}",
+        report.volumes
+    );
+    assert!(
+        report.volumes[0].path.contains("moved_out")
+            || Path::new(&report.volumes[0].path).file_name()
+                == Some(std::ffi::OsStr::new("moved_out.pst")),
+        "volume path should be remapped to moved out: {}",
+        report.volumes[0].path
+    );
+}
+
+#[test]
+fn no_mid_message_green_when_digests_match() {
+    use pst_dedup_cli::export_oracle::message_content_detail;
+    use pst_reader::PstFile;
+
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("nomid.pst");
+    let mut msg = base_msg("", "NoMid Subject", "no mid body");
+    msg.message_id = None;
+    write_simple_pst(&path, vec![msg]);
+
+    let mut pst = PstFile::open(&path).expect("open");
+    let folders = pst.folders().expect("folders");
+    let nid = folders
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("one msg");
+    let detail = message_content_detail(&mut pst, nid.0).expect("detail");
+    drop(pst);
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let digests = ContentDigestsFile {
+        schema: "content_digests_v1".into(),
+        origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
+        qc_level: "full".into(),
+        volumes: vec![ContentDigestsVolume {
+            volume_index: 1,
+            path: path.display().to_string(),
+            messages: vec![ContentDigestEntry {
+                export_message_index: 1,
+                source_path: r"C:\src\a.pst".into(),
+                source_nid: 1,
+                message_id_norm: String::new(),
+                content_digest: detail.digest.clone(),
+                subject: detail.subject.clone(),
+                display_to: detail.display_to.clone(),
+                display_cc: detail.display_cc.clone(),
+                body_plain_len: detail.body_plain_len,
+                body_html_len: detail.body_html_len,
+                attaches: vec![],
+            }],
+        }],
+    };
+    fs::write(
+        report_dir.join("content_digests.json"),
+        serde_json::to_string_pretty(&digests).expect("json"),
+    )
+    .expect("digests");
+
+    let volumes = vec![vol_row(&path, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: r"C:\src\a.pst".into(),
+        folder_path: "Inbox".into(),
+        nid: 1,
+        message_id_norm: String::new(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: path.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 0,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        subject: "NoMid Subject".into(),
+    }];
+    let mut c = cand(1, detail.body_plain_len);
+    c.message_id_norm = String::new();
+    c.subject = "NoMid Subject".into();
+    c.source_nid = 1;
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        false,
+        true, // parents_only clean-room body match
+    ));
+    assert!(
+        report.content_digest_backed,
+        "source digests must enable clean-room"
+    );
+    assert!(
+        !report.hard_fail,
+        "no-MID with matching digests/subject must be green: {:?}",
+        report.findings
+    );
+    assert_eq!(report.findings.defect, 0);
 }
 
 // Silence unused import warning if BTreeMap unused in some builds.

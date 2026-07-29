@@ -80,8 +80,16 @@ pub struct QcSampleCandidate {
     pub max_attach_size: u64,
     pub has_zero_byte_attach: bool,
     pub has_embedded: bool,
+    /// Sampling stratum only — **never** used to explain unrelated property mismatches.
     pub has_degraded: bool,
+    /// Attachment ledger soft-fail on this message (explains empty attach hashes only).
     pub has_ledger_fail: bool,
+    /// Source `body_unavailable` fidelity flag (explains body loss only, never CC/attaches).
+    pub body_unavailable: bool,
+    /// Source `body_incomplete` / truncated body flag (body explain only).
+    pub body_incomplete: bool,
+    /// Source CRC_SUSPECT integrity flag (body/digest explain only — never CC).
+    pub crc_suspect: bool,
     pub subject_non_ascii: bool,
     pub display_cc: String,
     pub display_bcc: String,
@@ -363,6 +371,9 @@ pub fn candidates_from_export_and_meta(
                 has_embedded: false,
                 has_degraded: false,
                 has_ledger_fail: row.attachments_failed_count > 0,
+                body_unavailable: false,
+                body_incomplete: false,
+                crc_suspect: false,
                 subject_non_ascii: !row.subject.is_ascii(),
                 display_cc: String::new(),
                 display_bcc: String::new(),
@@ -434,10 +445,27 @@ pub fn candidate_from_write_msg(input: CandidateFromWriteMsg<'_>) -> QcSampleCan
         has_embedded,
         has_degraded,
         has_ledger_fail,
+        body_unavailable: write_msg.body_unavailable,
+        body_incomplete: write_msg.body_incomplete,
+        crc_suspect: false, // filled by unique-pst from keep-set integrity when known
         subject_non_ascii: !subject.is_ascii(),
         display_cc: write_msg.display_cc.clone().unwrap_or_default(),
         display_bcc: display_bcc.to_string(),
     }
+}
+
+/// True when a body-specific fidelity flag may explain body/digest differences.
+/// Never use for CC, subject, or attachment presence.
+fn body_loss_explained(cand: &QcSampleCandidate) -> bool {
+    cand.body_unavailable || cand.body_incomplete || cand.crc_suspect
+}
+
+/// Normalize display address strings for comparison (strip quotes / angle brackets).
+fn normalize_display_addr(s: &str) -> String {
+    s.trim()
+        .trim_matches(|c| c == '\'' || c == '"' || c == '<' || c == '>')
+        .trim()
+        .to_string()
 }
 
 /// Origin of digests in `content_digests.json`. Only `"source"` enables
@@ -541,11 +569,15 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
             .collect();
         let expected_count = vol.messages_written;
 
-        // Expected folder set: distinct folder_path from export rows for this volume.
-        let expected_folders: BTreeSet<String> = expected_rows
-            .iter()
-            .map(|r| r.folder_path.to_ascii_lowercase())
-            .collect();
+        // Expected per-folder message counts (normalized path → count).
+        let mut expected_folder_counts: BTreeMap<String, u64> = BTreeMap::new();
+        for r in &expected_rows {
+            let key = normalize_folder_key(&r.folder_path);
+            if key.is_empty() {
+                continue;
+            }
+            *expected_folder_counts.entry(key).or_insert(0) += 1;
+        }
 
         match structural_digest_pst(&path) {
             Ok(digest) => {
@@ -553,10 +585,10 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
                 messages_found = digest.message_count;
                 message_count_match = messages_found == expected_count;
 
-                // Folder tree: every message folder should appear under output paths
-                // (output may add multi-source prefixes — require non-empty folders when
-                // messages exist; compare multiset of per-folder counts loosely via paths).
-                folder_tree_match = folder_tree_matches(&digest, &expected_folders, expected_count);
+                // Folder tree: every expected leaf must match by exact/suffix path segments
+                // with equal per-folder message counts (not presence alone).
+                folder_tree_match =
+                    folder_tree_matches(&digest, &expected_folder_counts, expected_count);
 
                 if !folder_tree_match {
                     let (class, _) = contract.classify("folder_tree_structure", false);
@@ -569,9 +601,10 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
                         source_nid: 0,
                         message_id_norm: String::new(),
                         detail: format!(
-                            "folder tree mismatch: out_folders={:?} expected_leaf_set_size={}",
+                            "folder tree/count mismatch: out_folders={:?} out_counts={:?} expected={:?}",
                             digest.folder_paths,
-                            expected_folders.len()
+                            digest.folder_message_counts,
+                            expected_folder_counts
                         ),
                     });
                 }
@@ -698,125 +731,152 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
         }
     }
 
-    // Test/diagnostic: force one allowlist-miss classification into the pipeline.
+    // Test/diagnostic: force one allowlist-miss classification into the pipeline
+    // via the same record path production uses for observed differences.
     if let Some(prop) = input.probe_unexplained_property {
         if !prop.is_empty() {
-            let (class, _) = contract.classify(prop, false);
-            counts.record(class);
-            findings_list.push(QcFinding {
-                class,
-                property: prop.into(),
-                volume_index: 0,
-                source_path: String::new(),
-                source_nid: 0,
-                message_id_norm: String::new(),
-                detail: format!("probe property '{prop}' classified as {class:?}"),
-            });
+            record_classified_finding(
+                &contract,
+                &mut counts,
+                &mut findings_list,
+                prop,
+                false,
+                RecordFindingId {
+                    volume_index: 0,
+                    source_path: "",
+                    source_nid: 0,
+                    message_id_norm: "",
+                },
+                format!("probe property '{prop}' via record_classified_finding"),
+            );
         }
     }
 
-    // External sidecars (skip-safe).
-    let mut independent_reader = if let Some(tool) = input.external_reader {
-        if let Some(vol) = input.volumes.first() {
-            run_independent_reader(tool, Path::new(&vol.path), DEFAULT_EXTERNAL_TIMEOUT)
-        } else {
-            IndependentReaderResult::skipped("no volumes")
-        }
-    } else {
+    // External sidecars (skip-safe) — run for **every** volume and aggregate.
+    let mut independent_reader = if input.external_reader.is_none() {
         IndependentReaderResult::skipped("no --qc-external-reader path")
+    } else if input.volumes.is_empty() {
+        IndependentReaderResult::skipped("no volumes")
+    } else {
+        IndependentReaderResult::skipped("pending multi-volume aggregate")
     };
-
-    // When external reader returns Ok counts, compare to expected volume counts.
-    if independent_reader.status == ExternalStatus::Ok {
-        if let Some(vol) = input.volumes.first() {
-            let expected_msgs = vol.messages_written;
-            if let Some(reader_msgs) = independent_reader.message_count {
-                if reader_msgs != expected_msgs {
-                    counts.record(FindingClass::Defect);
-                    findings_list.push(QcFinding {
-                        class: FindingClass::Defect,
-                        property: "independent_reader_message_count".into(),
-                        volume_index: vol.volume_index,
-                        source_path: String::new(),
-                        source_nid: 0,
-                        message_id_norm: String::new(),
-                        detail: format!(
-                            "independent reader message_count={reader_msgs} expected={expected_msgs}"
-                        ),
-                    });
-                    independent_reader.reason = Some(format!(
-                        "message_count mismatch: reader={reader_msgs} expected={expected_msgs}"
-                    ));
+    if let Some(tool) = input.external_reader {
+        let mut agg: Option<IndependentReaderResult> = None;
+        let mut reasons: Vec<String> = Vec::new();
+        for vol in input.volumes {
+            let r = run_independent_reader(tool, Path::new(&vol.path), DEFAULT_EXTERNAL_TIMEOUT);
+            if r.status == ExternalStatus::Ok {
+                let expected_msgs = vol.messages_written;
+                if let Some(reader_msgs) = r.message_count {
+                    if reader_msgs != expected_msgs {
+                        counts.record(FindingClass::Defect);
+                        findings_list.push(QcFinding {
+                            class: FindingClass::Defect,
+                            property: "independent_reader_message_count".into(),
+                            volume_index: vol.volume_index,
+                            source_path: String::new(),
+                            source_nid: 0,
+                            message_id_norm: String::new(),
+                            detail: format!(
+                                "independent reader message_count={reader_msgs} expected={expected_msgs} vol={}",
+                                vol.volume_index
+                            ),
+                        });
+                        reasons.push(format!(
+                            "vol{} message_count mismatch: reader={reader_msgs} expected={expected_msgs}",
+                            vol.volume_index
+                        ));
+                    }
                 }
-            }
-            let expected_folder_leaves = input
-                .export_rows
-                .iter()
-                .filter(|r| r.volume_index == vol.volume_index)
-                .map(|r| r.folder_path.to_ascii_lowercase())
-                .collect::<BTreeSet<_>>()
-                .len() as u64;
-            if expected_folder_leaves > 0 {
-                if let Some(reader_folders) = independent_reader.folder_count {
-                    // Allow reader folder_count >= expected leaves (IPM hierarchy overhead).
-                    // Hard fail only when reader reports fewer folders than distinct export leaves
-                    // or an exact expected when both are comparable and clearly wrong (0 vs N).
-                    if reader_folders == 0 && expected_folder_leaves > 0 {
-                        counts.record(FindingClass::Defect);
-                        findings_list.push(QcFinding {
-                            class: FindingClass::Defect,
-                            property: "independent_reader_folder_count".into(),
-                            volume_index: vol.volume_index,
-                            source_path: String::new(),
-                            source_nid: 0,
-                            message_id_norm: String::new(),
-                            detail: format!(
-                                "independent reader folder_count=0 expected_leaf_folders>={expected_folder_leaves}"
-                            ),
-                        });
-                    } else if reader_folders < expected_folder_leaves {
-                        counts.record(FindingClass::Defect);
-                        findings_list.push(QcFinding {
-                            class: FindingClass::Defect,
-                            property: "independent_reader_folder_count".into(),
-                            volume_index: vol.volume_index,
-                            source_path: String::new(),
-                            source_nid: 0,
-                            message_id_norm: String::new(),
-                            detail: format!(
-                                "independent reader folder_count={reader_folders} < expected_leaf_folders={expected_folder_leaves}"
-                            ),
-                        });
+                let expected_folder_leaves = input
+                    .export_rows
+                    .iter()
+                    .filter(|row| row.volume_index == vol.volume_index)
+                    .map(|row| normalize_folder_key(&row.folder_path))
+                    .filter(|k| !k.is_empty())
+                    .collect::<BTreeSet<_>>()
+                    .len() as u64;
+                if expected_folder_leaves > 0 {
+                    if let Some(reader_folders) = r.folder_count {
+                        if reader_folders == 0 && expected_folder_leaves > 0 {
+                            counts.record(FindingClass::Defect);
+                            findings_list.push(QcFinding {
+                                class: FindingClass::Defect,
+                                property: "independent_reader_folder_count".into(),
+                                volume_index: vol.volume_index,
+                                source_path: String::new(),
+                                source_nid: 0,
+                                message_id_norm: String::new(),
+                                detail: format!(
+                                    "independent reader folder_count=0 expected_leaf_folders>={expected_folder_leaves} vol={}",
+                                    vol.volume_index
+                                ),
+                            });
+                        } else if reader_folders < expected_folder_leaves {
+                            counts.record(FindingClass::Defect);
+                            findings_list.push(QcFinding {
+                                class: FindingClass::Defect,
+                                property: "independent_reader_folder_count".into(),
+                                volume_index: vol.volume_index,
+                                source_path: String::new(),
+                                source_nid: 0,
+                                message_id_norm: String::new(),
+                                detail: format!(
+                                    "independent reader folder_count={reader_folders} < expected_leaf_folders={expected_folder_leaves} vol={}",
+                                    vol.volume_index
+                                ),
+                            });
+                        }
                     }
                 }
             }
+            if let Some(ref mut a) = agg {
+                *a = merge_independent_reader(a, &r);
+            } else {
+                agg = Some(r);
+            }
+        }
+        if let Some(mut a) = agg {
+            if !reasons.is_empty() {
+                a.reason = Some(reasons.join("; "));
+            }
+            independent_reader = a;
         }
     }
 
-    let mut scanpst = if input.run_scanpst {
-        if let Some(vol) = input.volumes.first() {
-            run_scanpst_auto(Path::new(&vol.path), DEFAULT_EXTERNAL_TIMEOUT)
-        } else {
-            ScanpstResult::skipped("no volumes")
-        }
-    } else {
+    let mut scanpst = if !input.run_scanpst {
         ScanpstResult::skipped("scanpst not requested")
+    } else if input.volumes.is_empty() {
+        ScanpstResult::skipped("no volumes")
+    } else {
+        let mut agg: Option<ScanpstResult> = None;
+        for vol in input.volumes {
+            let r = run_scanpst_auto(Path::new(&vol.path), DEFAULT_EXTERNAL_TIMEOUT);
+            if r.hard_error {
+                counts.record(FindingClass::Defect);
+                findings_list.push(QcFinding {
+                    class: FindingClass::Defect,
+                    property: "scanpst".into(),
+                    volume_index: vol.volume_index,
+                    source_path: String::new(),
+                    source_nid: 0,
+                    message_id_norm: String::new(),
+                    detail: r
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "scanpst hard error".into()),
+                });
+            }
+            if let Some(ref mut a) = agg {
+                *a = merge_scanpst(a, &r);
+            } else {
+                agg = Some(r);
+            }
+        }
+        agg.unwrap_or_else(|| ScanpstResult::skipped("no volumes"))
     };
-    // Hard error from bak ⇒ defect
+    // Ensure hard_error is reflected as Failed status on the aggregate.
     if scanpst.hard_error {
-        counts.record(FindingClass::Defect);
-        findings_list.push(QcFinding {
-            class: FindingClass::Defect,
-            property: "scanpst".into(),
-            volume_index: 0,
-            source_path: String::new(),
-            source_nid: 0,
-            message_id_norm: String::new(),
-            detail: scanpst
-                .reason
-                .clone()
-                .unwrap_or_else(|| "scanpst hard error".into()),
-        });
         scanpst.status = ExternalStatus::Failed;
     }
 
@@ -825,8 +885,43 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
         .flatten();
 
     let qc_ms = t0.elapsed().as_millis() as u64;
-    let hard_fail = counts.hard_fail();
 
+    // Write artifacts first so write failures can force hard_fail / report_ok false.
+    let mut artifact_errors: Vec<String> = Vec::new();
+
+    // Findings CSV before final report so we can include artifact errors in report counts.
+    // content_digests only for source-side digests (export with live sources).
+    if input.source_differential
+        && matches!(input.level, QcLevel::Sample | QcLevel::Full)
+        && !content_volumes.is_empty()
+    {
+        let digests = ContentDigestsFile {
+            schema: "content_digests_v1".into(),
+            origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
+            qc_level: input.level.as_str().into(),
+            volumes: content_volumes,
+        };
+        if let Err(e) = write_content_digests(input.report_dir, &digests) {
+            artifact_errors.push(format!("content_digests.json: {e}"));
+        }
+    }
+
+    if !artifact_errors.is_empty() {
+        for e in &artifact_errors {
+            counts.record(FindingClass::Defect);
+            findings_list.push(QcFinding {
+                class: FindingClass::Defect,
+                property: "qc_artifact_write".into(),
+                volume_index: 0,
+                source_path: String::new(),
+                source_nid: 0,
+                message_id_norm: String::new(),
+                detail: e.clone(),
+            });
+        }
+    }
+
+    let hard_fail = counts.hard_fail();
     let report = QcReportV1 {
         schema: "qc_report_v1".into(),
         contract: FIDELITY_CONTRACT_VERSION.into(),
@@ -846,26 +941,118 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
         hard_fail,
     };
 
-    // Write artifacts.
-    let _ = write_qc_report(input.report_dir, &report);
-    let _ = write_qc_findings_csv(input.report_dir, &findings_list);
-    // Persist content_digests.json only for source-side digests (export with live sources).
-    // Never write output-only digests under this schema — they must not enable
-    // content_digest_backed on a later run (DoD-21).
-    if input.source_differential
-        && matches!(input.level, QcLevel::Sample | QcLevel::Full)
-        && !content_volumes.is_empty()
-    {
-        let digests = ContentDigestsFile {
-            schema: "content_digests_v1".into(),
-            origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
-            qc_level: input.level.as_str().into(),
-            volumes: content_volumes,
+    if let Err(e) = write_qc_report(input.report_dir, &report) {
+        // Report write failed — force hard_fail on a second write attempt with defect.
+        artifact_errors.push(format!("qc_report_v1.json: {e}"));
+    }
+    if let Err(e) = write_qc_findings_csv(input.report_dir, &findings_list) {
+        artifact_errors.push(format!("qc_findings.csv: {e}"));
+    }
+
+    if !artifact_errors.is_empty() {
+        // Re-emit with hard_fail so callers cannot treat missing artifacts as green.
+        let mut counts2 = report.findings.clone();
+        let mut findings2 = findings_list.clone();
+        for e in &artifact_errors {
+            // Avoid double-counting content_digests defects already recorded.
+            if e.starts_with("qc_report_v1.json:") || e.starts_with("qc_findings.csv:") {
+                counts2.record(FindingClass::Defect);
+                findings2.push(QcFinding {
+                    class: FindingClass::Defect,
+                    property: "qc_artifact_write".into(),
+                    volume_index: 0,
+                    source_path: String::new(),
+                    source_nid: 0,
+                    message_id_norm: String::new(),
+                    detail: e.clone(),
+                });
+            }
+        }
+        let hard2 = counts2.hard_fail();
+        let report2 = QcReportV1 {
+            findings: counts2,
+            hard_fail: hard2,
+            ..report
         };
-        let _ = write_content_digests(input.report_dir, &digests);
+        let _ = write_qc_report(input.report_dir, &report2);
+        let _ = write_qc_findings_csv(input.report_dir, &findings2);
+        return report2;
     }
 
     report
+}
+
+/// Merge two independent-reader results (worst status wins; prefer Failed > Timeout > Ok > Skipped).
+fn merge_independent_reader(
+    a: &IndependentReaderResult,
+    b: &IndependentReaderResult,
+) -> IndependentReaderResult {
+    let status = worse_external_status(a.status.clone(), b.status.clone());
+    let reason = match (&a.reason, &b.reason) {
+        (Some(x), Some(y)) if x != y => Some(format!("{x}; {y}")),
+        (Some(x), _) => Some(x.clone()),
+        (_, Some(y)) => Some(y.clone()),
+        _ => None,
+    };
+    IndependentReaderResult {
+        status,
+        reason,
+        tool: a.tool.clone().or_else(|| b.tool.clone()),
+        version: a.version.clone().or_else(|| b.version.clone()),
+        // Sum counts across volumes when both Ok; else keep first present.
+        message_count: match (a.message_count, b.message_count) {
+            (Some(x), Some(y)) => Some(x.saturating_add(y)),
+            (Some(x), None) => Some(x),
+            (None, Some(y)) => Some(y),
+            _ => None,
+        },
+        folder_count: match (a.folder_count, b.folder_count) {
+            (Some(x), Some(y)) => Some(x.saturating_add(y)),
+            (Some(x), None) => Some(x),
+            (None, Some(y)) => Some(y),
+            _ => None,
+        },
+        exit_code: b.exit_code.or(a.exit_code),
+    }
+}
+
+fn merge_scanpst(a: &ScanpstResult, b: &ScanpstResult) -> ScanpstResult {
+    let status = worse_external_status(a.status.clone(), b.status.clone());
+    let reason = match (&a.reason, &b.reason) {
+        (Some(x), Some(y)) if x != y => Some(format!("{x}; {y}")),
+        (Some(x), _) => Some(x.clone()),
+        (_, Some(y)) => Some(y.clone()),
+        _ => None,
+    };
+    ScanpstResult {
+        status,
+        reason,
+        build: a.build.clone().or_else(|| b.build.clone()),
+        log_path: b.log_path.clone().or_else(|| a.log_path.clone()),
+        bak_present: a.bak_present || b.bak_present,
+        log_summary: match (&a.log_summary, &b.log_summary) {
+            (Some(x), Some(y)) if x != y => Some(format!("{x}; {y}")),
+            (Some(x), _) => Some(x.clone()),
+            (_, Some(y)) => Some(y.clone()),
+            _ => None,
+        },
+        hard_error: a.hard_error || b.hard_error,
+    }
+}
+
+fn worse_external_status(a: ExternalStatus, b: ExternalStatus) -> ExternalStatus {
+    use ExternalStatus::*;
+    let rank = |s: &ExternalStatus| match s {
+        Failed => 3,
+        Timeout => 2,
+        Ok => 1,
+        Skipped => 0,
+    };
+    if rank(&b) > rank(&a) {
+        b
+    } else {
+        a
+    }
 }
 
 struct MsgCompareResult {
@@ -909,10 +1096,29 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
 
     // Resolve source-side detail
     let source_detail: Option<MessageContentDetail> = if source_differential {
+        let src_path = Path::new(&cand.source_path);
+        let path_missing = !src_path.is_file();
         match handles.get_mut(&cand.source_path) {
             Ok(pst) => match message_content_detail(pst, cand.source_nid) {
                 Ok(d) => Some(d),
                 Err(e) => {
+                    // Path openable but message read/parse failed ⇒ hard fail (not Explained skip).
+                    let (class, _) = contract.classify("message_content_digest", false);
+                    findings.push(QcFinding {
+                        class,
+                        property: "source_read".into(),
+                        volume_index: cand.volume_index,
+                        source_path: cand.source_path.clone(),
+                        source_nid: cand.source_nid,
+                        message_id_norm: cand.message_id_norm.clone(),
+                        detail: format!("source_read_failed: {e}"),
+                    });
+                    None
+                }
+            },
+            Err(e) => {
+                if path_missing {
+                    // Missing source path ⇒ explained skip (sources gone).
                     skipped_source = true;
                     findings.push(QcFinding {
                         class: FindingClass::Explained,
@@ -923,20 +1129,18 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                         message_id_norm: cand.message_id_norm.clone(),
                         detail: format!("skipped_source_unavailable: {e}"),
                     });
-                    None
+                } else {
+                    // Path exists but open/parse failed ⇒ hard finding.
+                    findings.push(QcFinding {
+                        class: FindingClass::Defect,
+                        property: "source_open".into(),
+                        volume_index: cand.volume_index,
+                        source_path: cand.source_path.clone(),
+                        source_nid: cand.source_nid,
+                        message_id_norm: cand.message_id_norm.clone(),
+                        detail: format!("source_open_failed: {e}"),
+                    });
                 }
-            },
-            Err(e) => {
-                skipped_source = true;
-                findings.push(QcFinding {
-                    class: FindingClass::Explained,
-                    property: "source_open".into(),
-                    volume_index: cand.volume_index,
-                    source_path: cand.source_path.clone(),
-                    source_nid: cand.source_nid,
-                    message_id_norm: cand.message_id_norm.clone(),
-                    detail: format!("skipped_source_unavailable: {e}"),
-                });
                 None
             }
         }
@@ -972,6 +1176,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                         )
                     })
                     .collect(),
+                attach_list_error: None,
             })
     } else {
         None
@@ -1052,9 +1257,10 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
         };
     };
 
-    // BCC on source: known_gap if present in source extract (display_bcc not in detail —
-    // we count from cand.display_bcc in caller). CC comparison:
-    if !src.display_cc.is_empty() && src.display_cc != out.display_cc {
+    // CC is preserved: never explained by attach soft-fail, body flags, or generic degradation.
+    if !src.display_cc.is_empty()
+        && normalize_display_addr(&src.display_cc) != normalize_display_addr(&out.display_cc)
+    {
         let (class, _) = contract.classify("PidTagDisplayCc", false);
         findings.push(QcFinding {
             class,
@@ -1064,6 +1270,19 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             source_nid: cand.source_nid,
             message_id_norm: cand.message_id_norm.clone(),
             detail: format!("cc src={:?} out={:?}", src.display_cc, out.display_cc),
+        });
+    }
+
+    // Attachment list failure must not look like empty attaches.
+    if let Some(ref err) = src.attach_list_error {
+        findings.push(QcFinding {
+            class: FindingClass::Defect,
+            property: "attachment_list".into(),
+            volume_index: cand.volume_index,
+            source_path: cand.source_path.clone(),
+            source_nid: cand.source_nid,
+            message_id_norm: cand.message_id_norm.clone(),
+            detail: format!("source attachment list failed: {err}"),
         });
     }
 
@@ -1084,7 +1303,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                 ),
             });
         }
-    } else {
+    } else if src.attach_list_error.is_none() {
         let out_attach_map: BTreeMap<String, &str> = out
             .attaches
             .iter()
@@ -1093,29 +1312,22 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
         for (fnm, sz, _, ph) in &src.attaches {
             attachments_compared = attachments_compared.saturating_add(1);
             if ph.is_empty() {
-                let explained = cand.has_ledger_fail || cand.has_degraded;
+                // Empty source hash: only attach-ledger soft-fail explains (never generic degraded).
+                let explained = cand.has_ledger_fail;
                 let (class, _) = contract.classify("attachment_stream_soft_fail", explained);
-                if class != FindingClass::Explained {
-                    findings.push(QcFinding {
-                        class,
-                        property: "attachment_stream_soft_fail".into(),
-                        volume_index: cand.volume_index,
-                        source_path: cand.source_path.clone(),
-                        source_nid: cand.source_nid,
-                        message_id_norm: cand.message_id_norm.clone(),
-                        detail: format!("source attach {fnm} has empty payload hash"),
-                    });
-                } else {
-                    findings.push(QcFinding {
-                        class: FindingClass::Explained,
-                        property: "attachment_stream_soft_fail".into(),
-                        volume_index: cand.volume_index,
-                        source_path: cand.source_path.clone(),
-                        source_nid: cand.source_nid,
-                        message_id_norm: cand.message_id_norm.clone(),
-                        detail: format!("source attach {fnm} empty hash (ledger/degraded)"),
-                    });
-                }
+                findings.push(QcFinding {
+                    class,
+                    property: "attachment_stream_soft_fail".into(),
+                    volume_index: cand.volume_index,
+                    source_path: cand.source_path.clone(),
+                    source_nid: cand.source_nid,
+                    message_id_norm: cand.message_id_norm.clone(),
+                    detail: if explained {
+                        format!("source attach {fnm} empty hash (ledger soft-fail)")
+                    } else {
+                        format!("source attach {fnm} has empty payload hash")
+                    },
+                });
                 continue;
             }
             match out_attach_map.get(&fnm.to_ascii_lowercase()) {
@@ -1133,76 +1345,142 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                     });
                 }
                 None => {
-                    let explained = cand.has_ledger_fail;
-                    let (class, _) = if explained {
-                        contract.classify("attachment_stream_soft_fail", true)
+                    // Missing in output: ledger soft-fail on this message may explain
+                    // (export omitted a soft-failed attach that QC can re-read). Payload
+                    // hash mismatches above remain defects. Never use ledger to explain
+                    // CC/body (handled elsewhere with field-specific flags only).
+                    if cand.has_ledger_fail {
+                        let (class, _) = contract.classify("attachment_stream_soft_fail", true);
+                        findings.push(QcFinding {
+                            class,
+                            property: "attachment_stream_soft_fail".into(),
+                            volume_index: cand.volume_index,
+                            source_path: cand.source_path.clone(),
+                            source_nid: cand.source_nid,
+                            message_id_norm: cand.message_id_norm.clone(),
+                            detail: format!(
+                                "attach {fnm} missing in output (ledger soft-fail explained)"
+                            ),
+                        });
                     } else {
-                        contract.classify("attachment_by_value", false)
-                    };
-                    findings.push(QcFinding {
-                        class,
-                        property: if explained {
-                            "attachment_stream_soft_fail".into()
-                        } else {
-                            "attachment_by_value".into()
-                        },
-                        volume_index: cand.volume_index,
-                        source_path: cand.source_path.clone(),
-                        source_nid: cand.source_nid,
-                        message_id_norm: cand.message_id_norm.clone(),
-                        detail: format!("attach {fnm} missing in output"),
-                    });
+                        let (class, _) = contract.classify("attachment_by_value", false);
+                        findings.push(QcFinding {
+                            class,
+                            property: "attachment_by_value".into(),
+                            volume_index: cand.volume_index,
+                            source_path: cand.source_path.clone(),
+                            source_nid: cand.source_nid,
+                            message_id_norm: cand.message_id_norm.clone(),
+                            detail: format!("attach {fnm} missing in output"),
+                        });
+                    }
                 }
             }
         }
     }
 
-    // Body/recipient compare: use field-level checks when parents_only so attach-less
-    // digests are not compared apples-to-oranges against source digests that include attaches.
-    let body_match = src.body_plain_len == out.body_plain_len
-        && src.body_html_len == out.body_html_len
-        && src.display_to == out.display_to
-        && src.display_cc == out.display_cc
-        && src.subject.eq_ignore_ascii_case(&out.subject);
+    // Field-level body/recipient checks.
+    // Body explain flags: body_unavailable | body_incomplete | crc_suspect only.
+    // Never: generic has_degraded alone, attach ledger, or any of the above for CC.
+    let subject_match = src.subject.eq_ignore_ascii_case(&out.subject);
+    let to_match =
+        normalize_display_addr(&src.display_to) == normalize_display_addr(&out.display_to);
+    let cc_match =
+        normalize_display_addr(&src.display_cc) == normalize_display_addr(&out.display_cc);
+    let body_len_match =
+        src.body_plain_len == out.body_plain_len && src.body_html_len == out.body_html_len;
     let digest_match = src.digest == out.digest;
-    if parents_only {
-        // Compare body lengths + recipients; full digest includes attaches.
-        if !body_match && !cand.has_degraded {
-            let (class, _) = contract.classify("message_content_digest", false);
+
+    if !subject_match {
+        let (class, _) = contract.classify("PidTagSubject", false);
+        findings.push(QcFinding {
+            class,
+            property: "PidTagSubject".into(),
+            volume_index: cand.volume_index,
+            source_path: cand.source_path.clone(),
+            source_nid: cand.source_nid,
+            message_id_norm: cand.message_id_norm.clone(),
+            detail: format!("subject src={:?} out={:?}", src.subject, out.subject),
+        });
+    }
+    if !to_match && !src.display_to.is_empty() {
+        // Empty-vs-nonempty or material address change only (quotes already normalized).
+        let (class, _) = contract.classify("PidTagDisplayTo", false);
+        findings.push(QcFinding {
+            class,
+            property: "PidTagDisplayTo".into(),
+            volume_index: cand.volume_index,
+            source_path: cand.source_path.clone(),
+            source_nid: cand.source_nid,
+            message_id_norm: cand.message_id_norm.clone(),
+            detail: format!("to src={:?} out={:?}", src.display_to, out.display_to),
+        });
+    }
+    if !body_len_match {
+        if body_loss_explained(cand) {
+            let prop = if cand.body_unavailable {
+                "body_unavailable"
+            } else {
+                "body_plain"
+            };
+            let (class, _) = contract.classify(
+                if cand.body_unavailable {
+                    "body_unavailable"
+                } else {
+                    // Best-effort path: treat as explained soft body under incomplete/CRC.
+                    "body_unavailable"
+                },
+                true,
+            );
             findings.push(QcFinding {
                 class,
-                property: "message_content_digest".into(),
+                property: prop.into(),
                 volume_index: cand.volume_index,
                 source_path: cand.source_path.clone(),
                 source_nid: cand.source_nid,
                 message_id_norm: cand.message_id_norm.clone(),
                 detail: format!(
-                    "body/recipient mismatch (parents_only) src_subj={:?} out_subj={:?} src_plain={} out_plain={}",
-                    src.subject, out.subject, src.body_plain_len, out.body_plain_len
+                    "body lengths differ under body fidelity flag (explained) src_plain={} out_plain={} flags=bu:{} bi:{} crc:{}",
+                    src.body_plain_len,
+                    out.body_plain_len,
+                    cand.body_unavailable,
+                    cand.body_incomplete,
+                    cand.crc_suspect
                 ),
             });
-        } else if !body_match && cand.has_degraded {
+        } else {
+            let (class, _) = contract.classify("body_plain", false);
             findings.push(QcFinding {
-                class: FindingClass::Explained,
+                class,
+                property: "body_plain".into(),
+                volume_index: cand.volume_index,
+                source_path: cand.source_path.clone(),
+                source_nid: cand.source_nid,
+                message_id_norm: cand.message_id_norm.clone(),
+                detail: format!(
+                    "body length mismatch src_plain={} out_plain={} src_html={} out_html={}",
+                    src.body_plain_len, out.body_plain_len, src.body_html_len, out.body_html_len
+                ),
+            });
+        }
+    }
+
+    if parents_only {
+        // Full digest includes attaches; field checks above cover body/recipients.
+    } else if !digest_match {
+        // Digest mismatch: explain only with body-specific flags when non-body fields match.
+        let non_body_ok = subject_match && to_match && cc_match;
+        if body_loss_explained(cand) && non_body_ok {
+            let (class, _) = contract.classify("body_unavailable", true);
+            findings.push(QcFinding {
+                class,
                 property: "body_unavailable".into(),
                 volume_index: cand.volume_index,
                 source_path: cand.source_path.clone(),
                 source_nid: cand.source_nid,
                 message_id_norm: cand.message_id_norm.clone(),
-                detail: "body/recipient differ on degraded winner (explained)".into(),
-            });
-        }
-    } else if !digest_match {
-        if cand.has_degraded {
-            findings.push(QcFinding {
-                class: FindingClass::Explained,
-                property: "message_content_digest".into(),
-                volume_index: cand.volume_index,
-                source_path: cand.source_path.clone(),
-                source_nid: cand.source_nid,
-                message_id_norm: cand.message_id_norm.clone(),
                 detail: format!(
-                    "content digest mismatch on degraded winner (explained) src={} out={}",
+                    "content digest mismatch under body fidelity flag (explained) src={} out={}",
                     src.digest, out.digest
                 ),
             });
@@ -1265,7 +1543,10 @@ fn normalize_folder_key(p: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// True when `out_path` equals `leaf` or ends with `leaf` as a path suffix/segment chain.
+/// True when `out_path` equals `leaf` or ends with `leaf` as a full path-segment suffix.
+///
+/// Rejects ancestor-only / intermediate-segment false positives from
+/// `contains("/leaf/")` (e.g. expected `Inbox/Sub` must not match bare `Inbox`).
 fn folder_leaf_matches(out_path: &str, leaf: &str) -> bool {
     let out = normalize_folder_key(out_path);
     let leaf = normalize_folder_key(leaf);
@@ -1275,7 +1556,7 @@ fn folder_leaf_matches(out_path: &str, leaf: &str) -> bool {
     if out.is_empty() {
         return false;
     }
-    out == leaf || out.ends_with(&format!("/{leaf}")) || out.contains(&format!("/{leaf}/"))
+    out == leaf || out.ends_with(&format!("/{leaf}"))
 }
 
 /// Residual catch-all folder used by flat / residual routing (not wholesale collapse).
@@ -1284,15 +1565,16 @@ fn is_residual_unique_mail(path: &str) -> bool {
     n == "unique mail" || n.ends_with("/unique mail")
 }
 
-/// Every expected leaf folder must match an output path (suffix or equality,
-/// case-insensitive). Missing leaf ⇒ false.
+/// Every expected leaf folder must match an output path (exact or path-segment
+/// suffix, case-insensitive) **with equal per-folder message counts**.
+/// Presence alone is not enough: same leaves with redistributed counts fail.
 ///
 /// **Residual Unique Mail allowance** (documented only): an expected path that
-/// *is itself* residual Unique Mail may match an output Unique Mail folder.
-/// Wholesale collapse (multi-leaf expected → single unrelated residual) fails.
+/// *is itself* residual Unique Mail may match an output Unique Mail folder when
+/// counts agree. Wholesale collapse (multi-leaf expected → single residual) fails.
 fn folder_tree_matches(
     digest: &VolumeStructuralDigest,
-    expected_leaf_folders: &BTreeSet<String>,
+    expected_folder_counts: &BTreeMap<String, u64>,
     expected_count: u64,
 ) -> bool {
     if expected_count == 0 {
@@ -1301,29 +1583,55 @@ fn folder_tree_matches(
     if digest.message_count != expected_count {
         return false;
     }
-    if expected_leaf_folders.is_empty() {
+    if expected_folder_counts.is_empty() {
         return true;
     }
-    let out_lower: Vec<String> = digest
+
+    // Available output folders with message counts.
+    // Multi-source prefixes may split one logical leaf across several out paths;
+    // sum counts across all path-segment suffix matches (exclusive claim).
+    let mut out_slots: Vec<(String, u64)> = digest
         .folder_paths
         .iter()
-        .map(|p| p.to_ascii_lowercase())
+        .zip(
+            digest
+                .folder_message_counts
+                .iter()
+                .copied()
+                .chain(std::iter::repeat(0)),
+        )
+        .map(|(p, c)| (normalize_folder_key(p), c))
+        .filter(|(p, c)| !p.is_empty() && *c > 0)
         .collect();
-    let out_has_residual = out_lower.iter().any(|p| is_residual_unique_mail(p));
 
-    for leaf in expected_leaf_folders {
+    // Longest expected leaves first so "Inbox/Sub" claims before "Inbox".
+    let mut expected_ordered: Vec<(&String, u64)> = expected_folder_counts
+        .iter()
+        .map(|(k, v)| (k, *v))
+        .collect();
+    expected_ordered.sort_by_key(|(leaf, _)| std::cmp::Reverse(leaf.len()));
+
+    for (leaf, exp_count) in expected_ordered {
         if leaf.trim().is_empty() {
             continue;
         }
-        if out_lower.iter().any(|p| folder_leaf_matches(p, leaf)) {
-            continue;
+        let mut matched_total = 0u64;
+        let mut claimed: Vec<usize> = Vec::new();
+        for (i, (p, c)) in out_slots.iter().enumerate() {
+            let path_ok = folder_leaf_matches(p, leaf)
+                || (is_residual_unique_mail(leaf) && is_residual_unique_mail(p));
+            if path_ok {
+                matched_total = matched_total.saturating_add(*c);
+                claimed.push(i);
+            }
         }
-        // Residual Unique Mail: only when the *expected* path maps to residual,
-        // not when any missing leaf is waved through because Unique Mail exists.
-        if is_residual_unique_mail(leaf) && out_has_residual {
-            continue;
+        if matched_total != exp_count {
+            return false;
         }
-        return false;
+        // Remove claimed slots (highest index first) so they cannot satisfy another leaf.
+        for i in claimed.into_iter().rev() {
+            out_slots.remove(i);
+        }
     }
     true
 }
@@ -1415,10 +1723,13 @@ pub fn run_qc_pst(
     if level == QcLevel::Off {
         return Err("qc-pst requires --qc-level other than off".into());
     }
-    // Load volumes from summary or invent single volume.
+    // Load volumes from summary or invent single volume; honor positional out.pst.
     let volumes = load_volumes_for_qc(report_dir, out_pst)?;
-    let export_rows = load_export_rows_for_qc(report_dir)?;
-    let candidates = candidates_from_export_and_meta(&export_rows, &BTreeMap::new());
+    let mut export_rows = load_export_rows_for_qc(report_dir)?;
+    // Hydrate subjects from content_digests (export CSV has no subject column).
+    hydrate_export_subjects_from_digests(report_dir, &mut export_rows);
+    let mut candidates = candidates_from_export_and_meta(&export_rows, &BTreeMap::new());
+    hydrate_candidates_from_digests(report_dir, &mut candidates);
 
     // Source differential if any source path still exists.
     let source_differential = export_rows
@@ -1442,6 +1753,85 @@ pub fn run_qc_pst(
         parents_only,
         probe_unexplained_property: None,
     }))
+}
+
+/// Fill empty export-row subjects from source-origin content digests.
+fn hydrate_export_subjects_from_digests(report_dir: &Path, rows: &mut [ExportMessageRow]) {
+    let Some(digests) = load_content_digests(&report_dir.join("content_digests.json")) else {
+        return;
+    };
+    if !content_digests_are_source_origin(&digests) {
+        return;
+    }
+    let by_idx: BTreeMap<u64, &ContentDigestEntry> = digests
+        .volumes
+        .iter()
+        .flat_map(|v| v.messages.iter())
+        .map(|m| (m.export_message_index, m))
+        .collect();
+    let by_mid: BTreeMap<String, &ContentDigestEntry> = digests
+        .volumes
+        .iter()
+        .flat_map(|v| v.messages.iter())
+        .filter(|m| !m.message_id_norm.is_empty())
+        .map(|m| (normalize_mid_key(&m.message_id_norm), m))
+        .collect();
+    for row in rows.iter_mut() {
+        if !row.subject.is_empty() {
+            continue;
+        }
+        if let Some(m) = by_idx.get(&row.export_message_index) {
+            if !m.subject.is_empty() {
+                row.subject = m.subject.clone();
+                continue;
+            }
+        }
+        let mid = normalize_mid_key(&row.message_id_norm);
+        if !mid.is_empty() {
+            if let Some(m) = by_mid.get(&mid) {
+                if !m.subject.is_empty() {
+                    row.subject = m.subject.clone();
+                }
+            }
+        }
+    }
+}
+
+/// Hydrate candidate subjects / body lens from digests for no-MID clean-room matching.
+fn hydrate_candidates_from_digests(report_dir: &Path, candidates: &mut [QcSampleCandidate]) {
+    let Some(digests) = load_content_digests(&report_dir.join("content_digests.json")) else {
+        return;
+    };
+    if !content_digests_are_source_origin(&digests) {
+        return;
+    }
+    let by_idx: BTreeMap<u64, &ContentDigestEntry> = digests
+        .volumes
+        .iter()
+        .flat_map(|v| v.messages.iter())
+        .map(|m| (m.export_message_index, m))
+        .collect();
+    for c in candidates.iter_mut() {
+        let Some(m) = by_idx.get(&c.export_message_index) else {
+            continue;
+        };
+        if c.subject.is_empty() && !m.subject.is_empty() {
+            c.subject = m.subject.clone();
+        }
+        if c.body_plain_len == 0 && m.body_plain_len > 0 {
+            c.body_plain_len = m.body_plain_len;
+        }
+        if c.body_html_len == 0 && m.body_html_len > 0 {
+            c.body_html_len = m.body_html_len;
+        }
+        if c.display_cc.is_empty() && !m.display_cc.is_empty() {
+            c.display_cc = m.display_cc.clone();
+        }
+        if c.attach_count == 0 && !m.attaches.is_empty() {
+            c.attach_count = m.attaches.len();
+            c.max_attach_size = m.attaches.iter().map(|a| a.size).max().unwrap_or(0);
+        }
+    }
 }
 
 /// Detect parents_only / no-attachments export from summary.json.
@@ -1517,6 +1907,19 @@ fn load_volumes_for_qc(report_dir: &Path, out_pst: &Path) -> Result<Vec<VolumeRe
                 });
             }
             if !rows.is_empty() {
+                // Honor positional out.pst over summary paths when provided and present.
+                // Remap first volume (or sole volume) to the operator-supplied output.
+                if out_pst.is_file() {
+                    let out_str = out_pst.display().to_string();
+                    let out_meta = fs::metadata(out_pst).map_err(|e| e.to_string())?;
+                    // Prefer remapping volume whose path is missing, else first volume.
+                    let remap_idx = rows
+                        .iter()
+                        .position(|r| !Path::new(&r.path).is_file())
+                        .unwrap_or(0);
+                    rows[remap_idx].path = out_str;
+                    rows[remap_idx].bytes = out_meta.len();
+                }
                 return Ok(rows);
             }
         }
@@ -1540,30 +1943,31 @@ fn load_export_rows_for_qc(report_dir: &Path) -> Result<Vec<ExportMessageRow>, S
     if !path.is_file() {
         return Ok(Vec::new());
     }
-    let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_path(&path)
+        .map_err(|e| e.to_string())?;
     let mut rows = Vec::new();
-    let mut lines = text.lines();
-    let _header = lines.next();
-    for (i, line) in lines.enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let cols: Vec<&str> = split_csv_line(line);
+    for (i, rec) in rdr.records().enumerate() {
+        let rec = rec.map_err(|e| e.to_string())?;
         // source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,...
-        if cols.len() < 9 {
+        if rec.len() < 9 {
             continue;
         }
         rows.push(ExportMessageRow {
-            source_path: cols[0].to_string(),
-            folder_path: cols[1].to_string(),
-            nid: parse_nid(cols[2]),
-            message_id_norm: cols[3].to_string(),
-            edrm_mih: cols[4].to_string(),
-            content_hash_hex: cols[5].to_string(),
-            volume_path: cols[6].to_string(),
-            volume_index: cols[7].parse().unwrap_or(1),
-            export_message_index: cols[8].parse().unwrap_or((i as u64) + 1),
-            attachments_failed_count: cols.get(9).and_then(|s| s.parse().ok()).unwrap_or(0),
+            source_path: rec.get(0).unwrap_or("").to_string(),
+            folder_path: rec.get(1).unwrap_or("").to_string(),
+            nid: parse_nid(rec.get(2).unwrap_or("")),
+            message_id_norm: rec.get(3).unwrap_or("").to_string(),
+            edrm_mih: rec.get(4).unwrap_or("").to_string(),
+            content_hash_hex: rec.get(5).unwrap_or("").to_string(),
+            volume_path: rec.get(6).unwrap_or("").to_string(),
+            volume_index: rec.get(7).and_then(|s| s.parse().ok()).unwrap_or(1),
+            export_message_index: rec
+                .get(8)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or((i as u64) + 1),
+            attachments_failed_count: rec.get(9).and_then(|s| s.parse().ok()).unwrap_or(0),
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             subject: String::new(),
@@ -1581,41 +1985,42 @@ fn parse_nid(s: &str) -> u64 {
     }
 }
 
-fn split_csv_line(line: &str) -> Vec<&str> {
-    // Minimal CSV split (no embedded quotes in our export format for these cols).
-    line.split(',').collect()
-}
-
-/// Hash bytes for negative tests.
+/// Hash bytes for negative tests / digests.
 pub fn sha256_hex_bytes(bytes: &[u8]) -> String {
     hex_sha256(bytes)
 }
 
-/// Deliberately corrupt a PST file (truncate last N bytes) for negative tests.
-pub fn corrupt_pst_truncate(path: &Path, drop_tail: u64) -> Result<(), String> {
-    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
-    let new_len = meta.len().saturating_sub(drop_tail);
-    let f = fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .map_err(|e| e.to_string())?;
-    f.set_len(new_len).map_err(|e| e.to_string())
+/// Identity fields for [`record_classified_finding`] (keeps arg count under clippy limits).
+pub struct RecordFindingId<'a> {
+    pub volume_index: u32,
+    pub source_path: &'a str,
+    pub source_nid: u64,
+    pub message_id_norm: &'a str,
 }
 
-/// Flip a byte in the middle of the file (payload corruption).
-pub fn corrupt_pst_flip_byte(path: &Path, offset: u64) -> Result<(), String> {
-    use std::io::{Read, Seek, SeekFrom, Write};
-    let mut f = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|e| e.to_string())?;
-    f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
-    let mut b = [0u8; 1];
-    f.read_exact(&mut b).map_err(|e| e.to_string())?;
-    b[0] ^= 0xFF;
-    f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
-    f.write_all(&b).map_err(|e| e.to_string())
+/// Record a classified finding through the same path production uses (DoD-9).
+///
+/// Unknown properties map to `unexplained_loss` via the contract allowlist.
+pub fn record_classified_finding(
+    contract: &FidelityContract,
+    counts: &mut QcFindingCounts,
+    findings: &mut Vec<QcFinding>,
+    property: &str,
+    explained: bool,
+    id: RecordFindingId<'_>,
+    detail: impl Into<String>,
+) {
+    let (class, _) = contract.classify(property, explained);
+    counts.record(class);
+    findings.push(QcFinding {
+        class,
+        property: property.into(),
+        volume_index: id.volume_index,
+        source_path: id.source_path.into(),
+        source_nid: id.source_nid,
+        message_id_norm: id.message_id_norm.into(),
+        detail: detail.into(),
+    });
 }
 
 #[cfg(test)]
@@ -1640,6 +2045,9 @@ mod tests {
             has_embedded: false,
             has_degraded: false,
             has_ledger_fail: false,
+            body_unavailable: false,
+            body_incomplete: false,
+            crc_suspect: false,
             subject_non_ascii: !subj.is_ascii(),
             display_cc: String::new(),
             display_bcc: String::new(),
@@ -1708,9 +2116,12 @@ mod tests {
         let digest = VolumeStructuralDigest {
             message_count: 2,
             folder_paths: vec!["Unique Mail".into()],
+            folder_message_counts: vec![2],
             message_digests: vec!["a".into(), "b".into()],
         };
-        let expected: BTreeSet<String> = ["inbox".into(), "sent items".into()].into();
+        let mut expected = BTreeMap::new();
+        expected.insert("inbox".into(), 1);
+        expected.insert("sent items".into(), 1);
         assert!(
             !folder_tree_matches(&digest, &expected, 2),
             "collapsed tree must not match multi-leaf expected"
@@ -1722,18 +2133,79 @@ mod tests {
         let digest = VolumeStructuralDigest {
             message_count: 1,
             folder_paths: vec!["IPM_SUBTREE/Inbox".into()],
+            folder_message_counts: vec![1],
             message_digests: vec!["a".into()],
         };
-        let expected: BTreeSet<String> = ["inbox".into()].into();
+        let mut expected = BTreeMap::new();
+        expected.insert("inbox".into(), 1);
         assert!(folder_tree_matches(&digest, &expected, 1));
 
         let residual = VolumeStructuralDigest {
             message_count: 1,
             folder_paths: vec!["Unique Mail".into()],
+            folder_message_counts: vec![1],
             message_digests: vec!["a".into()],
         };
-        let expected_res: BTreeSet<String> = ["unique mail".into()].into();
+        let mut expected_res = BTreeMap::new();
+        expected_res.insert("unique mail".into(), 1);
         assert!(folder_tree_matches(&residual, &expected_res, 1));
+    }
+
+    #[test]
+    fn folder_tree_rejects_same_leaves_different_counts() {
+        // Both Inbox and Sent exist with total 3, but counts redistributed.
+        let digest = VolumeStructuralDigest {
+            message_count: 3,
+            folder_paths: vec!["IPM_SUBTREE/Inbox".into(), "IPM_SUBTREE/Sent Items".into()],
+            folder_message_counts: vec![1, 2],
+            message_digests: vec!["a".into(), "b".into(), "c".into()],
+        };
+        let mut expected = BTreeMap::new();
+        expected.insert("inbox".into(), 2);
+        expected.insert("sent items".into(), 1);
+        assert!(
+            !folder_tree_matches(&digest, &expected, 3),
+            "same leaves with different per-folder counts must hard-fail match"
+        );
+    }
+
+    #[test]
+    fn folder_leaf_rejects_ancestor_contains_false_positive() {
+        // Intermediate-segment contains("/leaf/") must not match.
+        assert!(
+            !folder_leaf_matches("archive/inbox/2020", "inbox"),
+            "intermediate segment must not match leaf"
+        );
+        assert!(
+            !folder_leaf_matches("Inbox", "Inbox/Sub"),
+            "ancestor-only must not match longer expected leaf"
+        );
+        assert!(folder_leaf_matches("IPM_SUBTREE/Inbox", "inbox"));
+        assert!(folder_leaf_matches("IPM_SUBTREE/Inbox/Sub", "Inbox/Sub"));
+    }
+
+    #[test]
+    fn record_classified_finding_unexplained_is_hard_fail() {
+        let contract = FidelityContract::v1();
+        let mut counts = QcFindingCounts::default();
+        let mut findings = Vec::new();
+        record_classified_finding(
+            &contract,
+            &mut counts,
+            &mut findings,
+            "never_heard_of_this_mapi_prop",
+            false,
+            RecordFindingId {
+                volume_index: 0,
+                source_path: "",
+                source_nid: 0,
+                message_id_norm: "",
+            },
+            "synthetic unknown property via production record path",
+        );
+        assert_eq!(counts.unexplained_loss, 1);
+        assert!(counts.hard_fail());
+        assert_eq!(findings[0].class, FindingClass::UnexplainedLoss);
     }
 
     #[test]

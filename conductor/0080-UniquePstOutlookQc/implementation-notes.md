@@ -1,7 +1,7 @@
 # 0080 Implementation Notes — Unique PST Output QC
 
-Branch: `track/0080-unique-pst-outlook-qc`  
-Ledger tx (review fixes): `6a02f056-cc09-4ed9-bb5e-164326f601d5`
+Branch: `track/0080-unique-pst-outlook-qc`
+Ledger tx (codex P1/P2 fixes): `563d3421-7f9a-4928-a188-785a29ddc8b3`
 
 ## What shipped
 

@@ -1911,12 +1911,28 @@ pub fn run_unique_pst_with_options(
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let has_degraded = keep_set
+            let (has_degraded, crc_suspect, body_unavailable, body_incomplete) = keep_set
                 .winners
                 .get(i)
-                .map(|w| !w.integrity.degraded_reasons.is_empty())
-                .unwrap_or(false);
-            crate::unique_pst_qc::candidate_from_write_msg(
+                .map(|w| {
+                    use dedup_engine::integrity::IntegrityReason;
+                    let reasons = &w.integrity.degraded_reasons;
+                    (
+                        !reasons.is_empty(),
+                        reasons.contains(&IntegrityReason::CrcSuspect),
+                        reasons.contains(&IntegrityReason::BodyUnavailable)
+                            || p.write_msg.body_unavailable,
+                        reasons.contains(&IntegrityReason::BodyTruncated)
+                            || p.write_msg.body_incomplete,
+                    )
+                })
+                .unwrap_or((
+                    false,
+                    false,
+                    p.write_msg.body_unavailable,
+                    p.write_msg.body_incomplete,
+                ));
+            let mut meta = crate::unique_pst_qc::candidate_from_write_msg(
                 crate::unique_pst_qc::CandidateFromWriteMsg {
                     export_message_index: 0, // filled when export_message_index is known
                     volume_index: 0,
@@ -1930,7 +1946,11 @@ pub fn run_unique_pst_with_options(
                     has_ledger_fail: false,
                     display_bcc: &p.display_bcc,
                 },
-            )
+            );
+            meta.crc_suspect = crc_suspect;
+            meta.body_unavailable = body_unavailable;
+            meta.body_incomplete = body_incomplete;
+            meta
         })
         .collect();
     let mut export_message_index: u64 = 0;
@@ -2433,8 +2453,9 @@ pub fn run_unique_pst_with_options(
 
     // ── Phase 5b: source-differential QC (0080) ─────────────────────────────
     // When qc-level is off, legacy verify_volumes remains the structural baseline.
+    // Empty volumes still run QC when enabled (zero-winner export emits qc_report_v1).
     let mut qc_hard_fail = false;
-    if args.qc_level != crate::unique_pst_qc::QcLevel::Off && !volumes.is_empty() {
+    if args.qc_level != crate::unique_pst_qc::QcLevel::Off {
         emit_log(stderr, &on_log, "stage=qc");
         let t_qc = Instant::now();
         let candidates: Vec<crate::unique_pst_qc::QcSampleCandidate> = {
@@ -2468,6 +2489,9 @@ pub fn run_unique_pst_with_options(
                             has_embedded: false,
                             has_degraded: false,
                             has_ledger_fail: row.attachments_failed_count > 0,
+                            body_unavailable: false,
+                            body_incomplete: false,
+                            crc_suspect: false,
                             subject_non_ascii: !row.subject.is_ascii(),
                             display_cc: String::new(),
                             display_bcc: String::new(),

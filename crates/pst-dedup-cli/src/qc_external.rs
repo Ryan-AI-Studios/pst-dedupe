@@ -274,17 +274,31 @@ pub fn version_at_least(found: &str, min: &str) -> bool {
     true
 }
 
-/// Guess build from scanpst path (Office16 → 16.0.x unknown; registry version preferred).
+/// Resolve scanpst build only from **verified** sources — never invent from folder name.
+///
+/// Sources (in order):
+/// 1. Sibling `.version` file next to the binary (operator / test pin)
+/// 2. `PST_DEDUP_SCANPST_BUILD` environment variable
+///
+/// Office16/Office15 path segments alone are **not** treated as a verified minimum
+/// build (rule 2 / D-0080-scanpst-arg). Unverifiable ⇒ `None` ⇒ skip.
 pub fn guess_scanpst_build(scanpst_path: &Path) -> Option<String> {
-    // File version via PowerShell is heavy; use parent folder name as weak signal.
-    let parent = scanpst_path.parent()?.file_name()?.to_string_lossy();
-    if parent.eq_ignore_ascii_case("Office16") {
-        // Assume modern enough if file exists under Office16; operator residual confirms.
-        return Some("16.0.10325.20082".into());
+    let ver_file = scanpst_path.with_extension("version");
+    if ver_file.is_file() {
+        if let Ok(v) = fs::read_to_string(&ver_file) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
     }
-    if parent.eq_ignore_ascii_case("Office15") {
-        return Some("15.0.0.0".into());
+    if let Ok(v) = std::env::var("PST_DEDUP_SCANPST_BUILD") {
+        let v = v.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
     }
+    let _ = scanpst_path; // path folder name is not a version probe
     None
 }
 
@@ -411,26 +425,40 @@ pub fn run_scanpst(scanpst_path: &Path, pst_path: &Path, timeout: Duration) -> S
                 hard_error: false,
             },
             RunOutcome::Done { .. } => {
-                let summary = summarize_scanpst_log(&log_text);
-                let failed = log_suggests_errors(&log_text);
-                ScanpstResult {
-                    status: if failed {
-                        ExternalStatus::Failed
-                    } else {
-                        ExternalStatus::Ok
-                    },
-                    reason: if failed {
-                        Some("scanpst log indicates errors".into())
-                    } else if log_text.is_empty() {
-                        Some("scanpst finished; log empty or missing (exit not trusted)".into())
-                    } else {
-                        None
-                    },
-                    build,
-                    log_path: log_path.map(|p| p.display().to_string()),
-                    bak_present: false,
-                    log_summary: summary,
-                    hard_error: failed,
+                // Missing/empty log after run ⇒ never Ok (exit code is not trusted).
+                if log_text.trim().is_empty() {
+                    ScanpstResult {
+                        status: ExternalStatus::Skipped,
+                        reason: Some(
+                            "scanpst finished but log empty or missing; not Ok (exit not trusted)"
+                                .into(),
+                        ),
+                        build,
+                        log_path: log_path.map(|p| p.display().to_string()),
+                        bak_present: false,
+                        log_summary: None,
+                        hard_error: false,
+                    }
+                } else {
+                    let summary = summarize_scanpst_log(&log_text);
+                    let failed = log_suggests_errors(&log_text);
+                    ScanpstResult {
+                        status: if failed {
+                            ExternalStatus::Failed
+                        } else {
+                            ExternalStatus::Ok
+                        },
+                        reason: if failed {
+                            Some("scanpst log indicates errors".into())
+                        } else {
+                            None
+                        },
+                        build,
+                        log_path: log_path.map(|p| p.display().to_string()),
+                        bak_present: false,
+                        log_summary: summary,
+                        hard_error: failed,
+                    }
                 }
             }
         }
@@ -649,13 +677,20 @@ mod tests {
         assert_eq!(r.folder_count, Some(2));
     }
 
+    fn pin_scanpst_build(cmd_path: &Path) {
+        // Verified build via sibling .version — never invent from Office16 folder alone.
+        fs::write(
+            cmd_path.with_extension("version"),
+            format!("{SCANPST_MIN_BUILD}\n"),
+        )
+        .expect("version pin");
+    }
+
     #[test]
     fn stub_scanpst_ok_no_bak() {
         let dir = TempDir::new().expect("tmp");
-        // Place under Office16-named parent so build gate passes.
         let office = dir.path().join("Office16");
         fs::create_dir_all(&office).expect("dir");
-        // Real discover looks for SCANPST.EXE; for unit test call run_scanpst with .cmd
         let stub_exe = office.join("scanpst_stub.cmd");
         write_stub_cmd(
             &stub_exe,
@@ -665,19 +700,18 @@ mod tests {
         let pst = dir.path().join("deliverable.pst");
         fs::write(&pst, b"fake-pst-bytes").expect("pst");
 
-        // Force build guess by putting stub under Office16 and calling run_scanpst
-        // with a path whose parent is Office16.
-        let named = office.join("SCANPST.EXE");
-        // On Windows .exe required; use .cmd via Command which works.
-        // Copy stub content to SCANPST.cmd and invoke that path.
         let named_cmd = office.join("SCANPST.cmd");
         fs::copy(&stub_exe, &named_cmd).expect("copy");
-        let _ = named; // documentation of expected name
+        pin_scanpst_build(&named_cmd);
 
         let r = run_scanpst(&named_cmd, &pst, Duration::from_secs(15));
         // May be Ok or Failed depending on log write; must not hard_error without bak.
         assert!(!r.bak_present, "{r:?}");
         assert!(!r.hard_error || r.status == ExternalStatus::Failed, "{r:?}");
+        // With a log, status may be Ok; empty log must never be Ok.
+        if r.status == ExternalStatus::Ok {
+            assert!(r.log_summary.is_some() || r.reason.is_none(), "{r:?}");
+        }
     }
 
     #[test]
@@ -686,13 +720,12 @@ mod tests {
         let office = dir.path().join("Office16");
         fs::create_dir_all(&office).expect("dir");
         let named_cmd = office.join("SCANPST.cmd");
-        // Create .bak next to the temp copy by writing bak beside every .pst arg's copy.
-        // Our runner copies to temp\validate.pst — stub creates validate.bak in same dir.
         write_stub_cmd(
             &named_cmd,
             "for %%I in (%*) do if /I \"%%~xI\"==\".pst\" (echo repaired> \"%%~dpnI.bak\")\r\nexit /b 0\r\n",
         )
         .expect("stub");
+        pin_scanpst_build(&named_cmd);
         let pst = dir.path().join("deliverable.pst");
         fs::write(&pst, b"fake").expect("pst");
         let r = run_scanpst(&named_cmd, &pst, Duration::from_secs(15));
@@ -710,12 +743,83 @@ mod tests {
         fs::create_dir_all(&office).expect("dir");
         let named_cmd = office.join("SCANPST.cmd");
         write_stub_cmd(&named_cmd, "ping -n 30 127.0.0.1 >nul\r\nexit /b 0\r\n").expect("stub");
+        pin_scanpst_build(&named_cmd);
         let pst = dir.path().join("d.pst");
         fs::write(&pst, b"x").expect("pst");
         let r = run_scanpst(&named_cmd, &pst, Duration::from_millis(500));
         assert!(
             matches!(r.status, ExternalStatus::Timeout)
                 || r.reason.as_deref() == Some("SCANPST_TIMEOUT"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_build_skips_not_ok() {
+        let dir = TempDir::new().expect("tmp");
+        // No .version pin and no env — Office16 folder alone must skip.
+        let office = dir.path().join("Office16");
+        fs::create_dir_all(&office).expect("dir");
+        let named_cmd = office.join("SCANPST.cmd");
+        write_stub_cmd(&named_cmd, "exit /b 0\r\n").expect("stub");
+        let pst = dir.path().join("d.pst");
+        fs::write(&pst, b"x").expect("pst");
+        // Ensure env does not leak a pin from the environment.
+        let r = {
+            // Temporarily clear env if set.
+            let prev = std::env::var("PST_DEDUP_SCANPST_BUILD").ok();
+            std::env::remove_var("PST_DEDUP_SCANPST_BUILD");
+            let r = run_scanpst(&named_cmd, &pst, Duration::from_secs(5));
+            if let Some(v) = prev {
+                std::env::set_var("PST_DEDUP_SCANPST_BUILD", v);
+            }
+            r
+        };
+        assert_eq!(r.status, ExternalStatus::Skipped, "{r:?}");
+        assert_ne!(r.status, ExternalStatus::Ok);
+        assert!(
+            r.reason
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains("unverif")
+                || r.reason
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+                    .contains("skip"),
+            "{r:?}"
+        );
+        assert!(guess_scanpst_build(&named_cmd).is_none());
+    }
+
+    #[test]
+    fn empty_log_not_ok() {
+        let dir = TempDir::new().expect("tmp");
+        let office = dir.path().join("tools");
+        fs::create_dir_all(&office).expect("dir");
+        let named_cmd = office.join("SCANPST.cmd");
+        // Finish successfully without writing any log.
+        write_stub_cmd(&named_cmd, "exit /b 0\r\n").expect("stub");
+        pin_scanpst_build(&named_cmd);
+        let pst = dir.path().join("d.pst");
+        fs::write(&pst, b"x").expect("pst");
+        let r = run_scanpst(&named_cmd, &pst, Duration::from_secs(15));
+        assert_ne!(
+            r.status,
+            ExternalStatus::Ok,
+            "empty log must not be Ok: {r:?}"
+        );
+        assert!(
+            matches!(r.status, ExternalStatus::Skipped | ExternalStatus::Failed),
+            "{r:?}"
+        );
+        assert!(
+            r.reason
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains("log"),
             "{r:?}"
         );
     }

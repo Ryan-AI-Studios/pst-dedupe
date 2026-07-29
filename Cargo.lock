@@ -5078,6 +5078,7 @@ dependencies = [
  "assert_cmd",
  "camino",
  "clap",
+ "csv",
  "ctrlc",
  "dedup-engine",
  "matter-core",

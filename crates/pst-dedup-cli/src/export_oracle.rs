@@ -66,6 +66,8 @@ pub struct VolumeStructuralDigest {
     pub message_count: u64,
     /// Folder display paths in traversal order.
     pub folder_paths: Vec<String>,
+    /// Per-folder message counts aligned with [`Self::folder_paths`] (same length).
+    pub folder_message_counts: Vec<u64>,
     /// Per-message content digests in folder/message traversal order.
     pub message_digests: Vec<String>,
 }
@@ -495,11 +497,14 @@ pub fn structural_digest_pst(path: &Path) -> Result<VolumeStructuralDigest, Stri
         .folders()
         .map_err(|e| format!("folders {}: {e}", path.display()))?;
     let mut folder_paths = Vec::new();
+    let mut folder_message_counts = Vec::new();
     let mut message_digests = Vec::new();
     let mut message_count = 0u64;
 
     for folder in &folders {
         folder_paths.push(folder.path.clone());
+        let n = folder.message_nids.len() as u64;
+        folder_message_counts.push(n);
         for &nid in &folder.message_nids {
             message_count += 1;
             let digest = message_content_digest(&mut pst, nid.0)?;
@@ -510,6 +515,7 @@ pub fn structural_digest_pst(path: &Path) -> Result<VolumeStructuralDigest, Stri
     Ok(VolumeStructuralDigest {
         message_count,
         folder_paths,
+        folder_message_counts,
         message_digests,
     })
 }
@@ -535,6 +541,8 @@ pub struct MessageContentDetail {
     pub body_html_len: usize,
     /// (filename, size, mime, payload_sha256_hex)
     pub attaches: Vec<(String, u64, String, String)>,
+    /// When set, attachment enumeration failed (must not be treated as empty attaches).
+    pub attach_list_error: Option<String>,
 }
 
 /// Extract comparable content fields + digest for QC (reuses oracle hashing).
@@ -559,19 +567,26 @@ pub fn message_content_detail(
     let body_html = extract.body_html.as_deref().unwrap_or(&[][..]);
 
     let mut attaches: Vec<(String, u64, String, String)> = Vec::new();
-    if let Ok(list) = pst.list_attachments(NodeId(nid)) {
-        for meta in &list {
-            let filename = meta.filename.clone();
-            let size = u64::from(meta.size);
-            let mime = meta.mime_tag.clone().unwrap_or_default();
-            let mut payload_hash = String::new();
-            if let Ok(mut reader) = pst.open_attachment_data(NodeId(nid), meta.nid) {
-                let mut buf = Vec::new();
-                if reader.read_to_end(&mut buf).is_ok() {
-                    payload_hash = hex_sha256(&buf);
+    let mut attach_list_error: Option<String> = None;
+    match pst.list_attachments(NodeId(nid)) {
+        Ok(list) => {
+            for meta in &list {
+                let filename = meta.filename.clone();
+                let size = u64::from(meta.size);
+                let mime = meta.mime_tag.clone().unwrap_or_default();
+                let mut payload_hash = String::new();
+                if let Ok(mut reader) = pst.open_attachment_data(NodeId(nid), meta.nid) {
+                    let mut buf = Vec::new();
+                    if reader.read_to_end(&mut buf).is_ok() {
+                        payload_hash = hex_sha256(&buf);
+                    }
                 }
+                attaches.push((filename, size, mime, payload_hash));
             }
-            attaches.push((filename, size, mime, payload_hash));
+        }
+        Err(e) => {
+            // Fail closed for QC: never silently treat list failure as zero attaches.
+            attach_list_error = Some(format!("list_attachments nid={nid:#x}: {e}"));
         }
     }
 
@@ -606,6 +621,7 @@ pub fn message_content_detail(
         body_plain_len: body_plain.len(),
         body_html_len: body_html.len(),
         attaches,
+        attach_list_error,
     })
 }
 
