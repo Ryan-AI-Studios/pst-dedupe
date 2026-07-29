@@ -2,7 +2,7 @@
 
 A pure Rust Windows tool for deduplicating emails across Outlook PST files.
 
-**RC:** product version **0.2.0-rc.1** (schema **v39**). Operator day-1 runbook: [`docs/operator-golden-path.md`](docs/operator-golden-path.md). Release notes: [`CHANGELOG.md`](CHANGELOG.md). Residual checklist: [`docs/operator-rc-checklist.md`](docs/operator-rc-checklist.md).
+**RC:** product version **0.2.0-rc.1** (schema **v39**). Operator day-1 runbook: [`docs/operator-golden-path.md`](docs/operator-golden-path.md). Unique-PST eDiscovery lifecycle: [`docs/unique-pst-ediscovery-runbook.md`](docs/unique-pst-ediscovery-runbook.md). Release notes: [`CHANGELOG.md`](CHANGELOG.md). Residual checklist: [`docs/operator-rc-checklist.md`](docs/operator-rc-checklist.md).
 
 ## What It Does
 
@@ -161,7 +161,7 @@ volume-batched `.eml` directory for Outlook/Thunderbird import.
 | **Report pack** | `summary.json` + decisions + keepset + volumes + **mandatory `export_messages.csv`** |
 | **Verify** | Open + count + sample MID; full rehash only with `--verify-hash` |
 | **Partial fail** | Keep completed volumes; delete incomplete current; flush pack `ok=false` |
-| **How-to** | See [`docs/unique-pst-export.md`](docs/unique-pst-export.md) |
+| **How-to** | Flags: [`docs/unique-pst-export.md`](docs/unique-pst-export.md). Ops lifecycle: [`docs/unique-pst-ediscovery-runbook.md`](docs/unique-pst-ediscovery-runbook.md) |
 
 ### Headless matter automation (track 0045)
 
@@ -252,7 +252,7 @@ Severity order (not numeric): cancelled → hard fail → risk gate → partial 
 | **65** | Export risk gate met (`--fail-on-export-risk`; 0077 `export_risk`) |
 | **130** | Operator cancelled unique-export (SIGINT convention); truncated PST quarantined to `.partial` |
 
-Unique-export detail: [`docs/unique-pst-export.md`](docs/unique-pst-export.md). **Do not** treat exit 64 as “delete the PST” — the artifact is usable with disclosure. **0081:** do not blanket-retry exit 5 (`AuditChainBroken` is not retryable).
+Unique-export detail: [`docs/unique-pst-export.md`](docs/unique-pst-export.md). Counsel-facing lifecycle: [`docs/unique-pst-ediscovery-runbook.md`](docs/unique-pst-ediscovery-runbook.md). **Do not** treat exit 64 as “delete the PST” — the artifact is usable with disclosure. **0081:** do not blanket-retry exit 5 (`AuditChainBroken` is not retryable).
 
 **SIGINT / Ctrl+C**
 

@@ -80,6 +80,9 @@ See also: crate READMEs under `crates/dedupe-desk`, `crates/matter-core`, `ARCHI
 
 **Goal:** From one or more source PSTs, write keep-set unique messages into production-shaped Unicode PST volume(s) plus a report pack.
 
+**Counsel-grade lifecycle** (collection → handoff → disposition, exit codes, ScanPST-on-copy, basename custody):  
+[`docs/unique-pst-ediscovery-runbook.md`](unique-pst-ediscovery-runbook.md).
+
 ```powershell
 # --out is the primary volume path (not --out-dir). Report pack defaults beside the stem.
 .\pst-dedup.exe unique-pst a.pst b.pst `
@@ -95,15 +98,19 @@ See also: crate READMEs under `crates/dedupe-desk`, `crates/matter-core`, `ARCHI
   --verify-hash
 ```
 
+Prefer a prior `inspect` + `scan --json` for multi-mailbox matters; optional timing harness:  
+`scripts/unique-pst-timing.ps1` (parameterized inputs/out/report-dir; no client paths).
+
 **Optional GUI:** `pst-dedup-gui.exe` → Unique PST Export wizard (same `run_unique_pst` path as CLI; track 0072).
 
 **Honest limits:**
 
 - Source PSTs are **read-only**.
 - Multi-GB / multi-volume runs are supported on the streaming writer path; operator disk/time scale is residual (see checklist).
-- Opening volumes in **Outlook** or running **scanpst.exe** is an **operator residual** — this RC does **not** claim Outlook production-ready without that smoke.
+- Opening volumes in **Outlook** or running **scanpst.exe** is an **operator residual** — this RC does **not** claim Outlook production-ready without that smoke. ScanPST only on a **copy**.
+- Exit **64** = partial fidelity with retained artifact (disclose); **do not blanket-retry exit 5**.
 
-Deep docs: [`docs/unique-pst-export.md`](unique-pst-export.md), writer fidelity notes under `docs/`.
+Deep docs: [`docs/unique-pst-export.md`](unique-pst-export.md) (flags), [`docs/unique-pst-ediscovery-runbook.md`](unique-pst-ediscovery-runbook.md) (ops narrative), writer fidelity notes under `docs/`.
 
 ---
 

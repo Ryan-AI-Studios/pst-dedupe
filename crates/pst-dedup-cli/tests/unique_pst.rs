@@ -180,6 +180,10 @@ fn unique_pst_report_pack_and_export_messages_rows() {
         header.contains("duplicate_source_count") && header.contains("duplicate_sources"),
         "0075 All-Custodians columns required; got {header}"
     );
+    assert!(
+        header.ends_with(",source_id") || header.contains(",source_id"),
+        "0081 source_id trailing column required; got {header}"
+    );
     let rows: Vec<_> = lines.filter(|l| !l.is_empty()).collect();
     assert_eq!(rows.len() as u64, written);
     for row in &rows {

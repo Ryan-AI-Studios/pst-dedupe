@@ -468,6 +468,7 @@ fn cancel_exit_130_and_summary() {
         skip_limit: 10_000,
         attach_ledger: pst_dedup_cli::unique_export_report::AttachLedgerMode::Off,
         attach_ledger_max_rows: 500_000,
+        ledger_path_mode: pst_dedup_cli::unique_export_report::LedgerPathMode::Full,
         deep_attach_preflight: false,
         deep_attach_level: "head".into(),
         deep_attach_max_attaches: 50_000,

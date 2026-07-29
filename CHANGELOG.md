@@ -19,7 +19,13 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 - **D-0073-promote** — Mode A pre-write promote-on-attach-fail not shipped (ledger-only Mode C).
 - **D-0073-eml** — unique-eml has no attach ledger parity yet.
 - **D-0073-gui** — no GUI attach-ledger controls.
-- **D-0073-basename** — optional handoff path redaction mode.
+
+### Added (0081 — Unique export deps + operator docs)
+
+- **`--ledger-path-mode full|basename`** (default **`full`**): basename rewrites `source_path` columns in `export_messages.csv` + `export_attachments.csv` for handoff only.
+- **`export_messages.csv` trailing `source_id`** column (0-based index into `summary.inputs`; empty when unmapped) — join key under basename when multi-source packs share a basename.
+- Standalone **`qc-pst`** resolves basenamed source opens via `source_id` + `summary.inputs` when the CSV path is missing.
+- Operator runbook: [`docs/unique-pst-ediscovery-runbook.md`](docs/unique-pst-ediscovery-runbook.md). **D-0073-basename closed**.
 
 ## [0.2.0-rc.1] — 2026-07-24
 
