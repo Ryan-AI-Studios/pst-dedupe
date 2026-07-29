@@ -9,6 +9,7 @@ pub mod convenience;
 pub mod error;
 pub mod export_oracle;
 pub mod export_outcome;
+pub mod fidelity_contract;
 pub mod grouping_cli;
 pub mod inspect;
 pub mod job_cmd;
@@ -20,12 +21,15 @@ pub mod platform_cmd;
 pub mod production_profile_cmd;
 pub mod profile_cmd;
 pub mod pst_materializer;
+pub mod qc_attestation;
+pub mod qc_external;
 pub mod runner_util;
 pub mod scan;
 pub mod service_cmd;
 pub mod unique_eml_cmd;
 pub mod unique_export_report;
 pub mod unique_pst_cmd;
+pub mod unique_pst_qc;
 pub mod workflow_cmd;
 
 pub use unique_pst_cmd::{

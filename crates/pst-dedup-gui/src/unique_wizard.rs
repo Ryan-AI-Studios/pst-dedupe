@@ -406,6 +406,11 @@ impl UniqueWizardForm {
             fail_on_export_risk: None,
             // 0079: shared materialize/attach sticky handle LRU (matches CLI default).
             max_open_psts: DEFAULT_MAX_OPEN_PSTS,
+            // 0080: default sample QC (matches CLI); GUI wiring residual is thin.
+            qc_level: pst_dedup_cli::unique_pst_qc::QcLevel::Sample,
+            qc_sample_max: pst_dedup_cli::unique_pst_qc::DEFAULT_QC_SAMPLE_MAX,
+            qc_external_reader: None,
+            qc_scanpst: false,
         })
     }
 

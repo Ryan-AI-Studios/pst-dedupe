@@ -33,6 +33,9 @@ single-block only; keep using it only for existing fixture callers.
 | Recipient table / named-prop set beyond the store stub | **No** | Minimal named-property map stub only, sufficient for the properties this writer emits (none of which require named props). |
 | RTF | **No** | v1 never writes `PidTagRtfCompressed` or any RTF-native hint — there is nothing RTF-related to clear because nothing RTF-related is ever produced. |
 | `PidTagMessageFlags` | `MSGFLAG_READ` (0x1); `\| MSGFLAG_HASATTACH` (0x10) when ≥1 attach written | Paperclip + read default (0069). |
+| `PidTagDisplayTo` | Yes, when present | Written from source display To string. |
+| `PidTagDisplayCc` | **Yes (0080 §3.11)** | Written when present; previously silently dropped. |
+| `PidTagDisplayBcc` | **No (0080)** | Dropped by design (disclosure); counted via adapter `dropped` return. Opt-in is D-0080-bcc-policy. |
 | `PidTagCreationTime` / `PidTagLastModificationTime` | Set to `submit_time` when present; omitted otherwise | This is a synthetically-written export item, not a live mailbox object, so `submit_time` is a defensible stand-in for both when no better source exists. Never invented — omitted entirely when `submit_time` is `None`. |
 
 ## v1.1 — Attachments + folder fidelity (Track 0069)

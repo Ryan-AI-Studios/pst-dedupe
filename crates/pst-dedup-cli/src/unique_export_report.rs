@@ -377,6 +377,8 @@ pub struct PhaseTimings {
     pub write_ms: u64,
     pub report_ms: u64,
     pub verify_ms: u64,
+    /// Source-differential / external QC wall time (0080).
+    pub qc_ms: u64,
     pub quarantine_ms: u64,
     /// `total_ms − Σ(phases)`. Non-zero is a gap in instrumentation, not noise.
     pub unaccounted_ms: u64,
@@ -394,6 +396,7 @@ impl PhaseTimings {
             .saturating_add(self.write_ms)
             .saturating_add(self.report_ms)
             .saturating_add(self.verify_ms)
+            .saturating_add(self.qc_ms)
             .saturating_add(self.quarantine_ms)
     }
 

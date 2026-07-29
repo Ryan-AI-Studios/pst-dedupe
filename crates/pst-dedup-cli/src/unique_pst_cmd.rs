@@ -211,6 +211,18 @@ pub struct UniquePstClapArgs {
     /// Max sticky source PST handles for materialize + attach stream (0079; default 32).
     #[arg(long = "max-open-psts", default_value_t = DEFAULT_MAX_OPEN_PSTS)]
     pub max_open_psts: usize,
+    /// QC depth: `off|structure|sample|full` (0080). Default **sample**.
+    #[arg(long = "qc-level", default_value = "sample", value_parser = parse_qc_level_arg)]
+    pub qc_level: String,
+    /// Risk-weighted sample cap when `--qc-level sample` (default 64).
+    #[arg(long = "qc-sample-max", default_value_t = crate::unique_pst_qc::DEFAULT_QC_SAMPLE_MAX)]
+    pub qc_sample_max: usize,
+    /// Optional BYOB path to `pffinfo` / `readpst` for counts-only cross-check (0080).
+    #[arg(long = "qc-external-reader")]
+    pub qc_external_reader: Option<PathBuf>,
+    /// Attempt scanpst `-no repair` on a local temp copy when discoverable (0080).
+    #[arg(long = "qc-scanpst", action = clap::ArgAction::SetTrue)]
+    pub qc_scanpst: bool,
 }
 
 /// Runtime options for `unique-pst` orchestration.
@@ -278,6 +290,14 @@ pub struct UniquePstCliArgs {
     pub fail_on_export_risk: Option<String>,
     /// Max sticky source PST handles for materialize + attach stream (0079).
     pub max_open_psts: usize,
+    /// QC level (0080): off|structure|sample|full.
+    pub qc_level: crate::unique_pst_qc::QcLevel,
+    /// Sample cap for risk-weighted QC (0080).
+    pub qc_sample_max: usize,
+    /// Optional independent reader path (0080 BYOB).
+    pub qc_external_reader: Option<PathBuf>,
+    /// Attempt scanpst when true (0080).
+    pub qc_scanpst: bool,
 }
 
 /// Run options / hooks for GUI and library callers (0072).
@@ -447,6 +467,11 @@ impl UniquePstClapArgs {
             allow_partial_fidelity: self.allow_partial_fidelity,
             fail_on_export_risk: self.fail_on_export_risk,
             max_open_psts: self.max_open_psts,
+            qc_level: crate::unique_pst_qc::QcLevel::parse(&self.qc_level)
+                .map_err(CliError::Usage)?,
+            qc_sample_max: self.qc_sample_max.max(1),
+            qc_external_reader: self.qc_external_reader,
+            qc_scanpst: self.qc_scanpst,
         })
     }
 }
@@ -522,6 +547,11 @@ fn parse_attach_ledger_mode_arg(s: &str) -> std::result::Result<AttachLedgerMode
 
 fn parse_strong_content_hash_arg(s: &str) -> std::result::Result<String, String> {
     crate::grouping_cli::parse_identity_level(s)?;
+    Ok(s.to_string())
+}
+
+fn parse_qc_level_arg(s: &str) -> std::result::Result<String, String> {
+    crate::unique_pst_qc::QcLevel::parse(s)?;
     Ok(s.to_string())
 }
 
@@ -1873,6 +1903,32 @@ pub fn run_unique_pst_with_options(
     let t_write = Instant::now();
     let mut volumes: Vec<VolumeReportRow> = Vec::new();
     let mut export_rows: Vec<ExportMessageRow> = Vec::new();
+    // QC sample meta ordered by prepare/write order (export_message_index assigned later).
+    let mut qc_meta_by_prepare_idx: Vec<crate::unique_pst_qc::QcSampleCandidate> = prepared
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let has_degraded = keep_set
+                .winners
+                .get(i)
+                .map(|w| !w.integrity.degraded_reasons.is_empty())
+                .unwrap_or(false);
+            crate::unique_pst_qc::candidate_from_write_msg(
+                crate::unique_pst_qc::CandidateFromWriteMsg {
+                    export_message_index: 0, // filled when export_message_index is known
+                    volume_index: 0,
+                    source_path: &p.source_path,
+                    source_nid: p.nid,
+                    folder_path: &p.folder_path,
+                    message_id_norm: &p.message_id_norm,
+                    subject: &p.subject,
+                    write_msg: &p.write_msg,
+                    has_degraded,
+                    has_ledger_fail: false,
+                },
+            )
+        })
+        .collect();
     let mut export_message_index: u64 = 0;
     let mut attach_written_total: u64 = 0;
     let mut attach_failed_total: u64 = 0;
@@ -2124,6 +2180,13 @@ pub fn run_unique_pst_with_options(
                         duplicate_sources: dup_sources,
                         subject: p.subject.clone(),
                     });
+                    // Bind pre-write QC meta to this export index / volume.
+                    let prep_idx = start_cursor + i;
+                    if let Some(meta) = qc_meta_by_prepare_idx.get_mut(prep_idx) {
+                        meta.export_message_index = export_message_index;
+                        meta.volume_index = volume_index;
+                        meta.has_ledger_fail = attach_fails > 0;
+                    }
                 }
 
                 volumes.push(VolumeReportRow {
@@ -2363,6 +2426,90 @@ pub fn run_unique_pst_with_options(
     let t_verify = Instant::now();
     let mut verification = verify_volumes(&volumes, &export_rows, args.verify_hash);
     phase_timings.verify_ms = t_verify.elapsed().as_millis() as u64;
+
+    // ── Phase 5b: source-differential QC (0080) ─────────────────────────────
+    // When qc-level is off, legacy verify_volumes remains the structural baseline.
+    let mut qc_hard_fail = false;
+    if args.qc_level != crate::unique_pst_qc::QcLevel::Off && !volumes.is_empty() {
+        emit_log(stderr, &on_log, "stage=qc");
+        let t_qc = Instant::now();
+        let candidates: Vec<crate::unique_pst_qc::QcSampleCandidate> = {
+            // Prefer pre-write meta (body/attach sizes) bound to export indices.
+            let mut by_idx: HashMap<u64, crate::unique_pst_qc::QcSampleCandidate> = HashMap::new();
+            for m in &qc_meta_by_prepare_idx {
+                if m.export_message_index > 0 {
+                    by_idx.insert(m.export_message_index, m.clone());
+                }
+            }
+            export_rows
+                .iter()
+                .map(|row| {
+                    by_idx
+                        .get(&row.export_message_index)
+                        .cloned()
+                        .unwrap_or_else(|| crate::unique_pst_qc::QcSampleCandidate {
+                            export_message_index: row.export_message_index,
+                            volume_index: row.volume_index,
+                            source_path: row.source_path.clone(),
+                            source_nid: row.nid,
+                            folder_path: row.folder_path.clone(),
+                            subject: row.subject.clone(),
+                            sender: String::new(),
+                            message_id_norm: row.message_id_norm.clone(),
+                            body_plain_len: 0,
+                            body_html_len: 0,
+                            attach_count: 0,
+                            max_attach_size: 0,
+                            has_zero_byte_attach: false,
+                            has_embedded: false,
+                            has_degraded: false,
+                            has_ledger_fail: row.attachments_failed_count > 0,
+                            subject_non_ascii: !row.subject.is_ascii(),
+                            display_cc: String::new(),
+                            display_bcc: String::new(),
+                        })
+                })
+                .collect()
+        };
+        let qc_report = crate::unique_pst_qc::run_unique_pst_qc(crate::unique_pst_qc::QcRunInput {
+            level: args.qc_level,
+            sample_max: args.qc_sample_max,
+            report_dir: &report_dir,
+            volumes: &volumes,
+            export_rows: &export_rows,
+            candidates: &candidates,
+            external_reader: args.qc_external_reader.as_deref(),
+            run_scanpst: args.qc_scanpst,
+            max_open_psts: args.max_open_psts,
+            source_differential: true,
+            parents_only,
+        });
+        phase_timings.qc_ms = t_qc.elapsed().as_millis() as u64;
+        // Never lower an exit already set; only force verify failure on hard findings.
+        if qc_report.hard_fail {
+            qc_hard_fail = true;
+            verification.ok = false;
+            emit_log(
+                stderr,
+                &on_log,
+                &format!(
+                    "qc hard findings: defect={} unexplained_loss={}",
+                    qc_report.findings.defect, qc_report.findings.unexplained_loss
+                ),
+            );
+        } else {
+            emit_log(
+                stderr,
+                &on_log,
+                &format!(
+                    "qc ok: level={} messages_compared={} known_gap={}",
+                    qc_report.qc_level, qc_report.messages_compared, qc_report.findings.known_gap
+                ),
+            );
+        }
+        let _ = qc_hard_fail;
+    }
+
     // Spec §3.3.1: partial export forces overall + verification honesty flags.
     if export_partial {
         verification.ok = false;
@@ -3407,6 +3554,10 @@ mod tests {
             allow_partial_fidelity: false,
             fail_on_export_risk: None,
             max_open_psts: DEFAULT_MAX_OPEN_PSTS,
+            qc_level: crate::unique_pst_qc::QcLevel::Off,
+            qc_sample_max: 64,
+            qc_external_reader: None,
+            qc_scanpst: false,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3507,6 +3658,10 @@ mod tests {
             allow_partial_fidelity: false,
             fail_on_export_risk: None,
             max_open_psts: DEFAULT_MAX_OPEN_PSTS,
+            qc_level: crate::unique_pst_qc::QcLevel::Off,
+            qc_sample_max: 64,
+            qc_external_reader: None,
+            qc_scanpst: false,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3614,6 +3769,10 @@ mod tests {
             allow_partial_fidelity: false,
             fail_on_export_risk: None,
             max_open_psts: DEFAULT_MAX_OPEN_PSTS,
+            qc_level: crate::unique_pst_qc::QcLevel::Off,
+            qc_sample_max: 64,
+            qc_external_reader: None,
+            qc_scanpst: false,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3712,6 +3871,10 @@ mod tests {
             allow_partial_fidelity: false,
             fail_on_export_risk: None,
             max_open_psts: DEFAULT_MAX_OPEN_PSTS,
+            qc_level: crate::unique_pst_qc::QcLevel::Off,
+            qc_sample_max: 64,
+            qc_external_reader: None,
+            qc_scanpst: false,
         };
         let outcome = run_unique_pst_with_options(
             args,

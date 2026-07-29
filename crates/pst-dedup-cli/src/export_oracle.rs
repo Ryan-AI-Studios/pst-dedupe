@@ -514,7 +514,34 @@ pub fn structural_digest_pst(path: &Path) -> Result<VolumeStructuralDigest, Stri
     })
 }
 
-fn message_content_digest(pst: &mut pst_reader::PstFile, nid: u64) -> Result<String, String> {
+/// Per-message content + attachment payload digest (0080 promotes for QC reuse).
+///
+/// Includes recipients (`display_to` / `display_cc`) so source↔output comparison
+/// covers 0080 §3.11. Order-stable over attachment list.
+pub fn message_content_digest(pst: &mut pst_reader::PstFile, nid: u64) -> Result<String, String> {
+    let detail = message_content_detail(pst, nid)?;
+    Ok(detail.digest)
+}
+
+/// Detailed content fingerprint for one message NID (digest + attach payload hashes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageContentDetail {
+    pub digest: String,
+    pub message_id: String,
+    pub subject: String,
+    pub display_to: String,
+    pub display_cc: String,
+    pub body_plain_len: usize,
+    pub body_html_len: usize,
+    /// (filename, size, mime, payload_sha256_hex)
+    pub attaches: Vec<(String, u64, String, String)>,
+}
+
+/// Extract comparable content fields + digest for QC (reuses oracle hashing).
+pub fn message_content_detail(
+    pst: &mut pst_reader::PstFile,
+    nid: u64,
+) -> Result<MessageContentDetail, String> {
     use pst_reader::NodeId;
     let extract = pst
         .read_message_extract(NodeId(nid))
@@ -525,7 +552,9 @@ fn message_content_digest(pst: &mut pst_reader::PstFile, nid: u64) -> Result<Str
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    let subject = extract.subject.as_deref().unwrap_or("");
+    let subject = extract.subject.as_deref().unwrap_or("").to_string();
+    let display_to = extract.display_to.as_deref().unwrap_or("").to_string();
+    let display_cc = extract.display_cc.as_deref().unwrap_or("").to_string();
     let body_plain = extract.body_text.as_deref().unwrap_or("");
     let body_html = extract.body_html.as_deref().unwrap_or(&[][..]);
 
@@ -551,6 +580,10 @@ fn message_content_digest(pst: &mut pst_reader::PstFile, nid: u64) -> Result<Str
     h.update([0]);
     h.update(subject.as_bytes());
     h.update([0]);
+    h.update(display_to.as_bytes());
+    h.update([0]);
+    h.update(display_cc.as_bytes());
+    h.update([0]);
     h.update(body_plain.as_bytes());
     h.update([0]);
     h.update(body_html);
@@ -564,10 +597,20 @@ fn message_content_digest(pst: &mut pst_reader::PstFile, nid: u64) -> Result<Str
         h.update(ph.as_bytes());
         h.update([0]);
     }
-    Ok(hex_sha256_digest(h.finalize().as_slice()))
+    Ok(MessageContentDetail {
+        digest: hex_sha256_digest(h.finalize().as_slice()),
+        message_id: mid,
+        subject,
+        display_to,
+        display_cc,
+        body_plain_len: body_plain.len(),
+        body_html_len: body_html.len(),
+        attaches,
+    })
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
+/// SHA-256 lowercase hex of raw bytes (shared with QC attachment read-back).
+pub fn hex_sha256(bytes: &[u8]) -> String {
     let d = Sha256::digest(bytes);
     hex_sha256_digest(d.as_slice())
 }

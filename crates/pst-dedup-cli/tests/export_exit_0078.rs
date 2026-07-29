@@ -491,6 +491,10 @@ fn cancel_exit_130_and_summary() {
         allow_partial_fidelity: false,
         fail_on_export_risk: None,
         max_open_psts: 32,
+        qc_level: pst_dedup_cli::unique_pst_qc::QcLevel::Off,
+        qc_sample_max: 64,
+        qc_external_reader: None,
+        qc_scanpst: false,
     };
     let outcome = pst_dedup_cli::run_unique_pst_with_options(
         args,

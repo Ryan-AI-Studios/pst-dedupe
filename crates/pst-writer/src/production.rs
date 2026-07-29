@@ -84,6 +84,8 @@ const PID_TAG_MESSAGE_FLAGS: u16 = 0x0E07;
 const PID_TAG_CREATION_TIME: u16 = 0x3007;
 const PID_TAG_LAST_MODIFICATION_TIME: u16 = 0x3008;
 const PID_TAG_DISPLAY_TO: u16 = 0x0E04;
+/// PidTagDisplayCc (MS-OXPROPS) — written when present (track 0080 §3.11).
+const PID_TAG_DISPLAY_CC: u16 = 0x0E03;
 const PID_TAG_NATIVE_BODY: u16 = 0x1016;
 const PID_TAG_MESSAGE_EDITOR_FORMAT: u16 = 0x5909;
 const PID_TAG_INTERNET_CODEPAGE: u16 = 0x3FDE;
@@ -354,6 +356,8 @@ pub struct WriteMessage {
     pub subject: String,
     pub sender: Option<String>,
     pub display_to: Option<String>,
+    /// PidTagDisplayCc when present (0080 §3.11). BCC is intentionally not written.
+    pub display_cc: Option<String>,
     /// Absolute FILETIME passthrough (100ns since 1601-01-01), if present.
     pub submit_time: Option<i64>,
     pub body_plain: Option<String>,
@@ -767,9 +771,9 @@ fn record_attach_event(
 /// never depends on `pst-dedup-cli`, and `dedup-engine` never depends back on
 /// `pst-writer`, so no cycle is introduced.
 ///
-/// Attachments are **mapped** (0069). The second return value is reserved for
-/// attachments the adapter could not represent (always 0 today — metadata and
-/// optional small `data` always map). Bytes for large attaches are filled by
+/// Attachments are **mapped** (0069). The second return value counts fields the
+/// adapter deliberately does not map (0080: non-empty `display_bcc` is one).
+/// Optional small attach `data` always maps; large attach bytes are filled by
 /// the caller (or left `None` for soft-fail at write time).
 pub fn from_canonical_message(
     msg: &dedup_engine::keepset::CanonicalMessage,
@@ -799,11 +803,21 @@ pub fn from_canonical_message(
             .fidelity
             .degraded_reasons
             .contains(&dedup_engine::IntegrityReason::AttachMetaFailed);
+    let mut dropped = 0u64;
+    if msg
+        .display_bcc
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        // BCC is dropped_by_design (disclosure); count as unmapped field (0080).
+        dropped = dropped.saturating_add(1);
+    }
     let write_msg = WriteMessage {
         message_id: msg.message_id.clone(),
         subject: msg.subject.clone().unwrap_or_default(),
         sender: msg.sender.clone(),
         display_to: msg.display_to.clone(),
+        display_cc: msg.display_cc.clone(),
         submit_time: msg.submit_time,
         body_plain: msg.body_plain.clone(),
         body_html: msg.body_html.clone(),
@@ -816,7 +830,7 @@ pub fn from_canonical_message(
         source_msg_nid: Some(msg.locus.nid),
         attach_list_failed,
     };
-    (write_msg, 0)
+    (write_msg, dropped)
 }
 
 /// By-value conversion: **moves** bodies and buffered attach payloads (0079 D11).
@@ -835,6 +849,14 @@ pub fn from_canonical_message_owned(
             .fidelity
             .degraded_reasons
             .contains(&dedup_engine::IntegrityReason::AttachMetaFailed);
+    let mut dropped = 0u64;
+    if msg
+        .display_bcc
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        dropped = dropped.saturating_add(1);
+    }
     let attachments: Vec<WriteAttachment> = msg
         .attachments
         .into_iter()
@@ -856,6 +878,7 @@ pub fn from_canonical_message_owned(
         subject: msg.subject.unwrap_or_default(),
         sender: msg.sender,
         display_to: msg.display_to,
+        display_cc: msg.display_cc,
         submit_time: msg.submit_time,
         body_plain: msg.body_plain,
         body_html: msg.body_html,
@@ -868,7 +891,7 @@ pub fn from_canonical_message_owned(
         source_msg_nid: Some(parent_nid),
         attach_list_failed,
     };
-    (write_msg, 0)
+    (write_msg, dropped)
 }
 
 /// Write a production-scope Unicode, unencrypted PST containing `messages`.
@@ -2889,6 +2912,11 @@ fn build_message_payload(
     if let Some(display_to) = &msg.display_to {
         props.push((PID_TAG_DISPLAY_TO, PcValue::String(display_to.clone())));
     }
+    if let Some(display_cc) = &msg.display_cc {
+        if !display_cc.trim().is_empty() {
+            props.push((PID_TAG_DISPLAY_CC, PcValue::String(display_cc.clone())));
+        }
+    }
     if let Some(submit_time) = msg.submit_time {
         props.push((PID_TAG_CLIENT_SUBMIT_TIME, PcValue::Time(submit_time)));
     }
@@ -4719,5 +4747,78 @@ mod tests {
             conc_ms < 60_000,
             "conc hash should finish under 60s on 32MiB"
         );
+    }
+
+    /// 0080 §3.11: PidTagDisplayCc is written; non-empty display_bcc increments dropped.
+    #[test]
+    fn display_cc_written_and_bcc_counted_dropped() {
+        use dedup_engine::integrity::RecoverableIntegrity;
+        use dedup_engine::keepset::{CanonicalMessage, MessageLocus};
+
+        let mut canonical = CanonicalMessage {
+            locus: MessageLocus {
+                source_path: "C:/fake/source.pst".into(),
+                source_pst: "source.pst".into(),
+                folder_path: "Inbox".into(),
+                nid: 1,
+                is_orphaned: false,
+            },
+            message_id: Some("<cc@example.com>".into()),
+            subject: Some("CC test".into()),
+            sender: Some("alice@example.com".into()),
+            display_to: Some("bob@example.com".into()),
+            display_cc: Some("carol@example.com".into()),
+            display_bcc: Some("secret@example.com".into()),
+            submit_time: Some(0x01D5B035EDA780_i64),
+            size: None,
+            message_class: None,
+            body_plain: Some("hi".into()),
+            body_html: None,
+            attachments: Vec::new(),
+            fidelity: RecoverableIntegrity::clean(),
+            message_id_norm: None,
+            content_hash: [0u8; 32],
+            edrm_mih_hex: None,
+            body_incomplete: false,
+            body_unavailable: false,
+        };
+        let (write_msg, dropped) = from_canonical_message(&canonical);
+        assert_eq!(dropped, 1, "non-empty BCC counts as dropped");
+        assert_eq!(write_msg.display_cc.as_deref(), Some("carol@example.com"));
+
+        // Empty BCC does not count.
+        canonical.display_bcc = Some("   ".into());
+        let (_, dropped0) = from_canonical_message(&canonical);
+        assert_eq!(dropped0, 0);
+
+        let path =
+            std::env::temp_dir().join(format!("pst_writer_display_cc_{}.pst", std::process::id()));
+        let _ = fs::remove_file(&path);
+        write_unicode_pst(&path, vec![write_msg], &[], &WritePstOpts::default()).expect("write");
+
+        let mut pst = pst_reader::PstFile::open(&path).expect("open");
+        let folders = pst.folders().expect("folders");
+        let nid = folders
+            .iter()
+            .find(|f| !f.message_nids.is_empty())
+            .expect("folder with msg")
+            .message_nids[0];
+        let extract = pst.read_message_extract(nid).expect("extract");
+        assert_eq!(
+            extract.display_cc.as_deref(),
+            Some("carol@example.com"),
+            "PidTagDisplayCc must round-trip"
+        );
+        // BCC not written.
+        assert!(
+            extract
+                .display_bcc
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty(),
+            "BCC must not be written"
+        );
+        let _ = fs::remove_file(&path);
     }
 }
