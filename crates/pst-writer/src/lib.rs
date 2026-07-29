@@ -8,6 +8,11 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
+
 #[cfg(test)]
 mod heap_test;
 
@@ -18,11 +23,11 @@ pub mod production;
 
 pub use production::{
     build_bth_checked, build_pc_v2, build_tc_inline_checked, from_canonical_message,
-    temp_sibling_path, write_unicode_pst, write_unicode_pst_streaming,
-    write_unicode_pst_with_streams, AttachEventSeverity, AttachEventSink, AttachRead,
-    AttachStreamSource, AttachmentFidelityEvent, AttachmentFidelityKind, FolderLayoutPolicy,
-    PcValue, WriteAttachment, WriteMessage, WriteProgress, WriteProgressSink, WritePstOpts,
-    WritePstReport, WriteStage,
+    from_canonical_message_owned, temp_sibling_path, write_unicode_pst,
+    write_unicode_pst_streaming, write_unicode_pst_with_streams, AttachEventSeverity,
+    AttachEventSink, AttachRead, AttachStreamSource, AttachmentFidelityEvent,
+    AttachmentFidelityKind, FolderLayoutPolicy, PcValue, WriteAttachment, WriteMessage,
+    WriteProgress, WriteProgressSink, WritePstOpts, WritePstReport, WriteStage,
 };
 
 // EagerWriteCtx is defined above on Layout; re-exported for tests/integrations.
@@ -179,6 +184,14 @@ pub struct EagerWriteCtx {
     pub(crate) amap_pages: Vec<PageEntry>,
     /// Absolute offsets of AMap stubs already written to `file`.
     pub(crate) amap_stubs_written: HashSet<u64>,
+    /// Offsets already registered in `amap_pages` (O(1) ensure; 0079 D2).
+    pub(crate) amap_page_offsets: HashSet<u64>,
+    /// Watermark: `amap_pages[..stubbed_upto]` stubs already written (0079 D2).
+    pub(crate) stubbed_upto: usize,
+    /// Last known file cursor after positioned write (skip redundant seeks; 0079 D3).
+    pub(crate) file_pos: u64,
+    /// Operation-count instrumentation for complexity tests (0079; not wall-clock).
+    pub(crate) amap_scan_steps: u64,
 }
 
 impl EagerWriteCtx {
@@ -202,6 +215,11 @@ impl EagerWriteCtx {
             cursor: HEADER_SIZE,
             amap_pages: Vec::new(),
             amap_stubs_written: HashSet::new(),
+            amap_page_offsets: HashSet::new(),
+            stubbed_upto: 0,
+            // Header just written; cursor at HEADER_SIZE.
+            file_pos: HEADER_SIZE,
+            amap_scan_steps: 0,
         })
     }
 
@@ -341,23 +359,25 @@ impl Layout {
             block_size,
             BLOCK_ALIGN,
             &mut eager.amap_pages,
+            &mut eager.amap_page_offsets,
             &mut self.used_bids,
             &mut self.next_bid_counter,
+            &mut eager.amap_scan_steps,
         );
-        // Write AMap page stubs for any newly registered slots so physical size
-        // and file holes stay consistent with MS-PST layout.
-        let stubs_to_write: Vec<(u64, u64)> = eager
-            .amap_pages
-            .iter()
-            .filter(|p| !eager.amap_stubs_written.contains(&p.offset))
-            .map(|p| (p.offset, p.bid))
-            .collect();
-        for (amap_off, amap_bid) in stubs_to_write {
-            write_amap_stub_page(&mut eager.file, amap_off, amap_bid)?;
-            eager.amap_stubs_written.insert(amap_off);
+        // Only pages registered since the last watermark can need stubs (0079 D2).
+        // amap_pages is append-only, so unwritten stubs live at [stubbed_upto..].
+        while eager.stubbed_upto < eager.amap_pages.len() {
+            eager.amap_scan_steps = eager.amap_scan_steps.saturating_add(1);
+            let page = &eager.amap_pages[eager.stubbed_upto];
+            let amap_off = page.offset;
+            let amap_bid = page.bid;
+            if !eager.amap_stubs_written.contains(&amap_off) {
+                write_amap_stub_page_at(&mut eager.file, amap_off, amap_bid, &mut eager.file_pos)?;
+                eager.amap_stubs_written.insert(amap_off);
+            }
+            eager.stubbed_upto += 1;
         }
-        eager.file.seek(SeekFrom::Start(offset))?;
-        write_data_block(&mut eager.file, bid, payload)?;
+        write_data_block_at(&mut eager.file, offset, bid, payload, &mut eager.file_pos)?;
         Ok(offset)
     }
 
@@ -458,6 +478,16 @@ impl Layout {
         } else {
             Vec::new()
         };
+        let mut amap_page_offsets: HashSet<u64> = if let Some(eager) = self.eager.as_mut() {
+            std::mem::take(&mut eager.amap_page_offsets)
+        } else {
+            amap_pages.iter().map(|p| p.offset).collect()
+        };
+        // Keep set in sync if we only took pages (offsets should already match).
+        for p in &amap_pages {
+            amap_page_offsets.insert(p.offset);
+        }
+        let mut scan_steps = 0u64;
 
         // 1) Start after all eagerly written on_disk blocks (and header).
         let mut cursor = HEADER_SIZE;
@@ -482,8 +512,10 @@ impl Layout {
                 PAGE_SIZE,
                 1,
                 &mut amap_pages,
+                &mut amap_page_offsets,
                 &mut self.used_bids,
                 &mut self.next_bid_counter,
+                &mut scan_steps,
             );
         }
 
@@ -498,8 +530,10 @@ impl Layout {
                 block_size,
                 BLOCK_ALIGN,
                 &mut amap_pages,
+                &mut amap_page_offsets,
                 &mut self.used_bids,
                 &mut self.next_bid_counter,
+                &mut scan_steps,
             );
         }
 
@@ -516,6 +550,7 @@ impl Layout {
                 amap_ensure_page(
                     amap,
                     &mut amap_pages,
+                    &mut amap_page_offsets,
                     &mut self.used_bids,
                     &mut self.next_bid_counter,
                 );
@@ -533,6 +568,7 @@ impl Layout {
         amap_pages.sort_by_key(|p| p.offset);
         self.pages = amap_pages;
         self.pages.extend(other_pages);
+        let _ = scan_steps;
     }
 
     pub fn file_size(&self) -> u64 {
@@ -565,10 +601,12 @@ pub(crate) fn align_up(value: u64, alignment: u64) -> u64 {
 pub(crate) fn amap_ensure_page(
     amap_off: u64,
     amap_pages: &mut Vec<PageEntry>,
+    amap_page_offsets: &mut HashSet<u64>,
     used_bids: &mut HashSet<u64>,
     next_bid: &mut u64,
 ) {
-    if amap_pages.iter().any(|p| p.offset == amap_off) {
+    // O(1) membership via side HashSet (0079 D2); vec remains source of order.
+    if !amap_page_offsets.insert(amap_off) {
         return;
     }
     let bid = loop {
@@ -589,18 +627,22 @@ pub(crate) fn amap_ensure_page(
 /// Place a region of `size` bytes with `align` alignment, never overlapping
 /// mandated AMap page slots. Registers AMap pages when the cursor must skip
 /// past them.
+#[allow(clippy::too_many_arguments)] // placement + AMap bookkeeping + op-count (0079)
 pub(crate) fn amap_place_region(
     cursor: &mut u64,
     size: u64,
     align: u64,
     amap_pages: &mut Vec<PageEntry>,
+    amap_page_offsets: &mut HashSet<u64>,
     used_bids: &mut HashSet<u64>,
     next_bid: &mut u64,
+    scan_steps: &mut u64,
 ) -> u64 {
     *cursor = align_up(*cursor, align);
     loop {
+        *scan_steps = scan_steps.saturating_add(1);
         if is_amap_page_offset(*cursor) {
-            amap_ensure_page(*cursor, amap_pages, used_bids, next_bid);
+            amap_ensure_page(*cursor, amap_pages, amap_page_offsets, used_bids, next_bid);
             *cursor = align_up(*cursor + PAGE_SIZE, align);
             continue;
         }
@@ -611,7 +653,7 @@ pub(crate) fn amap_place_region(
             if *cursor < amap && region_end <= amap {
                 break;
             }
-            amap_ensure_page(amap, amap_pages, used_bids, next_bid);
+            amap_ensure_page(amap, amap_pages, amap_page_offsets, used_bids, next_bid);
             *cursor = align_up(amap_end, align);
             continue;
         }
@@ -622,9 +664,13 @@ pub(crate) fn amap_place_region(
     offset
 }
 
-/// Write a provisional AMap page (all-free `0xFF` bits) at a fixed offset.
-/// Finalized AMap content may be rewritten at finalize with the same layout.
-fn write_amap_stub_page(file: &mut File, offset: u64, bid: u64) -> Result<()> {
+/// AMap stub write with file_pos tracking (0079 D3).
+fn write_amap_stub_page_at(
+    file: &mut File,
+    offset: u64,
+    bid: u64,
+    file_pos: &mut u64,
+) -> Result<()> {
     let mut page = vec![0u8; PAGE_SIZE as usize];
     page[..496].fill(0xFF);
     let trailer_offset = PAGE_SIZE as usize - 16;
@@ -640,9 +686,72 @@ fn write_amap_stub_page(file: &mut File, offset: u64, bid: u64) -> Result<()> {
     let crc = crc32fast::hash(&page[..trailer_offset]);
     page[trailer_offset + 4..trailer_offset + 8].copy_from_slice(&crc.to_le_bytes());
     page[trailer_offset + 8..trailer_offset + 16].copy_from_slice(&bid.to_le_bytes());
-    file.seek(SeekFrom::Start(offset))?;
-    file.write_all(&page)?;
+    positioned_write_all(file, offset, &page, file_pos)?;
     Ok(())
+}
+
+/// Positioned write: fuse seek+write when possible; track `file_pos` to skip
+/// redundant seeks on the append-mostly eager path (0079 D3).
+///
+/// **Not** wrapped in `BufWriter` — AMap stubs land *behind* the advanced
+/// cursor, and `BufWriter::seek` flushes on every seek.
+fn positioned_write_all(
+    file: &mut File,
+    offset: u64,
+    data: &[u8],
+    file_pos: &mut u64,
+) -> Result<()> {
+    if *file_pos == offset {
+        file.write_all(data)?;
+        *file_pos = offset + data.len() as u64;
+        return Ok(());
+    }
+    // Prefer OS positioned write (no cursor change required on Windows/Unix).
+    #[cfg(any(windows, unix))]
+    {
+        let mut written = 0usize;
+        while written < data.len() {
+            let n = file
+                .seek_write(&data[written..], offset + written as u64)
+                .map_err(WriterError::Io)?;
+            if n == 0 {
+                return Err(WriterError::Io(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "positioned write returned 0",
+                )));
+            }
+            written += n;
+        }
+        // seek_write does not update the OS file cursor portably; resync.
+        *file_pos = offset + data.len() as u64;
+        // Keep OS cursor aligned for subsequent sequential write_all paths.
+        file.seek(SeekFrom::Start(*file_pos))?;
+        Ok(())
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(data)?;
+        *file_pos = offset + data.len() as u64;
+        Ok(())
+    }
+}
+
+fn write_data_block_at(
+    file: &mut File,
+    offset: u64,
+    bid: u64,
+    payload: &[u8],
+    file_pos: &mut u64,
+) -> Result<()> {
+    // Build the same on-disk block encoding as `write_data_block`, then positioned-write.
+    let mut buf = Vec::with_capacity(payload.len() + 16);
+    {
+        use std::io::Cursor;
+        let mut cur = Cursor::new(&mut buf);
+        write_data_block(&mut cur, bid, payload)?;
+    }
+    positioned_write_all(file, offset, &buf, file_pos)
 }
 
 // ── Builders ───────────────────────────────────────────────────────────────
@@ -1540,4 +1649,51 @@ fn write_bbt_leaf_page<W: Write>(
 
     writer.write_all(&page)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod amap_complexity_tests {
+    use super::*;
+    use std::fs;
+
+    /// Operation-count complexity: AMap bookkeeping steps stay within a small
+    /// constant multiple of block count across 1× and 4× workloads (0079 D2).
+    #[test]
+    fn amap_scan_steps_linear_in_block_count() {
+        fn run_blocks(n: usize) -> (u64, u64) {
+            let dir =
+                std::env::temp_dir().join(format!("pst_writer_amap_{}_{}", std::process::id(), n));
+            let _ = fs::create_dir_all(&dir);
+            let path = dir.join("eager.pst");
+            let mut eager = EagerWriteCtx::create(&path).expect("create");
+            let mut layout = Layout::new();
+            let payload = vec![0u8; 1024];
+            for i in 0..n {
+                let bid = layout.alloc_bid(false);
+                layout
+                    .place_and_write_block(&mut eager, bid, &payload)
+                    .unwrap_or_else(|e| panic!("block {i}: {e}"));
+            }
+            let steps = eager.amap_scan_steps;
+            drop(eager);
+            let _ = fs::remove_dir_all(&dir);
+            (steps, n as u64)
+        }
+
+        let (steps1, n1) = run_blocks(200);
+        let (steps4, n4) = run_blocks(800);
+        // Amortized O(1) per block: steps/n should not grow with n.
+        let ratio1 = steps1 as f64 / n1 as f64;
+        let ratio4 = steps4 as f64 / n4 as f64;
+        // Allow modest constant factor; forbid superlinear (ratio4 >> ratio1).
+        assert!(
+            ratio4 <= ratio1 * 2.5 + 5.0,
+            "superlinear AMap bookkeeping: ratio1={ratio1:.2} ratio4={ratio4:.2} steps1={steps1} steps4={steps4}"
+        );
+        // Absolute bound: small constant steps per block.
+        assert!(
+            ratio4 < 50.0,
+            "too many scan steps per block: {ratio4:.2} (steps={steps4} n={n4})"
+        );
+    }
 }

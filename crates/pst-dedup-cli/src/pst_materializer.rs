@@ -2,10 +2,15 @@
 //!
 //! Source PSTs are opened read-only. Large attach payloads are never loaded into
 //! multi-GB `Vec`s — exporters stream via [`PstAttachStreamSource`].
+//!
+//! Track **0079**: materializer and attach stream source share one bounded LRU
+//! [`PstHandleCache`] via `Rc<RefCell<…>>` (closes D-0074-mat-lru).
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -19,13 +24,94 @@ use pst_reader::{NodeId, PstFile};
 
 use crate::attach_probe::{path_mtime_and_size, probe_attach_stream, ProbeLevel, ProbeResultCache};
 
+/// Default max open source PST handles (matches probe path; 0079 §3.6).
+pub const DEFAULT_MAX_OPEN_PSTS: usize = 32;
+
 /// Optional soft-warning sink (GUI Log panel / CLI on_log bridge).
 pub type MaterializeWarnCb = Arc<Mutex<dyn FnMut(String) + Send>>;
 
+/// Bounded LRU of open read-only PST handles shared by materialize + attach stream.
+///
+/// Evicts least-recently-used when over capacity. Counts every successful
+/// `PstFile::open` in [`Self::opens`].
+pub struct PstHandleCache {
+    capacity: usize,
+    order: VecDeque<String>,
+    map: HashMap<String, PstFile>,
+    /// Cumulative successful opens (includes re-opens after eviction).
+    opens: u64,
+}
+
+impl PstHandleCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            order: VecDeque::new(),
+            map: HashMap::new(),
+            opens: 0,
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    pub fn opens(&self) -> u64 {
+        self.opens
+    }
+
+    fn touch(&mut self, path: &str) {
+        if let Some(pos) = self.order.iter().position(|p| p == path) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(path.to_string());
+    }
+
+    fn evict_lru(&mut self) {
+        while self.map.len() >= self.capacity {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Open or reuse a sticky handle; drops LRU when over capacity.
+    pub fn get_mut(&mut self, path: &str) -> Result<&mut PstFile, String> {
+        if self.map.contains_key(path) {
+            self.touch(path);
+            return self
+                .map
+                .get_mut(path)
+                .ok_or_else(|| format!("pst missing after touch: {path}"));
+        }
+        self.evict_lru();
+        let pst = PstFile::open(Path::new(path)).map_err(|e| format!("open {path}: {e}"))?;
+        self.opens = self.opens.saturating_add(1);
+        self.map.insert(path.to_string(), pst);
+        self.touch(path);
+        self.map
+            .get_mut(path)
+            .ok_or_else(|| format!("pst missing after open: {path}"))
+    }
+}
+
+/// Shared handle cache handle (`Rc<RefCell<…>>` — single-threaded unique-pst path).
+pub type SharedPstHandleCache = Rc<RefCell<PstHandleCache>>;
+
 /// Materializer holding open PST handles (source PSTs remain read-only).
 pub struct PstMaterializer {
-    /// Absolute path string → open file.
-    psts: HashMap<String, PstFile>,
+    /// Bounded LRU of open PST files (shared with attach stream when provided).
+    handles: SharedPstHandleCache,
     /// When false / parents_only, skip loading attach bytes (metadata list may still be empty).
     load_attach_payloads: bool,
     /// parents_only: still list attach metadata for omit ledger rows; never load payloads.
@@ -43,12 +129,22 @@ pub struct PstMaterializer {
     /// Phase-1b probe cache: set `stream_available` without re-opening streams (0074 P1-A).
     /// `Arc` so materialize can consult the cache while holding a PST handle borrow.
     probe_result_cache: Option<(Arc<ProbeResultCache>, ProbeLevel)>,
+    /// Count of successful `materialize` returns (0079 D1 assertion).
+    messages_materialized: u64,
 }
 
 impl PstMaterializer {
     pub fn new(family: FamilyPolicy) -> Self {
+        Self::with_handle_cache(
+            family,
+            Rc::new(RefCell::new(PstHandleCache::new(DEFAULT_MAX_OPEN_PSTS))),
+        )
+    }
+
+    /// Build with an explicit shared handle cache (unique-pst shares with attach stream).
+    pub fn with_handle_cache(family: FamilyPolicy, handles: SharedPstHandleCache) -> Self {
         Self {
-            psts: HashMap::new(),
+            handles,
             load_attach_payloads: family == FamilyPolicy::KeepAttachmentsWithParent,
             parents_only: family == FamilyPolicy::ParentsOnly,
             on_warn: None,
@@ -57,7 +153,21 @@ impl PstMaterializer {
             deep_probe_time_ms: 2000,
             cancel: None,
             probe_result_cache: None,
+            messages_materialized: 0,
         }
+    }
+
+    /// Shared cache handle (clone of the `Rc`).
+    pub fn handle_cache(&self) -> SharedPstHandleCache {
+        Rc::clone(&self.handles)
+    }
+
+    pub fn messages_materialized(&self) -> u64 {
+        self.messages_materialized
+    }
+
+    pub fn source_pst_opens(&self) -> u64 {
+        self.handles.borrow().opens()
     }
 
     /// Bridge soft attach/open warnings to a structured log sink (unique-pst GUI).
@@ -97,17 +207,6 @@ impl PstMaterializer {
     pub fn with_cancel(mut self, cancel: Option<Arc<AtomicBool>>) -> Self {
         self.cancel = cancel;
         self
-    }
-
-    fn open_pst(&mut self, path: &str) -> std::result::Result<&mut PstFile, MaterializeError> {
-        if !self.psts.contains_key(path) {
-            let pst = PstFile::open(Path::new(path))
-                .map_err(|e| MaterializeError::Hard(format!("open {}: {e}", path)))?;
-            self.psts.insert(path.to_string(), pst);
-        }
-        self.psts
-            .get_mut(path)
-            .ok_or_else(|| MaterializeError::Hard(format!("pst missing after open: {path}")))
     }
 }
 
@@ -149,7 +248,7 @@ impl MessageMaterializer for PstMaterializer {
         let cache_identity = probe_cache
             .as_ref()
             .map(|_| path_mtime_and_size(&locus.source_path));
-        // Clone warn sink before opening PST (pst holds &mut self.psts).
+        // Clone warn sink before borrowing the handle cache.
         let warn_cb = self.on_warn.clone();
         let emit_soft = |msg: String| {
             tracing::warn!("{msg}");
@@ -159,7 +258,11 @@ impl MessageMaterializer for PstMaterializer {
                 }
             }
         };
-        let pst = self.open_pst(&locus.source_path)?;
+        // Hold the shared cache for the full materialize (single-threaded path).
+        let mut handles = self.handles.borrow_mut();
+        let pst = handles
+            .get_mut(&locus.source_path)
+            .map_err(MaterializeError::Hard)?;
         let nid = NodeId(locus.nid);
 
         let mut soft_reasons: Vec<dedup_engine::IntegrityReason> = Vec::new();
@@ -463,6 +566,10 @@ impl MessageMaterializer for PstMaterializer {
             )
         };
 
+        // Drop handle borrow before mutating materializer counters.
+        drop(handles);
+        self.messages_materialized = self.messages_materialized.saturating_add(1);
+
         Ok(CanonicalMessage {
             locus: locus.clone(),
             message_id,
@@ -487,30 +594,33 @@ impl MessageMaterializer for PstMaterializer {
     }
 }
 
-/// Independent PST handle cache for streaming attach bytes during EML write.
+/// Attach stream source sharing the materializer's [`PstHandleCache`] (0079).
 ///
-/// Separate from [`PstMaterializer`] because `finalize_with_materialize` holds an exclusive
-/// borrow on the materializer while `on_winner` runs. Read-only multi-open is fine on Windows.
+/// Previously a separate unbounded `HashMap` (D-0074-mat-lru / D4 double-open).
+/// When built via [`PstAttachStreamSource::with_handle_cache`], opens reuse the
+/// same sticky handles as materialize.
 pub struct PstAttachStreamSource {
-    psts: HashMap<String, PstFile>,
+    handles: SharedPstHandleCache,
 }
 
 impl PstAttachStreamSource {
     pub fn new() -> Self {
         Self {
-            psts: HashMap::new(),
+            handles: Rc::new(RefCell::new(PstHandleCache::new(DEFAULT_MAX_OPEN_PSTS))),
         }
     }
 
-    fn open_pst(&mut self, path: &str) -> Result<&mut PstFile, EmlWriteError> {
-        if !self.psts.contains_key(path) {
-            let pst = PstFile::open(Path::new(path))
-                .map_err(|e| EmlWriteError::Other(format!("open attach stream pst {path}: {e}")))?;
-            self.psts.insert(path.to_string(), pst);
-        }
-        self.psts
-            .get_mut(path)
-            .ok_or_else(|| EmlWriteError::Other(format!("pst missing after open: {path}")))
+    /// Share a handle cache with [`PstMaterializer`] (preferred unique-pst path).
+    pub fn with_handle_cache(handles: SharedPstHandleCache) -> Self {
+        Self { handles }
+    }
+
+    pub fn source_pst_opens(&self) -> u64 {
+        self.handles.borrow().opens()
+    }
+
+    pub fn handle_cache(&self) -> SharedPstHandleCache {
+        Rc::clone(&self.handles)
     }
 }
 
@@ -530,7 +640,10 @@ impl PstAttachStreamSource {
         parent: &MessageLocus,
         attach_nid: u64,
     ) -> Result<pst_reader::AttachmentDataReader, EmlWriteError> {
-        let pst = self.open_pst(&parent.source_path)?;
+        let mut handles = self.handles.borrow_mut();
+        let pst = handles
+            .get_mut(&parent.source_path)
+            .map_err(|e| EmlWriteError::Other(format!("open attach stream pst: {e}")))?;
         pst.open_attachment_data(NodeId(parent.nid), NodeId(attach_nid))
             .map_err(|e| {
                 EmlWriteError::Other(format!(
@@ -555,5 +668,67 @@ impl AttachStreamSource for PstAttachStreamSource {
     ) -> Result<Box<dyn Read>, EmlWriteError> {
         let reader = self.open_attachment_data_reader(parent, attach_nid)?;
         Ok(Box::new(reader))
+    }
+}
+
+#[cfg(test)]
+mod handle_cache_tests {
+    use super::*;
+
+    #[test]
+    fn handle_cache_evicts_when_over_capacity() {
+        // Capacity 2: open three distinct missing paths fail without growth;
+        // use real fixture for open success if present.
+        let sample =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/aspose_outlook.pst");
+        if !sample.is_file() {
+            return;
+        }
+        // Copy to three distinct paths so cache keys differ.
+        let dir = std::env::temp_dir().join(format!("pst_handle_cache_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let a = dir.join("a.pst");
+        let b = dir.join("b.pst");
+        let c = dir.join("c.pst");
+        std::fs::copy(&sample, &a).expect("copy a");
+        std::fs::copy(&sample, &b).expect("copy b");
+        std::fs::copy(&sample, &c).expect("copy c");
+
+        let mut cache = PstHandleCache::new(2);
+        cache.get_mut(a.to_str().unwrap()).expect("open a");
+        cache.get_mut(b.to_str().unwrap()).expect("open b");
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.opens(), 2);
+        // Touch a so b is LRU.
+        cache.get_mut(a.to_str().unwrap()).expect("touch a");
+        cache.get_mut(c.to_str().unwrap()).expect("open c");
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.opens(), 3); // c is a new open
+                                      // b should have been evicted; re-open increments opens.
+        cache.get_mut(b.to_str().unwrap()).expect("reopen b");
+        assert_eq!(cache.opens(), 4);
+        assert_eq!(cache.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn materializer_and_attach_share_opens() {
+        let sample =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/aspose_outlook.pst");
+        if !sample.is_file() {
+            return;
+        }
+        let shared = Rc::new(RefCell::new(PstHandleCache::new(8)));
+        let mat = PstMaterializer::with_handle_cache(FamilyPolicy::ParentsOnly, Rc::clone(&shared));
+        let attach = PstAttachStreamSource::with_handle_cache(Rc::clone(&shared));
+        let path = sample.to_str().unwrap();
+        shared.borrow_mut().get_mut(path).expect("open via shared");
+        assert_eq!(shared.borrow().opens(), 1);
+        // Attach stream reuses without re-open.
+        let _ = attach.handle_cache().borrow_mut().get_mut(path);
+        assert_eq!(shared.borrow().opens(), 1);
+        assert_eq!(mat.source_pst_opens(), 1);
+        assert_eq!(attach.source_pst_opens(), 1);
     }
 }

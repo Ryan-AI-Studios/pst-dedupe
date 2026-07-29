@@ -490,6 +490,7 @@ fn cancel_exit_130_and_summary() {
         fail_on_partial_fidelity: true,
         allow_partial_fidelity: false,
         fail_on_export_risk: None,
+        max_open_psts: 32,
     };
     let outcome = pst_dedup_cli::run_unique_pst_with_options(
         args,

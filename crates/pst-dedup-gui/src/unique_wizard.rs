@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use dedup_engine::integrity::ScanMode;
 use dedup_engine::keepset::{FamilyPolicy, KeepPolicy};
 use pst_dedup_cli::paths::{is_same_or_under, is_same_or_under_resolved, paths_equal};
+use pst_dedup_cli::pst_materializer::DEFAULT_MAX_OPEN_PSTS;
 use pst_dedup_cli::unique_export_report::{
     volume_path_for, AttachLedgerMode, DEFAULT_ATTACH_LEDGER_MAX_ROWS,
 };
@@ -403,6 +404,8 @@ impl UniqueWizardForm {
             fail_on_partial_fidelity: true,
             allow_partial_fidelity: false,
             fail_on_export_risk: None,
+            // 0079: shared materialize/attach sticky handle LRU (matches CLI default).
+            max_open_psts: DEFAULT_MAX_OPEN_PSTS,
         })
     }
 

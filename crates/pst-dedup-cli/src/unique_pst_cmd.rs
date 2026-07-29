@@ -23,12 +23,12 @@ use dedup_engine::integrity::{
 };
 use dedup_engine::keepset::{
     finalize_with_materialize, recoverable_items_hint, resolve_groups_with_grouping,
-    sort_input_paths, write_keep_set_json, DecisionCsvWriter, FamilyPolicy, KeepEntry, KeepPolicy,
-    KeepSet, KeepSetProvenance, KeepSetStats, MessageMaterializer, KEEP_SET_SCHEMA,
+    sort_input_paths, write_keep_set_json, DecisionCsvWriter, FamilyPolicy, KeepPolicy, KeepSet,
+    KeepSetProvenance, KeepSetStats, KEEP_SET_SCHEMA,
 };
 use pst_reader::PstFile;
 use pst_writer::{
-    from_canonical_message, temp_sibling_path, write_unicode_pst_streaming, AttachRead,
+    from_canonical_message_owned, temp_sibling_path, write_unicode_pst_streaming, AttachRead,
     AttachStreamSource, FolderLayoutPolicy, WriteMessage, WriteProgress, WriteProgressSink,
     WritePstOpts, WriteStage,
 };
@@ -40,6 +40,7 @@ use crate::paths::{
     resolve_cli_path_maybe_missing,
 };
 use crate::pst_materializer::{PstAttachStreamSource, PstMaterializer};
+use crate::pst_materializer::{PstHandleCache, DEFAULT_MAX_OPEN_PSTS};
 use crate::scan::{
     apply_strict_probe_skips_to_file_stats, evaluate_exit_policy, rebuild_dedup_results_with_ctx,
     recompute_file_status_counts, recompute_per_file_degraded_from_candidates,
@@ -48,9 +49,13 @@ use crate::scan::{
 use crate::unique_export_report::{
     default_report_dir, volume_path_for, write_export_messages_csv, write_summary_json,
     write_volumes_csv, AttachLedgerMode, AttachLedgerSink, ExportMessageRow, ExportSection,
-    SummaryError, UniqueExportSummary, VerificationReport, VolumeAttachBuffer, VolumeReportRow,
-    VolumeVerification, DEFAULT_ATTACH_LEDGER_MAX_ROWS, UNIQUE_EXPORT_REPORT_SCHEMA,
+    PhaseTimings, SummaryError, UniqueExportSummary, VerificationReport, VolumeAttachBuffer,
+    VolumeReportRow, VolumeVerification, DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+    PREPARED_BYTES_PEAK_WARN_THRESHOLD, UNIQUE_EXPORT_REPORT_SCHEMA,
 };
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Max volume index considered for stale-sibling cleanup and collision guards.
 const MAX_VOLUME_SIBLING_INDEX: u32 = 999;
@@ -203,6 +208,9 @@ pub struct UniquePstClapArgs {
     /// Opt-in: exit 65 when `export_risk` rank ≥ level (default off; 0078).
     #[arg(long = "fail-on-export-risk", value_parser = parse_fail_on_export_risk_arg)]
     pub fail_on_export_risk: Option<String>,
+    /// Max sticky source PST handles for materialize + attach stream (0079; default 32).
+    #[arg(long = "max-open-psts", default_value_t = DEFAULT_MAX_OPEN_PSTS)]
+    pub max_open_psts: usize,
 }
 
 /// Runtime options for `unique-pst` orchestration.
@@ -268,6 +276,8 @@ pub struct UniquePstCliArgs {
     pub allow_partial_fidelity: bool,
     /// Opt-in risk gate level string or None (0078).
     pub fail_on_export_risk: Option<String>,
+    /// Max sticky source PST handles for materialize + attach stream (0079).
+    pub max_open_psts: usize,
 }
 
 /// Run options / hooks for GUI and library callers (0072).
@@ -436,6 +446,7 @@ impl UniquePstClapArgs {
             fail_on_partial_fidelity,
             allow_partial_fidelity: self.allow_partial_fidelity,
             fail_on_export_risk: self.fail_on_export_risk,
+            max_open_psts: self.max_open_psts,
         })
     }
 }
@@ -780,6 +791,9 @@ struct CancelledSummaryCtx<'a> {
     folder_layout: FolderLayoutArg,
     max_volume_bytes: Option<u64>,
     duration_ms: u64,
+    phase_timings: PhaseTimings,
+    source_pst_opens: u64,
+    messages_materialized: u64,
     artifact_state: crate::export_outcome::ArtifactState,
 }
 
@@ -1037,6 +1051,12 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
             rehash_ran: false,
         },
         duration_ms: ctx.duration_ms,
+        phase_timings: ctx.phase_timings,
+        source_pst_opens: ctx.source_pst_opens,
+        messages_materialized: ctx.messages_materialized,
+        bytes_written_total: 0,
+        prepared_bytes_peak: 0,
+        hash_ms: 0,
         max_volume_bytes: ctx.max_volume_bytes,
         decision_csv: None,
         keep_set_json: None,
@@ -1217,6 +1237,11 @@ pub fn run_unique_pst_with_options(
 
     let summary_path = report_dir.join("summary.json");
     let mut cancelled = false;
+    let mut phase_timings = PhaseTimings::default();
+    let mut source_pst_opens = 0u64;
+    let mut messages_materialized = 0u64;
+    let mut prepared_bytes_peak = 0u64;
+    let mut hash_ms = 0u64;
 
     emit_log(stderr, &on_log, "stage=scan");
     emit_stage_progress(&on_progress, "scan", 0, 0, 0, 0, None);
@@ -1226,6 +1251,8 @@ pub fn run_unique_pst_with_options(
         // Open report / operators see ok=false rather than a missing summary.
         emit_log(stderr, &on_log, "cancelled before scan");
         let artifact_state = crate::export_outcome::ArtifactState::Absent;
+        let total_ms = started.elapsed().as_millis() as u64;
+        phase_timings.finalize(total_ms);
         write_cancelled_summary_json(&CancelledSummaryCtx {
             summary_path: &summary_path,
             inputs: &paths,
@@ -1236,7 +1263,10 @@ pub fn run_unique_pst_with_options(
             mode: args.mode,
             folder_layout: args.folder_layout,
             max_volume_bytes: args.max_volume_bytes,
-            duration_ms: started.elapsed().as_millis() as u64,
+            duration_ms: total_ms,
+            phase_timings,
+            source_pst_opens,
+            messages_materialized,
             artifact_state,
         });
         return Ok(cancelled_outcome(
@@ -1291,7 +1321,9 @@ pub fn run_unique_pst_with_options(
     // ── Phase 1: integrity scan ─────────────────────────────────────────────
     // Dual-rate poly sources reclassify (clear) false-positive CRC_SUSPECT in
     // run_scan so keep-set sees clean identity without Tier-2 auto-allow.
+    let t_scan = Instant::now();
     let mut outcome = run_scan(&paths, &opts)?;
+    phase_timings.scan_ms = t_scan.elapsed().as_millis() as u64;
 
     // Scan-level integrity warnings must reach on_log (GUI Log panel), not only tracing.
     {
@@ -1393,6 +1425,8 @@ pub fn run_unique_pst_with_options(
                 attach_probe_cancelled: true,
             });
             let artifact_state = crate::export_outcome::ArtifactState::Absent;
+            let total_ms = started.elapsed().as_millis() as u64;
+            phase_timings.finalize(total_ms);
             write_cancelled_summary_json(&CancelledSummaryCtx {
                 summary_path: &summary_path,
                 inputs: &paths,
@@ -1403,7 +1437,10 @@ pub fn run_unique_pst_with_options(
                 mode: args.mode,
                 folder_layout: args.folder_layout,
                 max_volume_bytes: args.max_volume_bytes,
-                duration_ms: started.elapsed().as_millis() as u64,
+                duration_ms: total_ms,
+                phase_timings,
+                source_pst_opens,
+                messages_materialized,
                 artifact_state,
             });
             return Ok(cancelled_outcome(
@@ -1416,6 +1453,7 @@ pub fn run_unique_pst_with_options(
 
         emit_log(stderr, &on_log, "stage=deep_attach_preflight");
         emit_stage_progress(&on_progress, "deep_attach_preflight", 0, 0, 0, 0, None);
+        let t_preflight = Instant::now();
         let budgets = ProbeBudgets {
             max_attaches: args.deep_attach_max_attaches,
             max_probe_bytes: args.deep_attach_max_probe_bytes,
@@ -1456,11 +1494,14 @@ pub fn run_unique_pst_with_options(
             },
         );
         phase1b_probe_cache = Some((probe_cache, level));
+        phase_timings.deep_attach_preflight_ms = t_preflight.elapsed().as_millis() as u64;
 
         // Cancel during probe must not resolve/materialize/write with partial integrity.
         if probe_summary.cancelled || cancel_requested(&cancel) {
             emit_log(stderr, &on_log, "cancelled during deep_attach_preflight");
             let artifact_state = crate::export_outcome::ArtifactState::Absent;
+            let total_ms = started.elapsed().as_millis() as u64;
+            phase_timings.finalize(total_ms);
             write_cancelled_summary_json(&CancelledSummaryCtx {
                 summary_path: &summary_path,
                 inputs: &paths,
@@ -1471,7 +1512,10 @@ pub fn run_unique_pst_with_options(
                 mode: args.mode,
                 folder_layout: args.folder_layout,
                 max_volume_bytes: args.max_volume_bytes,
-                duration_ms: started.elapsed().as_millis() as u64,
+                duration_ms: total_ms,
+                phase_timings,
+                source_pst_opens,
+                messages_materialized,
                 artifact_state,
             });
             return Ok(cancelled_outcome(
@@ -1639,6 +1683,7 @@ pub fn run_unique_pst_with_options(
     // ── Phase 2 / 2b: resolve + promote ─────────────────────────────────────
     emit_log(stderr, &on_log, "stage=resolve");
     emit_stage_progress(&on_progress, "resolve", 0, 0, 0, 0, None);
+    let t_resolve = Instant::now();
     let rank_ctx = rank_context_from_cli(
         args.policy,
         &args.prefer_path_contains,
@@ -1668,6 +1713,7 @@ pub fn run_unique_pst_with_options(
         &grouping,
         Some(provenance),
     );
+    phase_timings.resolve_ms = t_resolve.elapsed().as_millis() as u64;
 
     if cancel_requested(&cancel) {
         cancelled = true;
@@ -1702,18 +1748,37 @@ pub fn run_unique_pst_with_options(
     // materialize sets stream_available from probe outcomes without re-I/O
     // (0074 P1-A). Unprobed attaches stay optimistic (honest via truncated).
     // Residual mid-tail fails go to the 0073 export ledger.
-    // Residual: D-0074-mat-lru (bounded materializer handle cache).
+    // 0079: one bounded LRU shared by materializer + attach stream (D-0074-mat-lru).
+    let handle_cache = Rc::new(RefCell::new(PstHandleCache::new(args.max_open_psts)));
     let mut mat = match mat_warn {
-        Some(cb) => PstMaterializer::new(effective_family).with_warn_sink(cb),
-        None => PstMaterializer::new(effective_family),
+        Some(cb) => PstMaterializer::with_handle_cache(effective_family, Rc::clone(&handle_cache))
+            .with_warn_sink(cb),
+        None => PstMaterializer::with_handle_cache(effective_family, Rc::clone(&handle_cache)),
     };
     if let Some((cache, level)) = phase1b_probe_cache {
         mat = mat.with_probe_result_cache(cache, level);
     }
-    let mut attach_src = PstAttachStreamSource::new();
-    let _materialized_count =
-        finalize_with_materialize(&mut resolved, &mut mat, &mut |_msg| Ok(()))
-            .map_err(|e| CliError::Msg(format!("materialize/promote: {e}")))?;
+    let mut attach_src = PstAttachStreamSource::with_handle_cache(Rc::clone(&handle_cache));
+
+    // 0079 D1: convert each winner to PreparedWinner in on_winner (single materialize).
+    // Keyed by (source_path, nid); write order still follows keep_set.winners (item index).
+    let mut prepared_by_locus: HashMap<(String, u64), PreparedWinner> = HashMap::new();
+    let t_materialize = Instant::now();
+    let materialized_count = finalize_with_materialize(&mut resolved, &mut mat, &mut |msg| {
+        let key = (msg.locus.source_path.clone(), msg.locus.nid);
+        match prepared_winner_from_canonical(msg) {
+            Ok(p) => {
+                prepared_by_locus.insert(key, p);
+                Ok(())
+            }
+            Err(e) => Err(dedup_engine::keepset::KeepSetError::Other(e)),
+        }
+    })
+    .map_err(|e| CliError::Msg(format!("materialize/promote: {e}")))?;
+    phase_timings.materialize_ms = t_materialize.elapsed().as_millis() as u64;
+    messages_materialized = mat.messages_materialized();
+    // finalize count and materializer counter should agree.
+    let _ = materialized_count;
 
     if cancel_requested(&cancel) {
         cancelled = true;
@@ -1726,9 +1791,10 @@ pub fn run_unique_pst_with_options(
     }
     let winners_total = Some(keep_set.stats.unique);
 
-    // Prepare winners for write (keep_set order).
+    // Assemble prepared winners in keep_set (item index) order — no re-materialize.
     emit_log(stderr, &on_log, "stage=prepare_winners");
     emit_stage_progress(&on_progress, "prepare_winners", 0, 0, 0, 0, winners_total);
+    let t_prepare = Instant::now();
     let mut prepared: Vec<PreparedWinner> = Vec::with_capacity(keep_set.winners.len());
     let mut prepare_errors: Vec<String> = Vec::new();
     for entry in &keep_set.winners {
@@ -1736,29 +1802,45 @@ pub fn run_unique_pst_with_options(
             cancelled = true;
             break;
         }
-        match prepare_winner(&mut mat, entry) {
-            Ok(p) => prepared.push(p),
-            Err(e) => {
-                let msg = format!("nid={:#x}: {e}", entry.locus.nid);
-                emit_log(
-                    stderr,
-                    &on_log,
-                    &format!("warning: prepare/materialize error: {msg}"),
+        let key = (entry.locus.source_path.clone(), entry.locus.nid);
+        match prepared_by_locus.remove(&key) {
+            Some(p) => {
+                prepared_bytes_peak =
+                    prepared_bytes_peak.saturating_add(prepared_winner_retained_bytes(&p));
+                prepared.push(p);
+            }
+            None => {
+                let msg = format!(
+                    "nid={:#x}: missing prepared winner after materialize",
+                    entry.locus.nid
                 );
+                emit_log(stderr, &on_log, &format!("warning: prepare error: {msg}"));
                 prepare_errors.push(msg);
             }
         }
+    }
+    phase_timings.prepare_ms = t_prepare.elapsed().as_millis() as u64;
+    if prepared_bytes_peak > PREPARED_BYTES_PEAK_WARN_THRESHOLD {
+        emit_log(
+            stderr,
+            &on_log,
+            &format!(
+                "warning: prepared_bytes_peak={prepared_bytes_peak} exceeds threshold {} (1 GiB); consider streaming prepare→write (D-0079-stream-prepare) when available",
+                PREPARED_BYTES_PEAK_WARN_THRESHOLD
+            ),
+        );
     }
     if !prepare_errors.is_empty() {
         emit_log(
             stderr,
             &on_log,
-            &format!(
-                "warning: prepare/materialize errors total={}",
-                prepare_errors.len()
-            ),
+            &format!("warning: prepare errors total={}", prepare_errors.len()),
         );
     }
+    // 0079: prepare is a pure re-order of on_winner materialize output — no second
+    // materialize. Missing prepared winners are a hard pipeline defect (or cancel);
+    // refuse to write an incomplete keep-set.
+    let prepare_incomplete = !prepare_errors.is_empty();
 
     let folder_layout = match args.folder_layout {
         FolderLayoutArg::Preserve => FolderLayoutPolicy::PreservePaths {
@@ -1788,6 +1870,7 @@ pub fn run_unique_pst_with_options(
 
     emit_log(stderr, &on_log, "stage=write");
     emit_stage_progress(&on_progress, "write", 0, 0, 0, 0, winners_total);
+    let t_write = Instant::now();
     let mut volumes: Vec<VolumeReportRow> = Vec::new();
     let mut export_rows: Vec<ExportMessageRow> = Vec::new();
     let mut export_message_index: u64 = 0;
@@ -1835,9 +1918,22 @@ pub fn run_unique_pst_with_options(
     if cancelled {
         export_partial = true;
         export_error = Some("cancelled".into());
+    } else if prepare_incomplete {
+        // Hard-fail before write (unless cancel already owns the outcome).
+        export_partial = true;
+        export_error = Some(format!(
+            "prepare/materialize errors ({}): {:?} — refusing write with incomplete keep-set",
+            prepare_errors.len(),
+            prepare_errors
+        ));
+        emit_log(
+            stderr,
+            &on_log,
+            "error: missing prepared winners after single materialize; write skipped",
+        );
     }
 
-    while cursor < prepared.len() && !cancelled {
+    while cursor < prepared.len() && !cancelled && export_error.is_none() {
         if cancel_requested(&cancel) {
             cancelled = true;
             export_partial = true;
@@ -2040,6 +2136,7 @@ pub fn run_unique_pst_with_options(
                     finalized_early: report.finalized_early,
                     volume_exceeded_soft_limit: exceeded,
                 });
+                hash_ms = hash_ms.saturating_add(report.hash_ms);
                 attach_written_total =
                     attach_written_total.saturating_add(report.attachments_written);
                 attach_failed_total = attach_failed_total.saturating_add(report.attachments_failed);
@@ -2106,6 +2203,8 @@ pub fn run_unique_pst_with_options(
         }
     }
 
+    phase_timings.write_ms = t_write.elapsed().as_millis() as u64;
+
     // Empty keep-set (or loop never entered): still honour cancel so outcome
     // is not reported as a successful zero-message export when the user aborted.
     if !cancelled && cancel_requested(&cancel) {
@@ -2158,6 +2257,7 @@ pub fn run_unique_pst_with_options(
         0,
         winners_total,
     );
+    let t_report = Instant::now();
     let mut report_write_errors: Vec<String> = Vec::new();
     if let Some(msg) = ledger_init_error.take() {
         report_write_errors.push(msg);
@@ -2247,6 +2347,8 @@ pub fn run_unique_pst_with_options(
         report_write_errors.push(msg);
     }
 
+    phase_timings.report_ms = t_report.elapsed().as_millis() as u64;
+
     // ── Phase 5: verify completed volumes ───────────────────────────────────
     emit_log(stderr, &on_log, "stage=verify");
     emit_stage_progress(
@@ -2258,13 +2360,14 @@ pub fn run_unique_pst_with_options(
         0,
         winners_total,
     );
+    let t_verify = Instant::now();
     let mut verification = verify_volumes(&volumes, &export_rows, args.verify_hash);
+    phase_timings.verify_ms = t_verify.elapsed().as_millis() as u64;
     // Spec §3.3.1: partial export forces overall + verification honesty flags.
     if export_partial {
         verification.ok = false;
     }
 
-    let duration_ms = started.elapsed().as_millis() as u64;
     let exit_err = evaluate_exit_policy(&outcome.summary, &opts).err();
     let verify_err = if verification.ok {
         None
@@ -2288,6 +2391,7 @@ pub fn run_unique_pst_with_options(
     // ── 0078: cancel quarantine before classify (D7) ────────────────────────
     let mut quarantine = crate::export_outcome::QuarantineResult::NotAttempted;
     if cancelled {
+        let t_quarantine = Instant::now();
         let bytes_on_disk = volumes.iter().any(|v| Path::new(&v.path).exists()) || out.exists();
         if bytes_on_disk {
             let vol_count = volumes.len() as u32;
@@ -2300,7 +2404,14 @@ pub fn run_unique_pst_with_options(
         } else {
             quarantine = crate::export_outcome::QuarantineResult::NoVolumes;
         }
+        phase_timings.quarantine_ms = t_quarantine.elapsed().as_millis() as u64;
     }
+    // Recompute total after quarantine so cancelled runs still report honest timings.
+    let duration_ms = started.elapsed().as_millis() as u64;
+    phase_timings.finalize(duration_ms);
+    // Refresh opens in case attach stream opened additional sources during write.
+    source_pst_opens = handle_cache.borrow().opens();
+    let bytes_written_total: u64 = volumes.iter().map(|v| v.bytes).sum();
 
     let export_ok_input = ExportOkInput {
         scan_ok: exit_err.is_none(),
@@ -2435,6 +2546,12 @@ pub fn run_unique_pst_with_options(
         export: export_section,
         verification,
         duration_ms,
+        phase_timings,
+        source_pst_opens,
+        messages_materialized,
+        bytes_written_total,
+        prepared_bytes_peak,
+        hash_ms,
         max_volume_bytes: args.max_volume_bytes,
         decision_csv: decision_csv_out.clone(),
         keep_set_json: keep_set_json_out.clone(),
@@ -2631,48 +2748,53 @@ pub fn run_unique_pst_with_options(
     Ok(structured)
 }
 
-fn prepare_winner(
-    mat: &mut PstMaterializer,
-    entry: &KeepEntry,
+/// Convert a just-materialized winner into a write-ready DTO (0079 D1 + D11).
+///
+/// `msg` already has fidelity merged from `finalize_with_materialize` and
+/// scan keys (MID/hash/MIH) applied. Bodies/attach payloads are **moved**.
+fn prepared_winner_from_canonical(
+    msg: dedup_engine::keepset::CanonicalMessage,
 ) -> std::result::Result<PreparedWinner, String> {
-    let mut msg = mat
-        .materialize(&entry.locus)
-        .map_err(|e| format!("re-materialize: {e}"))?;
-    msg.message_id_norm = entry.message_id_norm.clone();
-    msg.content_hash = entry.content_hash;
-    msg.edrm_mih_hex = entry.edrm_mih_hex.clone();
-    // Merge re-materialize soft reasons (e.g. ATTACH_META_FAILED) into keep-set integrity
-    // so from_canonical can set attach_list_failed honestly.
-    let mut integrity = entry.integrity.clone();
-    for r in &msg.fidelity.degraded_reasons {
-        if !integrity.degraded_reasons.contains(r) {
-            integrity.degraded_reasons.push(*r);
-            integrity.degraded = true;
-        }
-    }
-    if msg.fidelity.is_orphaned {
-        integrity.is_orphaned = true;
-    }
-    msg.fidelity = integrity;
-
-    let (write_msg, _dropped) = from_canonical_message(&msg);
-    let content_hash_hex = entry
+    let source_path = msg.locus.source_path.clone();
+    let folder_path = msg.locus.folder_path.clone();
+    let nid = msg.locus.nid;
+    let message_id_norm = msg.message_id_norm.clone().unwrap_or_default();
+    let edrm_mih = msg.edrm_mih_hex.clone().unwrap_or_default();
+    let content_hash_hex = msg
         .content_hash
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
 
+    let (write_msg, _dropped) = from_canonical_message_owned(msg);
     let subject = write_msg.subject.clone();
     Ok(PreparedWinner {
-        source_path: entry.locus.source_path.clone(),
-        folder_path: entry.locus.folder_path.clone(),
-        nid: entry.locus.nid,
-        message_id_norm: entry.message_id_norm.clone().unwrap_or_default(),
-        edrm_mih: entry.edrm_mih_hex.clone().unwrap_or_default(),
+        source_path,
+        folder_path,
+        nid,
+        message_id_norm,
+        edrm_mih,
         content_hash_hex,
         subject,
         write_msg,
     })
+}
+
+/// Retained body + buffered attach payload bytes for `prepared_bytes_peak` (0079 §3.9).
+fn prepared_winner_retained_bytes(p: &PreparedWinner) -> u64 {
+    let mut n = 0u64;
+    if let Some(ref s) = p.write_msg.body_plain {
+        n = n.saturating_add(s.len() as u64);
+    }
+    if let Some(ref h) = p.write_msg.body_html {
+        n = n.saturating_add(h.len() as u64);
+    }
+    for a in &p.write_msg.attachments {
+        if let Some(ref d) = a.data {
+            n = n.saturating_add(d.len() as u64);
+        }
+    }
+    n
 }
 
 /// Delete incomplete volume file and same-dir temp sibling (writer cleanup best-effort).
@@ -3284,6 +3406,7 @@ mod tests {
             fail_on_partial_fidelity: true,
             allow_partial_fidelity: false,
             fail_on_export_risk: None,
+            max_open_psts: DEFAULT_MAX_OPEN_PSTS,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3383,6 +3506,7 @@ mod tests {
             fail_on_partial_fidelity: true,
             allow_partial_fidelity: false,
             fail_on_export_risk: None,
+            max_open_psts: DEFAULT_MAX_OPEN_PSTS,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3489,6 +3613,7 @@ mod tests {
             fail_on_partial_fidelity: true,
             allow_partial_fidelity: false,
             fail_on_export_risk: None,
+            max_open_psts: DEFAULT_MAX_OPEN_PSTS,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3586,6 +3711,7 @@ mod tests {
             fail_on_partial_fidelity: true,
             allow_partial_fidelity: false,
             fail_on_export_risk: None,
+            max_open_psts: DEFAULT_MAX_OPEN_PSTS,
         };
         let outcome = run_unique_pst_with_options(
             args,

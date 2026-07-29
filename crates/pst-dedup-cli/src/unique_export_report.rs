@@ -361,6 +361,54 @@ pub fn compute_export_risk_with_thresholds(
     }
 }
 
+/// Per-phase wall-clock timings for unique-pst (track 0079).
+///
+/// All fields are additive and `#[serde(default)]` so older summaries remain
+/// readable. `unaccounted_ms = total_ms − Σ(phases)` is **computed**, never
+/// forced to zero — a non-zero value means instrumentation gap, not noise.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PhaseTimings {
+    pub scan_ms: u64,
+    pub deep_attach_preflight_ms: u64,
+    pub resolve_ms: u64,
+    pub materialize_ms: u64,
+    pub prepare_ms: u64,
+    pub write_ms: u64,
+    pub report_ms: u64,
+    pub verify_ms: u64,
+    pub quarantine_ms: u64,
+    /// `total_ms − Σ(phases)`. Non-zero is a gap in instrumentation, not noise.
+    pub unaccounted_ms: u64,
+    pub total_ms: u64,
+}
+
+impl PhaseTimings {
+    /// Sum of all accounted phase fields (excludes `unaccounted_ms` / `total_ms`).
+    pub fn accounted_ms(self) -> u64 {
+        self.scan_ms
+            .saturating_add(self.deep_attach_preflight_ms)
+            .saturating_add(self.resolve_ms)
+            .saturating_add(self.materialize_ms)
+            .saturating_add(self.prepare_ms)
+            .saturating_add(self.write_ms)
+            .saturating_add(self.report_ms)
+            .saturating_add(self.verify_ms)
+            .saturating_add(self.quarantine_ms)
+    }
+
+    /// Fill `total_ms` and `unaccounted_ms` from wall start elapsed.
+    pub fn finalize(&mut self, total_ms: u64) {
+        self.total_ms = total_ms;
+        self.unaccounted_ms = total_ms.saturating_sub(self.accounted_ms());
+    }
+}
+
+/// Soft warning threshold for retained prepared winner bytes (body + buffered
+/// attach payloads). Above this, unique-pst emits a soft warning (0079 §3.9).
+/// Documented default: **1 GiB**.
+pub const PREPARED_BYTES_PEAK_WARN_THRESHOLD: u64 = 1_073_741_824;
+
 /// Top-level `summary.json` payload (`unique_export_report_v1`).
 #[derive(Debug, Clone, Serialize)]
 pub struct UniqueExportSummary {
@@ -393,6 +441,24 @@ pub struct UniqueExportSummary {
     pub export: ExportSection,
     pub verification: VerificationReport,
     pub duration_ms: u64,
+    /// Per-phase timings (0079). Always present; defaults to zeros for old readers.
+    #[serde(default)]
+    pub phase_timings: PhaseTimings,
+    /// Source PST open count across materializer/attach-stream cache (0079).
+    #[serde(default)]
+    pub source_pst_opens: u64,
+    /// Times `materialize` returned a winner message (0079; must equal `unique` after D1).
+    #[serde(default)]
+    pub messages_materialized: u64,
+    /// Sum of completed volume `bytes` (0079).
+    #[serde(default)]
+    pub bytes_written_total: u64,
+    /// Peak retained body + buffered-attach bytes in `prepared` (0079 §3.9).
+    #[serde(default)]
+    pub prepared_bytes_peak: u64,
+    /// Final-hash wall time across volumes (SHA-256+MD5 of temp), when measured (0079).
+    #[serde(default)]
+    pub hash_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_volume_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -737,7 +737,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0070-dto-collect | — | Full `WriteMessage` DTO list collected for multi-source folder planning | **Closed in 0070**: streaming path uses `IncrementalFolderPlan` (one-pass consume; no DTO pre-collect). Caller-owned `Vec` RAM is the caller's; fat in-memory bodies on DTOs remain the caller's responsibility | **closed / 0070** |
 | D-0070-multi-source-stream-prefix | P3 | Multi-source folder prefixes on streaming path use sources **seen so far** | When `multi_source_prefix` and ≥2 distinct sources, prefixes match `unique_source_prefixes` for the current source set. Messages written **before** a second source appears may lack a source prefix (collect-all fidelity differs). Flat policy unaffected. Collect-based `plan_folder_tree` remains for unit comparison | residual polish |
 | D-0070-operator-multigb | — | Operator/nightly multi-GB synthetic stress + optional scanpst | CI capped (~16 MiB attach stream); full multi-GB not committed | operator residual |
-| D-0070-inline-hash-io | P3 | Final hash is a full sequential read of the temp after seeks (not byte-at-a-time inline writer) | Correct vs final bytes; second sequential I/O on multi-GB | residual polish |
+| D-0070-inline-hash-io | P3 | Final hash is a full sequential read of the temp after seeks (not byte-at-a-time inline writer) | Correct vs final bytes; second sequential I/O on multi-GB. **Narrowed by 0079 §2.4/§3.7:** inline hashing is *impossible* as the writer is built, not merely undone — finalize seeks back to rewrite header, AMap pages, NBT and BBT (`production.rs:1524-1540`), so the final bytes do not exist until after those seeks. 0079 owns only the buffer size + sequential-read hint. The residual shrinks to "restructure finalize to write strictly forward" — a writer-format track. | residual / writer-format |
 | D-0068-02 | — | scanpst / Outlook structural verification | Carry — run on multi-GB operator artifact | operator |
 | D-0069-stream-buffer | — | Chunked attach stream | **Closed in 0070** | — |
 
@@ -764,14 +764,14 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0073-eml | P2 | unique-eml attach skip ledger parity | **Narrowed by 0078** (not closed): 0078 adds only the *data-path* attach counters unique-eml needs to compute `fidelity`/exit 64 honestly. The full ledger-CSV parity (locus, reason taxonomy, row-cap) remains open here. | residual / narrowed **0078** |
 | D-0073-gui | P3 | GUI wizard attach-ledger mode / summary UI | CLI flags default full; GUI uses defaults via UniquePstCliArgs | residual polish |
 | D-0073-basename | P3 | `--ledger-path-mode=full\|basename` handoff redaction | source_id remains join key; must apply to both export_messages + export_attachments if shipped | residual / 0081 |
-| D-0073-vec-events | P3 | Writer still accumulates `attachment_fidelity_events` Vec | **Closed in 0077**: first-N cap 1000 + `attachment_fidelity_events_truncated` / `_total`. 0079 may still redesign to channel-only (no Vec). | **closed / 0077** |
+| D-0073-vec-events | P3 | Writer still accumulates `attachment_fidelity_events` Vec | **Closed in 0077**: first-N cap 1000 + `attachment_fidelity_events_truncated` / `_total`. **0079 declined the channel-only redesign with reason** (§2.4): converting a bounded 1000-element `Vec` to a channel adds a thread and a failure mode to save at most a few hundred KiB. Recorded so it is not re-raised as a free win. | **closed / 0077; declined 0079** |
 
 ## From track 0074-DeepAttachPreflightFidelity
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0074-gui | P3 | GUI wizard checkbox / summary for deep-attach preflight | CLI `--deep-attach-preflight` works; wizard defaults off via UniquePstCliArgs | residual polish |
-| D-0074-mat-lru | P3 | Bound materializer/export sticky PST handle map to `max_open_psts` LRU | Probe path has LRU (default 32); materializer/export still HashMap | residual / 0079 |
+| D-0074-mat-lru | P3 | Bound materializer/export sticky PST handle map to `max_open_psts` LRU | **Closed in 0079**: one shared bounded LRU `PstHandleCache` (`--max-open-psts` default 32) via `Rc<RefCell<…>>` for materializer + attach stream. | **closed / 0079** |
 | D-0074-cache-share | P3 | Cross-process or durable scan→unique probe result cache | In-process level/mtime/size cache only for phase 1b→materialize | residual polish |
 | D-0074-crc-fixture | P3 | Synthetic corrupt-attach PST E2E for CRC/open/read | **Closed in 0077**: generate-at-test-time via `pst-writer` + byte flips (`crc_integrity_0077` tests); never real-file derived. | **closed / 0077** |
 | D-0074-timeout-join | P3 | Join/cancel timed-out per-attach probe worker | `recv_timeout` returns ATTACH_PROBE_TIMEOUT; worker may finish in background; budget charged | residual polish |
@@ -807,7 +807,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0077-tracing-layer | P3 | Optional `tracing` rate-limit Layer for third-party consumers of `pst-reader` | Primary mechanism is data-path counters (Desk has no subscriber); Layer is residual | residual |
-| D-0077-parallel-attrib | P3 | Per-source CRC attribution under parallel materialize (0079) | Sequential snapshot/delta is exact today; comment at scan snapshot names this residual. Sequential path correct; residual is parallel materialize only | residual / **0079** |
+| D-0077-parallel-attrib | P3 | Per-source CRC attribution under parallel materialize (0079) | Sequential snapshot/delta is exact today; comment at scan snapshot names this residual. Sequential path correct; residual is parallel materialize only. **0079 §3.8 specifies the answer** — under `--jobs > 1`, emit `crc_attribution: "aggregate"` and **omit** per-source CRC fields rather than filling them with a plausible guess. Closed only if `--jobs` actually ships; 0079 may decline to ship it if §3.3–3.6 already hit the target. | residual / **0079** |
 | D-0077-desk-subscriber | P3 | Install a tracing subscriber in release Desk builds | Counters already reach `summary.json` without a subscriber; log lines remain CLI-centric | residual polish |
 | D-0077-gui | P3 | Desk per-source CRC counter tables / distinct-bad-BID drill-down | Banner + export_risk stats row shipped; richer UI residual | residual polish |
 | D-0077-repair-diff | P3 | `pst-dedup compare-counts` wrapper for ScanPST before/after | Runbook documents two-command `scan --json` workflow; product decision | residual / **0081** |
@@ -819,6 +819,17 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 |---|---|---|---|---|
 | D-0078-retryable | P3 | Transient (retry-safe) vs permanent failure — as a **`retryable: bool` JSON field, not a new exit code** | Retryability cross-cuts outcome classes (a transient IO surfaces as exit 1 in scan or exit 5 in matter open), so encoding it in the integer would double the table. Real need: SMB/cloud-mount PST reads hit network drops + AV file locks constantly. Blocked on a taxonomy across `PstError` / `matter_core::Error`. **0081 must not advise blanket "retry exit 5"** — `CliExit::MatterIo` also covers `AuditChainBroken` / `SchemaVersionMismatch` / `WrongPassphrase`, where retry is useless and delays escalation. | residual |
 | D-0078-gui | P3 | Desk surfacing of `fidelity` / `exit_reason` | 0077 banner already covers `export_risk` (the safety-critical half); wizard shows completion, not exit class | residual polish |
+
+## From track 0079-MaterializeWritePerformance (Completed — Codex luna PASS WITH DEFERRED P3)
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0079-deterministic-key | — | Derive the store record key from a digest of inputs so unique-pst output is byte-reproducible | `generate_store_record_key` uses `SystemTime::now()` + process id + path + message count (`production.rs:3069-3095`) and feeds both `PidTagRecordKey` and every folder EntryID ProviderUID, so two runs over identical inputs differ in bytes **and** in reported `sha256_hex`/`md5_hex`. This is why 0079 cannot use "byte-identical output" as its safety net and builds a structural equivalence oracle instead (§3.2). Fixing it would make the reported hash a meaningful chain-of-custody value — but it changes every produced PST's record key, so it is a **product** decision, not a perf track's call. | product |
+| D-0079-reader-buffer | P3 | `PstFile` holds a single 64 KiB `BufReader` (`pst-reader/src/lib.rs:105`) that random block reads defeat | A seek discards the buffer, so serving a ~8 KiB block can cost a 64 KiB refill. Suspected read amplification on every materialize/probe/verify path. Belongs to a `pst-reader` track with its own fixtures — 0079 measures it, does not fix it. | residual / pst-reader |
+| D-0079-stream-prepare | — | Pipeline prepare→write so RAM is bounded by in-flight winners rather than winner count | `prepared: Vec<PreparedWinner>` holds every winner's full `WriteMessage` incl. bodies before a single byte is written. Residual after 0079 shipped measurement + threshold warning; structural pipeline is Phase C / once `--jobs` plumbing exists. | residual / Phase C |
+| D-0079-operator-multigb | — | Operator-local multi-GB before/after using the 0079 equivalence oracle + `PhaseTimings` | Carries D-0070-operator-multigb and satisfies D-0076-operator-perf. Cannot be CI (no real PSTs in git). Fixture residual ~300 ms wall; INC 275 s operator evidence remains the multi-GB gate for shipping `--jobs`. | operator |
+| D-0079-seq-scan | P3 | Windows `FILE_FLAG_SEQUENTIAL_SCAN` on post-write hash open | std `File::open` cannot set the flag; 0079 declined a CreateFile re-open path and removed a fake no-op claim. Concurrent SHA-256+MD5 over 1 MiB buffer shipped instead. | residual polish |
+| D-0079-cancel-latency | P3 | Numeric cancel→quarantine latency before/after | 0078 behavioral gate (exit 130 + quarantine + summary) retained green; fixture-scale wall numbers not instrumented as a dedicated cancel timer. | residual / polish |
 
 ## From track 0062-ReleaseHardeningRc
 
