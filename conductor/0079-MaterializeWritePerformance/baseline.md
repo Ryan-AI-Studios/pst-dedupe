@@ -82,6 +82,35 @@ Example noatt (`duration_ms` 249–271 band):
 
 `unaccounted_ms` is honest (path guards, report-dir prep, clap/setup, summary JSON emit). Non-zero is expected on short fixture runs.
 
+### Why parent has no per-phase table (DoD-4 honesty)
+
+Parent `9c8be49` has **only** total `duration_ms` — `PhaseTimings` did not exist.
+Per-phase before/after on the *same* instrumentation is therefore **impossible**
+without rewriting parent history. What this track records instead:
+
+| Measurement | Parent | HEAD | How |
+|---|---|---|---|
+| Total fixture wall / `duration_ms` | measured (table above) | measured | parent binary vs HEAD binary |
+| Phase split | **n/a** (uninstrumented) | measured | HEAD only |
+| Materialize multiplicity | **2×** source read/winner (structural) | **1×** (`messages_materialized==unique`) | D1 code + integration assert |
+| Handle opens / source | separate mat + attach maps | shared LRU, `source_pst_opens==1` | D4 |
+| AMap bookkeeping | O(blocks×pages) | O(1) amortized | op-count test |
+| Post-write dual hash | sequential digests | concurrent digests | microbench below |
+
+### Phase 5 isolatable microbench — sequential vs concurrent hash (32 MiB)
+
+Machine: same Desktop / debug. Test:
+`pst-writer` `concurrent_vs_sequential_hash_timing_32mib` (warmed; digests equal).
+
+| Path | wall_ms (32 MiB file) |
+|---|---:|
+| Sequential SHA-256 + MD5, 1 MiB buffer (pre-0079 shape) | **1376** |
+| Concurrent SHA-256 + MD5, same buffer (`std::thread::scope`) | **909** |
+
+**Result:** concurrent path is ~**1.5×** faster on 32 MiB on this machine; digests match.
+On the aspose fixture (~0.2–0.8 MiB written) absolute hash_ms is small (~11–30);
+the concurrent rewrite is the multi-GB constant-factor win, measured here where it is visible.
+
 ## Cancel latency baseline
 
 0078 cancel/quarantine suite remains the contract gate. No operator multi-GB cancel measurement (D-0079-operator-multigb / D-0079-cancel-latency).

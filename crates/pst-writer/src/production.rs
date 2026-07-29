@@ -4649,4 +4649,75 @@ mod tests {
         assert_eq!(sha_conc, sha_seq, "SHA-256 concurrent == sequential");
         assert_eq!(md5_conc, md5_seq, "MD5 concurrent == sequential");
     }
+
+    /// Pre-0079 shape: sequential SHA+MD5 over the same 1 MiB buffer (no concurrent scope).
+    fn hash_file_hex_sequential_1mib(path: &Path) -> Result<(String, String)> {
+        use md5::Md5;
+        use sha2::{Digest, Sha256};
+        let mut file = File::open(path)?;
+        let mut sha = Sha256::new();
+        let mut md5 = Md5::new();
+        let mut buf = vec![0u8; 1024 * 1024];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            let chunk = &buf[..n];
+            sha.update(chunk);
+            md5.update(chunk);
+        }
+        Ok((digest_to_hex(sha.finalize()), digest_to_hex(md5.finalize())))
+    }
+
+    /// 0079 Phase 5 measurement: sequential vs concurrent digests on a multi-MiB file.
+    ///
+    /// Records both walls (eprintln for baseline capture) and asserts digests match.
+    /// This is the isolatable constant-factor measurement parent PhaseTimings cannot
+    /// provide (parent had no phase timers).
+    #[test]
+    fn concurrent_vs_sequential_hash_timing_32mib() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "pst_writer_hash_timing_{}_{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        // 32 MiB: large enough that dual digests are measurable, small enough for CI.
+        let size = 32 * 1024 * 1024;
+        let mut content = vec![0u8; size];
+        for (i, b) in content.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        fs::write(&path, &content).expect("write 32MiB");
+
+        // Warm once so cold-cache noise is reduced.
+        let _ = hash_file_hex_sequential_1mib(&path).expect("warm seq");
+        let _ = hash_file_hex(&path).expect("warm conc");
+
+        let t0 = std::time::Instant::now();
+        let (sha_s, md5_s) = hash_file_hex_sequential_1mib(&path).expect("seq");
+        let seq_ms = t0.elapsed().as_millis();
+
+        let t1 = std::time::Instant::now();
+        let (sha_c, md5_c) = hash_file_hex(&path).expect("conc");
+        let conc_ms = t1.elapsed().as_millis();
+
+        let _ = fs::remove_file(&path);
+        assert_eq!(sha_s, sha_c, "SHA-256 seq == concurrent");
+        assert_eq!(md5_s, md5_c, "MD5 seq == concurrent");
+        // Evidence for baseline.md / review.md (captured with --nocapture).
+        eprintln!("0079_hash_timing size_mib=32 sequential_ms={seq_ms} concurrent_ms={conc_ms}");
+        // Sanity: both paths finish; do not assert concurrent is always faster
+        // (thread spawn can lose on small/CPU-noisy hosts). Equality of digests
+        // is the correctness gate; timing is the measurement artifact.
+        assert!(seq_ms < 60_000, "seq hash should finish under 60s on 32MiB");
+        assert!(
+            conc_ms < 60_000,
+            "conc hash should finish under 60s on 32MiB"
+        );
+    }
 }

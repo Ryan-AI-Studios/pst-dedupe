@@ -75,7 +75,9 @@ Exact n=3 table: see `baseline.md`. Both remain **sub-second** on the fixture.
 - Concurrent SHA-256 + MD5 over same 1 MiB buffer (`std::thread::scope`)
 - Phase 5 `verify_volumes` unchanged; `hash_ms` / `verify_ms` reported
 - mmap declined (sources and output temp)
-- Evidence: `concurrent_hash_file_hex_matches_sequential` (pst-writer)
+- Evidence: `concurrent_hash_file_hex_matches_sequential` (correctness);
+  `concurrent_vs_sequential_hash_timing_32mib` (**measured**: sequential **1376 ms** vs
+  concurrent **909 ms** on 32 MiB, same machine; digests equal)
 
 ## Why `--jobs` was **not** shipped (DoD-13) — measured skip
 
@@ -133,13 +135,13 @@ Phases 1–5 miss the operator target.
 | 11 verify not weakened; hash/verify ms | **Met** | |
 | 12/12a --jobs | **N/A** | not shipped (DoD-13) |
 | 13 why no --jobs | **Met** | measured fixture + structural + multi-GB residual |
-| 14 measured speedup | **Partial** | parent vs HEAD fixture recorded; multi-GB residual |
-| 15 0071/73/74/77/78 suites | **Gate** | re-run commands below |
+| 14 measured speedup | **Met (fixture + isolatable)** | parent vs HEAD wall; HEAD phase split; 32 MiB hash seq vs conc; multi-GB residual |
+| 15 0071/73/74/77/78 suites | **Met at commit** | pre-commit full suite green on P1 commit; re-verify below |
 | 16 cancel latency | **Partial** | behavioral 0078 retained; numeric residual |
 | 17 no unjustified default dep | **Met** | |
-| 18 deferred.md | **Met** | In Progress header |
+| 18 deferred.md | **Met** | In Progress header until final PASS |
 | 19 conductor/sequencing/review | **In Progress** | until final Codex PASS |
-| 20 fmt/clippy/test | **Gate** | see verification |
+| 20 fmt/clippy/test | **Gate** | orchestrator re-runs outside Codex sandbox (sandbox cannot write `target/`) |
 
 ## Residuals
 
@@ -149,7 +151,10 @@ Phases 1–5 miss the operator target.
 - `D-0079-stream-prepare` — streaming prepare→write when peak warns
 - Per-phase wall attribution of historical INC 275 s forever missing (parent was uninstrumented)
 
-## Gate commands
+## Gate commands (orchestrator-writable environment)
+
+Codex read-only sandbox cannot take the cargo lock under `target/debug` — full
+gates are re-run by the orchestrator and recorded here after each fix commit.
 
 ```powershell
 cargo fmt --all --check
@@ -159,4 +164,16 @@ cargo test -p pst-dedup-cli --test unique_pst
 cargo test -p pst-writer --lib
 cargo check -p pst-dedup-gui
 cargo clippy -p pst-dedup-cli -p pst-writer -p pst-dedup-gui -p dedup-engine --all-targets -- -D warnings
+cargo test --workspace   # full DoD-20 when time permits
 ```
+
+### Gate results (hash timing + docs fix commit)
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all` | ok |
+| `cargo test -p pst-writer --lib` | **13 passed** (incl. 32 MiB hash timing) |
+| `cargo test -p pst-dedup-cli --test unique_pst` | **24 passed** |
+| `cargo check -p pst-dedup-gui` | ok |
+| `cargo clippy -p pst-dedup-cli -p pst-writer -p pst-dedup-gui -p dedup-engine --all-targets -- -D warnings` | ok |
+| 32 MiB hash microbench | sequential **1376 ms** / concurrent **909 ms** |
