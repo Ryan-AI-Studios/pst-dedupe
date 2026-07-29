@@ -146,12 +146,12 @@ const CONTRACT_V1: &[ContractProperty] = &[
     ContractProperty {
         name: "PidTagDisplayBcc",
         status: ContractStatus::DroppedByDesign,
-        reason: "Disclosure decision: writing BCC into a deliverable can reveal recipients the custodian copy would not show; opt-in is D-0080-bcc-policy",
+        reason: "0082 BCC disclosure: default omit Bcc rows + PidTagDisplayBcc; opt-in via --include-bcc-recipients (over-disclosure on consolidated unique-PST)",
     },
     ContractProperty {
         name: "display_bcc",
         status: ContractStatus::DroppedByDesign,
-        reason: "Alias of PidTagDisplayBcc — dropped_by_design (disclosure)",
+        reason: "Alias of PidTagDisplayBcc — DroppedByDesign unless --include-bcc-recipients; ledger column bcc_suppressed records omissions",
     },
     ContractProperty {
         name: "PidTagClientSubmitTime",
@@ -200,8 +200,8 @@ const CONTRACT_V1: &[ContractProperty] = &[
     },
     ContractProperty {
         name: "recipient_table",
-        status: ContractStatus::DroppedByDesign,
-        reason: "No recipient table rows in v1; display strings only (D-0080-recipient-table)",
+        status: ContractStatus::Preserved,
+        reason: "0082: MS-PST recipient TC (template 0x692) written per message; empty table when source had none. BCC rows remain DroppedByDesign unless --include-bcc-recipients",
     },
     ContractProperty {
         name: "named_properties",
@@ -284,6 +284,25 @@ mod tests {
         let p = c.get("cloud_modern_attachments").expect("present");
         assert_eq!(p.status, ContractStatus::DroppedByDesign);
         assert!(p.reason.contains("named-property") || p.reason.contains("unverified"));
+    }
+
+    /// 0082 DoD-6: recipient_table is Preserved (not DroppedByDesign).
+    #[test]
+    fn recipient_table_preserved() {
+        let c = FidelityContract::v1();
+        let p = c.get("recipient_table").expect("present");
+        assert_eq!(p.status, ContractStatus::Preserved);
+        assert!(
+            p.reason.contains("0082") || p.reason.contains("0x692"),
+            "reason should cite 0082/template: {}",
+            p.reason
+        );
+        // Diff on preserved recipient_table is a defect.
+        let (class, _) = c.classify("recipient_table", false);
+        assert_eq!(class, FindingClass::Defect);
+        // BCC still dropped by design.
+        let (bcc_class, _) = c.classify("PidTagDisplayBcc", false);
+        assert_eq!(bcc_class, FindingClass::KnownGap);
     }
 
     #[test]

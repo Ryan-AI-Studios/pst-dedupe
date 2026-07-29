@@ -63,10 +63,10 @@ use crate::{
     write_data_block, BlockEntry, HeapBuilder, Layout, NodeEntry, Result, WriterError,
     CLIENT_MAGIC, HEADER_SIZE, MAX_BLOCK_DATA, NID_ASSOC_CONTENTS_TABLE_TEMPLATE,
     NID_ATTACHMENT_TABLE_TEMPLATE, NID_CONTENTS_TABLE_TEMPLATE, NID_HIERARCHY_TABLE_TEMPLATE,
-    NID_MESSAGE_STORE, NID_NAME_TO_ID_MAP, NID_ROOT_FOLDER, NID_SEARCH_CONTENTS_TABLE_TEMPLATE,
-    NID_TYPE_NORMAL_FOLDER, NID_TYPE_NORMAL_MESSAGE, NID_TYPE_SEARCH_FOLDER, PAGE_SIZE,
-    PID_TAG_CLIENT_SUBMIT_TIME, PID_TAG_CONTENT_COUNT, PID_TAG_DISPLAY_NAME,
-    PID_TAG_HAS_ATTACHMENTS, PID_TAG_INTERNET_MESSAGE_ID, PID_TAG_LTP_ROW_ID,
+    NID_MESSAGE_STORE, NID_NAME_TO_ID_MAP, NID_RECIPIENT_TABLE_TEMPLATE, NID_ROOT_FOLDER,
+    NID_SEARCH_CONTENTS_TABLE_TEMPLATE, NID_TYPE_NORMAL_FOLDER, NID_TYPE_NORMAL_MESSAGE,
+    NID_TYPE_SEARCH_FOLDER, PAGE_SIZE, PID_TAG_CLIENT_SUBMIT_TIME, PID_TAG_CONTENT_COUNT,
+    PID_TAG_DISPLAY_NAME, PID_TAG_HAS_ATTACHMENTS, PID_TAG_INTERNET_MESSAGE_ID, PID_TAG_LTP_ROW_ID,
     PID_TAG_SENDER_EMAIL_ADDRESS, PID_TAG_SUBJECT, PST_MAGIC, PTYP_BOOLEAN, PTYP_INTEGER_32,
     PTYP_INTEGER_64, PTYP_STRING, PTYP_TIME, UNICODE_VERSION,
 };
@@ -118,12 +118,33 @@ const PID_TAG_ATTACH_SIZE: u16 = 0x0E20;
 /// Fixed subnode NID for a message's attachment table (same value as the
 /// PST-level template [`NID_ATTACHMENT_TABLE_TEMPLATE`]).
 const NID_ATTACHMENT_TABLE: u64 = NID_ATTACHMENT_TABLE_TEMPLATE;
+/// Fixed subnode NID for a message's recipient table (same value as the
+/// PST-level template [`NID_RECIPIENT_TABLE_TEMPLATE`] = 0x692).
+const NID_RECIPIENT_TABLE: u64 = NID_RECIPIENT_TABLE_TEMPLATE;
 /// NID type for attachment objects (low 5 bits).
 const NID_TYPE_ATTACHMENT: u8 = 0x05;
 /// PidTagRenderingPosition — typical "not rendered in body" sentinel.
 const PID_TAG_RENDERING_POSITION: u16 = 0x370B;
 /// PidTagLtpRowVer — TC row version column.
 const PID_TAG_LTP_ROW_VER: u16 = 0x67F3;
+
+// Recipient table property tags (MS-PST Recipient Table Template MUST set + product).
+const PID_TAG_DISPLAY_BCC: u16 = 0x0E02;
+const PID_TAG_RECIPIENT_TYPE: u16 = 0x0C15;
+const PID_TAG_RESPONSIBILITY: u16 = 0x0E0F;
+const PID_TAG_OBJECT_TYPE: u16 = 0x0FFE;
+const PID_TAG_ENTRY_ID: u16 = 0x0FFF;
+const PID_TAG_ADDRESS_TYPE: u16 = 0x3002;
+const PID_TAG_EMAIL_ADDRESS: u16 = 0x3003;
+const PID_TAG_SEARCH_KEY: u16 = 0x300B;
+const PID_TAG_DISPLAY_TYPE: u16 = 0x3900;
+const PID_TAG_SMTP_ADDRESS: u16 = 0x39FE;
+const PID_TAG_7BIT_DISPLAY_NAME: u16 = 0x39FF;
+const PID_TAG_SEND_RICH_INFO: u16 = 0x3A40;
+/// MAPI_MAILUSER — default `PidTagObjectType` for recipient rows.
+const MAPI_MAILUSER: i32 = 6;
+/// DT_MAILUSER — default `PidTagDisplayType`.
+const DT_MAILUSER: i32 = 0;
 
 const MSGFLAG_READ: i32 = 0x0000_0001;
 const MSGFLAG_HASATTACH: i32 = 0x0000_0010;
@@ -348,6 +369,66 @@ pub trait WriteProgressSink {
     }
 }
 
+/// MAPI recipient type for a [`WriteRecipient`] row (0082).
+///
+/// Writer-local mirror of `pst_reader::RecipientType` so production does not
+/// depend on the reader crate (reader is a dev-dep for round-trip tests only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum WriteRecipientType {
+    /// MAPI_TO = 1
+    #[default]
+    To,
+    /// MAPI_CC = 2
+    Cc,
+    /// MAPI_BCC = 3
+    Bcc,
+    /// Any other value (including MAPI_ORIG = 0).
+    Other(u32),
+}
+
+impl WriteRecipientType {
+    /// Map a raw MAPI `PidTagRecipientType` value.
+    pub fn from_mapi(value: u32) -> Self {
+        match value {
+            1 => Self::To,
+            2 => Self::Cc,
+            3 => Self::Bcc,
+            other => Self::Other(other),
+        }
+    }
+
+    /// Raw MAPI integer for this variant.
+    pub fn to_mapi(self) -> u32 {
+        match self {
+            Self::To => 1,
+            Self::Cc => 2,
+            Self::Bcc => 3,
+            Self::Other(v) => v,
+        }
+    }
+
+    /// True when this row is BCC (gated by [`WritePstOpts::include_bcc_recipients`]).
+    pub fn is_bcc(self) -> bool {
+        matches!(self, Self::Bcc)
+    }
+}
+
+/// One recipient row for the per-message recipient TC (0082).
+///
+/// Structural columns (`ObjectType`, `Responsibility`, `RecordKey`, `EntryId`,
+/// `SearchKey`, `DisplayType`, `SendRichInfo`, Ltp row ids) are synthesized by
+/// the writer when omitted. Callers supply identity fields only.
+#[derive(Debug, Clone, Default)]
+pub struct WriteRecipient {
+    pub recipient_type: WriteRecipientType,
+    pub display_name: Option<String>,
+    /// Address type: SMTP, EX, …
+    pub address_type: Option<String>,
+    pub email_address: Option<String>,
+    /// `PidTagSmtpAddress` (0x39FE) when known (product extra column).
+    pub smtp_address: Option<String>,
+}
+
 /// A plain message DTO the production writer consumes. Deliberately independent
 /// of `dedup_engine::CanonicalMessage` — see [`from_canonical_message`].
 #[derive(Debug, Clone, Default)]
@@ -356,8 +437,15 @@ pub struct WriteMessage {
     pub subject: String,
     pub sender: Option<String>,
     pub display_to: Option<String>,
-    /// PidTagDisplayCc when present (0080 §3.11). BCC is intentionally not written.
+    /// PidTagDisplayCc when present (0080 §3.11).
     pub display_cc: Option<String>,
+    /// PidTagDisplayBcc — written only when [`WritePstOpts::include_bcc_recipients`]
+    /// is true (0082 BCC disclosure policy; default omit).
+    pub display_bcc: Option<String>,
+    /// Structured recipient TC rows (0082). Empty vec still yields a zero-row
+    /// recipient table subnode (MS-PST MUST). BCC rows are filtered when
+    /// `include_bcc_recipients` is false.
+    pub recipients: Vec<WriteRecipient>,
     /// Absolute FILETIME passthrough (100ns since 1601-01-01), if present.
     pub submit_time: Option<i64>,
     pub body_plain: Option<String>,
@@ -422,6 +510,9 @@ pub struct WritePstOpts {
     pub max_embedded_depth: u32,
     /// When true, omit all attaches (family policy `parents_only`).
     pub parents_only: bool,
+    /// When true, write Bcc recipient TC rows and `PidTagDisplayBcc` (0082).
+    /// Default **false**: To+Cc only; BCC omitted from the deliverable by policy.
+    pub include_bcc_recipients: bool,
 }
 
 impl Default for WritePstOpts {
@@ -432,6 +523,7 @@ impl Default for WritePstOpts {
             overwrite: false,
             max_embedded_depth: 3,
             parents_only: false,
+            include_bcc_recipients: false,
         }
     }
 }
@@ -762,6 +854,22 @@ fn record_attach_event(
     }
 }
 
+/// Map a canonical recipient into a writer TC row (0082).
+fn write_recipient_from_canonical(r: &dedup_engine::keepset::CanonicalRecipient) -> WriteRecipient {
+    WriteRecipient {
+        recipient_type: match r.recipient_type {
+            dedup_engine::keepset::CanonicalRecipientType::To => WriteRecipientType::To,
+            dedup_engine::keepset::CanonicalRecipientType::Cc => WriteRecipientType::Cc,
+            dedup_engine::keepset::CanonicalRecipientType::Bcc => WriteRecipientType::Bcc,
+            dedup_engine::keepset::CanonicalRecipientType::Other(v) => WriteRecipientType::Other(v),
+        },
+        display_name: r.display_name.clone(),
+        address_type: r.address_type.clone(),
+        email_address: r.email_address.clone(),
+        smtp_address: r.smtp_address.clone(),
+    }
+}
+
 /// Map a `CanonicalMessage` (0066 keep-set winner) to the plain `WriteMessage`
 /// DTO this writer consumes.
 ///
@@ -772,7 +880,11 @@ fn record_attach_event(
 /// `pst-writer`, so no cycle is introduced.
 ///
 /// Attachments are **mapped** (0069). The second return value counts fields the
-/// adapter deliberately does not map (0080: non-empty `display_bcc` is one).
+/// adapter deliberately does not map for default write fidelity (0080: non-empty
+/// `display_bcc` still increments `dropped` because default write policy omits
+/// BCC — 0082 maps it onto [`WriteMessage::display_bcc`] for opt-in write via
+/// [`WritePstOpts::include_bcc_recipients`]). Structured `recipients` are mapped
+/// in full (including Bcc rows); the write path filters Bcc when the flag is off.
 /// Optional small attach `data` always maps; large attach bytes are filled by
 /// the caller (or left `None` for soft-fail at write time).
 pub fn from_canonical_message(
@@ -804,20 +916,30 @@ pub fn from_canonical_message(
             .degraded_reasons
             .contains(&dedup_engine::IntegrityReason::AttachMetaFailed);
     let mut dropped = 0u64;
-    if msg
+    let source_has_bcc = msg
         .display_bcc
         .as_deref()
         .is_some_and(|s| !s.trim().is_empty())
-    {
-        // BCC is dropped_by_design (disclosure); count as unmapped field (0080).
+        || msg.recipients.iter().any(|r| r.recipient_type.is_bcc());
+    if source_has_bcc {
+        // Default write policy still omits BCC (0082 gate); count as known_gap
+        // for 0080 fidelity accounting. Field is mapped onto WriteMessage for
+        // opt-in `--include-bcc-recipients` / WritePstOpts.
         dropped = dropped.saturating_add(1);
     }
+    let recipients: Vec<WriteRecipient> = msg
+        .recipients
+        .iter()
+        .map(write_recipient_from_canonical)
+        .collect();
     let write_msg = WriteMessage {
         message_id: msg.message_id.clone(),
         subject: msg.subject.clone().unwrap_or_default(),
         sender: msg.sender.clone(),
         display_to: msg.display_to.clone(),
         display_cc: msg.display_cc.clone(),
+        display_bcc: msg.display_bcc.clone(),
+        recipients,
         submit_time: msg.submit_time,
         body_plain: msg.body_plain.clone(),
         body_html: msg.body_html.clone(),
@@ -850,13 +972,19 @@ pub fn from_canonical_message_owned(
             .degraded_reasons
             .contains(&dedup_engine::IntegrityReason::AttachMetaFailed);
     let mut dropped = 0u64;
-    if msg
+    let source_has_bcc = msg
         .display_bcc
         .as_deref()
         .is_some_and(|s| !s.trim().is_empty())
-    {
+        || msg.recipients.iter().any(|r| r.recipient_type.is_bcc());
+    if source_has_bcc {
         dropped = dropped.saturating_add(1);
     }
+    let recipients: Vec<WriteRecipient> = msg
+        .recipients
+        .iter()
+        .map(write_recipient_from_canonical)
+        .collect();
     let attachments: Vec<WriteAttachment> = msg
         .attachments
         .into_iter()
@@ -879,6 +1007,8 @@ pub fn from_canonical_message_owned(
         sender: msg.sender,
         display_to: msg.display_to,
         display_cc: msg.display_cc,
+        display_bcc: msg.display_bcc,
+        recipients,
         submit_time: msg.submit_time,
         body_plain: msg.body_plain,
         body_html: msg.body_html,
@@ -1573,6 +1703,17 @@ pub fn write_unicode_pst_streaming(
         0,
         0,
     )?;
+
+    // Recipient Table Template (NID 0x692) — zero rows, full 14 MUST columns
+    // + product PidTagSmtpAddress (MS-PST Recipient Table Template; same NID
+    // used as per-message subnode key under each message).
+    let recipient_template_heap = {
+        let mut heap = HeapBuilder::new(0xBC);
+        let (columns, total_row_width) = build_template_tc_columns(&RECIPIENT_TABLE_COLUMNS);
+        let hid = build_tc_inline_checked_sized(&mut heap, &columns, &[], total_row_width)?;
+        heap.finalize(hid)
+    };
+    layout.add_node_data(NID_RECIPIENT_TABLE_TEMPLATE, recipient_template_heap, 0, 0)?;
 
     // ── AMap + BTree pages, then real file offsets ───────────────────────────
     // AMap pages are placed only at MS-PST fixed offsets by calculate_offsets
@@ -2585,6 +2726,7 @@ fn write_one_attachment(
     attach_index: u32,
     depth: u32,
     max_depth: u32,
+    include_bcc_recipients: bool,
     counters: &mut WriteCounters,
     attach_nid_counter: &mut u32,
     streams: &mut Option<&mut dyn AttachStreamSource>,
@@ -2652,6 +2794,7 @@ fn write_one_attachment(
             embedded,
             depth + 1,
             max_depth,
+            include_bcc_recipients,
             counters,
             streams,
             attach_event_sink,
@@ -2845,11 +2988,13 @@ fn write_one_attachment(
 
 /// Nested message object stored only as a subnode (not a top-level NBT entry).
 /// Returns `(nid, bid_data, bid_sub, size_contrib)`.
+#[allow(clippy::too_many_arguments)] // include_bcc + streams/counters for nested fidelity
 fn build_embedded_message_object(
     layout: &mut Layout,
     msg: &WriteMessage,
     depth: u32,
     max_depth: u32,
+    include_bcc_recipients: bool,
     counters: &mut WriteCounters,
     streams: &mut Option<&mut dyn AttachStreamSource>,
     attach_event_sink: &mut Option<&mut dyn AttachEventSink>,
@@ -2861,6 +3006,7 @@ fn build_embedded_message_object(
         layout,
         msg,
         max_depth,
+        include_bcc_recipients,
         counters,
         depth,
         streams,
@@ -2870,12 +3016,14 @@ fn build_embedded_message_object(
     Ok((msg_nid, bid_data, sub_bid, size_contrib))
 }
 
-/// Shared body/attach property builder for top-level and embedded messages.
+/// Shared body/attach/recipient property builder for top-level and embedded messages.
 /// Returns `(pc_heap_bytes, bid_sub, size_without_message_size_prop)`.
+#[allow(clippy::too_many_arguments)] // include_bcc + streams/counters for fidelity path
 fn build_message_payload(
     layout: &mut Layout,
     msg: &WriteMessage,
     max_depth: u32,
+    include_bcc_recipients: bool,
     counters: &mut WriteCounters,
     depth: u32,
     streams: &mut Option<&mut dyn AttachStreamSource>,
@@ -2915,6 +3063,14 @@ fn build_message_payload(
     if let Some(display_cc) = &msg.display_cc {
         if !display_cc.trim().is_empty() {
             props.push((PID_TAG_DISPLAY_CC, PcValue::String(display_cc.clone())));
+        }
+    }
+    // PidTagDisplayBcc only when opt-in BCC disclosure is enabled (0082 §2.5 rule 5).
+    if include_bcc_recipients {
+        if let Some(display_bcc) = &msg.display_bcc {
+            if !display_bcc.trim().is_empty() {
+                props.push((PID_TAG_DISPLAY_BCC, PcValue::String(display_bcc.clone())));
+            }
         }
     }
     if let Some(submit_time) = msg.submit_time {
@@ -2974,6 +3130,7 @@ fn build_message_payload(
             attach_index as u32,
             depth,
             max_depth,
+            include_bcc_recipients,
             counters,
             &mut attach_nid_counter,
             streams,
@@ -3010,6 +3167,23 @@ fn build_message_payload(
         // Real attachment-table heap size (not a fabricated constant).
         written_content_bytes += table_len;
     }
+
+    // Recipient table TC at fixed NID 0x692 — always present (MS-PST MUST),
+    // including zero rows. BCC rows filtered unless include_bcc_recipients.
+    let recip_rows: Vec<&WriteRecipient> = msg
+        .recipients
+        .iter()
+        .filter(|r| include_bcc_recipients || !r.recipient_type.is_bcc())
+        .collect();
+    let recip_table_heap = {
+        let mut heap = HeapBuilder::new(0xBC);
+        let (hid, _heap_after) = build_recipient_table_tc(&mut heap, &recip_rows)?;
+        heap.finalize(hid)
+    };
+    let recip_table_len = recip_table_heap.len() as u64;
+    let recip_table_bid = layout.write_data_chain(recip_table_heap)?;
+    subnode_entries.push((NID_RECIPIENT_TABLE, recip_table_bid, 0));
+    written_content_bytes += recip_table_len;
 
     props.push((PID_TAG_HAS_ATTACHMENTS, PcValue::Bool(has_attaches)));
     props.push((PID_TAG_MESSAGE_FLAGS, PcValue::I32(flags)));
@@ -3111,6 +3285,7 @@ fn build_message_node(
         layout,
         msg_ref,
         max_depth,
+        opts.include_bcc_recipients,
         counters,
         depth,
         streams,
@@ -3442,6 +3617,294 @@ fn build_attachment_table_tc(
     Ok((hid_tcinfo, heap_data_len(heap)))
 }
 
+/// Build an MS-PST-conformant recipient table TC on `heap` (0082).
+///
+/// Columns match [`RECIPIENT_TABLE_COLUMNS`] / the NBT template at
+/// [`NID_RECIPIENT_TABLE_TEMPLATE`] (14 MUST + product `PidTagSmtpAddress`).
+/// Structural fields are synthesized when the source omits them:
+/// - ObjectType = `MAPI_MAILUSER` (6)
+/// - Responsibility = true
+/// - SendRichInfo = false
+/// - DisplayType = 0 (`DT_MAILUSER`)
+/// - RecordKey / EntryId / SearchKey from row seed (store-style 16-byte keys)
+/// - LtpRowId = synthetic index-based key; LtpRowVer = 1-based row index
+///
+/// **RowIndex BTH** (`hidRowIndex`): key = LtpRowId (u32), value = 0-based
+/// row index. Empty tables use `hidRowIndex = 0` and an empty row matrix.
+///
+/// `PidTagSmtpAddress` is present in the column schema always; the existence
+/// bitmap bit is set only when the caller supplied a non-empty SMTP value.
+fn build_recipient_table_tc(
+    heap: &mut HeapBuilder,
+    rows: &[&WriteRecipient],
+) -> Result<(u32, usize)> {
+    let (columns, total_row_width) = build_template_tc_columns(&RECIPIENT_TABLE_COLUMNS);
+    let ncols = columns.len();
+    let bitmap_bytes = ncols.div_ceil(8);
+    let row_width = total_row_width as usize;
+
+    let mut row_matrix: Vec<u8> = Vec::with_capacity(rows.len() * row_width);
+    let mut row_index_records: Vec<(u32, Vec<u8>)> = Vec::with_capacity(rows.len());
+
+    for (i, recip) in rows.iter().enumerate() {
+        let row_id = (i as u32).saturating_add(1);
+        let display = recip
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        let email = recip
+            .email_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        let addr_type = resolve_recipient_address_type(recip);
+        let smtp = recip
+            .smtp_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let seven_bit = if !display.is_empty() {
+            display
+        } else if !email.is_empty() {
+            email
+        } else {
+            smtp.unwrap_or("")
+        };
+
+        let record_key = synthesize_recipient_record_key(row_id, email, display, &addr_type);
+        let entry_id = build_folder_entry_id(u64::from(row_id), &record_key);
+        let search_key = synthesize_recipient_search_key(&addr_type, email, smtp);
+
+        let display_hid = heap.try_alloc(&utf16le_bytes(display))?;
+        let addr_type_hid = heap.try_alloc(&utf16le_bytes(&addr_type))?;
+        let email_hid = heap.try_alloc(&utf16le_bytes(email))?;
+        let seven_hid = heap.try_alloc(&utf16le_bytes(seven_bit))?;
+        let record_key_hid = heap.try_alloc(&record_key)?;
+        let entry_id_hid = heap.try_alloc(&entry_id)?;
+        let search_key_hid = heap.try_alloc(&search_key)?;
+        let smtp_hid = match smtp {
+            Some(s) => Some(heap.try_alloc(&utf16le_bytes(s))?),
+            None => None,
+        };
+
+        let mut row = vec![0u8; row_width];
+        // Columns present by default (all MUST + 7Bit). Smtp optional.
+        let mut present_bits: Vec<bool> = vec![true; ncols];
+
+        for (col_idx, col) in columns.iter().enumerate() {
+            let prop_id = col.0;
+            let ib = col.2 as usize;
+            let cb = col.3 as usize;
+            match prop_id {
+                PID_TAG_RECIPIENT_TYPE => {
+                    let v = recip.recipient_type.to_mapi().to_le_bytes();
+                    copy_col_bytes(&mut row, ib, cb, &v)?;
+                }
+                PID_TAG_RESPONSIBILITY => {
+                    // PtypBoolean true = 0x01
+                    if cb < 1 {
+                        return Err(WriterError::Layout(
+                            "build_recipient_table_tc: Responsibility column width 0".into(),
+                        ));
+                    }
+                    row[ib] = 1;
+                }
+                PID_TAG_RECORD_KEY => {
+                    copy_col_bytes(&mut row, ib, cb, &record_key_hid.to_le_bytes())?;
+                }
+                PID_TAG_OBJECT_TYPE => {
+                    copy_col_bytes(&mut row, ib, cb, &(MAPI_MAILUSER as u32).to_le_bytes())?;
+                }
+                PID_TAG_ENTRY_ID => {
+                    copy_col_bytes(&mut row, ib, cb, &entry_id_hid.to_le_bytes())?;
+                }
+                PID_TAG_DISPLAY_NAME => {
+                    copy_col_bytes(&mut row, ib, cb, &display_hid.to_le_bytes())?;
+                }
+                PID_TAG_ADDRESS_TYPE => {
+                    copy_col_bytes(&mut row, ib, cb, &addr_type_hid.to_le_bytes())?;
+                }
+                PID_TAG_EMAIL_ADDRESS => {
+                    copy_col_bytes(&mut row, ib, cb, &email_hid.to_le_bytes())?;
+                }
+                PID_TAG_SEARCH_KEY => {
+                    copy_col_bytes(&mut row, ib, cb, &search_key_hid.to_le_bytes())?;
+                }
+                PID_TAG_DISPLAY_TYPE => {
+                    copy_col_bytes(&mut row, ib, cb, &(DT_MAILUSER as u32).to_le_bytes())?;
+                }
+                PID_TAG_SMTP_ADDRESS => match smtp_hid {
+                    Some(hid) => copy_col_bytes(&mut row, ib, cb, &hid.to_le_bytes())?,
+                    None => {
+                        present_bits[col_idx] = false;
+                    }
+                },
+                PID_TAG_7BIT_DISPLAY_NAME => {
+                    copy_col_bytes(&mut row, ib, cb, &seven_hid.to_le_bytes())?;
+                }
+                PID_TAG_SEND_RICH_INFO => {
+                    if cb < 1 {
+                        return Err(WriterError::Layout(
+                            "build_recipient_table_tc: SendRichInfo column width 0".into(),
+                        ));
+                    }
+                    row[ib] = 0; // false
+                }
+                PID_TAG_LTP_ROW_ID => {
+                    copy_col_bytes(&mut row, ib, cb, &row_id.to_le_bytes())?;
+                }
+                PID_TAG_LTP_ROW_VER => {
+                    let ver = (i as u32).saturating_add(1);
+                    copy_col_bytes(&mut row, ib, cb, &ver.to_le_bytes())?;
+                }
+                _ => {
+                    return Err(WriterError::Layout(format!(
+                        "build_recipient_table_tc: unexpected column prop 0x{prop_id:04X}"
+                    )));
+                }
+            }
+        }
+
+        // Existence bitmap at end of row.
+        let bitmap_start = row_width - bitmap_bytes;
+        for (col_idx, col) in columns.iter().enumerate() {
+            if present_bits[col_idx] {
+                let bit = col.4 as usize;
+                row[bitmap_start + bit / 8] |= 1u8 << (bit % 8);
+            }
+        }
+
+        row_matrix.extend_from_slice(&row);
+        row_index_records.push((row_id, (i as u32).to_le_bytes().to_vec()));
+    }
+
+    let hid_row_index = if rows.is_empty() {
+        0u32
+    } else {
+        build_bth_u32_checked(heap, 4, 4, &mut row_index_records)?
+    };
+
+    let mut tcinfo = Vec::new();
+    tcinfo.push(0x7C);
+    tcinfo.push(columns.len() as u8);
+    tcinfo.extend_from_slice(&0u16.to_le_bytes());
+    tcinfo.extend_from_slice(&0u16.to_le_bytes());
+    tcinfo.extend_from_slice(&0u16.to_le_bytes());
+    tcinfo.extend_from_slice(&total_row_width.to_le_bytes());
+    tcinfo.extend_from_slice(&0u32.to_le_bytes()); // hidRowIndex placeholder
+    tcinfo.extend_from_slice(&0u32.to_le_bytes()); // hnidRows placeholder
+
+    for col in &columns {
+        tcinfo.extend_from_slice(&col.0.to_le_bytes());
+        tcinfo.extend_from_slice(&col.1.to_le_bytes());
+        tcinfo.extend_from_slice(&col.2.to_le_bytes());
+        tcinfo.push(col.3);
+        tcinfo.push(col.4);
+    }
+
+    let hid_tcinfo = heap.try_alloc(&tcinfo)?;
+    let hid_rows = heap.try_alloc(&row_matrix)?;
+
+    heap.patch_u32(hid_tcinfo, 10, hid_row_index)?;
+    heap.patch_u32(hid_tcinfo, 14, hid_rows)?;
+
+    Ok((hid_tcinfo, heap_data_len(heap)))
+}
+
+/// Copy up to 4 LE value bytes into a TC row cell, checking bounds.
+fn copy_col_bytes(row: &mut [u8], ib: usize, cb: usize, bytes: &[u8]) -> Result<()> {
+    if ib + cb > row.len() || cb > bytes.len() {
+        return Err(WriterError::Layout(format!(
+            "recipient TC column out of bounds (ib={ib} cb={cb} row_len={} val_len={})",
+            row.len(),
+            bytes.len()
+        )));
+    }
+    row[ib..ib + cb].copy_from_slice(&bytes[..cb]);
+    Ok(())
+}
+
+/// Resolve address type for a recipient row (caller value, else SMTP/EX heuristic).
+fn resolve_recipient_address_type(recip: &WriteRecipient) -> String {
+    if let Some(t) = recip
+        .address_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return t.to_string();
+    }
+    if recip
+        .smtp_address
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+    {
+        return "SMTP".to_string();
+    }
+    if let Some(email) = recip
+        .email_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if email.to_ascii_uppercase().contains("/O=") {
+            return "EX".to_string();
+        }
+        if email.contains('@') {
+            return "SMTP".to_string();
+        }
+    }
+    String::new()
+}
+
+/// 16-byte synthetic RecordKey for a recipient row (crc-salted seed, no new deps).
+fn synthesize_recipient_record_key(
+    row_id: u32,
+    email: &str,
+    display: &str,
+    addr_type: &str,
+) -> [u8; 16] {
+    let mut seed = Vec::with_capacity(64);
+    seed.extend_from_slice(&row_id.to_le_bytes());
+    seed.extend_from_slice(addr_type.as_bytes());
+    seed.push(0);
+    seed.extend_from_slice(email.as_bytes());
+    seed.push(0);
+    seed.extend_from_slice(display.as_bytes());
+
+    let mut key = [0u8; 16];
+    let salts: [u32; 4] = [0x0C15_0001, 0x0C15_0002, 0x0C15_0003, 0x0C15_0004];
+    for (i, salt) in salts.into_iter().enumerate() {
+        let mut salted = Vec::with_capacity(seed.len() + 4);
+        salted.extend_from_slice(&salt.to_le_bytes());
+        salted.extend_from_slice(&seed);
+        let h = crc32fast::hash(&salted);
+        key[i * 4..(i + 1) * 4].copy_from_slice(&h.to_le_bytes());
+    }
+    key
+}
+
+/// MAPI-shaped SearchKey: `TYPE:ADDRESS` uppercase ASCII bytes.
+fn synthesize_recipient_search_key(addr_type: &str, email: &str, smtp: Option<&str>) -> Vec<u8> {
+    let ty = if addr_type.is_empty() {
+        "UNKNOWN"
+    } else {
+        addr_type
+    };
+    let addr = if let Some(s) = smtp {
+        s
+    } else if !email.is_empty() {
+        email
+    } else {
+        ""
+    };
+    format!("{}:{}", ty.to_ascii_uppercase(), addr.to_ascii_uppercase()).into_bytes()
+}
+
 /// Current allocated heap data length (pre-finalize), for sizing probes.
 fn heap_data_len(heap: &HeapBuilder) -> usize {
     heap.data.len()
@@ -3707,6 +4170,27 @@ const ATTACHMENT_TABLE_COLUMNS: [(u16, TcColType); 6] = [
     (PID_TAG_RENDERING_POSITION, TcColType::I32),    // 0x370B
     (PID_TAG_LTP_ROW_ID, TcColType::I32),            // 0x67F2
     (PID_TAG_LTP_ROW_VER, TcColType::I32),           // 0x67F3
+];
+
+/// Recipient Table (template NID `0x692` + per-message subnode) column schema.
+/// MS-PST Recipient Table Template 14 MUST columns + product `PidTagSmtpAddress`.
+/// https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-pst/bb069b2b-80ad-46d5-b86f-33487d16bf0c
+const RECIPIENT_TABLE_COLUMNS: [(u16, TcColType); 15] = [
+    (PID_TAG_RECIPIENT_TYPE, TcColType::I32),          // 0x0C15
+    (PID_TAG_RESPONSIBILITY, TcColType::Bool),         // 0x0E0F
+    (PID_TAG_RECORD_KEY, TcColType::BinaryRef),        // 0x0FF9
+    (PID_TAG_OBJECT_TYPE, TcColType::I32),             // 0x0FFE
+    (PID_TAG_ENTRY_ID, TcColType::BinaryRef),          // 0x0FFF
+    (PID_TAG_DISPLAY_NAME, TcColType::StringRef),      // 0x3001
+    (PID_TAG_ADDRESS_TYPE, TcColType::StringRef),      // 0x3002
+    (PID_TAG_EMAIL_ADDRESS, TcColType::StringRef),     // 0x3003
+    (PID_TAG_SEARCH_KEY, TcColType::BinaryRef),        // 0x300B
+    (PID_TAG_DISPLAY_TYPE, TcColType::I32),            // 0x3900
+    (PID_TAG_SMTP_ADDRESS, TcColType::StringRef),      // 0x39FE (product extra)
+    (PID_TAG_7BIT_DISPLAY_NAME, TcColType::StringRef), // 0x39FF
+    (PID_TAG_SEND_RICH_INFO, TcColType::Bool),         // 0x3A40
+    (PID_TAG_LTP_ROW_ID, TcColType::I32),              // 0x67F2
+    (PID_TAG_LTP_ROW_VER, TcColType::I32),             // 0x67F3
 ];
 
 /// 5d. Search Folder Contents Table Template (NID `0x610`) column schema —
@@ -4769,6 +5253,8 @@ mod tests {
             display_to: Some("bob@example.com".into()),
             display_cc: Some("carol@example.com".into()),
             display_bcc: Some("secret@example.com".into()),
+            recipients: Vec::new(),
+            message_flags: None,
             submit_time: Some(0x01D5B035EDA780_i64),
             size: None,
             message_class: None,

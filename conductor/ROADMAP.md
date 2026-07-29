@@ -353,7 +353,13 @@ Deferred triage + operator soak       ← real PSTs local-only; bugfix tracks on
 Series K Clean Unique export (CLI)    ← planned product path (0065–0072 Proposed)
 ```
 
-Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedTeamFixes/spec.md) **Completed**; [`0064`](0064-DeskPlatformConnectUx/spec.md) **Completed**. Series K [`0065`](0065-ScanIntegrityReport/spec.md)–[`0072`](0072-DeskUniquePstWizard/spec.md) **Completed**.
+Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedTeamFixes/spec.md) **Completed**; [`0064`](0064-DeskPlatformConnectUx/spec.md) **Completed**. Series K [`0065`](0065-ScanIntegrityReport/spec.md)–[`0072`](0072-DeskUniquePstWizard/spec.md) **Completed**. Series L (0073–0081 unique-export hardening) **Completed**. Series M opens at **0082** (recipient table fidelity — Ready).
+
+### Wave 6 — Unique export fidelity residuals (Series M)
+
+| ID | Track | Status | Priority | High-level notes |
+|---|---|---|---|---|
+| **0082** | RecipientTableFidelity | **Completed** | **P0 M** | MS-PST recipient TC read+write (`0x692`); SMTP+EX Tier-2.5; BCC write opt-in + suppress ledger; `retryable`; closes D-0080/D-0076 recip + D-0078-retryable. |
 
 ### What each step is for
 

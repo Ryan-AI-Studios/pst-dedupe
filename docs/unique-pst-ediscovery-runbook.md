@@ -35,6 +35,8 @@ Risks of manual Outlook / legacy Exchange dumps (disclose when used): incomplete
 | Optional QC (`--qc-level`), BYOB external reader, optional scanpst on a **copy** | COM automation against Outlook |
 | Streaming Unicode production PST writer | Product secure-wipe binary |
 | Basename path mode for handoff CSVs (default off / `full`) | Full de-identification of custodian names |
+| MS-PST recipient tables on unique-PST (**0082**); BCC opt-in write | Distribution-list / GAL expansion |
+| `retryable` boolean on summary JSON (**0082**) | Blanket retry of exit **5** without classification |
 
 **Outlook clients (re-verified 2026-07-29):**
 
@@ -84,12 +86,40 @@ Optional timing harness (no client paths baked in): [`scripts/unique-pst-timing.
 |---|---|
 | Multi-file / multi-custodian | Prefer `--source-rank` (best-first) so keep-set winners favor the intended collection tier. |
 | Recoverable Items / dumpster-like folders | `--prefer-folder-class` (and/or custom `--folder-rank`) when purging soft-deleted noise is matter policy. |
-| Sender-copy completeness | `--prefer-bcc-copy` when BCC-bearing copies are preferred. |
+| Sender-copy completeness | `--prefer-bcc-copy` when BCC-bearing copies are preferred for **keep-set winner choice**. |
+| BCC on the **deliverable** | Default **suppresses** Bcc TC rows / `PidTagDisplayBcc` (disclosure). Use `--include-bcc-recipients` only under counsel instruction when full-fidelity BCC must appear in the written PST. |
 | Chronological winner | `--policy earliest_date` prefers earliest submit time (delivery fallback); missing dates rank last — disclose when used. |
 | `first_seen` honesty | Default `first_seen` is **sorted input-path order**, not chronological send time. |
 | Per-source isolation | `--dedupe-scope per-source` when cross-mailbox collapse is not authorized. |
 
 Full flag table: [`unique-pst-export.md`](unique-pst-export.md).
+
+### BCC disclosure & near-duplicates (0082)
+
+Unique-PST consolidates custodians. Writing every BCC into a multi-mailbox deliverable can over-disclose relative to a single custodian's outward view — same class as visible-only defaults elsewhere.
+
+| Path | Behavior |
+|---|---|
+| **Write (default)** | To + Cc only; no Bcc rows / no `PidTagDisplayBcc` |
+| **Write (opt-in)** | `--include-bcc-recipients` writes Bcc when the source had them |
+| **Identity (Tier-2.5)** | To+Cc+**Bcc** still participate in the content hash when a recipient table is present — so copies that differ only by BCC do **not** false-merge |
+| **Ledger** | `export_messages.csv` → `bcc_suppressed`; summary → `bcc_suppressed_message_count` |
+
+**Reviewer note:** two near-identical messages in the unique-PST with `bcc_suppressed=true` are **not** a dedupe failure. BCC variance was retained for identity and omitted from the deliverable by policy. Disclose the suppress count to counsel when handoff includes the report pack.
+
+### No distribution-list expansion
+
+Fidelity is to the **PST file**, not live Exchange group membership. If the source stored only a DL display name or EX address without expanded members, the unique-PST **replicates that** and does **not** resolve membership against a GAL. Do not claim expanded To/Cc from this product alone.
+
+### Zero-recipient anomaly (telemetry)
+
+| Condition | Product response |
+|---|---|
+| Empty recipient TC **and** `MSGFLAG_UNSENT` **not** set | Count `sent_message_with_no_recipients_count` (anomaly telemetry) |
+| Empty TC **and** UNSENT set (draft) | Normal — no anomaly |
+| Flags unreadable | Skip anomaly (do not invent UNSENT) |
+
+This is **telemetry only** — it does **not** hard-fail the export and does **not** invent a new `export_risk` value (`ok` \| `re_export_recommended` \| `not_export_ready` remains frozen).
 
 ---
 
@@ -143,22 +173,34 @@ Stable unique-export / matter automation codes (0078 table; **no new integers**)
 | **4** | Job failed or cancelled (matter job path) | Inspect job status |
 | **5** | Matter open/create/IO | **Do not blanket-retry** — may be `AuditChainBroken`, schema mismatch, wrong passphrase, or transient IO |
 
+### `retryable` on summary JSON (0082)
+
+Additive boolean on `summary.json` / `--json` stdout — **not** a new exit code and **not** a substitute for classifying exit **5**.
+
+| `retryable` | Typical cases |
+|---|---|
+| `true` | Operator cancel (exit 130), clear transient matter/disk IO |
+| `false` | Success, usage, risk gate (65), partial fidelity (64), verify/count/report hard fails, schema / passphrase / audit-chain classes |
+
+**Rule:** never script `while ($code -eq 5) { retry }` without reading `retryable` **and** the error class. Exit 5 remains mixed permanent/transient; `retryable: false` forbids blind loops even when the shell code is 5.
+
 ### PowerShell switch example
 
 ```powershell
 & .\pst-dedup.exe unique-pst @inputs --out $Out --report-dir $Report --json
 $code = $LASTEXITCODE
+# Prefer parsing summary.json retryable when automating.
 switch ($code) {
     0   { Write-Host 'ok — complete' }
     64  { Write-Host 'partial fidelity — retain artifact; disclose soft-fails' }
     65  { Write-Host 'export_risk gate — review summary.json before handoff' }
-    130 { Write-Host 'cancelled — partial quarantined' }
+    130 { Write-Host 'cancelled — partial quarantined; retryable' }
     1   { Write-Host 'hard fail — do not hand off' }
     2   { Write-Host 'usage error — fix args' }
     5   {
         # NEVER blanket-retry exit 5.
-        # Inspect error class: AuditChainBroken / SchemaVersionMismatch / WrongPassphrase
-        # are permanent until fixed; only clear transient IO after diagnosis.
+        # Inspect summary.retryable + error class: AuditChainBroken / SchemaVersionMismatch /
+        # WrongPassphrase are permanent until fixed; only clear transient IO after diagnosis.
         Write-Host 'matter IO/open — diagnose; do not blind retry'
     }
     default { Write-Host "exit $code — see docs/unique-pst-export.md" }
@@ -175,8 +217,8 @@ Typical `--report-dir` contents:
 
 | Artifact | Role |
 |---|---|
-| `summary.json` | `unique_export_report_v1` — fidelity, exit, `export_risk`, `phase_timings`, digests |
-| `export_messages.csv` | Winner → volume crosswalk (mandatory when messages written) |
+| `summary.json` | `unique_export_report_v1` — fidelity, exit, `export_risk`, `phase_timings`, digests, `retryable`, `bcc_suppressed_message_count`, `sent_message_with_no_recipients_count` |
+| `export_messages.csv` | Winner → volume crosswalk (mandatory when messages written); includes `bcc_suppressed` (**0082**) |
 | `export_attachments.csv` | Attach failure ledger when `--attach-ledger=full` |
 | `volumes.csv` | Per-volume path/bytes/hashes |
 | `decisions.csv` / `keepset.json` | Keep-set provenance |
@@ -265,7 +307,7 @@ Standalone re-QC of a basename-mode report pack uses `source_id` + `summary.inpu
 |---|---|
 | [`unique-pst-export.md`](unique-pst-export.md) | Flag encyclopedia |
 | [`operator-golden-path.md`](operator-golden-path.md) | Day-1 RC paths (Path B unique-PST) |
-| [`deferred.md`](deferred.md) | Residuals (basename closed in 0081; repair-diff docs-closed) |
+| [`deferred.md`](deferred.md) | Residuals (basename closed in 0081; recipient table / retryable closed in **0082**) |
 | Writer / fidelity notes under `docs/` | Volume shape honesty |
 | [Microsoft Support — open PST in new Outlook](https://support.microsoft.com/en-us/outlook/open-and-find-items-in-an-outlook-data-file-pst) | Access date **2026-07-29** |
 | [Microsoft Support — open/close Outlook Data Files](https://support.microsoft.com/en-us/outlook/open-and-close-outlook-data-files-pst) | Access date **2026-07-29** |

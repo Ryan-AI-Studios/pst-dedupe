@@ -7,6 +7,18 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0082 — Recipient table fidelity)
+
+- **Reader:** `pst-reader` walks per-message recipient TC (`NID_TYPE_RECIPIENT_TABLE`); structured `Recipient` / `RecipientType` (To/Cc/Bcc) with SMTP + EX address fields; never invents rows from Display* props.
+- **Writer:** MS-PST recipient table template at NID **`0x692`** (14 MUST columns); every message gets a recipient TC subnode (empty table allowed); optional `PidTagSmtpAddress` column when known.
+- **Tier-2.5 identity:** when a recipient table is present, fingerprint uses per-row cascade **SMTP → EX DN → display** over To+Cc+Bcc (sorted); table-less messages keep the display-string path.
+- **BCC disclosure:** CLI `--include-bcc-recipients` (default **OFF**) writes Bcc rows + `PidTagDisplayBcc`; default suppresses BCC on the deliverable; identity hashing still includes BCC when the table is present.
+- **`export_messages.csv`:** trailing `bcc_suppressed` boolean; summary `bcc_suppressed_message_count`.
+- **Telemetry:** `sent_message_with_no_recipients_count` (empty TC + not UNSENT; not an `export_risk` / hard-fail).
+- **`retryable`:** additive boolean on unique-export summary JSON (transient cancel/IO only; no new exit integers).
+- **`fidelity_contract_v1`:** `recipient_table` → `Preserved` (BCC rows remain `DroppedByDesign` unless the flag is set).
+- Closes **D-0080-recipient-table**, **D-0076-recipient-table**, **D-0068-04** recipient half, **D-0078-retryable**; decides **D-0080-bcc-policy** (opt-in write + suppress ledger). Named-prop / Mode A promote / unique-eml ledger / deterministic store key remain open.
+
 ### Added (0073 — Export attachment failure ledger)
 
 - **unique-pst** streams `export_attachments.csv` (default `--attach-ledger=full`) with locus keys, stable reason codes, CSV injection neutralization, and a default 500k row cap.

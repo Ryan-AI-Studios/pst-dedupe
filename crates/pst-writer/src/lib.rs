@@ -27,7 +27,8 @@ pub use production::{
     write_unicode_pst_streaming, write_unicode_pst_with_streams, AttachEventSeverity,
     AttachEventSink, AttachRead, AttachStreamSource, AttachmentFidelityEvent,
     AttachmentFidelityKind, FolderLayoutPolicy, PcValue, WriteAttachment, WriteMessage,
-    WriteProgress, WriteProgressSink, WritePstOpts, WritePstReport, WriteStage,
+    WriteProgress, WriteProgressSink, WritePstOpts, WritePstReport, WriteRecipient,
+    WriteRecipientType, WriteStage,
 };
 
 // EagerWriteCtx is defined above on Layout; re-exported for tests/integrations.
@@ -101,6 +102,11 @@ pub(crate) const NID_SEARCH_CONTENTS_TABLE_TEMPLATE: u64 = 0x610;
 /// attachment-table column schema; per-message attachment tables also use
 /// this NID as their subnode key under the message's subnode BTree.
 pub(crate) const NID_ATTACHMENT_TABLE_TEMPLATE: u64 = 0x671;
+/// Recipient Table Template (MS-PST fixed NID `NID_RECIPIENT_TABLE` = 0x692).
+/// Zero-row TC with the full 14-column MUST schema (+ product SmtpAddress);
+/// per-message recipient tables also use this NID as their subnode key
+/// (`NidType::RecipientTable` = 0x12 is the low 5 bits of 0x692).
+pub(crate) const NID_RECIPIENT_TABLE_TEMPLATE: u64 = 0x692;
 
 // NID types
 pub(crate) const NID_TYPE_NORMAL_FOLDER: u8 = 0x02;

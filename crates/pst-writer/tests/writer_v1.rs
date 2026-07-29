@@ -296,6 +296,8 @@ fn message_size_is_computed_not_copied_from_inflated_source() {
         display_to: None,
         display_cc: None,
         display_bcc: None,
+        recipients: Vec::new(),
+        message_flags: None,
         submit_time: None,
         // Fake, hugely inflated declared size (e.g. included attachments the
         // writer never sees / never writes).
@@ -646,12 +648,13 @@ fn fixed_template_object_tables_are_present_and_empty() {
     // source data's column lists (§5a-5d), duplicate 0x0E07/0x0E17 in
     // Microsoft's own published Search Folder Contents Table Template page
     // collapsed to one column each, per that table's own documented note.
-    let templates: [(u64, usize); 5] = [
+    let templates: [(u64, usize); 6] = [
         (0x60D, 13), // Hierarchy Table Template
         (0x60E, 27), // Contents Table Template
         (0x60F, 14), // FAI Contents Table Template
         (0x610, 18), // Search Folder Contents Table Template
         (0x671, 6),  // Attachment Table Template (MS-PST / 0069 review)
+        (0x692, 15), // Recipient Table Template (MS-PST 14 MUST + SmtpAddress / 0082)
     ];
 
     for (nid, expected_cols) in templates {

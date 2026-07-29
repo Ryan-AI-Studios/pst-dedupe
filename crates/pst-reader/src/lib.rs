@@ -48,7 +48,8 @@
 //! | API | Role |
 //! |---|---|
 //! | `read_message_properties` | CLI Tier-2: body preview truncated to 4KB |
-//! | `read_message_extract` / `ExtractedMessage` | Full body, DisplayTo/Cc/Bcc, submit + delivery time, optional HTML, In-Reply-To / References / ConversationIndex, MessageClass + appointment start/end/location |
+//! | `read_message_extract` / `ExtractedMessage` | Full body, DisplayTo/Cc/Bcc, structured `recipients` TC rows (0082), message flags / UNSENT, submit + delivery time, optional HTML, In-Reply-To / References / ConversationIndex, MessageClass + appointment start/end/location |
+//! | `list_recipients` / `Recipient` | Per-message recipient TC (`NID_TYPE_RECIPIENT_TABLE` 0x12); never invents from Display* |
 //! | `is_calendar_message_class` | IPM.Appointment / Schedule.Meeting.* classification |
 //! | `list_attachments` / `AttachmentInfo` | NID, filename, size, mime, method |
 //! | `open_attachment_data` / `AttachmentDataReader` | `Read` over attach binary (leaf-block stream; no multi-GB `Vec` production path) |
@@ -71,6 +72,10 @@ pub use messaging::message::{
     filetime_to_rfc3339, filetime_to_unix, is_calendar_message_class, ExtractedMessage,
     MessageProperties, MessageReadOpts,
 };
+pub use messaging::recipient::{
+    looks_like_x500_dn, message_flags_is_unsent, Recipient, RecipientType,
+};
+pub use ndb::nid::{MSGFLAG_UNSENT, PID_TAG_MESSAGE_FLAGS, PID_TAG_RECIPIENT_TYPE};
 pub use ndb::NodeId;
 
 use std::fs::File;

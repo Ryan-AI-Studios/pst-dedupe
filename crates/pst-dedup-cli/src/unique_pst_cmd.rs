@@ -30,7 +30,7 @@ use pst_reader::PstFile;
 use pst_writer::{
     from_canonical_message_owned, temp_sibling_path, write_unicode_pst_streaming, AttachRead,
     AttachStreamSource, FolderLayoutPolicy, WriteMessage, WriteProgress, WriteProgressSink,
-    WritePstOpts, WriteStage,
+    WritePstOpts, WriteStage, WriterError,
 };
 use sha2::{Digest, Sha256};
 
@@ -59,6 +59,24 @@ use std::rc::Rc;
 
 /// Max volume index considered for stale-sibling cleanup and collision guards.
 const MAX_VOLUME_SIBLING_INDEX: u32 = 999;
+
+/// Map a writer failure to a summary `error.code` for [`crate::export_outcome::summary_is_retryable`].
+///
+/// - [`WriterError::Io`] → `write_io` (transient; automation may retry)
+/// - [`WriterError::Cancelled`] → `cancelled`
+/// - layout / capacity / policy refusals → `export` (permanent)
+pub(crate) fn writer_error_summary_code(err: &WriterError) -> &'static str {
+    match err {
+        WriterError::Io(_) => "write_io",
+        WriterError::Cancelled => "cancelled",
+        WriterError::Layout(_)
+        | WriterError::BodyTooLarge(_)
+        | WriterError::AllocationFailed(_)
+        | WriterError::Refused(_)
+        | WriterError::RefusedSourceOverwrite(_)
+        | WriterError::EmlParse(_) => "export",
+    }
+}
 
 /// Clap surface for `unique-pst` (tuple-variant keeps `Commands` smaller on stack).
 #[derive(Debug, Args)]
@@ -227,6 +245,12 @@ pub struct UniquePstClapArgs {
     /// Attempt scanpst `-no repair` on a local temp copy when discoverable (0080).
     #[arg(long = "qc-scanpst", action = clap::ArgAction::SetTrue)]
     pub qc_scanpst: bool,
+    /// Write Bcc recipient rows and PidTagDisplayBcc into the unique-PST (0082).
+    /// Default OFF: consolidating custodians can over-disclose BCC relative to a
+    /// single custodian's outward view. Identity hashing still includes BCC when
+    /// the source table is present.
+    #[arg(long = "include-bcc-recipients", action = clap::ArgAction::SetTrue)]
+    pub include_bcc_recipients: bool,
 }
 
 /// Runtime options for `unique-pst` orchestration.
@@ -304,6 +328,8 @@ pub struct UniquePstCliArgs {
     pub qc_external_reader: Option<PathBuf>,
     /// Attempt scanpst when true (0080).
     pub qc_scanpst: bool,
+    /// Write Bcc rows + PidTagDisplayBcc (0082). Default false.
+    pub include_bcc_recipients: bool,
 }
 
 /// Run options / hooks for GUI and library callers (0072).
@@ -479,6 +505,7 @@ impl UniquePstClapArgs {
             qc_sample_max: self.qc_sample_max.max(1),
             qc_external_reader: self.qc_external_reader,
             qc_scanpst: self.qc_scanpst,
+            include_bcc_recipients: self.include_bcc_recipients,
         })
     }
 }
@@ -611,6 +638,10 @@ struct PreparedWinner {
     /// Source-side BCC retained for QC known_gap accounting (not written to PST).
     /// Populated from `CanonicalMessage.display_bcc` / adapter `dropped` (0080 DoD-15).
     display_bcc: String,
+    /// Source had Bcc (table row and/or non-empty display_bcc) — for `bcc_suppressed` (0082).
+    source_has_bcc: bool,
+    /// Empty recipient table + flags present + not UNSENT (0082 rule 8 anomaly).
+    sent_message_with_no_recipients: bool,
 }
 
 /// Adapter: `PstAttachStreamSource` → `pst_writer::AttachStreamSource`.
@@ -1089,6 +1120,7 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
             failed_volume_index: None,
             attachment_fidelity_events_truncated: None,
             attachment_fidelity_events_total: None,
+            include_bcc_recipients: false,
         },
         verification: VerificationReport {
             ok: false,
@@ -1110,6 +1142,10 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
             message: "cancelled".into(),
         }),
         export_risk,
+        bcc_suppressed_message_count: 0,
+        sent_message_with_no_recipients_count: 0,
+        // Cancel is a retryable class (0082 D-0078-retryable).
+        retryable: true,
     };
     if let Err(e) = write_summary_json(ctx.summary_path, &summary) {
         tracing::warn!(
@@ -1903,6 +1939,8 @@ pub fn run_unique_pst_with_options(
         overwrite: args.overwrite,
         max_embedded_depth: 3,
         parents_only,
+        // 0082: default OFF (BCC omit / over-disclosure policy).
+        include_bcc_recipients: args.include_bcc_recipients,
     };
 
     // ── Phase 3: multi-volume streaming write ───────────────────────────────
@@ -1976,6 +2014,9 @@ pub fn run_unique_pst_with_options(
     let mut attach_stream_crc_events: u64 = 0;
     let mut export_partial = false;
     let mut export_error: Option<String> = None;
+    // Summary error.code for retryable classification (0082 P2-1).
+    // Transient disk/write IO uses write_io; permanent writer failures use export.
+    let mut export_error_code: Option<&'static str> = None;
     let mut failed_volume_index: Option<u32> = None;
     let mut cursor = 0usize;
     let mut volume_index: u32 = 0;
@@ -2078,6 +2119,7 @@ pub fn run_unique_pst_with_options(
                         "cannot remove existing volume {}: {e}",
                         vol_path.display()
                     ));
+                    export_error_code = Some("write_io");
                     failed_volume_index = Some(volume_index);
                     break;
                 }
@@ -2091,6 +2133,7 @@ pub fn run_unique_pst_with_options(
             if let Err(e) = fs::create_dir_all(parent) {
                 export_partial = true;
                 export_error = Some(format!("create volume parent {}: {e}", parent.display()));
+                export_error_code = Some("write_io");
                 failed_volume_index = Some(volume_index);
                 break;
             }
@@ -2229,6 +2272,8 @@ pub fn run_unique_pst_with_options(
                         duplicate_source_count: dup_count,
                         duplicate_sources: dup_sources,
                         source_id,
+                        // true when source had BCC and write path omitted it (0082 rule 7).
+                        bcc_suppressed: p.source_has_bcc && !args.include_bcc_recipients,
                         subject: p.subject.clone(),
                     });
                     // Bind pre-write QC meta to this export index / volume.
@@ -2299,17 +2344,21 @@ pub fn run_unique_pst_with_options(
                 // any residual final path and same-dir temp.
                 delete_incomplete_volume(&vol_path);
                 export_partial = true;
-                let is_cancel = matches!(e, pst_writer::WriterError::Cancelled)
+                let is_cancel = matches!(e, WriterError::Cancelled)
                     || e.to_string().eq_ignore_ascii_case("cancelled");
                 if is_cancel {
                     cancelled = true;
                     export_error = Some("cancelled".into());
+                    export_error_code = Some("cancelled");
                     emit_log(
                         stderr,
                         &on_log,
                         &format!("volume {volume_index} cancelled mid-write"),
                     );
                 } else {
+                    // Typed summary code: WriterError::Io → write_io (retryable);
+                    // layout/capacity/refusal → export (permanent).
+                    export_error_code = Some(writer_error_summary_code(&e));
                     export_error = Some(format!("volume {volume_index} write failed: {e}"));
                 }
                 failed_volume_index = Some(volume_index);
@@ -2545,6 +2594,7 @@ pub fn run_unique_pst_with_options(
             max_open_psts: args.max_open_psts,
             source_differential: true,
             parents_only,
+            include_bcc_recipients: args.include_bcc_recipients,
             probe_unexplained_property: None,
         });
         phase_timings.qc_ms = t_qc.elapsed().as_millis() as u64;
@@ -2662,6 +2712,7 @@ pub fn run_unique_pst_with_options(
             failed_volume_index,
             attachment_fidelity_events_truncated: Some(attach_fidelity_events_truncated),
             attachment_fidelity_events_total: Some(attach_fidelity_events_total),
+            include_bcc_recipients: args.include_bcc_recipients,
         };
         if let Some(finish) = attach_ledger_finish.as_ref() {
             finish.apply_to_export_section(&mut section);
@@ -2708,7 +2759,8 @@ pub fn run_unique_pst_with_options(
         let (code, message) = if cancelled {
             ("cancelled", "cancelled".to_string())
         } else if let Some(msg) = export_err.as_ref() {
-            ("export", msg.clone())
+            // Prefer writer/disk typed code (write_io) when the write phase failed.
+            (export_error_code.unwrap_or("export"), msg.clone())
         } else if let Some(msg) = report_err_msg.as_ref() {
             ("report", msg.clone())
         } else if let Some(msg) = verify_err.as_ref() {
@@ -2730,6 +2782,19 @@ pub fn run_unique_pst_with_options(
     } else {
         None
     };
+
+    let bcc_suppressed_message_count =
+        export_rows.iter().filter(|r| r.bcc_suppressed).count() as u64;
+    let sent_message_with_no_recipients_count = prepared
+        .iter()
+        .filter(|p| p.sent_message_with_no_recipients)
+        .count() as u64;
+    let retryable = crate::export_outcome::summary_is_retryable(
+        classified.exit,
+        cancelled,
+        &classified.reasons,
+        summary_error.as_ref().map(|e| e.code.as_str()),
+    );
 
     let summary_abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
     let mut summary = UniqueExportSummary {
@@ -2767,6 +2832,9 @@ pub fn run_unique_pst_with_options(
         keep_set_json: keep_set_json_out.clone(),
         error: summary_error.clone(),
         export_risk,
+        bcc_suppressed_message_count,
+        sent_message_with_no_recipients_count,
+        retryable,
     };
 
     // Fail-closed: if summary.json itself fails, force non-success exit even if
@@ -2808,6 +2876,12 @@ pub fn run_unique_pst_with_options(
             });
             summary.error = summary_error.clone();
         }
+        summary.retryable = crate::export_outcome::summary_is_retryable(
+            classified.exit,
+            cancelled,
+            &classified.reasons,
+            summary_error.as_ref().map(|e| e.code.as_str()),
+        );
         // Best-effort rewrite with corrected fields.
         let _ = write_summary_json(&summary_path, &summary);
     }
@@ -2958,6 +3032,12 @@ pub fn run_unique_pst_with_options(
     Ok(structured)
 }
 
+/// Zero-recip anomaly (0082 §2.5 rule 8): empty table + flags present + NOT unsent.
+/// Missing flags → skip (do not invent UNSENT). Empty + unsent → not an anomaly.
+fn is_sent_message_with_no_recipients(recipients_empty: bool, message_flags: Option<u32>) -> bool {
+    recipients_empty && message_flags.is_some_and(|f| !pst_reader::message_flags_is_unsent(f))
+}
+
 /// Convert a just-materialized winner into a write-ready DTO (0079 D1 + D11).
 ///
 /// `msg` already has fidelity merged from `finalize_with_materialize` and
@@ -2976,17 +3056,15 @@ fn prepared_winner_from_canonical(
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
 
-    // Capture BCC before adapter drop — QC counts known_gap; writer does not emit BCC.
+    // Capture BCC before adapter map — dedicated source signal (display + table Bcc).
+    // Do not couple to adapter_dropped: that counter also tracks disclosure policy.
     let display_bcc = msg.display_bcc.clone().unwrap_or_default();
-    let (write_msg, adapter_dropped) = from_canonical_message_owned(msg);
+    let source_has_bcc =
+        !display_bcc.trim().is_empty() || msg.recipients.iter().any(|r| r.recipient_type.is_bcc());
+    let sent_message_with_no_recipients =
+        is_sent_message_with_no_recipients(msg.recipients.is_empty(), msg.message_flags);
+    let (write_msg, _adapter_dropped) = from_canonical_message_owned(msg);
     let subject = write_msg.subject.clone();
-    // Adapter `dropped` must not be discarded silently (0080 known_gap accounting).
-    let display_bcc = if adapter_dropped > 0 && display_bcc.trim().is_empty() {
-        // Defensive: adapter counted a drop; keep a sentinel so QC still records known_gap.
-        "(dropped)".to_string()
-    } else {
-        display_bcc
-    };
     Ok(PreparedWinner {
         source_path,
         folder_path,
@@ -2997,6 +3075,8 @@ fn prepared_winner_from_canonical(
         subject,
         write_msg,
         display_bcc,
+        source_has_bcc,
+        sent_message_with_no_recipients,
     })
 }
 
@@ -3491,6 +3571,61 @@ mod tests {
         assert!(!compute_export_ok(count));
     }
 
+    /// 0082 P2-1: WriterError::Io → write_io (retryable); permanent variants → export.
+    #[test]
+    fn writer_error_summary_code_io_retryable_layout_permanent() {
+        let io_err = WriterError::Io(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            "disk full",
+        ));
+        assert_eq!(writer_error_summary_code(&io_err), "write_io");
+        assert!(crate::export_outcome::summary_is_retryable(
+            crate::error::CliExit::Generic,
+            false,
+            &[crate::export_outcome::reason::COUNT_MISMATCH],
+            Some(writer_error_summary_code(&io_err)),
+        ));
+
+        let layout = WriterError::Layout("bad heap".into());
+        assert_eq!(writer_error_summary_code(&layout), "export");
+        assert!(!crate::export_outcome::summary_is_retryable(
+            crate::error::CliExit::Generic,
+            false,
+            &[crate::export_outcome::reason::COUNT_MISMATCH],
+            Some(writer_error_summary_code(&layout)),
+        ));
+
+        let refused = WriterError::Refused("exists".into());
+        assert_eq!(writer_error_summary_code(&refused), "export");
+        assert!(!crate::export_outcome::summary_is_retryable(
+            crate::error::CliExit::Generic,
+            false,
+            &[crate::export_outcome::reason::COUNT_MISMATCH],
+            Some(writer_error_summary_code(&refused)),
+        ));
+
+        assert_eq!(
+            writer_error_summary_code(&WriterError::Cancelled),
+            "cancelled"
+        );
+    }
+
+    /// 0082 DoD-10: zero-recip anomaly boundaries.
+    #[test]
+    fn zero_recip_anomaly_sent_counts_draft_skips_missing_flags_skip() {
+        // Sent (flags=0) + empty → count.
+        assert!(is_sent_message_with_no_recipients(true, Some(0)));
+        // Unsent bit set → no count.
+        assert!(!is_sent_message_with_no_recipients(
+            true,
+            Some(pst_reader::MSGFLAG_UNSENT)
+        ));
+        // Missing flags → skip (no invent).
+        assert!(!is_sent_message_with_no_recipients(true, None));
+        // Non-empty table → no count even if sent.
+        assert!(!is_sent_message_with_no_recipients(false, Some(0)));
+    }
+
     #[test]
     fn sample_mid_exact_not_substring() {
         let written = vec!["abc@example.com".to_string()];
@@ -3632,6 +3767,7 @@ mod tests {
             qc_sample_max: 64,
             qc_external_reader: None,
             qc_scanpst: false,
+            include_bcc_recipients: false,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3737,6 +3873,7 @@ mod tests {
             qc_sample_max: 64,
             qc_external_reader: None,
             qc_scanpst: false,
+            include_bcc_recipients: false,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3849,6 +3986,7 @@ mod tests {
             qc_sample_max: 64,
             qc_external_reader: None,
             qc_scanpst: false,
+            include_bcc_recipients: false,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -3952,6 +4090,7 @@ mod tests {
             qc_sample_max: 64,
             qc_external_reader: None,
             qc_scanpst: false,
+            include_bcc_recipients: false,
         };
         let outcome = run_unique_pst_with_options(
             args,

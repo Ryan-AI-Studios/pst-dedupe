@@ -25,7 +25,7 @@ use crate::export_outcome::{ArtifactState, ExportFidelity};
 pub const UNIQUE_EXPORT_REPORT_SCHEMA: &str = "unique_export_report_v1";
 
 /// Fixed header for mandatory `export_messages.csv` (prefix locked; 0073/0075/0081 append).
-pub const EXPORT_MESSAGES_CSV_HEADER: &str = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources,source_id";
+pub const EXPORT_MESSAGES_CSV_HEADER: &str = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count,duplicate_source_count,duplicate_sources,source_id,bcc_suppressed";
 
 /// Pre-0075 export_messages header prefix (10 columns).
 pub const EXPORT_MESSAGES_CSV_HEADER_V1: &str = "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count";
@@ -181,6 +181,9 @@ pub struct ExportMessageRow {
     /// unmapped (0081 — never invent `"0"`). Join key under `--ledger-path-mode
     /// basename` when multiple sources share a basename.
     pub source_id: String,
+    /// True when source had BCC (table Bcc row or non-empty display_bcc) and the
+    /// write path omitted them (`include_bcc_recipients == false`) — 0082 rule 7.
+    pub bcc_suppressed: bool,
     /// In-memory only: used for sample verification when MID is empty.
     /// Not written to `export_messages.csv` (header locked).
     #[serde(skip)]
@@ -242,6 +245,10 @@ pub struct ExportSection {
     /// Total attach events observed (may exceed Vec len when truncated; 0077).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_fidelity_events_total: Option<u64>,
+    /// Whether BCC rows / `PidTagDisplayBcc` were written (0082 `--include-bcc-recipients`).
+    /// Default false. Clean-room `qc-pst` reads this so re-QC matches the export policy.
+    #[serde(default)]
+    pub include_bcc_recipients: bool,
 }
 
 /// Inputs for post-export risk evaluation (0077).
@@ -548,6 +555,18 @@ pub struct UniqueExportSummary {
     pub error: Option<SummaryError>,
     /// Post-export risk (0077); same vocabulary as preflight.
     pub export_risk: ExportRisk,
+    /// Messages where source BCC was omitted from the written PST by policy (0082).
+    #[serde(default)]
+    pub bcc_suppressed_message_count: u64,
+    /// Empty recipient table on a non-draft (MSGFLAG_UNSENT clear) message (0082 rule 8).
+    /// Telemetry only — does **not** invent a new `export_risk` value.
+    #[serde(default)]
+    pub sent_message_with_no_recipients_count: u64,
+    /// Whether automation may retry this run (0082 D-0078-retryable).
+    /// `true` only for clearly transient IO / cancel-retry classes; permanent
+    /// failures (risk gate, fidelity, schema, passphrase, audit) stay `false`.
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 /// Structured error on the summary / JSON stdout.
@@ -1134,7 +1153,7 @@ pub fn write_export_messages_csv(
         let source_path = format_ledger_source_path(&r.source_path, path_mode);
         writeln!(
             w,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             csv_escape_cell(&source_path),
             csv_escape_cell(&r.folder_path),
             r.nid,
@@ -1148,6 +1167,7 @@ pub fn write_export_messages_csv(
             r.duplicate_source_count,
             csv_escape_cell(&r.duplicate_sources),
             csv_escape_cell(&r.source_id),
+            if r.bcc_suppressed { "true" } else { "false" },
         )
         .map_err(|e| CliError::CsvWrite {
             path: path.to_path_buf(),
@@ -1294,10 +1314,14 @@ mod tests {
         );
         assert!(EXPORT_MESSAGES_CSV_HEADER.contains("duplicate_source_count"));
         assert!(EXPORT_MESSAGES_CSV_HEADER.contains("duplicate_sources"));
-        // 0081: source_id is a trailing append (never reorders locked prefix).
+        // 0081: source_id append; 0082: bcc_suppressed trailing append.
         assert!(
-            EXPORT_MESSAGES_CSV_HEADER.ends_with(",source_id"),
-            "source_id must be trailing append; got {EXPORT_MESSAGES_CSV_HEADER}"
+            EXPORT_MESSAGES_CSV_HEADER.contains(",source_id,"),
+            "source_id must remain after locked prefix; got {EXPORT_MESSAGES_CSV_HEADER}"
+        );
+        assert!(
+            EXPORT_MESSAGES_CSV_HEADER.ends_with(",bcc_suppressed"),
+            "bcc_suppressed must be trailing append; got {EXPORT_MESSAGES_CSV_HEADER}"
         );
     }
 
@@ -1320,6 +1344,7 @@ mod tests {
             duplicate_source_count: dup_count,
             duplicate_sources: joined.clone(),
             source_id: "0".into(),
+            bcc_suppressed: false,
             subject: String::new(),
         };
         assert_eq!(row.duplicate_source_count, dup_count);
@@ -1440,6 +1465,7 @@ mod tests {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: "0".into(),
+            bcc_suppressed: false,
             subject: String::new(),
         };
         let dir = tempfile::tempdir().expect("tmp");
@@ -1457,7 +1483,7 @@ mod tests {
             "absolute path must not appear in CSV under basename mode; row={data}"
         );
         assert!(
-            data.ends_with(",0") || data.contains(",0\n") || data.ends_with(",0\r"),
+            data.contains(",0,false") || data.ends_with(",0,false"),
             "source_id column must be present; row={data}"
         );
         // Full mode retains absolute path.
@@ -1489,6 +1515,7 @@ mod tests {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: "0".into(),
+            bcc_suppressed: false,
             subject: String::new(),
         };
         let row_b = ExportMessageRow {
@@ -1505,6 +1532,7 @@ mod tests {
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
             source_id: "1".into(),
+            bcc_suppressed: false,
             subject: String::new(),
         };
         let dir = tempfile::tempdir().expect("tmp");
@@ -1514,7 +1542,7 @@ mod tests {
         let mut lines = text.lines();
         let header = lines.next().expect("header");
         assert_eq!(header, EXPORT_MESSAGES_CSV_HEADER);
-        assert!(header.ends_with(",source_id"));
+        assert!(header.ends_with(",bcc_suppressed"));
         let data_a = lines.next().expect("row a");
         let data_b = lines.next().expect("row b");
         assert!(
@@ -1529,9 +1557,15 @@ mod tests {
             !data_a.contains(r"C:\evidence") && !data_b.contains(r"D:\other"),
             "absolute paths must not appear under basename; a={data_a} b={data_b}"
         );
-        // Trailing source_id disambiguates same basename.
-        assert!(data_a.ends_with(",0"), "row a source_id=0; got {data_a}");
-        assert!(data_b.ends_with(",1"), "row b source_id=1; got {data_b}");
+        // source_id disambiguates same basename (penultimate before bcc_suppressed).
+        assert!(
+            data_a.contains(",0,false") || data_a.ends_with(",0,false"),
+            "row a source_id=0; got {data_a}"
+        );
+        assert!(
+            data_b.contains(",1,false") || data_b.ends_with(",1,false"),
+            "row b source_id=1; got {data_b}"
+        );
         // Resolve helper matches AttachLedgerSink honesty.
         let inputs = vec![
             r"C:\evidence\custA\mailbox.pst".to_string(),
@@ -1688,6 +1722,7 @@ mod tests {
             failed_volume_index: None,
             attachment_fidelity_events_truncated: None,
             attachment_fidelity_events_total: None,
+            include_bcc_recipients: false,
         };
         finish.apply_to_export_section(&mut export);
         assert!(export.attachment_ledger.is_none());
@@ -1794,6 +1829,7 @@ mod tests {
             failed_volume_index: None,
             attachment_fidelity_events_truncated: None,
             attachment_fidelity_events_total: None,
+            include_bcc_recipients: false,
         };
         finish.apply_to_export_section(&mut export);
         assert!(export.attachments_failed_by_reason.is_none());
@@ -1971,5 +2007,42 @@ mod tests {
             "discarded volume must not write CSV rows"
         );
         assert!(csv.contains("ATTACH_METHOD_UNSUPPORTED"));
+    }
+
+    /// 0082 DoD-9: bcc_suppressed true/false column.
+    #[test]
+    fn bcc_suppressed_column_true_and_false() {
+        let row_true = ExportMessageRow {
+            source_path: r"C:\a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 1,
+            message_id_norm: "a@x".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: "aa".repeat(32),
+            volume_path: r"C:\out.pst".into(),
+            volume_index: 1,
+            export_message_index: 1,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            source_id: "0".into(),
+            bcc_suppressed: true,
+            subject: String::new(),
+        };
+        let row_false = ExportMessageRow {
+            bcc_suppressed: false,
+            export_message_index: 2,
+            message_id_norm: "b@x".into(),
+            ..row_true.clone()
+        };
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("export_messages.csv");
+        write_export_messages_csv(&path, &[row_true, row_false], LedgerPathMode::Full)
+            .expect("write");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.lines().next().unwrap().ends_with(",bcc_suppressed"));
+        let lines: Vec<_> = text.lines().skip(1).collect();
+        assert!(lines[0].ends_with(",true"), "row0={}", lines[0]);
+        assert!(lines[1].ends_with(",false"), "row1={}", lines[1]);
     }
 }

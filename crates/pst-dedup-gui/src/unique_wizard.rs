@@ -412,6 +412,7 @@ impl UniqueWizardForm {
             qc_sample_max: pst_dedup_cli::unique_pst_qc::DEFAULT_QC_SAMPLE_MAX,
             qc_external_reader: None,
             qc_scanpst: false,
+            include_bcc_recipients: false,
         })
     }
 

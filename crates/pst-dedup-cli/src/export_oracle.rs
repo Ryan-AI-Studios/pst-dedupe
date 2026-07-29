@@ -529,6 +529,15 @@ pub fn message_content_digest(pst: &mut pst_reader::PstFile, nid: u64) -> Result
     Ok(detail.digest)
 }
 
+/// One structured recipient fingerprint for QC (0082).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipientFingerprint {
+    /// MAPI recipient type (1=To, 2=Cc, 3=Bcc, other).
+    pub recipient_type: u32,
+    /// Identity key (SMTP → EX → display); empty when none.
+    pub identity_key: String,
+}
+
 /// Detailed content fingerprint for one message NID (digest + attach payload hashes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageContentDetail {
@@ -544,6 +553,8 @@ pub struct MessageContentDetail {
     pub attaches: Vec<(String, u64, String, String)>,
     /// When set, attachment enumeration failed (must not be treated as empty attaches).
     pub attach_list_error: Option<String>,
+    /// Structured recipient TC rows when present (0082). Empty when table missing.
+    pub recipients: Vec<RecipientFingerprint>,
 }
 
 /// Extract comparable content fields + digest for QC (reuses oracle hashing).
@@ -567,6 +578,15 @@ pub fn message_content_detail(
     let display_cc = extract.display_cc.as_deref().unwrap_or("").to_string();
     let body_plain = extract.body_text.as_deref().unwrap_or("");
     let body_html = extract.body_html.as_deref().unwrap_or(&[][..]);
+    // Structured recipients (never invented from Display* on the reader path).
+    let recipients: Vec<RecipientFingerprint> = extract
+        .recipients
+        .iter()
+        .map(|r| RecipientFingerprint {
+            recipient_type: r.recipient_type.to_mapi(),
+            identity_key: r.identity_key().unwrap_or_default(),
+        })
+        .collect();
 
     let mut attaches: Vec<(String, u64, String, String)> = Vec::new();
     let mut attach_list_error: Option<String> = None;
@@ -627,6 +647,7 @@ pub fn message_content_detail(
         body_html_len: body_html.len(),
         attaches,
         attach_list_error,
+        recipients,
     })
 }
 

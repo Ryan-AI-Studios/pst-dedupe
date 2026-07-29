@@ -276,6 +276,8 @@ impl MessageMaterializer for PstMaterializer {
             display_to,
             display_cc,
             display_bcc,
+            recipients,
+            message_flags,
             submit_time,
             size,
             message_class,
@@ -296,6 +298,11 @@ impl MessageMaterializer for PstMaterializer {
                 {
                     soft_reasons.push(dedup_engine::IntegrityReason::CrcSuspect);
                 }
+                let recipients: Vec<dedup_engine::CanonicalRecipient> = extracted
+                    .recipients
+                    .iter()
+                    .map(dedup_engine::CanonicalRecipient::from_reader)
+                    .collect();
                 (
                     extracted.message_id,
                     extracted.subject,
@@ -303,6 +310,8 @@ impl MessageMaterializer for PstMaterializer {
                     extracted.display_to,
                     extracted.display_cc,
                     extracted.display_bcc,
+                    recipients,
+                    extracted.message_flags,
                     extracted.submit_time,
                     extracted.message_size.map(|s| s as u32),
                     extracted.message_class,
@@ -339,13 +348,20 @@ impl MessageMaterializer for PstMaterializer {
                         {
                             soft_reasons.push(dedup_engine::IntegrityReason::CrcSuspect);
                         }
+                        let recipients: Vec<dedup_engine::CanonicalRecipient> = props
+                            .recipients
+                            .iter()
+                            .map(dedup_engine::CanonicalRecipient::from_reader)
+                            .collect();
                         (
                             props.message_id,
                             props.subject,
                             props.sender_email,
                             props.display_to,
-                            None,
-                            None,
+                            props.display_cc,
+                            props.display_bcc,
+                            recipients,
+                            props.message_flags,
                             props.submit_time,
                             props.message_size.map(|s| s as u32),
                             None,
@@ -369,8 +385,21 @@ impl MessageMaterializer for PstMaterializer {
                             soft_reasons.push(r2);
                         }
                         (
-                            None, None, None, None, None, None, None, None, None, None, None,
-                            false, true,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            false,
+                            true,
                         )
                     }
                 }
@@ -578,6 +607,8 @@ impl MessageMaterializer for PstMaterializer {
             display_to,
             display_cc,
             display_bcc,
+            recipients,
+            message_flags,
             submit_time,
             size,
             message_class,

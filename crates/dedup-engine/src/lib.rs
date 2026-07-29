@@ -31,7 +31,8 @@ pub use eml_pack::{
 };
 pub use exporter::export_eml;
 pub use grouping::{
-    mid_join_compatible, normalize_recipients, recipient_has_x500, BoundBy, DedupeScope,
+    mid_join_compatible, normalize_recipient_identity_keys, normalize_recipients,
+    recipient_has_x500, BoundBy, CanonicalRecipient, CanonicalRecipientType, DedupeScope,
     GroupingContext, GroupingStats, IdentityLevel, Tier1Verify,
 };
 pub use hasher::{

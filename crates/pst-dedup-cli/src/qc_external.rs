@@ -994,10 +994,12 @@ mod tests {
         fs::create_dir_all(&office).expect("dir");
         let named_cmd = office.join("SCANPST.cmd");
         // Production always passes: -file <pst> -no repair ...
-        // Write .bak next to %2 (the pst path after -file) — most reliable on cmd.
+        // Write .bak next to %2 only (the pst path after -file). Never use %3:
+        // %3 is the `-no` token, and `%~dpn3.bak` would create `cwd\-no.bak`
+        // pollution in the crate root when tests run from the package dir.
         write_stub_cmd(
             &named_cmd,
-            "if not \"%~2\"==\"\" (echo NO_REPAIR_MODE> \"%~dpn2.log\" & echo repaired> \"%~dpn2.bak\")\r\nif not \"%~3\"==\"\" (echo repaired> \"%~dpn3.bak\")\r\nexit /b 0\r\n",
+            "if not \"%~2\"==\"\" (echo NO_REPAIR_MODE> \"%~dpn2.log\" & echo repaired> \"%~dpn2.bak\")\r\nexit /b 0\r\n",
         )
         .expect("stub");
         pin_scanpst_build(&named_cmd);

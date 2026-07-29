@@ -683,6 +683,9 @@ pub struct CanonicalAttachment {
     pub attach_method: Option<i32>,
 }
 
+// Re-export recipient types for keep-set callers (defined in grouping for hasher use).
+pub use crate::grouping::{CanonicalRecipient, CanonicalRecipientType};
+
 /// Fully materialized winner message (bodies held one-at-a-time by callers).
 #[derive(Clone, Debug)]
 pub struct CanonicalMessage {
@@ -693,6 +696,10 @@ pub struct CanonicalMessage {
     pub display_to: Option<String>,
     pub display_cc: Option<String>,
     pub display_bcc: Option<String>,
+    /// Structured recipient TC rows (0082). Empty when table missing — never invented from Display*.
+    pub recipients: Vec<CanonicalRecipient>,
+    /// `PidTagMessageFlags` when readable (0082 zero-recip anomaly); None = skip inventing UNSENT.
+    pub message_flags: Option<u32>,
     pub submit_time: Option<i64>,
     pub size: Option<u32>,
     pub message_class: Option<String>,
@@ -3161,6 +3168,8 @@ mod tests {
                         display_to: None,
                         display_cc: None,
                         display_bcc: None,
+                        recipients: Vec::new(),
+                        message_flags: None,
                         submit_time: None,
                         size: Some(10),
                         message_class: None,
@@ -3354,6 +3363,8 @@ mod tests {
                     display_to: None,
                     display_cc: None,
                     display_bcc: None,
+                    recipients: Vec::new(),
+                    message_flags: None,
                     submit_time: None,
                     size: Some(10),
                     message_class: None,
@@ -3427,6 +3438,8 @@ mod tests {
                     display_to: None,
                     display_cc: None,
                     display_bcc: None,
+                    recipients: Vec::new(),
+                    message_flags: None,
                     submit_time: None,
                     size: Some(10),
                     message_class: None,
@@ -3527,6 +3540,8 @@ mod tests {
                             display_to: None,
                             display_cc: None,
                             display_bcc: None,
+                            recipients: Vec::new(),
+                            message_flags: None,
                             submit_time: None,
                             size: Some(10),
                             message_class: None,
