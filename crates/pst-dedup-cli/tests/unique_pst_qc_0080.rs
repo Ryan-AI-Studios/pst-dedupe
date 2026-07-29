@@ -104,12 +104,36 @@ fn cand(i: u64, body: usize) -> QcSampleCandidate {
         has_embedded: false,
         has_degraded: false,
         has_ledger_fail: false,
+        ledger_failed_attach_names: Vec::new(),
         body_unavailable: false,
         body_incomplete: false,
         crc_suspect: false,
         subject_non_ascii: false,
         display_cc: String::new(),
         display_bcc: String::new(),
+    }
+}
+
+fn digest_entry(
+    idx: u64,
+    mid: &str,
+    subject: &str,
+    digest: &str,
+    body_plain_len: usize,
+) -> ContentDigestEntry {
+    ContentDigestEntry {
+        export_message_index: idx,
+        source_path: r"C:\src\a.pst".into(),
+        source_nid: idx,
+        message_id_norm: mid.into(),
+        content_digest: digest.into(),
+        subject: subject.into(),
+        display_to: "bob@example.com".into(),
+        display_cc: "carol@example.com".into(),
+        body_plain_len,
+        body_html_len: 0,
+        attaches: vec![],
+        extra_source_props: vec![],
     }
 }
 
@@ -955,6 +979,7 @@ fn clean_room_parents_only_with_source_digests_is_green() {
                         payload_sha256: h.clone(),
                     })
                     .collect(),
+                extra_source_props: vec![],
             }],
         }],
     };
@@ -1025,6 +1050,7 @@ fn clean_room_parents_only_mismatched_body_is_defect() {
                 body_plain_len: 9999,
                 body_html_len: 0,
                 attaches: vec![],
+                extra_source_props: vec![],
             }],
         }],
     };
@@ -1553,6 +1579,7 @@ fn no_mid_message_green_when_digests_match() {
                 body_plain_len: detail.body_plain_len,
                 body_html_len: detail.body_html_len,
                 attaches: vec![],
+                extra_source_props: vec![],
             }],
         }],
     };
@@ -1604,8 +1631,650 @@ fn no_mid_message_green_when_digests_match() {
     assert_eq!(report.findings.defect, 0);
 }
 
+/// DoD-5/10: one ledger-failed attach must not explain a different missing attach.
+#[test]
+fn attach_ledger_fail_does_not_explain_unrelated_missing_attach() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let good = b"good-payload-bytes-aaa";
+    let bad = b"bad-payload-bytes-bbb";
+    let mut src_msg = base_msg("<att2@ex.com>", "TwoAttaches", "body two attaches");
+    src_msg.attachments = vec![
+        WriteAttachment {
+            filename: "good.bin".into(),
+            data: Some(good.to_vec()),
+            size: good.len() as u32,
+            ..WriteAttachment::default()
+        },
+        WriteAttachment {
+            filename: "ledger_fail.bin".into(),
+            data: Some(bad.to_vec()),
+            size: bad.len() as u32,
+            ..WriteAttachment::default()
+        },
+    ];
+    write_simple_pst(&src, vec![src_msg]);
+
+    // Output keeps only neither attach (both missing) — only ledger_fail.bin is explained.
+    let mut out_msg = base_msg("<att2@ex.com>", "TwoAttaches", "body two attaches");
+    out_msg.attachments = vec![];
+    write_simple_pst(&out, vec![out_msg]);
+
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "att2@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 1,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        subject: "TwoAttaches".into(),
+    }];
+    let mut c = cand(1, 18);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "att2@ex.com".into();
+    c.subject = "TwoAttaches".into();
+    c.has_ledger_fail = true; // message-wide flag alone must not suppress good.bin
+    c.ledger_failed_attach_names = vec!["ledger_fail.bin".into()];
+    c.attach_count = 2;
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        true,
+        false,
+    ));
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "silently missing good.bin must defect even when sibling has ledger fail: {:?}",
+        report.findings
+    );
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).expect("csv");
+    assert!(
+        csv.to_ascii_lowercase().contains("good.bin")
+            || csv.contains("attachment_by_value")
+            || csv.contains("missing"),
+        "findings should mention missing good.bin: {csv}"
+    );
+}
+
+/// DoD-21: sample digests + full qc must not silently green uncovered candidates.
+#[test]
+fn sample_digests_full_qc_not_silent_green_for_uncovered() {
+    use pst_dedup_cli::export_oracle::message_content_detail;
+    use pst_reader::PstFile;
+
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("out.pst");
+    write_simple_pst(
+        &path,
+        vec![
+            base_msg("<cov@ex.com>", "Covered", "covered body"),
+            base_msg("<unc@ex.com>", "Uncovered", "uncovered body"),
+        ],
+    );
+    let mut pst = PstFile::open(&path).expect("open");
+    let folders = pst.folders().expect("folders");
+    let nids: Vec<_> = folders
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .collect();
+    assert!(nids.len() >= 2);
+    let d0 = message_content_detail(&mut pst, nids[0].0).expect("d0");
+    drop(pst);
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    // Only first message covered; digests claim sample granularity.
+    let digests = ContentDigestsFile {
+        schema: "content_digests_v1".into(),
+        origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
+        qc_level: "sample".into(),
+        volumes: vec![ContentDigestsVolume {
+            volume_index: 1,
+            path: path.display().to_string(),
+            messages: vec![ContentDigestEntry {
+                export_message_index: 1,
+                source_path: r"C:\src\a.pst".into(),
+                source_nid: 1,
+                message_id_norm: "cov@ex.com".into(),
+                content_digest: d0.digest.clone(),
+                subject: d0.subject.clone(),
+                display_to: d0.display_to.clone(),
+                display_cc: d0.display_cc.clone(),
+                body_plain_len: d0.body_plain_len,
+                body_html_len: d0.body_html_len,
+                attaches: vec![],
+                extra_source_props: vec![],
+            }],
+        }],
+    };
+    fs::write(
+        report_dir.join("content_digests.json"),
+        serde_json::to_string_pretty(&digests).expect("json"),
+    )
+    .expect("write");
+
+    let volumes = vec![vol_row(&path, 2)];
+    let export_rows = vec![
+        export_row("cov@ex.com", 1, 1),
+        export_row("unc@ex.com", 2, 2),
+    ];
+    let mut c1 = cand(1, 12);
+    c1.message_id_norm = "cov@ex.com".into();
+    c1.subject = "Covered".into();
+    let mut c2 = cand(2, 14);
+    c2.message_id_norm = "unc@ex.com".into();
+    c2.subject = "Uncovered".into();
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c1, c2],
+        false,
+        true,
+    ));
+    assert!(report.content_digest_backed);
+    assert!(
+        report.content_digest_partial || report.hard_fail || report.findings.defect > 0,
+        "sample digests under full must not silent-green: partial={} findings={:?}",
+        report.content_digest_partial,
+        report.findings
+    );
+    assert!(
+        report.hard_fail || report.findings.defect > 0,
+        "must hard_fail when full requested against sample digests: {:?}",
+        report.findings
+    );
+}
+
+/// DoD-9: production unexplained_loss via extra_source_props on content digests (no probe).
+#[test]
+fn unexplained_loss_via_extra_source_props_production_path() {
+    use pst_dedup_cli::export_oracle::message_content_detail;
+    use pst_reader::PstFile;
+
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("out.pst");
+    write_simple_pst(
+        &path,
+        vec![base_msg("<xp@ex.com>", "ExtraProp", "body extra prop")],
+    );
+    let mut pst = PstFile::open(&path).expect("open");
+    let folders = pst.folders().expect("folders");
+    let nid = folders
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("nid");
+    let detail = message_content_detail(&mut pst, nid.0).expect("detail");
+    drop(pst);
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let digests = ContentDigestsFile {
+        schema: "content_digests_v1".into(),
+        origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
+        qc_level: "full".into(),
+        volumes: vec![ContentDigestsVolume {
+            volume_index: 1,
+            path: path.display().to_string(),
+            messages: vec![ContentDigestEntry {
+                export_message_index: 1,
+                source_path: r"C:\src\a.pst".into(),
+                source_nid: 1,
+                message_id_norm: "xp@ex.com".into(),
+                content_digest: detail.digest.clone(),
+                subject: detail.subject.clone(),
+                display_to: detail.display_to.clone(),
+                display_cc: detail.display_cc.clone(),
+                body_plain_len: detail.body_plain_len,
+                body_html_len: detail.body_html_len,
+                attaches: vec![],
+                extra_source_props: vec!["PidTagUnmappedQcTest".into()],
+            }],
+        }],
+    };
+    fs::write(
+        report_dir.join("content_digests.json"),
+        serde_json::to_string_pretty(&digests).expect("json"),
+    )
+    .expect("write");
+
+    let volumes = vec![vol_row(&path, 1)];
+    let export_rows = vec![export_row("xp@ex.com", 1, 1)];
+    let mut c = cand(1, detail.body_plain_len);
+    c.message_id_norm = "xp@ex.com".into();
+    c.subject = "ExtraProp".into();
+
+    // source_differential false, digests present — production path, no probe hook.
+    let candidates = [c];
+    let input = qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &candidates,
+        false,
+        true,
+    );
+    assert!(input.probe_unexplained_property.is_none());
+    let report = run_unique_pst_qc(input);
+    assert!(report.content_digest_backed);
+    assert!(
+        report.findings.unexplained_loss > 0,
+        "extra_source_props must yield unexplained_loss without probe: {:?}",
+        report.findings
+    );
+    assert!(report.hard_fail);
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).expect("csv");
+    assert!(
+        csv.contains("PidTagUnmappedQcTest") || csv.contains("unexplained_loss"),
+        "{csv}"
+    );
+}
+
+/// Malformed/truncated export_messages.csv row must hard-fail standalone qc-pst.
+#[test]
+fn malformed_export_csv_row_hard_fails_qc_pst() {
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("out.pst");
+    write_simple_pst(&path, vec![base_msg("<csv@ex.com>", "Csv", "body csv")]);
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    // Truncated CSV line (fewer than 9 fields).
+    fs::write(
+        report_dir.join("export_messages.csv"),
+        "source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,attachments_failed_count\n\
+         C:\\src\\a.pst,Inbox,0x100,csv@ex.com\n",
+    )
+    .expect("csv");
+    fs::write(
+        report_dir.join("summary.json"),
+        serde_json::json!({
+            "export": {
+                "volumes": [{
+                    "volume_index": 1,
+                    "path": path.display().to_string(),
+                    "bytes": 1,
+                    "sha256_hex": "",
+                    "md5_hex": "",
+                    "messages_written": 1,
+                    "finalized_early": false,
+                    "volume_exceeded_soft_limit": false
+                }]
+            }
+        })
+        .to_string(),
+    )
+    .expect("summary");
+
+    let err = run_qc_pst(&path, &report_dir, QcLevel::Structure, 64, None, false, 4)
+        .expect_err("malformed CSV must error");
+    assert!(
+        err.to_ascii_lowercase().contains("malformed")
+            || err.to_ascii_lowercase().contains("fields")
+            || err.to_ascii_lowercase().contains("export_messages"),
+        "unexpected err: {err}"
+    );
+}
+
+/// Two no-MID messages with same subject must not misassociate bodies.
+#[test]
+fn no_mid_duplicate_subjects_do_not_misassociate() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let mut m1 = base_msg("", "Same Subject", "body-alpha-111111");
+    m1.message_id = None;
+    let mut m2 = base_msg("", "Same Subject", "body-beta-2222222");
+    m2.message_id = None;
+    write_simple_pst(&src, vec![m1, m2]);
+
+    // Output swaps nothing — same bodies; matching must pair correctly by body.
+    let mut o1 = base_msg("", "Same Subject", "body-alpha-111111");
+    o1.message_id = None;
+    let mut o2 = base_msg("", "Same Subject", "body-beta-2222222");
+    o2.message_id = None;
+    write_simple_pst(&out, vec![o1, o2]);
+
+    let src_nids = {
+        use pst_reader::PstFile;
+        let mut pst = PstFile::open(&src).expect("open");
+        let folders = pst.folders().expect("f");
+        folders
+            .iter()
+            .flat_map(|f| f.message_nids.iter().map(|n| n.0))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(src_nids.len(), 2);
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 2)];
+    let export_rows = vec![
+        ExportMessageRow {
+            source_path: src.display().to_string(),
+            folder_path: "Inbox".into(),
+            nid: src_nids[0],
+            message_id_norm: String::new(),
+            edrm_mih: String::new(),
+            content_hash_hex: String::new(),
+            volume_path: out.display().to_string(),
+            volume_index: 1,
+            export_message_index: 1,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            subject: "Same Subject".into(),
+        },
+        ExportMessageRow {
+            source_path: src.display().to_string(),
+            folder_path: "Inbox".into(),
+            nid: src_nids[1],
+            message_id_norm: String::new(),
+            edrm_mih: String::new(),
+            content_hash_hex: String::new(),
+            volume_path: out.display().to_string(),
+            volume_index: 1,
+            export_message_index: 2,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            subject: "Same Subject".into(),
+        },
+    ];
+    let mut c1 = cand(1, 17);
+    c1.source_path = src.display().to_string();
+    c1.source_nid = src_nids[0];
+    c1.message_id_norm = String::new();
+    c1.subject = "Same Subject".into();
+    let mut c2 = cand(2, 17);
+    c2.source_path = src.display().to_string();
+    c2.source_nid = src_nids[1];
+    c2.message_id_norm = String::new();
+    c2.subject = "Same Subject".into();
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c1, c2],
+        true,
+        true, // parents_only — body field match
+    ));
+    assert!(
+        !report.hard_fail,
+        "two no-MID same-subject messages must pair by body, not misassociate: {:?}",
+        report.findings
+    );
+    assert_eq!(report.findings.defect, 0);
+}
+
+/// DoD-11: multi-volume synthetic structure QC green (zero hard findings).
+#[test]
+fn fixture_matrix_multi_volume_structure_green() {
+    let dir = TempDir::new().expect("tmp");
+    let v1 = dir.path().join("vol1.pst");
+    let v2 = dir.path().join("vol2.pst");
+    write_simple_pst(&v1, vec![base_msg("<mv1@ex.com>", "Vol1", "body vol1")]);
+    write_simple_pst(&v2, vec![base_msg("<mv2@ex.com>", "Vol2", "body vol2")]);
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![
+        VolumeReportRow {
+            volume_index: 1,
+            path: v1.display().to_string(),
+            bytes: fs::metadata(&v1).map(|m| m.len()).unwrap_or(0),
+            sha256_hex: String::new(),
+            md5_hex: String::new(),
+            messages_written: 1,
+            finalized_early: false,
+            volume_exceeded_soft_limit: false,
+        },
+        VolumeReportRow {
+            volume_index: 2,
+            path: v2.display().to_string(),
+            bytes: fs::metadata(&v2).map(|m| m.len()).unwrap_or(0),
+            sha256_hex: String::new(),
+            md5_hex: String::new(),
+            messages_written: 1,
+            finalized_early: false,
+            volume_exceeded_soft_limit: false,
+        },
+    ];
+    let export_rows = vec![
+        ExportMessageRow {
+            source_path: r"C:\src\a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 1,
+            message_id_norm: "mv1@ex.com".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: String::new(),
+            volume_path: v1.display().to_string(),
+            volume_index: 1,
+            export_message_index: 1,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            subject: "Vol1".into(),
+        },
+        ExportMessageRow {
+            source_path: r"C:\src\a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 2,
+            message_id_norm: "mv2@ex.com".into(),
+            edrm_mih: String::new(),
+            content_hash_hex: String::new(),
+            volume_path: v2.display().to_string(),
+            volume_index: 2,
+            export_message_index: 2,
+            attachments_failed_count: 0,
+            duplicate_source_count: 0,
+            duplicate_sources: String::new(),
+            subject: "Vol2".into(),
+        },
+    ];
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Structure,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[],
+        false,
+        false,
+    ));
+    assert!(
+        !report.hard_fail,
+        "multi-volume structure must be green: {:?}",
+        report.findings
+    );
+    assert_eq!(report.volumes.len(), 2);
+    assert!(report
+        .volumes
+        .iter()
+        .all(|v| v.open_ok && v.message_count_match));
+}
+
+/// DoD-11: non-ASCII subject round-trip QC green under clean-room digests.
+#[test]
+fn fixture_matrix_non_ascii_subject_qc_green() {
+    use pst_dedup_cli::export_oracle::message_content_detail;
+    use pst_reader::PstFile;
+
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("nonascii.pst");
+    let subject = "日本語サブジェクト café";
+    write_simple_pst(
+        &path,
+        vec![base_msg("<na@ex.com>", subject, "non-ascii body text")],
+    );
+    let mut pst = PstFile::open(&path).expect("open");
+    let folders = pst.folders().expect("f");
+    let nid = folders
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("nid");
+    let detail = message_content_detail(&mut pst, nid.0).expect("detail");
+    drop(pst);
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let digests = ContentDigestsFile {
+        schema: "content_digests_v1".into(),
+        origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
+        qc_level: "full".into(),
+        volumes: vec![ContentDigestsVolume {
+            volume_index: 1,
+            path: path.display().to_string(),
+            messages: vec![ContentDigestEntry {
+                export_message_index: 1,
+                source_path: r"C:\src\a.pst".into(),
+                source_nid: 1,
+                message_id_norm: "na@ex.com".into(),
+                content_digest: detail.digest.clone(),
+                subject: detail.subject.clone(),
+                display_to: detail.display_to.clone(),
+                display_cc: detail.display_cc.clone(),
+                body_plain_len: detail.body_plain_len,
+                body_html_len: detail.body_html_len,
+                attaches: vec![],
+                extra_source_props: vec![],
+            }],
+        }],
+    };
+    fs::write(
+        report_dir.join("content_digests.json"),
+        serde_json::to_string_pretty(&digests).expect("json"),
+    )
+    .expect("digests");
+
+    let volumes = vec![vol_row(&path, 1)];
+    let export_rows = vec![export_row("na@ex.com", 1, 1)];
+    let mut c = cand(1, detail.body_plain_len);
+    c.message_id_norm = "na@ex.com".into();
+    c.subject = subject.into();
+    c.subject_non_ascii = true;
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        false,
+        true,
+    ));
+    assert!(
+        !report.hard_fail,
+        "non-ASCII subject clean-room must be green: {:?}",
+        report.findings
+    );
+}
+
+/// DoD-11: oversized (long) subject QC green under clean-room digests.
+#[test]
+fn fixture_matrix_oversized_subject_qc_green() {
+    use pst_dedup_cli::export_oracle::message_content_detail;
+    use pst_reader::PstFile;
+
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("longsubj.pst");
+    let subject = "S".repeat(512);
+    write_simple_pst(
+        &path,
+        vec![base_msg("<ls@ex.com>", &subject, "long subject body")],
+    );
+    let mut pst = PstFile::open(&path).expect("open");
+    let folders = pst.folders().expect("f");
+    let nid = folders
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("nid");
+    let detail = message_content_detail(&mut pst, nid.0).expect("detail");
+    drop(pst);
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let digests = ContentDigestsFile {
+        schema: "content_digests_v1".into(),
+        origin: CONTENT_DIGEST_ORIGIN_SOURCE.into(),
+        qc_level: "full".into(),
+        volumes: vec![ContentDigestsVolume {
+            volume_index: 1,
+            path: path.display().to_string(),
+            messages: vec![ContentDigestEntry {
+                export_message_index: 1,
+                source_path: r"C:\src\a.pst".into(),
+                source_nid: 1,
+                message_id_norm: "ls@ex.com".into(),
+                content_digest: detail.digest.clone(),
+                subject: detail.subject.clone(),
+                display_to: detail.display_to.clone(),
+                display_cc: detail.display_cc.clone(),
+                body_plain_len: detail.body_plain_len,
+                body_html_len: detail.body_html_len,
+                attaches: vec![],
+                extra_source_props: vec![],
+            }],
+        }],
+    };
+    fs::write(
+        report_dir.join("content_digests.json"),
+        serde_json::to_string_pretty(&digests).expect("json"),
+    )
+    .expect("digests");
+
+    let volumes = vec![vol_row(&path, 1)];
+    let export_rows = vec![export_row("ls@ex.com", 1, 1)];
+    let mut c = cand(1, detail.body_plain_len);
+    c.message_id_norm = "ls@ex.com".into();
+    c.subject = subject;
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        false,
+        true,
+    ));
+    assert!(
+        !report.hard_fail,
+        "oversized subject clean-room must be green: {:?}",
+        report.findings
+    );
+}
+
 // Silence unused import warning if BTreeMap unused in some builds.
 #[allow(dead_code)]
 fn _touch_btreemap() -> BTreeMap<u64, u64> {
     BTreeMap::new()
+}
+
+#[allow(dead_code)]
+fn _touch_digest_entry() -> ContentDigestEntry {
+    digest_entry(1, "x", "s", "d", 0)
 }

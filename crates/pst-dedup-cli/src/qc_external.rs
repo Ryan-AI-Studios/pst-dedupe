@@ -83,8 +83,8 @@ impl ScanpstResult {
 
 /// Run an operator-supplied independent reader against a **local copy** of the PST.
 ///
-/// `tool_path` must be an absolute filesystem path (BYOB — never a URL).
-/// Compares **counts only** when the tool emits parseable stdout.
+/// `tool_path` must be an **absolute** filesystem path (BYOB — never a URL or relative path).
+/// `Ok` requires parseable `message_count`; exit 0 alone is **not** enough (DoD-12).
 pub fn run_independent_reader(
     tool_path: &Path,
     pst_path: &Path,
@@ -96,6 +96,11 @@ pub fn run_independent_reader(
     {
         return IndependentReaderResult::skipped(
             "BYOB path only — URL/fetch not accepted (rule 15)",
+        );
+    }
+    if !tool_path.is_absolute() {
+        return IndependentReaderResult::skipped(
+            "BYOB absolute path required — relative external reader path not accepted (DoD-12)",
         );
     }
     if !tool_path.is_file() {
@@ -118,7 +123,7 @@ pub fn run_independent_reader(
     let temp_dir = std::env::temp_dir().join(format!(
         "pst-dedup-qc-ext-{}-{}",
         std::process::id(),
-        Instant::now().elapsed().as_nanos()
+        unique_stamp()
     ));
     if let Err(e) = fs::create_dir_all(&temp_dir) {
         return IndependentReaderResult::skipped(format!("temp dir: {e}"));
@@ -157,24 +162,31 @@ pub fn run_independent_reader(
         RunOutcome::Done { status, stdout, .. } => {
             let (messages, folders) = parse_reader_counts(&stdout);
             let code = status.code();
-            // Counts-only: success when we could parse at least message count, or exit 0.
-            let ok = messages.is_some() || code == Some(0);
-            IndependentReaderResult {
-                status: if ok {
-                    ExternalStatus::Ok
-                } else {
-                    ExternalStatus::Failed
-                },
-                reason: if ok {
-                    None
-                } else {
-                    Some("could not parse counts from reader output".into())
-                },
-                tool: Some(tool_name),
-                version: None,
-                message_count: messages,
-                folder_count: folders,
-                exit_code: code,
+            // Ok requires parseable message_count (exit 0 alone is insufficient — DoD-12).
+            if let Some(msg_count) = messages {
+                IndependentReaderResult {
+                    status: ExternalStatus::Ok,
+                    reason: None,
+                    tool: Some(tool_name),
+                    version: None,
+                    message_count: Some(msg_count),
+                    folder_count: folders,
+                    exit_code: code,
+                }
+            } else if code == Some(0) {
+                IndependentReaderResult::skipped(
+                    "exit 0 but no parseable message_count — not Ok (DoD-12 counts required)",
+                )
+            } else {
+                IndependentReaderResult {
+                    status: ExternalStatus::Failed,
+                    reason: Some("could not parse message_count from reader output".into()),
+                    tool: Some(tool_name),
+                    version: None,
+                    message_count: None,
+                    folder_count: folders,
+                    exit_code: code,
+                }
             }
         }
     }
@@ -302,12 +314,73 @@ pub fn guess_scanpst_build(scanpst_path: &Path) -> Option<String> {
     None
 }
 
+/// Verify that the installed scanpst accepts the exact `-no repair` token (rule 2).
+///
+/// Order:
+/// 1. Sibling `.accepts-no-repair` flag file (tests / operator pin)
+/// 2. Env `PST_DEDUP_SCANPST_NO_REPAIR_OK=1` (operator opt-in)
+/// 3. Help probe (`-?` / `/?` / `-help`) looking for "no repair" text
+///
+/// Unverifiable ⇒ skip (never risk repair path).
+pub fn verify_scanpst_no_repair(scanpst_path: &Path) -> Result<(), String> {
+    let flag = scanpst_path.with_extension("accepts-no-repair");
+    if flag.is_file() {
+        return Ok(());
+    }
+    if std::env::var("PST_DEDUP_SCANPST_NO_REPAIR_OK")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    // Help probe — look for "no repair" (case-insensitive) in usage text.
+    for help_arg in ["-?", "/?", "-help", "--help"] {
+        let mut cmd = Command::new(scanpst_path);
+        cmd.arg(help_arg)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let run = run_with_timeout(cmd, Duration::from_secs(5));
+        if let RunOutcome::Done { stdout, stderr, .. } = run {
+            let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+            if combined.contains("no repair") || combined.contains("-no repair") {
+                return Ok(());
+            }
+        }
+    }
+    Err(
+        "scanpst -no repair support unverifiable; skip rather than risk repair (rule 2 / D-0080-scanpst-arg)"
+            .into(),
+    )
+}
+
+/// Recognized scanpst **success** log markers (case-insensitive).
+///
+/// Non-empty logs without a success marker are **never** treated as Ok (DoD-13).
+/// Documented patterns: "no errors", "no problems found", "complete", "0 errors".
+pub fn log_indicates_scanpst_success(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    // Explicit success phrases (checked before error heuristics so "no errors found" wins).
+    if lower.contains("no errors")
+        || lower.contains("no problems found")
+        || lower.contains("0 errors")
+        || lower.contains("zero errors")
+    {
+        return true;
+    }
+    // "complete" alone is success only when no hard error markers are present.
+    if lower.contains("complete") && !lower.contains("incomplete") {
+        return !(lower.contains("is corrupt") || lower.contains("serious error"));
+    }
+    false
+}
+
 /// Run scanpst `-no repair` on a **local temp copy** of the deliverable.
 ///
-/// - Verifies `-no repair` token is present in the command we build; if the installed
-///   build is below [`SCANPST_MIN_BUILD`], skips (GUI-only would hang).
+/// - Verifies build ≥ [`SCANPST_MIN_BUILD`] and `-no repair` support (else skip).
 /// - `.bak` next to the copy ⇒ hard error (proves repair ran).
-/// - Parses the log, not the exit code.
+/// - Parses the log for **recognized success markers**, not the exit code.
+/// - Unrecognized non-empty log ⇒ Skipped/Failed, never Ok.
 pub fn run_scanpst(scanpst_path: &Path, pst_path: &Path, timeout: Duration) -> ScanpstResult {
     if !scanpst_path.is_file() {
         return ScanpstResult::skipped(format!("scanpst not found: {}", scanpst_path.display()));
@@ -338,10 +411,22 @@ pub fn run_scanpst(scanpst_path: &Path, pst_path: &Path, timeout: Duration) -> S
         );
     }
 
+    if let Err(reason) = verify_scanpst_no_repair(scanpst_path) {
+        return ScanpstResult {
+            status: ExternalStatus::Skipped,
+            reason: Some(reason),
+            build,
+            log_path: None,
+            bak_present: false,
+            log_summary: None,
+            hard_error: false,
+        };
+    }
+
     let temp_dir = std::env::temp_dir().join(format!(
         "pst-dedup-scanpst-{}-{}",
         std::process::id(),
-        Instant::now().elapsed().as_nanos()
+        unique_stamp()
     ));
     if let Err(e) = fs::create_dir_all(&temp_dir) {
         return ScanpstResult::skipped(format!("temp dir: {e}"));
@@ -439,25 +524,39 @@ pub fn run_scanpst(scanpst_path: &Path, pst_path: &Path, timeout: Duration) -> S
                         log_summary: None,
                         hard_error: false,
                     }
-                } else {
-                    let summary = summarize_scanpst_log(&log_text);
-                    let failed = log_suggests_errors(&log_text);
+                } else if log_suggests_errors(&log_text) {
                     ScanpstResult {
-                        status: if failed {
-                            ExternalStatus::Failed
-                        } else {
-                            ExternalStatus::Ok
-                        },
-                        reason: if failed {
-                            Some("scanpst log indicates errors".into())
-                        } else {
-                            None
-                        },
+                        status: ExternalStatus::Failed,
+                        reason: Some("scanpst log indicates errors".into()),
                         build,
                         log_path: log_path.map(|p| p.display().to_string()),
                         bak_present: false,
-                        log_summary: summary,
-                        hard_error: failed,
+                        log_summary: summarize_scanpst_log(&log_text),
+                        hard_error: true,
+                    }
+                } else if log_indicates_scanpst_success(&log_text) {
+                    ScanpstResult {
+                        status: ExternalStatus::Ok,
+                        reason: None,
+                        build,
+                        log_path: log_path.map(|p| p.display().to_string()),
+                        bak_present: false,
+                        log_summary: summarize_scanpst_log(&log_text),
+                        hard_error: false,
+                    }
+                } else {
+                    // Non-empty but unrecognized — never Ok (DoD-13).
+                    ScanpstResult {
+                        status: ExternalStatus::Skipped,
+                        reason: Some(
+                            "scanpst log content unrecognized; not Ok without success markers (no errors / complete / 0 errors)"
+                                .into(),
+                        ),
+                        build,
+                        log_path: log_path.map(|p| p.display().to_string()),
+                        bak_present: false,
+                        log_summary: summarize_scanpst_log(&log_text),
+                        hard_error: false,
                     }
                 }
             }
@@ -485,6 +584,18 @@ pub fn run_scanpst_auto(pst_path: &Path, timeout: Duration) -> ScanpstResult {
     }
 }
 
+/// Monotonic-ish unique stamp for temp dirs (never use Instant::elapsed ≈ 0).
+fn unique_stamp() -> u128 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    nanos.saturating_add(u128::from(n))
+}
+
 fn summarize_scanpst_log(text: &str) -> Option<String> {
     if text.is_empty() {
         return None;
@@ -495,11 +606,20 @@ fn summarize_scanpst_log(text: &str) -> Option<String> {
 
 fn log_suggests_errors(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
+    // Success phrases take precedence ("no errors found" contains "errors found").
+    if lower.contains("no errors")
+        || lower.contains("no problems found")
+        || lower.contains("0 errors")
+        || lower.contains("zero errors")
+    {
+        return false;
+    }
     // Conservative: explicit error markers only.
     lower.contains("errors found")
         || lower.contains("error found")
         || lower.contains("is corrupt")
         || lower.contains("serious error")
+        || lower.contains("errors were found")
 }
 
 /// Parse message/folder counts from pffinfo/readpst-like stdout (best-effort).
@@ -684,6 +804,8 @@ mod tests {
             format!("{SCANPST_MIN_BUILD}\n"),
         )
         .expect("version pin");
+        // Stub-friendly: accept -no repair without help probe.
+        fs::write(cmd_path.with_extension("accepts-no-repair"), b"1\n").expect("no-repair pin");
     }
 
     #[test]
@@ -691,27 +813,27 @@ mod tests {
         let dir = TempDir::new().expect("tmp");
         let office = dir.path().join("Office16");
         fs::create_dir_all(&office).expect("dir");
-        let stub_exe = office.join("scanpst_stub.cmd");
+        let named_cmd = office.join("SCANPST.cmd");
+        // %2 is the pst path after -file (production argv shape).
         write_stub_cmd(
-            &stub_exe,
-            "echo No errors found > \"%~dp2validate.log\" 2>nul\r\nrem write log next to copy\r\nfor %%I in (%*) do if /I \"%%~xI\"==\".pst\" (echo No errors found> \"%%~dpnI.log\")\r\nexit /b 0\r\n",
+            &named_cmd,
+            "if not \"%~2\"==\"\" (echo No errors found> \"%~dpn2.log\")\r\nexit /b 0\r\n",
         )
         .expect("stub");
+        pin_scanpst_build(&named_cmd);
         let pst = dir.path().join("deliverable.pst");
         fs::write(&pst, b"fake-pst-bytes").expect("pst");
-
-        let named_cmd = office.join("SCANPST.cmd");
-        fs::copy(&stub_exe, &named_cmd).expect("copy");
-        pin_scanpst_build(&named_cmd);
 
         let r = run_scanpst(&named_cmd, &pst, Duration::from_secs(15));
         // May be Ok or Failed depending on log write; must not hard_error without bak.
         assert!(!r.bak_present, "{r:?}");
         assert!(!r.hard_error || r.status == ExternalStatus::Failed, "{r:?}");
-        // With a log, status may be Ok; empty log must never be Ok.
-        if r.status == ExternalStatus::Ok {
-            assert!(r.log_summary.is_some() || r.reason.is_none(), "{r:?}");
-        }
+        // With a success-marker log, status should be Ok.
+        assert_eq!(
+            r.status,
+            ExternalStatus::Ok,
+            "recognized success log must be Ok: {r:?}"
+        );
     }
 
     #[test]
@@ -720,16 +842,21 @@ mod tests {
         let office = dir.path().join("Office16");
         fs::create_dir_all(&office).expect("dir");
         let named_cmd = office.join("SCANPST.cmd");
+        // Production always passes: -file <pst> -no repair ...
+        // Write .bak next to %2 (the pst path after -file) — most reliable on cmd.
         write_stub_cmd(
             &named_cmd,
-            "for %%I in (%*) do if /I \"%%~xI\"==\".pst\" (echo repaired> \"%%~dpnI.bak\")\r\nexit /b 0\r\n",
+            "if not \"%~2\"==\"\" (echo repaired> \"%~dpn2.bak\")\r\nif not \"%~3\"==\"\" (echo repaired> \"%~dpn3.bak\")\r\nexit /b 0\r\n",
         )
         .expect("stub");
         pin_scanpst_build(&named_cmd);
         let pst = dir.path().join("deliverable.pst");
         fs::write(&pst, b"fake").expect("pst");
         let r = run_scanpst(&named_cmd, &pst, Duration::from_secs(15));
-        assert!(r.bak_present || r.hard_error, "{r:?}");
+        assert!(
+            r.bak_present || r.hard_error,
+            "expected bak hard error, got {r:?}"
+        );
         if r.bak_present {
             assert!(r.hard_error);
             assert_eq!(r.status, ExternalStatus::Failed);
@@ -822,5 +949,114 @@ mod tests {
                 .contains("log"),
             "{r:?}"
         );
+    }
+
+    #[test]
+    fn unrecognized_log_content_not_ok() {
+        let dir = TempDir::new().expect("tmp");
+        let office = dir.path().join("tools");
+        fs::create_dir_all(&office).expect("dir");
+        let named_cmd = office.join("SCANPST.cmd");
+        // Write a non-empty log without recognized success/error markers (%2 = pst after -file).
+        write_stub_cmd(
+            &named_cmd,
+            "if not \"%~2\"==\"\" (echo lorem ipsum random banner> \"%~dpn2.log\")\r\nexit /b 0\r\n",
+        )
+        .expect("stub");
+        pin_scanpst_build(&named_cmd);
+        let pst = dir.path().join("d.pst");
+        fs::write(&pst, b"x").expect("pst");
+        let r = run_scanpst(&named_cmd, &pst, Duration::from_secs(15));
+        assert_ne!(
+            r.status,
+            ExternalStatus::Ok,
+            "unrecognized log must not be Ok: {r:?}"
+        );
+        let reason = r.reason.as_deref().unwrap_or("").to_ascii_lowercase();
+        assert!(
+            reason.contains("unrecog") || reason.contains("success") || reason.contains("log"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn missing_no_repair_verification_skips() {
+        let dir = TempDir::new().expect("tmp");
+        let office = dir.path().join("tools");
+        fs::create_dir_all(&office).expect("dir");
+        let named_cmd = office.join("SCANPST.cmd");
+        // Version pin only — no .accepts-no-repair, no env, help has no "no repair".
+        write_stub_cmd(
+            &named_cmd,
+            "echo usage: SCANPST -file path\r\nexit /b 0\r\n",
+        )
+        .expect("stub");
+        fs::write(
+            named_cmd.with_extension("version"),
+            format!("{SCANPST_MIN_BUILD}\n"),
+        )
+        .expect("version");
+        let pst = dir.path().join("d.pst");
+        fs::write(&pst, b"x").expect("pst");
+        let prev = std::env::var("PST_DEDUP_SCANPST_NO_REPAIR_OK").ok();
+        std::env::remove_var("PST_DEDUP_SCANPST_NO_REPAIR_OK");
+        let r = run_scanpst(&named_cmd, &pst, Duration::from_secs(10));
+        if let Some(v) = prev {
+            std::env::set_var("PST_DEDUP_SCANPST_NO_REPAIR_OK", v);
+        }
+        assert_eq!(r.status, ExternalStatus::Skipped, "{r:?}");
+        assert!(
+            r.reason
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains("no repair")
+                || r.reason
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+                    .contains("unverif"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn relative_reader_path_skipped() {
+        let r = run_independent_reader(
+            Path::new("pffinfo.cmd"),
+            Path::new("nope.pst"),
+            Duration::from_secs(1),
+        );
+        assert_eq!(r.status, ExternalStatus::Skipped);
+        assert!(
+            r.reason
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains("absolute"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn exit_zero_without_counts_skipped_not_ok() {
+        let dir = TempDir::new().expect("tmp");
+        let stub = dir.path().join("pffinfo.cmd");
+        write_stub_cmd(&stub, "echo hello world\r\nexit /b 0\r\n").expect("stub");
+        let pst = dir.path().join("x.pst");
+        fs::write(&pst, b"not-real").expect("pst");
+        let r = run_independent_reader(&stub, &pst, Duration::from_secs(10));
+        assert_ne!(r.status, ExternalStatus::Ok, "{r:?}");
+        assert_eq!(r.status, ExternalStatus::Skipped, "{r:?}");
+        assert!(r.message_count.is_none());
+    }
+
+    #[test]
+    fn log_success_markers() {
+        assert!(log_indicates_scanpst_success("No errors found"));
+        assert!(log_indicates_scanpst_success("No problems found."));
+        assert!(log_indicates_scanpst_success("Scan complete. 0 errors."));
+        assert!(!log_indicates_scanpst_success("lorem ipsum banner"));
+        assert!(!log_indicates_scanpst_success(""));
     }
 }

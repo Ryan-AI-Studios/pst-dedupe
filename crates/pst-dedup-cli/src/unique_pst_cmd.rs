@@ -2172,6 +2172,10 @@ pub fn run_unique_pst_with_options(
                         .as_ref()
                         .map(|l| l.fail_count_for(&p.source_path, p.nid))
                         .unwrap_or(0);
+                    let attach_fail_names = attach_ledger
+                        .as_ref()
+                        .map(|l| l.fail_filenames_for(&p.source_path, p.nid))
+                        .unwrap_or_default();
                     // Match keep-set winner for 0075 All-Custodians aggregate.
                     let (dup_count, dup_sources) = keep_set
                         .winners
@@ -2210,6 +2214,7 @@ pub fn run_unique_pst_with_options(
                         meta.export_message_index = export_message_index;
                         meta.volume_index = volume_index;
                         meta.has_ledger_fail = attach_fails > 0;
+                        meta.ledger_failed_attach_names = attach_fail_names;
                     }
                 }
 
@@ -2489,6 +2494,7 @@ pub fn run_unique_pst_with_options(
                             has_embedded: false,
                             has_degraded: false,
                             has_ledger_fail: row.attachments_failed_count > 0,
+                            ledger_failed_attach_names: Vec::new(),
                             body_unavailable: false,
                             body_incomplete: false,
                             crc_suspect: false,

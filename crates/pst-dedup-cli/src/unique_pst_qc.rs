@@ -82,8 +82,13 @@ pub struct QcSampleCandidate {
     pub has_embedded: bool,
     /// Sampling stratum only — **never** used to explain unrelated property mismatches.
     pub has_degraded: bool,
-    /// Attachment ledger soft-fail on this message (explains empty attach hashes only).
+    /// Attachment ledger soft-fail on this message (sampling / empty-hash explain only when
+    /// filename-specific list is empty). Prefer [`Self::ledger_failed_attach_names`].
     pub has_ledger_fail: bool,
+    /// Filenames with attach-ledger Fail events for this message (case-preserving).
+    /// Missing output attaches are explained **only** when the filename matches (case-insensitive).
+    #[serde(default)]
+    pub ledger_failed_attach_names: Vec<String>,
     /// Source `body_unavailable` fidelity flag (explains body loss only, never CC/attaches).
     pub body_unavailable: bool,
     /// Source `body_incomplete` / truncated body flag (body explain only).
@@ -164,6 +169,10 @@ pub struct QcReportV1 {
     pub qc_level: String,
     pub source_differential: bool,
     pub content_digest_backed: bool,
+    /// True when content digests cover only a sample (or subset) while QC requested broader coverage.
+    /// Spec honesty: never claim full content coverage when digests are sample-granularity.
+    #[serde(default)]
+    pub content_digest_partial: bool,
     pub volumes: Vec<QcVolumeResult>,
     pub messages_compared: u64,
     pub attachments_compared: u64,
@@ -371,6 +380,7 @@ pub fn candidates_from_export_and_meta(
                 has_embedded: false,
                 has_degraded: false,
                 has_ledger_fail: row.attachments_failed_count > 0,
+                ledger_failed_attach_names: Vec::new(),
                 body_unavailable: false,
                 body_incomplete: false,
                 crc_suspect: false,
@@ -445,6 +455,7 @@ pub fn candidate_from_write_msg(input: CandidateFromWriteMsg<'_>) -> QcSampleCan
         has_embedded,
         has_degraded,
         has_ledger_fail,
+        ledger_failed_attach_names: Vec::new(),
         body_unavailable: write_msg.body_unavailable,
         body_incomplete: write_msg.body_incomplete,
         crc_suspect: false, // filled by unique-pst from keep-set integrity when known
@@ -452,6 +463,16 @@ pub fn candidate_from_write_msg(input: CandidateFromWriteMsg<'_>) -> QcSampleCan
         display_cc: write_msg.display_cc.clone().unwrap_or_default(),
         display_bcc: display_bcc.to_string(),
     }
+}
+
+/// True when `filename` is in the message's attach-ledger fail set (case-insensitive).
+/// Empty/unnamed source attaches match only empty ledger-fail names (not any fail).
+fn attach_ledger_explains(cand: &QcSampleCandidate, filename: &str) -> bool {
+    let target = filename.trim().to_ascii_lowercase();
+    cand.ledger_failed_attach_names.iter().any(|n| {
+        let n = n.trim().to_ascii_lowercase();
+        n == target
+    })
 }
 
 /// True when a body-specific fidelity flag may explain body/digest differences.
@@ -512,6 +533,10 @@ pub struct ContentDigestEntry {
     #[serde(default)]
     pub body_html_len: usize,
     pub attaches: Vec<AttachDigestEntry>,
+    /// Optional production-path extras observed on source (empty in normal export).
+    /// Each prop is classified via the fidelity allowlist; unknown ⇒ `unexplained_loss`.
+    #[serde(default)]
+    pub extra_source_props: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -542,6 +567,78 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
 
     // Output-only without source digests: structural only — cannot emit defect from content.
     let content_capable = input.source_differential || content_digest_backed;
+
+    // Digest coverage (DoD-21): sample digests under full QC ⇒ partial, never silent pass.
+    let digest_covered_indices: BTreeSet<u64> = existing_digests
+        .as_ref()
+        .filter(|d| content_digests_are_source_origin(d))
+        .map(|d| {
+            d.volumes
+                .iter()
+                .flat_map(|v| v.messages.iter())
+                .map(|m| m.export_message_index)
+                .collect()
+        })
+        .unwrap_or_default();
+    let digests_qc_level = existing_digests
+        .as_ref()
+        .map(|d| d.qc_level.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let mut content_digest_partial = false;
+    if content_digest_backed {
+        let sample_granularity = digests_qc_level == "sample" || digests_qc_level == "structure";
+        if input.level == QcLevel::Full && sample_granularity {
+            content_digest_partial = true;
+            counts.record(FindingClass::Defect);
+            findings_list.push(QcFinding {
+                class: FindingClass::Defect,
+                property: "content_digests_incomplete".into(),
+                volume_index: 0,
+                source_path: String::new(),
+                source_nid: 0,
+                message_id_norm: String::new(),
+                detail: format!(
+                    "content digests incomplete for full (persisted qc_level={digests_qc_level})"
+                ),
+            });
+        } else if input.level == QcLevel::Full {
+            let missing: Vec<u64> = input
+                .candidates
+                .iter()
+                .map(|c| c.export_message_index)
+                .filter(|i| !digest_covered_indices.contains(i))
+                .collect();
+            if !missing.is_empty() {
+                content_digest_partial = true;
+                counts.record(FindingClass::Defect);
+                findings_list.push(QcFinding {
+                    class: FindingClass::Defect,
+                    property: "content_digests_incomplete".into(),
+                    volume_index: 0,
+                    source_path: String::new(),
+                    source_nid: 0,
+                    message_id_norm: String::new(),
+                    detail: format!(
+                        "content digests incomplete for full: {} candidate(s) lack digest coverage (e.g. idx={:?})",
+                        missing.len(),
+                        missing.iter().take(5).collect::<Vec<_>>()
+                    ),
+                });
+            }
+        } else if matches!(input.level, QcLevel::Sample) {
+            // Partial when sample set exceeds covered digests (still compare covered).
+            let sample_probe = select_sample_indices(input.candidates, input.sample_max);
+            let any_uncovered = sample_probe.iter().any(|&ci| {
+                input
+                    .candidates
+                    .get(ci)
+                    .is_some_and(|c| !digest_covered_indices.contains(&c.export_message_index))
+            });
+            if any_uncovered {
+                content_digest_partial = true;
+            }
+        }
+    }
 
     let sample_idxs: Vec<usize> = match input.level {
         QcLevel::Off => Vec::new(),
@@ -629,17 +726,40 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
                 // Content comparison for sample/full (source-differential or source digests).
                 if matches!(input.level, QcLevel::Sample | QcLevel::Full) && content_capable {
                     let mut digest_entries = Vec::new();
-                    let mut out_by_mid = index_output_by_mid(&path);
+                    let mut out_index = index_output_messages(&path);
 
                     for &ci in &sample_idxs {
                         let cand = match input.candidates.get(ci) {
                             Some(c) if c.volume_index == vol.volume_index => c,
                             _ => continue,
                         };
+                        // Clean-room: never silently pass candidates absent from digests.
+                        if content_digest_backed
+                            && !input.source_differential
+                            && !digest_covered_indices.contains(&cand.export_message_index)
+                        {
+                            content_digest_partial = true;
+                            counts.record(FindingClass::Defect);
+                            findings_list.push(QcFinding {
+                                class: FindingClass::Defect,
+                                property: "content_digest_unavailable".into(),
+                                volume_index: cand.volume_index,
+                                source_path: cand.source_path.clone(),
+                                source_nid: cand.source_nid,
+                                message_id_norm: cand.message_id_norm.clone(),
+                                detail: format!(
+                                    "no source content digest for export_message_index={} (partial/unavailable; not silent pass)",
+                                    cand.export_message_index
+                                ),
+                            });
+                            vol_msgs_compared = vol_msgs_compared.saturating_add(1);
+                            messages_compared = messages_compared.saturating_add(1);
+                            continue;
+                        }
                         let compare = compare_one_message(CompareOneArgs {
                             cand,
                             handles: &mut handle_cache,
-                            out_by_mid: &mut out_by_mid,
+                            out_index: &mut out_index,
                             out_path: &path,
                             source_differential: input.source_differential,
                             existing: existing_digests
@@ -664,8 +784,10 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
                             findings_list.push(f);
                         }
                         // Persist digests only from source-side reads (export path).
+                        // Never write extra_source_props (empty on export).
                         if input.source_differential {
-                            if let Some(entry) = compare.digest_entry {
+                            if let Some(mut entry) = compare.digest_entry {
+                                entry.extra_source_props.clear();
                                 digest_entries.push(entry);
                             }
                         }
@@ -928,6 +1050,7 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
         qc_level: input.level.as_str().into(),
         source_differential: input.source_differential,
         content_digest_backed,
+        content_digest_partial,
         volumes: vol_results,
         messages_compared,
         attachments_compared,
@@ -1071,7 +1194,7 @@ fn normalize_mid_key(s: &str) -> String {
 struct CompareOneArgs<'a> {
     cand: &'a QcSampleCandidate,
     handles: &'a mut PstHandleCache,
-    out_by_mid: &'a mut BTreeMap<String, MessageContentDetail>,
+    out_index: &'a mut OutputMessageIndex,
     out_path: &'a Path,
     source_differential: bool,
     existing: Option<&'a ContentDigestsFile>,
@@ -1083,7 +1206,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
     let CompareOneArgs {
         cand,
         handles,
-        out_by_mid,
+        out_index,
         out_path,
         source_differential,
         existing,
@@ -1154,60 +1277,56 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                     || (!cand.message_id_norm.is_empty()
                         && m.message_id_norm == cand.message_id_norm)
             })
-            .map(|m| MessageContentDetail {
-                digest: m.content_digest.clone(),
-                message_id: m.message_id_norm.clone(),
-                // Prefer persisted field-level data so clean-room under parents_only
-                // can body-match (DoD-21); never silently zero these when present.
-                subject: m.subject.clone(),
-                display_to: m.display_to.clone(),
-                display_cc: m.display_cc.clone(),
-                body_plain_len: m.body_plain_len,
-                body_html_len: m.body_html_len,
-                attaches: m
-                    .attaches
-                    .iter()
-                    .map(|a| {
-                        (
-                            a.filename.clone(),
-                            a.size,
-                            String::new(),
-                            a.payload_sha256.clone(),
-                        )
-                    })
-                    .collect(),
-                attach_list_error: None,
+            .map(|m| {
+                // Production unexplained_loss path (DoD-9): extras on digest entry.
+                for prop in &m.extra_source_props {
+                    if prop.trim().is_empty() {
+                        continue;
+                    }
+                    let (class, _) = contract.classify(prop, false);
+                    findings.push(QcFinding {
+                        class,
+                        property: prop.clone(),
+                        volume_index: cand.volume_index,
+                        source_path: cand.source_path.clone(),
+                        source_nid: cand.source_nid,
+                        message_id_norm: cand.message_id_norm.clone(),
+                        detail: format!(
+                            "extra_source_prop '{prop}' classified via content digest production path"
+                        ),
+                    });
+                }
+                MessageContentDetail {
+                    digest: m.content_digest.clone(),
+                    message_id: m.message_id_norm.clone(),
+                    // Prefer persisted field-level data so clean-room under parents_only
+                    // can body-match (DoD-21); never silently zero these when present.
+                    subject: m.subject.clone(),
+                    display_to: m.display_to.clone(),
+                    display_cc: m.display_cc.clone(),
+                    body_plain_len: m.body_plain_len,
+                    body_html_len: m.body_html_len,
+                    attaches: m
+                        .attaches
+                        .iter()
+                        .map(|a| {
+                            (
+                                a.filename.clone(),
+                                a.size,
+                                String::new(),
+                                a.payload_sha256.clone(),
+                            )
+                        })
+                        .collect(),
+                    attach_list_error: None,
+                }
             })
     } else {
         None
     };
 
-    // Output side: by normalized MID, then subject fallback.
-    let mid_key = normalize_mid_key(&cand.message_id_norm);
-    let out_detail = {
-        let by_mid = if !mid_key.is_empty() {
-            out_by_mid.get(&mid_key).cloned().or_else(|| {
-                out_by_mid
-                    .values()
-                    .find(|d| normalize_mid_key(&d.message_id) == mid_key)
-                    .cloned()
-            })
-        } else {
-            None
-        };
-        by_mid.or_else(|| {
-            if cand.subject.is_empty() {
-                None
-            } else {
-                out_by_mid
-                    .values()
-                    .find(|d| d.subject.eq_ignore_ascii_case(&cand.subject))
-                    .cloned()
-            }
-        })
-    };
-
     let Some(src) = source_detail else {
+        // Still try to consume an output slot? No — without source we cannot compare.
         return MsgCompareResult {
             findings,
             attachments_compared,
@@ -1215,6 +1334,15 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             digest_entry: None,
         };
     };
+
+    // Output side: MID first, then no-MID multimap scored by subject/body/digest (consume).
+    let out_detail = out_index.take_match(
+        &cand.message_id_norm,
+        &cand.subject,
+        cand.source_nid,
+        Some(src.digest.as_str()),
+        Some(src.body_plain_len),
+    );
 
     let digest_entry = ContentDigestEntry {
         export_message_index: cand.export_message_index,
@@ -1236,6 +1364,8 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                 payload_sha256: h.clone(),
             })
             .collect(),
+        // Export path always empty; production extras only via crafted digests / tests.
+        extra_source_props: Vec::new(),
     };
 
     let Some(out) = out_detail else {
@@ -1309,11 +1439,13 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             .iter()
             .map(|(f, _, _, h)| (f.to_ascii_lowercase(), h.as_str()))
             .collect();
+        let mut matched_out: BTreeSet<String> = BTreeSet::new();
         for (fnm, sz, _, ph) in &src.attaches {
             attachments_compared = attachments_compared.saturating_add(1);
+            let fnm_key = fnm.to_ascii_lowercase();
             if ph.is_empty() {
-                // Empty source hash: only attach-ledger soft-fail explains (never generic degraded).
-                let explained = cand.has_ledger_fail;
+                // Empty source hash: only filename-specific ledger fail explains.
+                let explained = attach_ledger_explains(cand, fnm);
                 let (class, _) = contract.classify("attachment_stream_soft_fail", explained);
                 findings.push(QcFinding {
                     class,
@@ -1330,9 +1462,12 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                 });
                 continue;
             }
-            match out_attach_map.get(&fnm.to_ascii_lowercase()) {
-                Some(out_ph) if *out_ph == ph.as_str() => {}
+            match out_attach_map.get(&fnm_key) {
+                Some(out_ph) if *out_ph == ph.as_str() => {
+                    matched_out.insert(fnm_key);
+                }
                 Some(out_ph) => {
+                    matched_out.insert(fnm_key);
                     let (class, _) = contract.classify("attachment_payload_sha256", false);
                     findings.push(QcFinding {
                         class,
@@ -1345,11 +1480,9 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                     });
                 }
                 None => {
-                    // Missing in output: ledger soft-fail on this message may explain
-                    // (export omitted a soft-failed attach that QC can re-read). Payload
-                    // hash mismatches above remain defects. Never use ledger to explain
-                    // CC/body (handled elsewhere with field-specific flags only).
-                    if cand.has_ledger_fail {
+                    // Missing in output: explain only when **this filename** is in the
+                    // attach-ledger fail set (never message-wide has_ledger_fail alone).
+                    if attach_ledger_explains(cand, fnm) {
                         let (class, _) = contract.classify("attachment_stream_soft_fail", true);
                         findings.push(QcFinding {
                             class,
@@ -1375,6 +1508,27 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                         });
                     }
                 }
+            }
+        }
+        // Unexpected output attaches not present on source.
+        for (f, _, _, _) in &out.attaches {
+            let key = f.to_ascii_lowercase();
+            if !matched_out.contains(&key)
+                && !src
+                    .attaches
+                    .iter()
+                    .any(|(sf, _, _, _)| sf.eq_ignore_ascii_case(f))
+            {
+                let (class, _) = contract.classify("attachment_by_value", false);
+                findings.push(QcFinding {
+                    class,
+                    property: "attachment_unexpected_output".into(),
+                    volume_index: cand.volume_index,
+                    source_path: cand.source_path.clone(),
+                    source_nid: cand.source_nid,
+                    message_id_norm: cand.message_id_norm.clone(),
+                    detail: format!("unexpected output attach {f} not present on source"),
+                });
             }
         }
     }
@@ -1510,29 +1664,106 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
     }
 }
 
-fn index_output_by_mid(path: &Path) -> BTreeMap<String, MessageContentDetail> {
-    let mut map = BTreeMap::new();
+/// Indexed output messages for QC matching (MID map + no-MID multimap).
+///
+/// No-MID messages with duplicate subjects must not overwrite one another (DoD-6).
+/// Matching consumes an entry so two same-subject messages cannot share one output.
+struct OutputMessageIndex {
+    by_mid: BTreeMap<String, MessageContentDetail>,
+    /// Remaining unmatched no-MID messages: (output_nid, detail).
+    no_mid: Vec<(u64, MessageContentDetail)>,
+}
+
+impl OutputMessageIndex {
+    fn take_match(
+        &mut self,
+        message_id_norm: &str,
+        subject: &str,
+        source_nid: u64,
+        prefer_digest: Option<&str>,
+        prefer_body_plain: Option<usize>,
+    ) -> Option<MessageContentDetail> {
+        let mid_key = normalize_mid_key(message_id_norm);
+        if !mid_key.is_empty() {
+            if let Some(d) = self.by_mid.remove(&mid_key) {
+                return Some(d);
+            }
+            let hit_key = self
+                .by_mid
+                .iter()
+                .find(|(_, d)| normalize_mid_key(&d.message_id) == mid_key)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = hit_key {
+                return self.by_mid.remove(&k);
+            }
+        }
+
+        // No-MID (or MID miss): score remaining no_mid entries.
+        if self.no_mid.is_empty() {
+            return None;
+        }
+        let subj_l = subject.to_ascii_lowercase();
+        let mut best_i: Option<usize> = None;
+        let mut best_score: i32 = i32::MIN;
+        for (i, (out_nid, d)) in self.no_mid.iter().enumerate() {
+            let mut score = 0i32;
+            if !subj_l.is_empty() && d.subject.eq_ignore_ascii_case(subject) {
+                score += 100;
+            } else if !subj_l.is_empty() {
+                continue; // subject required when provided
+            }
+            if source_nid != 0 && *out_nid == source_nid {
+                score += 50;
+            }
+            if let Some(dig) = prefer_digest {
+                if !dig.is_empty() && d.digest == dig {
+                    score += 40;
+                }
+            }
+            if let Some(bp) = prefer_body_plain {
+                if d.body_plain_len == bp {
+                    score += 20;
+                }
+            }
+            if score > best_score {
+                best_score = score;
+                best_i = Some(i);
+            }
+        }
+        // Require at least subject match (or empty subject + nid/digest).
+        if best_score < 50 && !subject.is_empty() {
+            // subject-only is enough (score 100); below 50 means no subject hit
+            if best_score < 100 {
+                return None;
+            }
+        }
+        best_i.map(|i| self.no_mid.remove(i).1)
+    }
+}
+
+fn index_output_messages(path: &Path) -> OutputMessageIndex {
+    let mut by_mid = BTreeMap::new();
+    let mut no_mid = Vec::new();
     let Ok(mut pst) = pst_reader::PstFile::open(path) else {
-        return map;
+        return OutputMessageIndex { by_mid, no_mid };
     };
     let Ok(folders) = pst.folders() else {
-        return map;
+        return OutputMessageIndex { by_mid, no_mid };
     };
     for folder in &folders {
         for &nid in &folder.message_nids {
             if let Ok(detail) = message_content_detail(&mut pst, nid.0) {
                 let key = normalize_mid_key(&detail.message_id);
                 if !key.is_empty() {
-                    map.insert(key, detail);
+                    by_mid.insert(key, detail);
                 } else {
-                    // Key by subject when no MID
-                    let sk = format!("subj:{}", detail.subject.to_ascii_lowercase());
-                    map.insert(sk, detail);
+                    // Multimap: unique by output nid so duplicate subjects never overwrite.
+                    no_mid.push((nid.0, detail));
                 }
             }
         }
     }
-    map
+    OutputMessageIndex { by_mid, no_mid }
 }
 
 /// Normalize folder path for case-insensitive segment comparison.
@@ -1949,24 +2180,46 @@ fn load_export_rows_for_qc(report_dir: &Path) -> Result<Vec<ExportMessageRow>, S
         .map_err(|e| e.to_string())?;
     let mut rows = Vec::new();
     for (i, rec) in rdr.records().enumerate() {
-        let rec = rec.map_err(|e| e.to_string())?;
+        let rec = rec.map_err(|e| format!("export_messages.csv row {}: {e}", i + 1))?;
         // source_path,folder_path,nid,message_id_norm,edrm_mih,content_hash_hex,volume_path,volume_index,export_message_index,...
         if rec.len() < 9 {
-            continue;
+            return Err(format!(
+                "export_messages.csv row {} malformed: expected ≥9 fields, got {} (truncated/corrupt row)",
+                i + 1,
+                rec.len()
+            ));
         }
+        let nid_raw = rec.get(2).unwrap_or("").trim();
+        let nid = parse_nid_strict(nid_raw).map_err(|e| {
+            format!(
+                "export_messages.csv row {}: invalid nid '{nid_raw}': {e}",
+                i + 1
+            )
+        })?;
+        let volume_index = rec.get(7).and_then(|s| s.parse().ok()).ok_or_else(|| {
+            format!(
+                "export_messages.csv row {}: invalid volume_index {:?}",
+                i + 1,
+                rec.get(7)
+            )
+        })?;
+        let export_message_index = rec.get(8).and_then(|s| s.parse().ok()).ok_or_else(|| {
+            format!(
+                "export_messages.csv row {}: invalid export_message_index {:?}",
+                i + 1,
+                rec.get(8)
+            )
+        })?;
         rows.push(ExportMessageRow {
             source_path: rec.get(0).unwrap_or("").to_string(),
             folder_path: rec.get(1).unwrap_or("").to_string(),
-            nid: parse_nid(rec.get(2).unwrap_or("")),
+            nid,
             message_id_norm: rec.get(3).unwrap_or("").to_string(),
             edrm_mih: rec.get(4).unwrap_or("").to_string(),
             content_hash_hex: rec.get(5).unwrap_or("").to_string(),
             volume_path: rec.get(6).unwrap_or("").to_string(),
-            volume_index: rec.get(7).and_then(|s| s.parse().ok()).unwrap_or(1),
-            export_message_index: rec
-                .get(8)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or((i as u64) + 1),
+            volume_index,
+            export_message_index,
             attachments_failed_count: rec.get(9).and_then(|s| s.parse().ok()).unwrap_or(0),
             duplicate_source_count: 0,
             duplicate_sources: String::new(),
@@ -1976,13 +2229,22 @@ fn load_export_rows_for_qc(report_dir: &Path) -> Result<Vec<ExportMessageRow>, S
     Ok(rows)
 }
 
-fn parse_nid(s: &str) -> u64 {
+fn parse_nid_strict(s: &str) -> Result<u64, String> {
     let t = s.trim();
-    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        u64::from_str_radix(hex, 16).unwrap_or(0)
-    } else {
-        t.parse().unwrap_or(0)
+    if t.is_empty() {
+        return Err("empty nid".into());
     }
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).map_err(|e| e.to_string())
+    } else {
+        t.parse().map_err(|e| format!("{e}"))
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn parse_nid(s: &str) -> u64 {
+    parse_nid_strict(s).unwrap_or(0)
 }
 
 /// Hash bytes for negative tests / digests.
@@ -2045,6 +2307,7 @@ mod tests {
             has_embedded: false,
             has_degraded: false,
             has_ledger_fail: false,
+            ledger_failed_attach_names: Vec::new(),
             body_unavailable: false,
             body_incomplete: false,
             crc_suspect: false,

@@ -7,7 +7,7 @@
 //! - `export_attachments.csv` (track 0073; `--attach-ledger=full`)
 //! - `decisions.csv` / `keepset.json` / optional `integrity.csv` (orchestrator)
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -738,6 +738,8 @@ pub struct AttachLedgerSink {
     pub omitted_by_policy: u64,
     /// Per (source_path, msg_nid) fail counts for export_messages column (all modes).
     pub msg_fail_counts: HashMap<(String, u64), u64>,
+    /// Per (source_path, msg_nid) failed attachment filenames (case-preserving; match case-insensitive).
+    pub msg_fail_filenames: HashMap<(String, u64), BTreeSet<String>>,
     /// CSV rows accepted for write (including truncation marker).
     pub rows_written: u64,
     pub truncated: bool,
@@ -775,6 +777,7 @@ impl AttachLedgerSink {
             failed_by_reason: BTreeMap::new(),
             omitted_by_policy: 0,
             msg_fail_counts: HashMap::new(),
+            msg_fail_filenames: HashMap::new(),
             rows_written: 0,
             truncated: false,
             rows_dropped: 0,
@@ -806,10 +809,15 @@ impl AttachLedgerSink {
 
     /// Ingest one fidelity event (same path as the sink trait).
     pub fn ingest(&mut self, event: &AttachmentFidelityEvent) {
-        // Per-message fail counts in all modes (Off still fills export_messages).
+        // Per-message fail counts / filenames in all modes (Off still fills export_messages).
         if event.severity == AttachEventSeverity::Fail {
             let key = (event.source_path.clone(), event.msg_nid);
-            *self.msg_fail_counts.entry(key).or_insert(0) += 1;
+            *self.msg_fail_counts.entry(key.clone()).or_insert(0) += 1;
+            // Track empty filenames too (embedded MSG often has blank long-filename).
+            self.msg_fail_filenames
+                .entry(key)
+                .or_default()
+                .insert(event.attach_filename.clone());
         }
 
         if self.mode == AttachLedgerMode::Off {
@@ -867,6 +875,14 @@ impl AttachLedgerSink {
             .unwrap_or(0)
     }
 
+    /// Failed attachment filenames for a message locus (0080 attach-specific explain).
+    pub fn fail_filenames_for(&self, source_path: &str, msg_nid: u64) -> Vec<String> {
+        self.msg_fail_filenames
+            .get(&(source_path.to_string(), msg_nid))
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Flush CSV thread; update rows_written from thread if available.
     pub fn finish(mut self) -> Result<AttachLedgerFinish> {
         let csv_rows = if let Some(csv) = self.csv.take() {
@@ -885,6 +901,7 @@ impl AttachLedgerSink {
             failed_by_reason: self.failed_by_reason,
             omitted_by_policy: self.omitted_by_policy,
             msg_fail_counts: self.msg_fail_counts,
+            msg_fail_filenames: self.msg_fail_filenames,
             rows_written: rows,
             truncated: self.truncated,
         })
@@ -941,6 +958,7 @@ pub struct AttachLedgerFinish {
     pub failed_by_reason: BTreeMap<String, u64>,
     pub omitted_by_policy: u64,
     pub msg_fail_counts: HashMap<(String, u64), u64>,
+    pub msg_fail_filenames: HashMap<(String, u64), BTreeSet<String>>,
     pub rows_written: u64,
     pub truncated: bool,
 }
@@ -951,6 +969,13 @@ impl AttachLedgerFinish {
             .get(&(source_path.to_string(), msg_nid))
             .copied()
             .unwrap_or(0)
+    }
+
+    pub fn fail_filenames_for(&self, source_path: &str, msg_nid: u64) -> Vec<String> {
+        self.msg_fail_filenames
+            .get(&(source_path.to_string(), msg_nid))
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Populate additive export-section fields from this ledger.
