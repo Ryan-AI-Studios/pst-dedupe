@@ -54,14 +54,15 @@ Risks of manual Outlook / legacy Exchange dumps (disclose when used): incomplete
 
 Recommended counsel-grade sequence:
 
-1. **`inspect`** — confirm Unicode PST, rough folder/message counts.  
-2. **`scan --json`** — integrity + CRC telemetry; capture preflight recommendation.  
-3. **Optional deep-attach** — `--deep-attach-preflight` when attachment fidelity is matter-critical.  
-4. **`unique-pst`** — keep-set resolve → streaming write → report pack.  
-5. **Exit / report** — read process exit + `summary.json` (`fidelity`, `export_risk`, `exit_reason`, `phase_timings`).  
-6. **QC / ScanPST-on-copy** — default `--qc-level sample`; optional `--qc-scanpst` / external reader; ScanPST only on a copy (§5).  
-7. **Handoff** — unique PST volume(s) + report pack subset; apply basename only if Matter Archive mapping is retained (§7).  
-8. **Disposition** — after hold release, purge workstation intermediates per firm policy (§8).
+1. **`inspect`** — confirm Unicode PST, rough folder/message counts.
+2. **`scan --json`** — integrity + CRC telemetry; capture preflight recommendation.
+3. **Optional deep-attach** — `--deep-attach-preflight` when attachment fidelity is matter-critical.
+4. **Optional Mode A promote** — `--promote-on-attach-fail` when a complete peer copy should win over an incomplete first-ranked peer (default off; see §2a).
+5. **`unique-pst`** — keep-set resolve → streaming write → report pack.
+6. **Exit / report** — read process exit + `summary.json` (`fidelity`, `export_risk`, `exit_reason`, `phase_timings`).
+7. **QC / ScanPST-on-copy** — default `--qc-level sample`; optional `--qc-scanpst` / external reader; ScanPST only on a copy (§5).
+8. **Handoff** — unique PST volume(s) + report pack subset; apply basename only if Matter Archive mapping is retained (§7).
+9. **Disposition** — after hold release, purge workstation intermediates per firm policy (§8).
 
 Day-1 CLI sketch:
 
@@ -77,6 +78,48 @@ Day-1 CLI sketch:
 ```
 
 Optional timing harness (no client paths baked in): [`scripts/unique-pst-timing.ps1`](../scripts/unique-pst-timing.ps1).
+
+---
+
+## 2a. Mode A promote-on-attach-fail (0083) & cross-custodian disclosure
+
+**Default is Mode C (ledger-only):** incomplete attaches on the export winner are written best-effort, ledgered in `export_attachments.csv`, and exit honesty stays exit **64** when fail-on-partial is on.
+
+**Mode A** (`--promote-on-attach-fail`, default **off**) is **pre-write only**: before a family commits to the unique PST/EML, if the ranked peer materializes with incomplete attachments and a later peer is complete, the complete peer becomes the export winner. Mode B (write-time mid-message promote / rewrite) is **not supported** and will not ship.
+
+### When to enable
+
+| Situation | Recommendation |
+|---|---|
+| Multi-custodian global dedupe; attach completeness is production-critical | Enable Mode A; prefer also `--deep-attach-preflight` for richer incomplete signals |
+| Single-source or `--dedupe-scope per-source` isolation | Mode A only walks peers **within** one source — no cross-custodian promote |
+| Reproducible Mode C historical runs | Leave flag **off** |
+
+### Sedona “cross-custodian de-duplication”
+
+Default keep-set grouping unites messages **across custodians** (global scope). Mode A peer walk uses that same group, so under global scope selecting another custodian’s complete copy **is** cross-custodian de-duplication (Sedona Glossary term). ESI protocols often require **disclosing** when cross-custodian dedup is in play and which custodians held a suppressed copy.
+
+**Disclosure inventory already on Unique decision / export_messages rows:**
+
+- `duplicate_sources` / `duplicate_source_count` — basenames of other group members (including soft-skipped incomplete peers after Mode A)
+- `decided_by=promoted_after_attach_incomplete` — Mode A recovered a complete peer
+- `decided_by=mode_c_fallback_all_peers_incomplete` — Mode A **failed** to find a complete peer; filter these rows for counsel review
+- `export_attachments.csv` with `winner_promoted=true` on soft-skipped incomplete loci
+
+### Honesty ceilings
+
+- **Cloud / modern link-only attaches** (OneDrive/SharePoint) are **not** detected as incomplete without named-property resolution (**D-0080-cloud-attachments**). Mode A will not promote away from an undetected cloud-link “complete” copy.
+- Mode A does **not** change grouping (who is a peer) — only which peer wins export after grouping. Future attach-byte identity (**D-0076-attach-content**) can fracture incomplete vs complete into different groups; Mode A cannot cross that split.
+- Peer order is existing keep-set `rank_key` only — **no** “least incomplete” re-rank.
+
+```powershell
+.\pst-dedup.exe unique-pst C:\evidence\custA.pst C:\evidence\custB.pst `
+  --out C:\work\unique.pst `
+  --report-dir C:\work\unique_report `
+  --promote-on-attach-fail `
+  --deep-attach-preflight `
+  --json
+```
 
 ---
 

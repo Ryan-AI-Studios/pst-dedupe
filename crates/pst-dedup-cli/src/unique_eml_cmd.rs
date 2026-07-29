@@ -14,9 +14,9 @@ use crate::grouping_cli::{format_grouping_stats_human, grouping_context_from_cli
 use crate::keep_set_cmd::rank_context_from_cli;
 use dedup_engine::integrity::{IntegrityThresholds, ScanMode, SCAN_INTEGRITY_SCHEMA};
 use dedup_engine::keepset::{
-    finalize_with_materialize, recoverable_items_hint, resolve_groups_with_grouping,
+    finalize_with_materialize_opts, recoverable_items_hint, resolve_groups_with_grouping,
     sort_input_paths, write_keep_set_json, DecisionCsvWriter, FamilyPolicy, KeepPolicy,
-    KeepSetProvenance, MessageMaterializer,
+    KeepSetProvenance, MaterializeFinalizeOpts, MessageMaterializer,
 };
 use dedup_engine::{
     clamp_files_per_volume, merge_pack_degraded, validate_volume_prefix, write_canonical_eml,
@@ -75,6 +75,9 @@ pub struct UniqueEmlCliArgs {
     pub allow_partial_fidelity: bool,
     /// Opt-in risk gate level (0078).
     pub fail_on_export_risk: Option<String>,
+    /// Mode A pre-write promote-on-attach-fail (0083). Default false.
+    /// Full attach-ledger CSV for eml remains residual **D-0073-eml**.
+    pub promote_on_attach_fail: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -235,8 +238,12 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         ..EmlWriteOpts::default()
     };
 
-    let materialized_count = finalize_with_materialize(&mut resolved, &mut mat, &mut |_msg| Ok(()))
-        .map_err(|e| CliError::Msg(format!("materialize/promote: {e}")))?;
+    let mat_opts = MaterializeFinalizeOpts {
+        promote_on_attach_fail: args.promote_on_attach_fail,
+    };
+    let materialized_count =
+        finalize_with_materialize_opts(&mut resolved, &mut mat, &mat_opts, &mut |_msg| Ok(()))
+            .map_err(|e| CliError::Msg(format!("materialize/promote: {e}")))?;
 
     let keep_set = resolved.to_keep_set();
     if let Some(hint) = recoverable_items_hint(keep_set.stats.winners_from_recoverable_items) {

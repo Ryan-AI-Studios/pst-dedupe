@@ -499,6 +499,7 @@ fn cancel_exit_130_and_summary() {
         qc_external_reader: None,
         qc_scanpst: false,
         include_bcc_recipients: false,
+        promote_on_attach_fail: false,
     };
     let outcome = pst_dedup_cli::run_unique_pst_with_options(
         args,
@@ -518,4 +519,106 @@ fn cancel_exit_130_and_summary() {
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(v["exit_code"].as_u64(), Some(130));
     assert_eq!(v["exit_reason"], serde_json::json!(["CANCELLED"]));
+    assert_eq!(
+        v["promote_on_attach_fail"], false,
+        "cancelled summary must echo promote_on_attach_fail=false when flag off"
+    );
+}
+
+/// 0083: cancelled summary must echo `promote_on_attach_fail: true` when requested.
+#[test]
+fn cancel_summary_echoes_promote_on_attach_fail_true() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixture missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+    let cancel = Arc::new(AtomicBool::new(true));
+    let args = pst_dedup_cli::UniquePstCliArgs {
+        paths: vec![sample],
+        out: out.clone(),
+        report_dir: Some(report.clone()),
+        policy: dedup_engine::keepset::KeepPolicy::FirstSeen,
+        family_policy: dedup_engine::keepset::FamilyPolicy::KeepAttachmentsWithParent,
+        prefer_path_contains: vec![],
+        prefer_bcc_copy: false,
+        prefer_folder_class: false,
+        folder_rank: vec![],
+        source_rank: vec![],
+        rank_folder_class_first: false,
+        fidelity_rank: "binary".into(),
+        decision_csv: None,
+        keep_set_json: None,
+        folder_layout: pst_dedup_cli::FolderLayoutArg::Preserve,
+        max_volume_bytes: None,
+        overwrite: false,
+        verify_hash: false,
+        also_eml: None,
+        no_tier2: false,
+        no_attachments: true,
+        json: false,
+        mode: dedup_engine::integrity::ScanMode::BestEffort,
+        max_skip_rate: 0.05,
+        max_crc_skip_rate: 0.01,
+        max_failed_file_rate: 0.0,
+        allow_failed_files: false,
+        integrity_csv: None,
+        skip_limit: 10_000,
+        attach_ledger: pst_dedup_cli::unique_export_report::AttachLedgerMode::Off,
+        attach_ledger_max_rows: 500_000,
+        ledger_path_mode: pst_dedup_cli::unique_export_report::LedgerPathMode::Full,
+        deep_attach_preflight: false,
+        deep_attach_level: "head".into(),
+        deep_attach_max_attaches: 50_000,
+        deep_attach_max_probe_bytes: 268_435_456,
+        deep_attach_per_attach_max_bytes: 1_048_576,
+        deep_attach_max_probe_time_ms: 2000,
+        deep_attach_max_open_psts: 32,
+        deep_attach_max_peer_probes: 3,
+        max_attach_fail_rate: 0.05,
+        strong_content_hash: "off".into(),
+        dedupe_scope: "global".into(),
+        tier1_verify: "off".into(),
+        tier1_backfill: false,
+        identity_ignore_inline_attachments: false,
+        allow_cross_mid_tier2: false,
+        allow_degenerate_tier2: false,
+        allow_crc_suspect_tier2: false,
+        crc_log_limit: 10,
+        crc_log_interval_secs: 30,
+        fail_on_partial_fidelity: true,
+        allow_partial_fidelity: false,
+        fail_on_export_risk: None,
+        max_open_psts: 32,
+        qc_level: pst_dedup_cli::unique_pst_qc::QcLevel::Off,
+        qc_sample_max: 64,
+        qc_external_reader: None,
+        qc_scanpst: false,
+        include_bcc_recipients: false,
+        promote_on_attach_fail: true,
+    };
+    let outcome = pst_dedup_cli::run_unique_pst_with_options(
+        args,
+        pst_dedup_cli::UniquePstRunOptions {
+            cancel: Some(cancel),
+            stderr_progress: false,
+            on_progress: None,
+            on_log: None,
+        },
+    )
+    .expect("outcome");
+    assert!(outcome.cancelled);
+    assert_eq!(outcome.exit.as_u8(), 130);
+    let body = fs::read_to_string(&outcome.summary_path).expect("summary");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["promote_on_attach_fail"], true,
+        "cancelled summary must not hardcode promote_on_attach_fail=false"
+    );
 }

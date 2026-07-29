@@ -210,6 +210,17 @@ impl PstMaterializer {
     }
 }
 
+/// Optimistic `stream_available` for an attachment successfully returned by
+/// `list_attachments` when no deep-probe or cache outcome has classified it.
+///
+/// Listing success implies an exportable stream handle exists **or** a valid
+/// zero-byte by-value payload (including empty display name). Must not require
+/// `size > 0` or a non-empty filename (§2.5 rule 5 / 0083).
+#[inline]
+fn optimistic_listed_stream_available(_size: u32, _filename: &str) -> bool {
+    true
+}
+
 /// True hard failures that must promote peers. Everything else may soft-recover
 /// via `read_message_properties` (scan already classified many of these as recoverable).
 fn is_hard_structural_reason(reason: dedup_engine::IntegrityReason) -> bool {
@@ -417,14 +428,19 @@ impl MessageMaterializer for PstMaterializer {
                 const SMALL_ATTACH_CAP: u32 = 64 * 1024;
                 for att in list {
                     let mut data = None;
-                    // parents_only: metadata only — writer omits payloads by policy.
-                    // Default (no deep probe): optimistic size/filename (legacy).
-                    // Deep probe (0074): set from open/head outcome — never claim exportable on fail.
-                    let mut stream_available = if parents_only {
-                        false
-                    } else {
-                        att.size > 0 || !att.filename.is_empty()
-                    };
+                    // Metadata list always (incl. parents_only) for omit ledger rows.
+                    // Do **not** force stream_available=false under parents_only: policy omit
+                    // ≠ attach fail (0073), and Mode A incomplete (0083) must not treat
+                    // parents_only omit as attach-incomplete.
+                    // Default (no deep probe): optimistically available for any attach
+                    // successfully returned by list_attachments — including zero-byte
+                    // by-value with empty filename (§2.5 rule 5 / 0083). Do **not** gate
+                    // on size>0 or non-empty name (that falsely marked empty zero-byte
+                    // attaches incomplete and spuriously promoted Mode A).
+                    // Deep probe / cache (0074): may set false on fail — never claim
+                    // exportable after probe fail.
+                    let mut stream_available =
+                        optimistic_listed_stream_available(att.size, &att.filename);
 
                     // Prefer phase-1b cache (no re-I/O). Cache miss keeps optimistic.
                     let mut applied_cache = false;
@@ -705,6 +721,65 @@ impl AttachStreamSource for PstAttachStreamSource {
 #[cfg(test)]
 mod handle_cache_tests {
     use super::*;
+    use dedup_engine::integrity::RecoverableIntegrity;
+    use dedup_engine::{is_attach_incomplete, CanonicalAttachment, CanonicalMessage, MessageLocus};
+
+    /// Codex P2: zero-byte by-value with empty filename must stay optimistically
+    /// available (not Mode-A incomplete) when listing succeeded and no probe failed.
+    #[test]
+    fn zero_byte_empty_name_listed_attach_not_incomplete() {
+        // Materializer default before probe/cache overrides.
+        assert!(
+            optimistic_listed_stream_available(0, ""),
+            "zero-byte empty-name must be stream_available"
+        );
+        assert!(optimistic_listed_stream_available(0, "empty.bin"));
+        assert!(optimistic_listed_stream_available(10, ""));
+        assert!(optimistic_listed_stream_available(10, "a.bin"));
+
+        let locus = MessageLocus {
+            source_path: "C:/a.pst".into(),
+            source_pst: "a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 1,
+            is_orphaned: false,
+        };
+        let msg = CanonicalMessage {
+            locus,
+            message_id: None,
+            subject: Some("s".into()),
+            sender: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            recipients: Vec::new(),
+            message_flags: None,
+            submit_time: None,
+            size: Some(0),
+            message_class: None,
+            body_plain: Some("b".into()),
+            body_html: None,
+            attachments: vec![CanonicalAttachment {
+                filename: String::new(),
+                size: 0,
+                mime: None,
+                data: Some(vec![]),
+                stream_available: optimistic_listed_stream_available(0, ""),
+                attach_nid: Some(100),
+                attach_method: Some(1), // by-value
+            }],
+            fidelity: RecoverableIntegrity::clean(),
+            message_id_norm: None,
+            content_hash: [0; 32],
+            edrm_mih_hex: None,
+            body_incomplete: false,
+            body_unavailable: false,
+        };
+        assert!(
+            !is_attach_incomplete(&msg),
+            "zero-byte empty-name by-value with listed success must not be attach-incomplete"
+        );
+    }
 
     #[test]
     fn handle_cache_evicts_when_over_capacity() {

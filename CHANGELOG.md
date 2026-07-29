@@ -7,6 +7,16 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0083 — Mode A promote-on-attach-fail)
+
+- **`--promote-on-attach-fail`** (default **off**) on `unique-pst` and `unique-eml`: pre-write promote when a keep-set peer materializes with incomplete attachments and a ranked peer is complete.
+- **Incomplete predicate** centralized as `is_attach_incomplete` (`stream_available == false` or fail-severity attach fidelity; not body soft flags / parents_only omit / CRC noise). Cloud/modern link-only attaches remain undetectable without named props (**D-0080-cloud-attachments**).
+- **`decided_by` vocabulary:** `promoted_after_attach_incomplete`, `promoted_after_materialize_fail` (hard path unchanged), `mode_c_fallback_all_peers_incomplete` (all materializable peers incomplete → highest-ranked materializable; not group drop).
+- Summary counters: `promote_on_attach_fail`, `promoted_after_attach_incomplete_count`, `mode_c_fallback_all_peers_incomplete_count`.
+- Attach ledger: `winner_promoted` / peer locus honesty for soft-skipped incomplete peers and promoted winners.
+- **Mode B** write-time mid-message promote **permanently declined**. Cross-custodian disclosure documented (Sedona term; `duplicate_sources` invariant after promote).
+- Closes **D-0073-promote**. **D-0073-eml** full ledger CSV remains residual (Mode A flag threads shared finalizer only).
+
 ### Added (0082 — Recipient table fidelity)
 
 - **Reader:** `pst-reader` walks per-message recipient TC (`NID_TYPE_RECIPIENT_TABLE`); structured `Recipient` / `RecipientType` (To/Cc/Bcc) with SMTP + EX address fields; never invents rows from Display* props.
@@ -17,7 +27,7 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 - **Telemetry:** `sent_message_with_no_recipients_count` (empty TC + not UNSENT; not an `export_risk` / hard-fail).
 - **`retryable`:** additive boolean on unique-export summary JSON (transient cancel/IO only; no new exit integers).
 - **`fidelity_contract_v1`:** `recipient_table` → `Preserved` (BCC rows remain `DroppedByDesign` unless the flag is set).
-- Closes **D-0080-recipient-table**, **D-0076-recipient-table**, **D-0068-04** recipient half, **D-0078-retryable**; decides **D-0080-bcc-policy** (opt-in write + suppress ledger). Named-prop / Mode A promote / unique-eml ledger / deterministic store key remain open.
+- Closes **D-0080-recipient-table**, **D-0076-recipient-table**, **D-0068-04** recipient half, **D-0078-retryable**; decides **D-0080-bcc-policy** (opt-in write + suppress ledger). Named-prop / unique-eml ledger / deterministic store key remain open (**Mode A promote closed in 0083**).
 
 ### Added (0073 — Export attachment failure ledger)
 
@@ -28,9 +38,9 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ### Residuals
 
-- **D-0073-promote** — Mode A pre-write promote-on-attach-fail not shipped (ledger-only Mode C).
-- **D-0073-eml** — unique-eml has no attach ledger parity yet.
-- **D-0073-gui** — no GUI attach-ledger controls.
+- **D-0073-promote** — **closed / 0083** (Mode A flag; Mode B declined).
+- **D-0073-eml** — unique-eml has no full attach ledger CSV parity yet (Mode A flag shared).
+- **D-0073-gui** — no GUI attach-ledger / Mode A controls.
 
 ### Added (0081 — Unique export deps + operator docs)
 

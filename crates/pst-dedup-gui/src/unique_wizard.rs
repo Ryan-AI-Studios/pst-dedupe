@@ -413,6 +413,8 @@ impl UniqueWizardForm {
             qc_external_reader: None,
             qc_scanpst: false,
             include_bcc_recipients: false,
+            // Mode A promote: CLI opt-in; GUI pass-through default false (0083).
+            promote_on_attach_fail: false,
         })
     }
 

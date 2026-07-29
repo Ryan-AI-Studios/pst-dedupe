@@ -411,6 +411,10 @@ enum Commands {
         /// Opt-in: exit 65 when export_risk rank ≥ level (default off; 0078).
         #[arg(long = "fail-on-export-risk", value_parser = parse_fail_on_export_risk)]
         fail_on_export_risk: Option<String>,
+        /// Mode A pre-write promote-on-attach-fail (0083). Default off. Mode B not supported.
+        /// Full attach-ledger CSV for unique-eml remains residual D-0073-eml.
+        #[arg(long = "promote-on-attach-fail", action = clap::ArgAction::SetTrue)]
+        promote_on_attach_fail: bool,
     },
 
     /// Export unique messages as streaming PST volume(s) + report pack (`unique_export_report_v1`).
@@ -1201,6 +1205,7 @@ fn run(cli: Cli) -> Result<CliExit> {
             fail_on_partial_fidelity,
             allow_partial_fidelity,
             fail_on_export_risk,
+            promote_on_attach_fail,
         } => {
             let mut all = paths;
             all.extend(input);
@@ -1261,6 +1266,7 @@ fn run(cli: Cli) -> Result<CliExit> {
                 fail_on_partial_fidelity: fail_on_partial,
                 allow_partial_fidelity,
                 fail_on_export_risk,
+                promote_on_attach_fail,
             });
         }
         Commands::UniquePst(clap_args) => {

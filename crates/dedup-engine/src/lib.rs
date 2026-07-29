@@ -49,16 +49,18 @@ pub use integrity::{
 pub use keepset::{
     build_keep_set, build_keep_set_materialized, build_keep_set_with_ctx, classify_folder,
     decided_by_rung, duplicate_source_aggregate, edrm_mih_hex, fidelity_rank,
-    fidelity_rank_with_mode, finalize_with_materialize, folder_class_and_rank,
-    format_date_filetime_utc, group_candidates, group_candidates_ctx, group_candidates_with_stats,
-    rank_key, reason_fidelity_tier, recoverable_items_hint, resolve_groups,
-    resolve_groups_with_ctx, resolve_groups_with_grouping, resolve_item_date, segment_glob_match,
-    sort_input_paths, source_rank_of, write_keep_set_json, CanonicalAttachment, CanonicalMessage,
-    DateSource, DecisionCsvWriter, DecisionRecord, DecisionRole, FamilyPolicy, FidelityMode,
-    FolderClass, FolderRankMode, GroupingOutcome, KeepEntry, KeepPolicy, KeepSet, KeepSetError,
-    KeepSetProvenance, KeepSetStats, MaterializeBuildOpts, MaterializeError, MessageLocus,
-    MessageMaterializer, RankContext, RankKey, RecoverableScanItem, ResolvedKeepSet,
-    DECISION_CSV_HEADER, DECISION_CSV_HEADER_V1, DUPLICATE_SOURCES_CAP, KEEP_SET_SCHEMA,
+    fidelity_rank_with_mode, finalize_with_materialize, finalize_with_materialize_opts,
+    folder_class_and_rank, format_date_filetime_utc, group_candidates, group_candidates_ctx,
+    group_candidates_with_stats, is_attach_incomplete, rank_key, reason_fidelity_tier,
+    recoverable_items_hint, resolve_groups, resolve_groups_with_ctx, resolve_groups_with_grouping,
+    resolve_item_date, segment_glob_match, sort_input_paths, source_rank_of, write_keep_set_json,
+    CanonicalAttachment, CanonicalMessage, DateSource, DecisionCsvWriter, DecisionRecord,
+    DecisionRole, FamilyPolicy, FidelityMode, FolderClass, FolderRankMode, GroupingOutcome,
+    KeepEntry, KeepPolicy, KeepSet, KeepSetError, KeepSetProvenance, KeepSetStats,
+    MaterializeBuildOpts, MaterializeError, MaterializeFinalizeOpts, MessageLocus,
+    MessageMaterializer, PromoteReason, RankContext, RankKey, RecoverableScanItem, ResolvedKeepSet,
+    SoftSkipAttachRecord, DECISION_CSV_HEADER, DECISION_CSV_HEADER_V1, DUPLICATE_SOURCES_CAP,
+    KEEP_SET_SCHEMA,
 };
 pub use report::{write_csv_report, StreamingCsvReportWriter};
 pub use util::{filetime_to_unix, format_bytes, truncate_utf8};

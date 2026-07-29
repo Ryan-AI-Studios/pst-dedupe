@@ -1,10 +1,22 @@
 //! Integration tests for track 0071 unique-pst CLI.
 
 use std::fs;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use assert_cmd::cargo::cargo_bin;
+use dedup_engine::integrity::RecoverableIntegrity;
+use dedup_engine::{
+    build_keep_set_materialized, DecisionRole, FamilyPolicy, KeepPolicy, MaterializeBuildOpts,
+    MessageLocus, RecoverableScanItem,
+};
+use pst_dedup_cli::attach_probe::ProbeLevel;
+use pst_dedup_cli::pst_materializer::PstMaterializer;
+use pst_dedup_cli::unique_export_report::{ExportMessageRow, VolumeReportRow};
+use pst_dedup_cli::unique_pst_qc::{run_unique_pst_qc, QcLevel, QcRunInput, QcSampleCandidate};
+use pst_reader::ndb::block;
+use pst_writer::{write_unicode_pst, WriteAttachment, WriteMessage, WritePstOpts};
 use tempfile::TempDir;
 
 fn bin() -> PathBuf {
@@ -1629,4 +1641,551 @@ fn unique_pst_parent_baseline_oracle_when_env_set() {
         &out_h_att,
     );
     diff_att.assert_equivalent();
+}
+
+/// 0083: `--promote-on-attach-fail` is accepted; summary records the flag and counters.
+#[test]
+fn unique_pst_promote_on_attach_fail_flag_summary() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+
+    // Default off
+    let off = run_unique_pst(&[
+        "unique-pst",
+        sample.to_str().expect("utf8"),
+        "--out",
+        out.to_str().expect("utf8"),
+        "--report-dir",
+        report.to_str().expect("utf8"),
+        "--json",
+        "--no-attachments",
+    ]);
+    assert!(
+        off.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&off.stderr)
+    );
+    let v_off: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&off.stdout)).expect("json");
+    assert_eq!(v_off["promote_on_attach_fail"], false);
+    assert_eq!(
+        v_off["promoted_after_attach_incomplete_count"]
+            .as_u64()
+            .unwrap_or(999),
+        0
+    );
+    assert_eq!(
+        v_off["mode_c_fallback_all_peers_incomplete_count"]
+            .as_u64()
+            .unwrap_or(999),
+        0
+    );
+
+    // Flag on (parents_only path via --no-attachments: no soft attach promote expected)
+    let out2 = dir.path().join("unique2.pst");
+    let report2 = dir.path().join("report2");
+    let on = Command::new(bin())
+        .args([
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out2.to_str().expect("utf8"),
+            "--report-dir",
+            report2.to_str().expect("utf8"),
+            "--json",
+            "--no-attachments",
+            "--promote-on-attach-fail",
+            "--qc-level",
+            "sample",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        on.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&on.stderr),
+        String::from_utf8_lossy(&on.stdout)
+    );
+    let v_on: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&on.stdout)).expect("json");
+    assert_eq!(v_on["promote_on_attach_fail"], true);
+    assert_eq!(
+        v_on["promoted_after_attach_incomplete_count"]
+            .as_u64()
+            .unwrap_or(999),
+        0,
+        "no-attachments: no Mode A soft promote expected"
+    );
+    // Mode A × QC: sample QC must not introduce hard defects on a clean fixture.
+    // QC keys the final export winner locus (export_messages / keep_set winners).
+    let qc = &v_on["verification"];
+    if let Some(ok) = qc.get("ok") {
+        // verification.ok may be present; when sample QC runs, clean fixture stays ok.
+        assert_ne!(
+            ok,
+            &serde_json::json!(false),
+            "QC must not hard-fail clean Mode A run"
+        );
+    }
+    // decisions decided_by must not invent Mode A strings when no promote occurred
+    let dec = fs::read_to_string(report2.join("decisions.csv")).expect("decisions");
+    assert!(
+        !dec.contains("promoted_after_attach_incomplete"),
+        "no soft promote expected without incomplete peers"
+    );
+    assert!(
+        !dec.contains("mode_c_fallback_all_peers_incomplete"),
+        "no Mode C fallback expected on single complete source"
+    );
+}
+
+/// Shared MID for dual-source Mode A fixture messages.
+fn mode_a_msg(mid: &str, subject: &str, body: &str, attach_payload: Vec<u8>) -> WriteMessage {
+    let mut msg = WriteMessage {
+        message_id: Some(mid.into()),
+        subject: subject.into(),
+        sender: Some("alice@example.com".into()),
+        display_to: Some("bob@example.com".into()),
+        body_plain: Some(body.into()),
+        source_folder_path: Some("Inbox".into()),
+        ..WriteMessage::default()
+    };
+    msg.attachments = vec![WriteAttachment {
+        filename: "payload.bin".into(),
+        mime: Some("application/octet-stream".into()),
+        size: attach_payload.len() as u32,
+        attach_method: Some(1),
+        data: Some(attach_payload),
+        stream_available: true,
+        ..WriteAttachment::default()
+    }];
+    msg
+}
+
+fn first_message_nid(path: &Path) -> u64 {
+    let mut pst = pst_reader::PstFile::open(path).expect("open");
+    let folders = pst.folders().expect("folders");
+    folders
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("nid")
+        .0
+}
+
+/// Corrupt attachment leaf data blocks so `open_attachment_data` fails while the
+/// message body + attach *list* remain readable (Mode A incomplete signal).
+fn corrupt_first_message_attach_streams(path: &Path) {
+    let (msg_nid, att_nid, targets) = {
+        let mut pst = pst_reader::PstFile::open(path).expect("open for locate");
+        let folders = pst.folders().expect("folders");
+        let nid = folders
+            .iter()
+            .flat_map(|f| f.message_nids.iter().copied())
+            .next()
+            .expect("message nid");
+        let atts = pst.list_attachments(nid).expect("list atts");
+        assert!(
+            !atts.is_empty(),
+            "fixture must have at least one attachment to corrupt"
+        );
+        let att_nid = atts[0].nid;
+        let msg_entry = pst.nbt().get(nid).expect("nbt").clone();
+        let mut reader = BufReader::new(fs::File::open(path).expect("reopen"));
+        let att_entry =
+            block::find_subnode_entry(&mut reader, pst.bbt(), msg_entry.bid_sub, att_nid)
+                .expect("find sub")
+                .expect("att subnode");
+        // Corrupt **data leaves only** — leave attach PC (bid_data) intact so
+        // list_attachments still returns metadata (filename/size).
+        let mut targets: Vec<(usize, usize)> = Vec::new();
+        assert!(
+            !att_entry.bid_sub.is_null(),
+            "Mode A fixture attach must use subnode storage (large payload)"
+        );
+        let subs = block::list_subnode_entries(&mut reader, pst.bbt(), att_entry.bid_sub)
+            .expect("attach subnodes");
+        for s in &subs {
+            if let Some(e) = pst.bbt().get(s.bid_data) {
+                targets.push((e.bref.ib as usize, e.cb as usize));
+            }
+            if let Ok(leaves) = block::collect_leaf_data_bids(&mut reader, pst.bbt(), s.bid_data) {
+                for lb in leaves {
+                    if let Some(e) = pst.bbt().get(lb) {
+                        targets.push((e.bref.ib as usize, e.cb as usize));
+                    }
+                }
+            }
+        }
+        targets.sort_unstable();
+        targets.dedup();
+        (nid, att_nid, targets)
+    };
+    assert!(
+        !targets.is_empty(),
+        "could not locate attach data leaf blocks for corruption"
+    );
+
+    let mut data = fs::read(path).expect("read pst");
+    for (ib, cb) in &targets {
+        let ib = *ib;
+        let cb = *cb;
+        for i in ib..(ib + cb) {
+            if i < data.len() {
+                data[i] ^= 0xA5;
+            }
+        }
+        let trailer_start = (cb + 63) & !63;
+        let crc_off = ib + trailer_start;
+        if crc_off + 12 <= data.len() {
+            data[crc_off] ^= 0xFF;
+            data[crc_off + 4] ^= 0x01;
+        }
+    }
+    fs::write(path, &data).expect("write corrupt");
+
+    let mut pst = pst_reader::PstFile::open(path).expect("reopen after corrupt");
+    pst.read_message_properties(msg_nid)
+        .expect("message body must remain readable");
+    let atts = pst
+        .list_attachments(msg_nid)
+        .expect("attach list must remain after leaf-only corrupt");
+    assert!(!atts.is_empty(), "attach meta must remain");
+    let open_fail = match pst.open_attachment_data(msg_nid, atts[0].nid) {
+        Ok(mut r) => {
+            let mut buf = Vec::new();
+            r.read_to_end(&mut buf).is_err()
+        }
+        Err(_) => true,
+    };
+    assert!(
+        open_fail,
+        "leaf corrupt must break open/read (att_nid={att_nid:?})"
+    );
+}
+
+fn scan_item(
+    path: &Path,
+    nid: u64,
+    mid: &str,
+    scan_order: u64,
+    subject: &str,
+) -> RecoverableScanItem {
+    let path_s = path.display().to_string();
+    let pst = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("x.pst")
+        .to_string();
+    RecoverableScanItem {
+        locus: MessageLocus {
+            source_path: path_s,
+            source_pst: pst,
+            folder_path: "Inbox".into(),
+            nid,
+            is_orphaned: false,
+        },
+        message_id_norm: Some(
+            mid.trim_matches(|c| c == '<' || c == '>')
+                .to_ascii_lowercase(),
+        ),
+        content_hash: [0xAB; 32],
+        size: 80_000,
+        integrity: RecoverableIntegrity::clean(),
+        scan_order,
+        submit_time: None,
+        delivery_time: None,
+        has_bcc: false,
+        has_body_preview: true,
+        subject_nonempty: !subject.is_empty(),
+        sender_nonempty: true,
+        attach_count: 1,
+        body_sha256: None,
+        body_char_len: None,
+        display_to: Some("bob@example.com".into()),
+        display_cc: None,
+        display_bcc: None,
+        strong_content_hash: None,
+        fp_header: 0,
+        fp_body: 0,
+        fp_recipients: 0,
+        fp_attachments: 0,
+        preview_bytes_over_budget: false,
+    }
+}
+
+/// DoD-11: Mode A promotion **occurs** and QC sample keys the **final winner** locus
+/// (no spurious `unexplained_loss` / hard defect from comparing pre-promote source).
+///
+/// Uses real dual-PST fixtures + `PstMaterializer` with **materialize-time** deep
+/// attach probe (not phase-1b preflight, which would re-rank via fidelity before
+/// Mode A and hide soft-promote). Then runs production `run_unique_pst_qc` against
+/// the final winner locus — and proves the wrong (pre-promote) locus hard-fails.
+#[test]
+fn unique_pst_mode_a_promote_qc_sample_keys_final_winner() {
+    let dir = TempDir::new().expect("tmp");
+    let incomplete = dir.path().join("aaa_incomplete.pst");
+    let complete = dir.path().join("zzz_complete.pst");
+    let out = dir.path().join("unique.pst");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report dir");
+
+    // ~80 KiB → multi-block attach leaves; surgical corrupt breaks open/read.
+    let payload: Vec<u8> = (0..80 * 1024).map(|i| (i % 251) as u8).collect();
+    let mid = "<mode-a-qc@ex.com>";
+    let mid_norm = "mode-a-qc@ex.com";
+    let body = "mode a promote qc body for final winner locus";
+
+    // Distinct subjects so QC subject mismatch proves wrong-locus hard-fail.
+    write_unicode_pst(
+        &incomplete,
+        vec![mode_a_msg(mid, "PRE_PROMOTE", body, payload.clone())],
+        &[],
+        &WritePstOpts::default(),
+    )
+    .expect("write incomplete");
+    corrupt_first_message_attach_streams(&incomplete);
+
+    write_unicode_pst(
+        &complete,
+        vec![mode_a_msg(mid, "FINAL_WINNER", body, payload.clone())],
+        &[],
+        &WritePstOpts::default(),
+    )
+    .expect("write complete");
+
+    let nid_inc = first_message_nid(&incomplete);
+    let nid_cmp = first_message_nid(&complete);
+
+    // FirstSeen scan_order: incomplete ranks first (Mode A soft-skip target).
+    let items = vec![
+        scan_item(&incomplete, nid_inc, mid, 0, "PRE_PROMOTE"),
+        scan_item(&complete, nid_cmp, mid, 1, "FINAL_WINNER"),
+    ];
+
+    // Materialize-time deep probe (not phase-1b): discovers incomplete without
+    // pre-degrading rank so FirstSeen still attempts incomplete first.
+    let mut mat = PstMaterializer::new(FamilyPolicy::KeepAttachmentsWithParent)
+        .with_deep_attach_probe(ProbeLevel::Head, 1_048_576, 5_000);
+
+    let mut accepted: Option<dedup_engine::CanonicalMessage> = None;
+    let (ks, dec, count) = build_keep_set_materialized(
+        items,
+        MaterializeBuildOpts {
+            policy: KeepPolicy::FirstSeen,
+            family_policy: FamilyPolicy::KeepAttachmentsWithParent,
+            prefer_path: &[],
+            tier2_enabled: true,
+            created_from: None,
+            rank_ctx: None,
+            grouping_ctx: None,
+            promote_on_attach_fail: true,
+        },
+        &mut mat,
+        |msg| {
+            accepted = Some(msg);
+            Ok(())
+        },
+    )
+    .expect("mode a materialize");
+
+    assert_eq!(count, 1);
+    assert_eq!(ks.stats.promoted_after_attach_incomplete_count, 1);
+    assert!(ks.winners[0].promoted_from_failure);
+    assert_eq!(
+        ks.winners[0].decided_by.as_deref(),
+        Some("promoted_after_attach_incomplete")
+    );
+    assert_eq!(
+        ks.winners[0].locus.nid, nid_cmp,
+        "final winner must be complete peer"
+    );
+    assert!(
+        ks.winners[0].locus.source_path.contains("zzz_complete.pst"),
+        "final winner source: {}",
+        ks.winners[0].locus.source_path
+    );
+    let uniq = dec
+        .iter()
+        .find(|d| d.role == DecisionRole::Unique)
+        .expect("unique decision");
+    assert_eq!(uniq.decided_by, "promoted_after_attach_incomplete");
+    let _ = accepted;
+
+    // Export unique PST from **final winner** content (Mode A deliverable).
+    write_unicode_pst(
+        &out,
+        vec![mode_a_msg(mid, "FINAL_WINNER", body, payload)],
+        &[],
+        &WritePstOpts::default(),
+    )
+    .expect("write export");
+
+    let volumes = vec![VolumeReportRow {
+        volume_index: 1,
+        path: out.display().to_string(),
+        bytes: fs::metadata(&out).map(|m| m.len()).unwrap_or(0),
+        sha256_hex: String::new(),
+        md5_hex: String::new(),
+        messages_written: 1,
+        finalized_early: false,
+        volume_exceeded_soft_limit: false,
+    }];
+
+    // QC candidates/export rows keyed to **final winner** locus (production path).
+    let final_path = complete.display().to_string();
+    let export_rows_final = vec![ExportMessageRow {
+        source_path: final_path.clone(),
+        folder_path: "Inbox".into(),
+        nid: nid_cmp,
+        message_id_norm: mid_norm.into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 0,
+        duplicate_source_count: 1,
+        duplicate_sources: "aaa_incomplete.pst".into(),
+        source_id: "1".into(),
+        bcc_suppressed: false,
+        subject: "FINAL_WINNER".into(),
+    }];
+    let cand_final = QcSampleCandidate {
+        export_message_index: 1,
+        volume_index: 1,
+        source_path: final_path.clone(),
+        source_nid: nid_cmp,
+        folder_path: "Inbox".into(),
+        subject: "FINAL_WINNER".into(),
+        sender: "alice@example.com".into(),
+        message_id_norm: mid_norm.into(),
+        body_plain_len: body.len(),
+        body_html_len: 0,
+        attach_count: 1,
+        max_attach_size: 80 * 1024,
+        has_zero_byte_attach: false,
+        has_embedded: false,
+        has_degraded: false,
+        has_ledger_fail: false,
+        ledger_failed_attach_names: Vec::new(),
+        body_unavailable: false,
+        body_incomplete: false,
+        crc_suspect: false,
+        subject_non_ascii: false,
+        display_cc: String::new(),
+        display_bcc: String::new(),
+    };
+
+    let qc_ok = run_unique_pst_qc(QcRunInput {
+        level: QcLevel::Sample,
+        sample_max: 32,
+        report_dir: &report_dir,
+        volumes: &volumes,
+        export_rows: &export_rows_final,
+        candidates: &[cand_final],
+        external_reader: None,
+        run_scanpst: false,
+        max_open_psts: 4,
+        source_differential: true,
+        parents_only: false,
+        include_bcc_recipients: false,
+        probe_unexplained_property: None,
+    });
+    assert!(
+        !qc_ok.hard_fail,
+        "QC vs final winner must not hard-fail: {:?}",
+        qc_ok.findings
+    );
+    assert_eq!(
+        qc_ok.findings.defect, 0,
+        "no defect for promoted family: {:?}",
+        qc_ok.findings
+    );
+    assert_eq!(
+        qc_ok.findings.unexplained_loss, 0,
+        "no unexplained_loss when QC keys final winner: {:?}",
+        qc_ok.findings
+    );
+    assert!(
+        qc_ok.messages_compared >= 1,
+        "sample QC must compare the promoted family"
+    );
+
+    // Negative control: same export keyed to **pre-promote** incomplete locus →
+    // subject mismatch / source read issues must produce hard findings (proves
+    // QC is locus-sensitive; Mode A must not leave pre-promote as the key).
+    let pre_path = incomplete.display().to_string();
+    let export_rows_wrong = vec![ExportMessageRow {
+        source_path: pre_path.clone(),
+        folder_path: "Inbox".into(),
+        nid: nid_inc,
+        message_id_norm: mid_norm.into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 0,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        source_id: "0".into(),
+        bcc_suppressed: false,
+        subject: "PRE_PROMOTE".into(),
+    }];
+    let cand_wrong = QcSampleCandidate {
+        export_message_index: 1,
+        volume_index: 1,
+        source_path: pre_path,
+        source_nid: nid_inc,
+        folder_path: "Inbox".into(),
+        subject: "PRE_PROMOTE".into(),
+        sender: "alice@example.com".into(),
+        message_id_norm: mid_norm.into(),
+        body_plain_len: body.len(),
+        body_html_len: 0,
+        attach_count: 1,
+        max_attach_size: 80 * 1024,
+        has_zero_byte_attach: false,
+        has_embedded: false,
+        has_degraded: false,
+        has_ledger_fail: false,
+        ledger_failed_attach_names: Vec::new(),
+        body_unavailable: false,
+        body_incomplete: false,
+        crc_suspect: false,
+        subject_non_ascii: false,
+        display_cc: String::new(),
+        display_bcc: String::new(),
+    };
+    let report_wrong = dir.path().join("report_wrong");
+    fs::create_dir_all(&report_wrong).expect("report_wrong");
+    let qc_wrong = run_unique_pst_qc(QcRunInput {
+        level: QcLevel::Sample,
+        sample_max: 32,
+        report_dir: &report_wrong,
+        volumes: &volumes,
+        export_rows: &export_rows_wrong,
+        candidates: &[cand_wrong],
+        external_reader: None,
+        run_scanpst: false,
+        max_open_psts: 4,
+        source_differential: true,
+        parents_only: false,
+        include_bcc_recipients: false,
+        probe_unexplained_property: None,
+    });
+    assert!(
+        qc_wrong.hard_fail
+            || qc_wrong.findings.defect > 0
+            || qc_wrong.findings.unexplained_loss > 0,
+        "QC vs pre-promote incomplete locus must hard-find (locus sensitivity); findings={:?}",
+        qc_wrong.findings
+    );
 }

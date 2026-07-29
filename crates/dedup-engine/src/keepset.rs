@@ -576,6 +576,12 @@ pub struct KeepSetStats {
     /// 0076 identity-binding honesty counters (additive; default empty for pre-0076 JSON).
     #[serde(default, skip_serializing_if = "grouping_stats_is_default")]
     pub grouping: GroupingStats,
+    /// Mode A soft-attach promote count (0083; accepted complete peer after incomplete skip).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub promoted_after_attach_incomplete_count: u64,
+    /// Mode A all-peers-incomplete Mode C fallback count (0083).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub mode_c_fallback_all_peers_incomplete_count: u64,
 }
 
 fn grouping_stats_is_default(s: &GroupingStats) -> bool {
@@ -712,6 +718,145 @@ pub struct CanonicalMessage {
     pub edrm_mih_hex: Option<String>,
     pub body_incomplete: bool,
     pub body_unavailable: bool,
+}
+
+/// Why a Unique row was selected after peer walk (0083 three-way vocabulary).
+///
+/// Distinct from provisional rank `decided_by` rungs (`sole_member`, `fidelity`, …).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromoteReason {
+    /// Hard materialize fail on earlier peer(s); later peer accepted.
+    MaterializeFail,
+    /// Mode A: incomplete attach on earlier peer(s); later **complete** peer accepted.
+    AttachIncomplete,
+    /// Mode A flag on: every materializable peer was attach-incomplete; exported highest-ranked.
+    ModeCFallbackAllPeersIncomplete,
+}
+
+impl PromoteReason {
+    /// Fixed `decided_by` string for decision CSV / keep-set JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MaterializeFail => "promoted_after_materialize_fail",
+            Self::AttachIncomplete => "promoted_after_attach_incomplete",
+            Self::ModeCFallbackAllPeersIncomplete => "mode_c_fallback_all_peers_incomplete",
+        }
+    }
+}
+
+/// Options for [`finalize_with_materialize_opts`] (0083 Mode A).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MaterializeFinalizeOpts {
+    /// When true, skip attach-incomplete peers and try the next ranked peer before accept.
+    /// Default **false** (Mode C ledger-only). Mode B write-time promote is not supported.
+    pub promote_on_attach_fail: bool,
+}
+
+/// Soft-skipped incomplete attach locus for attach-ledger honesty (0083).
+///
+/// Soft skip does **not** set [`DecisionRole::MaterializeFailed`]; peers remain
+/// `DupOf` the final winner. CLI may emit ledger rows with `winner_promoted=true`.
+#[derive(Clone, Debug)]
+pub struct SoftSkipAttachRecord {
+    pub source_path: String,
+    pub source_pst: String,
+    pub folder_path: String,
+    pub msg_nid: u64,
+    pub attach_nid: Option<u64>,
+    pub attach_index: u32,
+    pub filename: String,
+    pub size: u32,
+    pub attach_method: i32,
+    pub reason_code: String,
+    /// Final accepted winner source path (filled after peer accept).
+    pub peer_source_path: String,
+    /// Final accepted winner msg nid.
+    pub peer_msg_nid: u64,
+}
+
+/// True when a materialized message is **attach-incomplete** for Mode A (0083).
+///
+/// Normative (§2.5 rule 5):
+/// - any attach with `stream_available == false`; **or**
+/// - fail-severity attach outcomes already bound on message fidelity
+///   ([`IntegrityReason::is_attach_probe_fail`]).
+///
+/// **Not** incomplete solely for: body soft flags, CRC page noise (`CrcSuspect`),
+/// zero-byte by-value success, or `parents_only` policy omit (omit ≠ fail — 0073).
+/// Materializers must not force `stream_available=false` solely for parents_only;
+/// the writer omits by family policy independently.
+///
+/// Honesty ceiling (**D-0080-cloud-attachments**): cloud/modern link-only attaches
+/// that present as parsed with no fail-severity stream error **cannot** be detected
+/// without named-property resolution. Do not invent a modern-attach detector here.
+pub fn is_attach_incomplete(msg: &CanonicalMessage) -> bool {
+    if msg.attachments.iter().any(|a| !a.stream_available) {
+        return true;
+    }
+    msg.fidelity
+        .degraded_reasons
+        .iter()
+        .any(|r| r.is_attach_probe_fail())
+}
+
+/// Build soft-skip ledger records from an incomplete materialized message.
+fn soft_skip_records_for_msg(
+    msg: &CanonicalMessage,
+    peer_source_path: &str,
+    peer_msg_nid: u64,
+) -> Vec<SoftSkipAttachRecord> {
+    let mut out = Vec::new();
+    let fail_reason = msg
+        .fidelity
+        .degraded_reasons
+        .iter()
+        .find(|r| r.is_attach_probe_fail())
+        .map(|r| r.as_str())
+        .unwrap_or("ATTACH_STREAM_OPEN_FAILED");
+
+    let incomplete_attaches: Vec<(usize, &CanonicalAttachment)> = msg
+        .attachments
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| !a.stream_available)
+        .collect();
+
+    if incomplete_attaches.is_empty() {
+        // Fidelity-only incomplete (e.g. AttachMetaFailed with empty attach list).
+        out.push(SoftSkipAttachRecord {
+            source_path: msg.locus.source_path.clone(),
+            source_pst: msg.locus.source_pst.clone(),
+            folder_path: msg.locus.folder_path.clone(),
+            msg_nid: msg.locus.nid,
+            attach_nid: None,
+            attach_index: 0,
+            filename: String::new(),
+            size: 0,
+            attach_method: -1,
+            reason_code: fail_reason.to_string(),
+            peer_source_path: peer_source_path.to_string(),
+            peer_msg_nid,
+        });
+        return out;
+    }
+
+    for (i, a) in incomplete_attaches {
+        out.push(SoftSkipAttachRecord {
+            source_path: msg.locus.source_path.clone(),
+            source_pst: msg.locus.source_pst.clone(),
+            folder_path: msg.locus.folder_path.clone(),
+            msg_nid: msg.locus.nid,
+            attach_nid: a.attach_nid,
+            attach_index: i as u32,
+            filename: a.filename.clone(),
+            size: a.size,
+            attach_method: a.attach_method.unwrap_or(-1),
+            reason_code: fail_reason.to_string(),
+            peer_source_path: peer_source_path.to_string(),
+            peer_msg_nid,
+        });
+    }
+    out
 }
 
 /// Hard materialize failure (triggers promotion). Soft issues return Ok with flags.
@@ -1833,6 +1978,10 @@ pub struct ResolvedKeepSet {
     pub grouping_stats: GroupingStats,
     /// Per-item promoted_from_failure flag.
     pub promoted_from_failure: Vec<bool>,
+    /// Per-item promote reason when Unique was selected via peer walk (0083).
+    pub promote_reason: Vec<Option<PromoteReason>>,
+    /// Soft-skipped incomplete attach rows for ledger honesty (0083 Mode A).
+    pub soft_skip_attach_records: Vec<SoftSkipAttachRecord>,
     /// Per-group: true if all materialize attempts failed.
     pub group_dropped: Vec<bool>,
     pub created_from: Option<KeepSetProvenance>,
@@ -1888,6 +2037,15 @@ impl ResolvedKeepSet {
                     }
                     if self.promoted_from_failure[i] {
                         stats.promoted_from_failure += 1;
+                    }
+                    match self.promote_reason.get(i).and_then(|r| *r) {
+                        Some(PromoteReason::AttachIncomplete) => {
+                            stats.promoted_after_attach_incomplete_count += 1;
+                        }
+                        Some(PromoteReason::ModeCFallbackAllPeersIncomplete) => {
+                            stats.mode_c_fallback_all_peers_incomplete_count += 1;
+                        }
+                        Some(PromoteReason::MaterializeFail) | None => {}
                     }
                     let (class, _) =
                         folder_class_and_rank(&item.locus.folder_path, &self.rank_ctx.folder_rank);
@@ -1961,8 +2119,11 @@ impl ResolvedKeepSet {
 
     /// `decided_by` token for item `i`.
     fn decided_by_for(&self, i: usize) -> &'static str {
-        if self.promoted_from_failure[i] && self.roles[i] == DecisionRole::Unique {
-            return "promoted_after_materialize_fail";
+        // 0083 three-way promote vocabulary takes precedence for Unique winners.
+        if self.roles[i] == DecisionRole::Unique {
+            if let Some(reason) = self.promote_reason.get(i).and_then(|r| *r) {
+                return reason.as_str();
+            }
         }
         let group = self.group_containing(i);
         if group.len() == 1 {
@@ -2004,11 +2165,9 @@ impl ResolvedKeepSet {
                 }
             }
             DecisionRole::MaterializeFailed => {
-                if self.promoted_from_failure.get(i).copied().unwrap_or(false) {
-                    "promoted_after_materialize_fail"
-                } else {
-                    "path_order"
-                }
+                // Hard-fail peers are not "promoted"; keep path_order unless we
+                // historically stamped promote on the failed row (legacy false).
+                "path_order"
             }
         }
     }
@@ -2177,6 +2336,7 @@ pub fn resolve_groups_with_grouping(
     let mut winner_of: Vec<Option<usize>> = vec![None; n];
     let mut tier_of: Vec<Option<String>> = vec![None; n];
     let promoted_from_failure = vec![false; n];
+    let promote_reason = vec![None; n];
     let group_dropped = vec![false; groups.len()];
     let mut provisional_winners = Vec::with_capacity(groups.len());
 
@@ -2225,6 +2385,8 @@ pub fn resolve_groups_with_grouping(
         tier2_eligible,
         grouping_stats,
         promoted_from_failure,
+        promote_reason,
+        soft_skip_attach_records: Vec::new(),
         group_dropped,
         created_from,
     }
@@ -2273,6 +2435,8 @@ pub struct MaterializeBuildOpts<'a> {
     pub rank_ctx: Option<&'a RankContext>,
     /// Optional grouping context (0076). When set, overrides `tier2_enabled`.
     pub grouping_ctx: Option<&'a GroupingContext>,
+    /// Mode A pre-write promote-on-attach-fail (0083). Default false via tests that set it.
+    pub promote_on_attach_fail: bool,
 }
 
 /// Build keep-set then finalize winners via materialize + promotion.
@@ -2310,7 +2474,11 @@ where
         gctx_ref,
         opts.created_from,
     );
-    let count = finalize_with_materialize(&mut resolved, materializer, &mut on_winner)?;
+    let fin_opts = MaterializeFinalizeOpts {
+        promote_on_attach_fail: opts.promote_on_attach_fail,
+    };
+    let count =
+        finalize_with_materialize_opts(&mut resolved, materializer, &fin_opts, &mut on_winner)?;
     Ok((resolved.to_keep_set(), resolved.to_decisions(), count))
 }
 
@@ -2341,6 +2509,9 @@ fn merge_soft_fidelity(item: &mut RecoverableScanItem, msg: &CanonicalMessage) {
 
 /// Materialize provisional winners; on hard fail promote next peer (§3.7.1).
 ///
+/// Thin wrapper: Mode A flag **off** (default). Prefer
+/// [`finalize_with_materialize_opts`] when threading `--promote-on-attach-fail`.
+///
 /// Bodies are delivered **one-at-a-time** through `on_winner` and never retained
 /// as an all-winners `Vec` (O(1) body memory). Soft fidelity flags are written
 /// back onto `resolved.items` so Phase 3 decision/keep rows stay honest.
@@ -2354,15 +2525,42 @@ pub fn finalize_with_materialize<F>(
 where
     F: FnMut(CanonicalMessage) -> Result<(), KeepSetError>,
 {
+    finalize_with_materialize_opts(
+        resolved,
+        materializer,
+        &MaterializeFinalizeOpts::default(),
+        on_winner,
+    )
+}
+
+/// Materialize provisional winners with optional Mode A attach-incomplete promote (0083).
+///
+/// Peer order follows existing `rank_key` only — **no** least-incomplete re-rank.
+/// Mode B write-time mid-message promote is **not** supported.
+///
+/// Soft-skipped incomplete peers remain [`DecisionRole::DupOf`] (not
+/// [`DecisionRole::MaterializeFailed`]). Soft-skip attach loci are recorded in
+/// [`ResolvedKeepSet::soft_skip_attach_records`] for ledger honesty.
+pub fn finalize_with_materialize_opts<F>(
+    resolved: &mut ResolvedKeepSet,
+    materializer: &mut dyn MessageMaterializer,
+    opts: &MaterializeFinalizeOpts,
+    on_winner: &mut F,
+) -> Result<u64, KeepSetError>
+where
+    F: FnMut(CanonicalMessage) -> Result<(), KeepSetError>,
+{
     let mut materialized_count = 0u64;
     let rank_ctx = resolved.rank_ctx.clone();
+    // Clear any prior soft-skip records (re-finalize safety).
+    resolved.soft_skip_attach_records.clear();
 
     for (g_idx, group) in resolved.groups.clone().into_iter().enumerate() {
         if group.is_empty() {
             continue;
         }
 
-        // Rank full group once.
+        // Rank full group once (same ladder as hard promote / 0075).
         let mut ranked = group.clone();
         ranked.sort_by(|&a, &b| {
             rank_key(&resolved.items[a], &rank_ctx).cmp(&rank_key(&resolved.items[b], &rank_ctx))
@@ -2370,7 +2568,13 @@ where
 
         let mut final_winner: Option<usize> = None;
         let mut failed: Vec<usize> = Vec::new();
-        let mut promoted = false;
+        // Incomplete peers soft-skipped while hunting for a complete peer (item idx + msg).
+        let mut soft_skipped_msgs: Vec<(usize, CanonicalMessage)> = Vec::new();
+        let mut had_hard_fail = false;
+        let mut had_soft_skip = false;
+        let mut mode_c_fallback = false;
+        let mut accepted_msg: Option<CanonicalMessage> = None;
+        let mut accepted_attempt: usize = 0;
 
         for (attempt, &idx) in ranked.iter().enumerate() {
             let locus = resolved.items[idx].locus.clone();
@@ -2387,21 +2591,104 @@ where
                     msg.content_hash = resolved.items[idx].content_hash;
                     msg.edrm_mih_hex = resolved.items[idx].edrm_mih_hex();
 
-                    if attempt > 0 {
-                        promoted = true;
+                    let incomplete = opts.promote_on_attach_fail && is_attach_incomplete(&msg);
+                    let more_peers = attempt + 1 < ranked.len();
+
+                    if incomplete && more_peers {
+                        // Soft skip: valid message, incomplete attaches — try next peer.
+                        // Stash so Mode C fallback can accept the highest-ranked
+                        // materializable incomplete without re-materialize.
+                        had_soft_skip = true;
+                        soft_skipped_msgs.push((idx, msg));
+                        continue;
                     }
+
+                    if incomplete && opts.promote_on_attach_fail {
+                        // No more peers: Mode C fallback — highest-ranked materializable
+                        // (first soft-skipped incomplete, else this sole incomplete).
+                        mode_c_fallback = true;
+                        if soft_skipped_msgs.is_empty() {
+                            accepted_attempt = attempt;
+                            final_winner = Some(idx);
+                            accepted_msg = Some(msg);
+                        } else {
+                            let (first_idx, first_msg) = soft_skipped_msgs.remove(0);
+                            // Remaining soft-skips + current last incomplete → DupOf winner.
+                            soft_skipped_msgs.push((idx, msg));
+                            // Walked past first incomplete looking for complete → promoted.
+                            accepted_attempt = attempt.max(1);
+                            final_winner = Some(first_idx);
+                            accepted_msg = Some(first_msg);
+                        }
+                        break;
+                    }
+
+                    // Accept complete (or flag-off any Ok).
+                    accepted_attempt = attempt;
                     final_winner = Some(idx);
-                    on_winner(msg)?;
-                    materialized_count += 1;
+                    accepted_msg = Some(msg);
                     break;
                 }
                 Err(MaterializeError::Hard(_)) => {
                     failed.push(idx);
+                    had_hard_fail = true;
                 }
             }
         }
 
+        // Mode A / Mode C: incomplete peer(s) soft-skipped, but every remaining
+        // peer hard-failed (no complete Ok). Accept highest-ranked materializable
+        // incomplete — same as end-of-list incomplete accept path (DoD-5 / §2.5 r7).
+        if final_winner.is_none() && !soft_skipped_msgs.is_empty() {
+            mode_c_fallback = true;
+            let (first_idx, first_msg) = soft_skipped_msgs.remove(0);
+            // Walked past first incomplete looking for complete → promoted.
+            accepted_attempt = 1;
+            final_winner = Some(first_idx);
+            accepted_msg = Some(first_msg);
+        }
+
         if let Some(winner) = final_winner {
+            let Some(msg) = accepted_msg.take() else {
+                return Err(KeepSetError::Other(
+                    "internal: accepted winner without message".into(),
+                ));
+            };
+
+            // Decide promote vocabulary (0083).
+            let promoted = accepted_attempt > 0 || had_hard_fail || had_soft_skip;
+            let promote_reason = if mode_c_fallback {
+                Some(PromoteReason::ModeCFallbackAllPeersIncomplete)
+            } else if promoted {
+                if had_soft_skip {
+                    // Soft-attach Mode A deliverable wins over mixed hard-fail history.
+                    Some(PromoteReason::AttachIncomplete)
+                } else if had_hard_fail {
+                    Some(PromoteReason::MaterializeFail)
+                } else {
+                    // attempt > 0 without hard/soft should not happen; keep hard string.
+                    Some(PromoteReason::MaterializeFail)
+                }
+            } else {
+                None
+            };
+
+            // Soft-skip ledger records with peer locus of accepted winner.
+            // Exclude the winner itself if it was pulled from soft_skipped_msgs.
+            let peer_path = resolved.items[winner].locus.source_path.clone();
+            let peer_nid = resolved.items[winner].locus.nid;
+            for (skip_idx, skip_msg) in soft_skipped_msgs.drain(..) {
+                if skip_idx == winner {
+                    continue;
+                }
+                resolved
+                    .soft_skip_attach_records
+                    .extend(soft_skip_records_for_msg(&skip_msg, &peer_path, peer_nid));
+            }
+
+            on_winner(msg)?;
+            materialized_count += 1;
+
             resolved.group_dropped[g_idx] = false;
             for &idx in &group {
                 if failed.contains(&idx) {
@@ -2409,31 +2696,40 @@ where
                     resolved.winner_of[idx] = Some(winner);
                     resolved.tier_of[idx] = None;
                     resolved.promoted_from_failure[idx] = false;
+                    resolved.promote_reason[idx] = None;
                 } else if idx == winner {
                     resolved.roles[idx] = DecisionRole::Unique;
                     resolved.winner_of[idx] = Some(winner);
                     resolved.tier_of[idx] = None;
                     resolved.promoted_from_failure[idx] = promoted;
+                    resolved.promote_reason[idx] = promote_reason;
                 } else {
+                    // Soft-skipped incomplete + normal dups: DupOf (not MaterializeFailed).
                     resolved.roles[idx] = DecisionRole::DupOf;
                     resolved.winner_of[idx] = Some(winner);
-                    // Use bind-time provenance (member_tier deleted).
                     resolved.tier_of[idx] = resolved
                         .bound_by
                         .get(idx)
                         .and_then(|b| b.tier_csv())
                         .map(|s| s.to_string());
                     resolved.promoted_from_failure[idx] = false;
+                    resolved.promote_reason[idx] = None;
                 }
             }
         } else {
-            // All failed — zero exportable winners.
+            // All hard-failed (no soft-skipped materializable) — zero exportable winners.
+            debug_assert!(
+                soft_skipped_msgs.is_empty(),
+                "soft-skipped materializable must Mode C fallback, not drop"
+            );
+            let _ = soft_skipped_msgs;
             resolved.group_dropped[g_idx] = true;
             for &idx in &group {
                 resolved.roles[idx] = DecisionRole::MaterializeFailed;
                 resolved.winner_of[idx] = None;
                 resolved.tier_of[idx] = None;
                 resolved.promoted_from_failure[idx] = false;
+                resolved.promote_reason[idx] = None;
             }
         }
     }
@@ -3220,6 +3516,7 @@ mod tests {
                 created_from: None,
                 rank_ctx: None,
                 grouping_ctx: None,
+                promote_on_attach_fail: false,
             },
             &mut mat,
             |msg| {
@@ -3260,6 +3557,7 @@ mod tests {
                 created_from: None,
                 rank_ctx: None,
                 grouping_ctx: None,
+                promote_on_attach_fail: false,
             },
             &mut mat,
             |msg| {
@@ -3293,6 +3591,7 @@ mod tests {
                 created_from: None,
                 rank_ctx: None,
                 grouping_ctx: None,
+                promote_on_attach_fail: false,
             },
             &mut mat,
             |_| Ok(()),
@@ -3314,6 +3613,583 @@ mod tests {
         );
     }
 
+    /// Helper: complete attach or incomplete (stream_available=false) by nid.
+    struct AttachIncompleteMat {
+        /// nid → Ok(complete) or Ok(incomplete) or Err hard
+        map: HashMap<u64, Result<bool, ()>>,
+    }
+
+    impl MessageMaterializer for AttachIncompleteMat {
+        fn materialize(
+            &mut self,
+            locus: &MessageLocus,
+        ) -> Result<CanonicalMessage, MaterializeError> {
+            match self.map.get(&locus.nid) {
+                Some(Ok(complete)) => {
+                    let stream_available = *complete;
+                    Ok(CanonicalMessage {
+                        locus: locus.clone(),
+                        message_id: None,
+                        subject: Some("s".into()),
+                        sender: None,
+                        display_to: None,
+                        display_cc: None,
+                        display_bcc: None,
+                        recipients: Vec::new(),
+                        message_flags: None,
+                        submit_time: None,
+                        size: Some(10),
+                        message_class: None,
+                        body_plain: Some("body".into()),
+                        body_html: None,
+                        attachments: vec![CanonicalAttachment {
+                            filename: "a.bin".into(),
+                            size: if stream_available { 10 } else { 0 },
+                            mime: Some("application/octet-stream".into()),
+                            data: if stream_available {
+                                Some(vec![1, 2, 3])
+                            } else {
+                                None
+                            },
+                            stream_available,
+                            attach_nid: Some(100),
+                            attach_method: Some(1),
+                        }],
+                        fidelity: if stream_available {
+                            RecoverableIntegrity::clean()
+                        } else {
+                            RecoverableIntegrity::with_degraded(
+                                vec![IntegrityReason::AttachStreamOpenFailed],
+                                false,
+                            )
+                        },
+                        message_id_norm: None,
+                        content_hash: [0; 32],
+                        edrm_mih_hex: None,
+                        body_incomplete: false,
+                        body_unavailable: false,
+                    })
+                }
+                Some(Err(())) | None => Err(MaterializeError::Hard(format!(
+                    "forced fail nid={}",
+                    locus.nid
+                ))),
+            }
+        }
+    }
+
+    #[test]
+    fn is_attach_incomplete_table() {
+        let locus = MessageLocus {
+            source_path: "C:/a.pst".into(),
+            source_pst: "a.pst".into(),
+            folder_path: "I".into(),
+            nid: 1,
+            is_orphaned: false,
+        };
+        let base = |atts: Vec<CanonicalAttachment>,
+                    fidelity: RecoverableIntegrity,
+                    body_u: bool,
+                    body_i: bool| {
+            CanonicalMessage {
+                locus: locus.clone(),
+                message_id: None,
+                subject: Some("s".into()),
+                sender: None,
+                display_to: None,
+                display_cc: None,
+                display_bcc: None,
+                recipients: Vec::new(),
+                message_flags: None,
+                submit_time: None,
+                size: Some(10),
+                message_class: None,
+                body_plain: Some("b".into()),
+                body_html: None,
+                attachments: atts,
+                fidelity,
+                message_id_norm: None,
+                content_hash: [0; 32],
+                edrm_mih_hex: None,
+                body_incomplete: body_i,
+                body_unavailable: body_u,
+            }
+        };
+        let ok_att = CanonicalAttachment {
+            filename: "f.bin".into(),
+            size: 0, // zero-byte success is still complete
+            mime: None,
+            data: Some(vec![]),
+            stream_available: true,
+            attach_nid: Some(1),
+            attach_method: Some(1),
+        };
+        // Zero-byte by-value with empty display name (materializer must set stream_available).
+        let zero_empty_name = CanonicalAttachment {
+            filename: String::new(),
+            size: 0,
+            mime: None,
+            data: Some(vec![]),
+            stream_available: true,
+            attach_nid: Some(1),
+            attach_method: Some(1),
+        };
+        let bad_att = CanonicalAttachment {
+            filename: "f.bin".into(),
+            size: 10,
+            mime: None,
+            data: None,
+            stream_available: false,
+            attach_nid: Some(1),
+            attach_method: Some(1),
+        };
+
+        // Positives
+        assert!(is_attach_incomplete(&base(
+            vec![bad_att.clone()],
+            RecoverableIntegrity::clean(),
+            false,
+            false
+        )));
+        assert!(is_attach_incomplete(&base(
+            vec![],
+            RecoverableIntegrity::with_degraded(vec![IntegrityReason::AttachMetaFailed], false),
+            false,
+            false
+        )));
+        assert!(is_attach_incomplete(&base(
+            vec![ok_att.clone()],
+            RecoverableIntegrity::with_degraded(
+                vec![IntegrityReason::AttachStreamReadFailed],
+                false
+            ),
+            false,
+            false
+        )));
+
+        // Negatives
+        assert!(!is_attach_incomplete(&base(
+            vec![ok_att.clone()],
+            RecoverableIntegrity::clean(),
+            false,
+            false
+        )));
+        // Spec §2.5 rule 5: zero-byte by-value empty name is NOT incomplete.
+        assert!(!is_attach_incomplete(&base(
+            vec![zero_empty_name],
+            RecoverableIntegrity::clean(),
+            false,
+            false
+        )));
+        assert!(!is_attach_incomplete(&base(
+            vec![], // parents_only omit
+            RecoverableIntegrity::clean(),
+            false,
+            false
+        )));
+        assert!(!is_attach_incomplete(&base(
+            vec![ok_att.clone()],
+            RecoverableIntegrity::with_degraded(vec![IntegrityReason::BodyUnavailable], false),
+            true,
+            false
+        )));
+        assert!(!is_attach_incomplete(&base(
+            vec![ok_att],
+            RecoverableIntegrity::with_degraded(vec![IntegrityReason::CrcSuspect], false),
+            false,
+            false
+        )));
+        // Body incomplete alone is not attach-incomplete
+        assert!(!is_attach_incomplete(&base(
+            vec![],
+            RecoverableIntegrity::clean(),
+            false,
+            true
+        )));
+    }
+
+    #[test]
+    fn mode_a_promotes_complete_peer_after_incomplete() {
+        let mid = Some("modea@x");
+        let a = item("C:/a.pst", "a.pst", "I", 1, mid, [1; 32], 100, 0, false);
+        let b = item("C:/b.pst", "b.pst", "I", 2, mid, [1; 32], 100, 1, false);
+        let mut mat = AttachIncompleteMat {
+            // peer0 incomplete, peer1 complete
+            map: HashMap::from([(1, Ok(false)), (2, Ok(true))]),
+        };
+        let (ks, dec, count) = build_keep_set_materialized(
+            vec![a, b],
+            MaterializeBuildOpts {
+                policy: KeepPolicy::FirstSeen,
+                family_policy: FamilyPolicy::KeepAttachmentsWithParent,
+                prefer_path: &[],
+                tier2_enabled: true,
+                created_from: None,
+                rank_ctx: None,
+                grouping_ctx: None,
+                promote_on_attach_fail: true,
+            },
+            &mut mat,
+            |_| Ok(()),
+        )
+        .expect("m");
+        assert_eq!(count, 1);
+        assert_eq!(ks.stats.unique, 1);
+        assert_eq!(ks.winners[0].locus.nid, 2);
+        assert!(ks.winners[0].promoted_from_failure);
+        assert_eq!(
+            ks.winners[0].decided_by.as_deref(),
+            Some("promoted_after_attach_incomplete")
+        );
+        assert_eq!(ks.stats.promoted_after_attach_incomplete_count, 1);
+        assert_eq!(ks.stats.mode_c_fallback_all_peers_incomplete_count, 0);
+        let skipped = dec.iter().find(|d| d.nid == 1).expect("a");
+        assert_eq!(
+            skipped.role,
+            DecisionRole::DupOf,
+            "soft skip must not be MaterializeFailed"
+        );
+        let uniq = dec.iter().find(|d| d.nid == 2).expect("b");
+        assert_eq!(uniq.role, DecisionRole::Unique);
+        assert!(uniq.promoted_from_failure);
+        assert_eq!(uniq.decided_by, "promoted_after_attach_incomplete");
+        // dup_sources must list the skipped incomplete peer's source
+        assert!(
+            ks.winners[0].duplicate_sources.iter().any(|s| s == "a.pst"),
+            "dup_sources must keep full group: {:?}",
+            ks.winners[0].duplicate_sources
+        );
+        assert_eq!(ks.winners[0].duplicate_source_count, 1);
+    }
+
+    #[test]
+    fn mode_a_flag_off_accepts_incomplete_first_peer() {
+        let mid = Some("modea-off@x");
+        let a = item("C:/a.pst", "a.pst", "I", 1, mid, [1; 32], 100, 0, false);
+        let b = item("C:/b.pst", "b.pst", "I", 2, mid, [1; 32], 100, 1, false);
+        let mut mat = AttachIncompleteMat {
+            map: HashMap::from([(1, Ok(false)), (2, Ok(true))]),
+        };
+        let (ks, dec, count) = build_keep_set_materialized(
+            vec![a, b],
+            MaterializeBuildOpts {
+                policy: KeepPolicy::FirstSeen,
+                family_policy: FamilyPolicy::KeepAttachmentsWithParent,
+                prefer_path: &[],
+                tier2_enabled: true,
+                created_from: None,
+                rank_ctx: None,
+                grouping_ctx: None,
+                promote_on_attach_fail: false,
+            },
+            &mut mat,
+            |_| Ok(()),
+        )
+        .expect("m");
+        assert_eq!(count, 1);
+        assert_eq!(ks.winners[0].locus.nid, 1, "flag off: first peer wins");
+        assert!(!ks.winners[0].promoted_from_failure);
+        assert_ne!(
+            ks.winners[0].decided_by.as_deref(),
+            Some("promoted_after_attach_incomplete")
+        );
+        assert_eq!(ks.stats.promoted_after_attach_incomplete_count, 0);
+        let uniq = dec.iter().find(|d| d.nid == 1).expect("a");
+        assert_eq!(uniq.role, DecisionRole::Unique);
+    }
+
+    /// Soft-incomplete peer0 then hard-fail peer1 → Mode C fallback (not group_dropped).
+    /// Regression for Codex P1: materializable soft-skip must not be discarded after
+    /// later Hard failures leave `final_winner` unset.
+    #[test]
+    fn mode_a_soft_incomplete_then_hard_fails_mode_c_fallback() {
+        let mid = Some("modea-soft-hard@x");
+        let a = item("C:/a.pst", "a.pst", "I", 1, mid, [1; 32], 100, 0, false);
+        let b = item("C:/b.pst", "b.pst", "I", 2, mid, [1; 32], 100, 1, false);
+        let mut mat = AttachIncompleteMat {
+            // peer0 attach-incomplete (soft skip), peer1 hard materialize fail
+            map: HashMap::from([(1, Ok(false)), (2, Err(()))]),
+        };
+        let (ks, dec, count) = build_keep_set_materialized(
+            vec![a, b],
+            MaterializeBuildOpts {
+                policy: KeepPolicy::FirstSeen,
+                family_policy: FamilyPolicy::KeepAttachmentsWithParent,
+                prefer_path: &[],
+                tier2_enabled: true,
+                created_from: None,
+                rank_ctx: None,
+                grouping_ctx: None,
+                promote_on_attach_fail: true,
+            },
+            &mut mat,
+            |_| Ok(()),
+        )
+        .expect("m");
+        assert_eq!(count, 1, "must export soft-incomplete fallback, not drop");
+        assert_eq!(ks.stats.unique, 1);
+        assert_eq!(
+            ks.stats.groups_dropped_materialize, 0,
+            "must not group_drop when a materializable soft-skip exists"
+        );
+        assert_eq!(ks.winners[0].locus.nid, 1);
+        assert!(ks.winners[0].promoted_from_failure);
+        assert_eq!(
+            ks.winners[0].decided_by.as_deref(),
+            Some("mode_c_fallback_all_peers_incomplete")
+        );
+        assert_eq!(ks.stats.mode_c_fallback_all_peers_incomplete_count, 1);
+        assert_eq!(ks.stats.promoted_after_attach_incomplete_count, 0);
+        let uniq = dec.iter().find(|d| d.nid == 1).expect("a");
+        assert_eq!(uniq.role, DecisionRole::Unique);
+        assert_eq!(uniq.decided_by, "mode_c_fallback_all_peers_incomplete");
+        assert!(uniq.promoted_from_failure);
+        let hard = dec.iter().find(|d| d.nid == 2).expect("b");
+        assert_eq!(
+            hard.role,
+            DecisionRole::MaterializeFailed,
+            "hard-fail peer stays MaterializeFailed under Mode C fallback"
+        );
+    }
+
+    #[test]
+    fn mode_a_all_incomplete_mode_c_fallback() {
+        let mid = Some("modea-all@x");
+        let a = item("C:/a.pst", "a.pst", "I", 1, mid, [1; 32], 100, 0, false);
+        let b = item("C:/b.pst", "b.pst", "I", 2, mid, [1; 32], 100, 1, false);
+        let mut mat = AttachIncompleteMat {
+            map: HashMap::from([(1, Ok(false)), (2, Ok(false))]),
+        };
+        let (ks, dec, count) = build_keep_set_materialized(
+            vec![a, b],
+            MaterializeBuildOpts {
+                policy: KeepPolicy::FirstSeen,
+                family_policy: FamilyPolicy::KeepAttachmentsWithParent,
+                prefer_path: &[],
+                tier2_enabled: true,
+                created_from: None,
+                rank_ctx: None,
+                grouping_ctx: None,
+                promote_on_attach_fail: true,
+            },
+            &mut mat,
+            |_| Ok(()),
+        )
+        .expect("m");
+        assert_eq!(count, 1);
+        assert_eq!(ks.stats.unique, 1);
+        assert_eq!(ks.stats.groups_dropped_materialize, 0);
+        // Highest-ranked materializable = peer0 (first_seen / path order)
+        assert_eq!(ks.winners[0].locus.nid, 1);
+        assert!(ks.winners[0].promoted_from_failure);
+        assert_eq!(
+            ks.winners[0].decided_by.as_deref(),
+            Some("mode_c_fallback_all_peers_incomplete")
+        );
+        assert_eq!(ks.stats.mode_c_fallback_all_peers_incomplete_count, 1);
+        let uniq = dec.iter().find(|d| d.nid == 1).expect("a");
+        assert_eq!(uniq.decided_by, "mode_c_fallback_all_peers_incomplete");
+        let peer = dec.iter().find(|d| d.nid == 2).expect("b");
+        assert_eq!(peer.role, DecisionRole::DupOf);
+    }
+
+    /// P3: least-incomplete must **not** re-rank. Three incomplete peers; peer1 is
+    /// less incomplete than peer0 → still highest-ranked materializable (peer0)
+    /// wins with `mode_c_fallback_all_peers_incomplete`.
+    #[test]
+    fn mode_a_least_incomplete_does_not_rerank() {
+        let mid = Some("modea-least@x");
+        let a = item("C:/a.pst", "a.pst", "I", 1, mid, [1; 32], 100, 0, false);
+        let b = item("C:/b.pst", "b.pst", "I", 2, mid, [1; 32], 100, 1, false);
+        let c = item("C:/c.pst", "c.pst", "I", 3, mid, [1; 32], 100, 2, false);
+
+        /// Graded incomplete: unavailable_attach_count (0 = complete).
+        struct GradedIncompleteMat {
+            map: HashMap<u64, Result<usize, ()>>,
+        }
+        impl MessageMaterializer for GradedIncompleteMat {
+            fn materialize(
+                &mut self,
+                locus: &MessageLocus,
+            ) -> Result<CanonicalMessage, MaterializeError> {
+                match self.map.get(&locus.nid) {
+                    Some(Ok(n_unavail)) => {
+                        let n = *n_unavail;
+                        let mut attachments = Vec::new();
+                        if n == 0 {
+                            attachments.push(CanonicalAttachment {
+                                filename: "good.bin".into(),
+                                size: 10,
+                                mime: Some("application/octet-stream".into()),
+                                data: Some(vec![1, 2, 3]),
+                                stream_available: true,
+                                attach_nid: Some(100),
+                                attach_method: Some(1),
+                            });
+                        } else {
+                            for i in 0..n {
+                                attachments.push(CanonicalAttachment {
+                                    filename: format!("bad{i}.bin"),
+                                    size: 10,
+                                    mime: Some("application/octet-stream".into()),
+                                    data: None,
+                                    stream_available: false,
+                                    attach_nid: Some(100 + i as u64),
+                                    attach_method: Some(1),
+                                });
+                            }
+                        }
+                        Ok(CanonicalMessage {
+                            locus: locus.clone(),
+                            message_id: None,
+                            subject: Some("s".into()),
+                            sender: None,
+                            display_to: None,
+                            display_cc: None,
+                            display_bcc: None,
+                            recipients: Vec::new(),
+                            message_flags: None,
+                            submit_time: None,
+                            size: Some(10),
+                            message_class: None,
+                            body_plain: Some("body".into()),
+                            body_html: None,
+                            attachments,
+                            fidelity: if n == 0 {
+                                RecoverableIntegrity::clean()
+                            } else {
+                                RecoverableIntegrity::with_degraded(
+                                    vec![IntegrityReason::AttachStreamOpenFailed],
+                                    false,
+                                )
+                            },
+                            message_id_norm: None,
+                            content_hash: [0; 32],
+                            edrm_mih_hex: None,
+                            body_incomplete: false,
+                            body_unavailable: false,
+                        })
+                    }
+                    Some(Err(())) | None => Err(MaterializeError::Hard(format!(
+                        "forced fail nid={}",
+                        locus.nid
+                    ))),
+                }
+            }
+        }
+
+        // peer0: 2 unavailable, peer1: 1 unavailable (less incomplete), peer2: 1.
+        // Spec: no least-incomplete re-rank → peer0 (highest ranked) wins Mode C fallback.
+        let mut mat = GradedIncompleteMat {
+            map: HashMap::from([(1, Ok(2)), (2, Ok(1)), (3, Ok(1))]),
+        };
+        let (ks, dec, count) = build_keep_set_materialized(
+            vec![a, b, c],
+            MaterializeBuildOpts {
+                policy: KeepPolicy::FirstSeen,
+                family_policy: FamilyPolicy::KeepAttachmentsWithParent,
+                prefer_path: &[],
+                tier2_enabled: true,
+                created_from: None,
+                rank_ctx: None,
+                grouping_ctx: None,
+                promote_on_attach_fail: true,
+            },
+            &mut mat,
+            |_| Ok(()),
+        )
+        .expect("m");
+        assert_eq!(count, 1);
+        assert_eq!(
+            ks.winners[0].locus.nid, 1,
+            "must keep highest-ranked materializable, not least-incomplete peer"
+        );
+        assert_eq!(
+            ks.winners[0].decided_by.as_deref(),
+            Some("mode_c_fallback_all_peers_incomplete")
+        );
+        assert_eq!(ks.stats.mode_c_fallback_all_peers_incomplete_count, 1);
+        assert_eq!(ks.stats.promoted_after_attach_incomplete_count, 0);
+        let uniq = dec.iter().find(|d| d.nid == 1).expect("a");
+        assert_eq!(uniq.decided_by, "mode_c_fallback_all_peers_incomplete");
+        // Peers remain DupOf (not dropped).
+        assert_eq!(
+            dec.iter().find(|d| d.nid == 2).map(|d| d.role),
+            Some(DecisionRole::DupOf)
+        );
+        assert_eq!(
+            dec.iter().find(|d| d.nid == 3).map(|d| d.role),
+            Some(DecisionRole::DupOf)
+        );
+    }
+
+    #[test]
+    fn mode_a_dup_sources_multi_source_after_promote() {
+        let mid = Some("modea-dups@x");
+        let a = item("C:/a.pst", "a.pst", "I", 1, mid, [1; 32], 100, 0, false);
+        let b = item("C:/b.pst", "b.pst", "I", 2, mid, [1; 32], 100, 1, false);
+        let c = item("C:/c.pst", "c.pst", "I", 3, mid, [1; 32], 100, 2, false);
+        let mut mat = AttachIncompleteMat {
+            // incomplete, complete, incomplete — promote to b
+            map: HashMap::from([(1, Ok(false)), (2, Ok(true)), (3, Ok(false))]),
+        };
+        let (ks, _dec, _) = build_keep_set_materialized(
+            vec![a, b, c],
+            MaterializeBuildOpts {
+                policy: KeepPolicy::FirstSeen,
+                family_policy: FamilyPolicy::KeepAttachmentsWithParent,
+                prefer_path: &[],
+                tier2_enabled: true,
+                created_from: None,
+                rank_ctx: None,
+                grouping_ctx: None,
+                promote_on_attach_fail: true,
+            },
+            &mut mat,
+            |_| Ok(()),
+        )
+        .expect("m");
+        assert_eq!(ks.winners[0].locus.nid, 2);
+        assert_eq!(ks.winners[0].duplicate_source_count, 2);
+        let names = &ks.winners[0].duplicate_sources;
+        assert!(names.iter().any(|s| s == "a.pst"), "{names:?}");
+        assert!(names.iter().any(|s| s == "c.pst"), "{names:?}");
+    }
+
+    #[test]
+    fn mode_a_hard_promote_still_materialize_fail_string() {
+        // Flag on, but only hard fails — not soft incomplete.
+        let mid = Some("modea-hard@x");
+        let a = item("C:/a.pst", "a.pst", "I", 1, mid, [1; 32], 100, 0, false);
+        let b = item("C:/b.pst", "b.pst", "I", 2, mid, [1; 32], 100, 1, false);
+        let mut mat = AttachIncompleteMat {
+            map: HashMap::from([(1, Err(())), (2, Ok(true))]),
+        };
+        let (ks, dec, _) = build_keep_set_materialized(
+            vec![a, b],
+            MaterializeBuildOpts {
+                policy: KeepPolicy::FirstSeen,
+                family_policy: FamilyPolicy::default(),
+                prefer_path: &[],
+                tier2_enabled: true,
+                created_from: None,
+                rank_ctx: None,
+                grouping_ctx: None,
+                promote_on_attach_fail: true,
+            },
+            &mut mat,
+            |_| Ok(()),
+        )
+        .expect("m");
+        assert_eq!(ks.winners[0].locus.nid, 2);
+        assert_eq!(
+            ks.winners[0].decided_by.as_deref(),
+            Some("promoted_after_materialize_fail")
+        );
+        let failed = dec.iter().find(|d| d.nid == 1).expect("a");
+        assert_eq!(failed.role, DecisionRole::MaterializeFailed);
+    }
+
     #[test]
     fn all_materialize_fail_zero_winners() {
         let mid = Some("allfail@x");
@@ -3333,6 +4209,7 @@ mod tests {
                 created_from: None,
                 rank_ctx: None,
                 grouping_ctx: None,
+                promote_on_attach_fail: false,
             },
             &mut mat,
             |_| Ok(()),
@@ -3402,6 +4279,7 @@ mod tests {
                 created_from: None,
                 rank_ctx: None,
                 grouping_ctx: None,
+                promote_on_attach_fail: false,
             },
             &mut mat,
             |_| Ok(()),
@@ -3481,6 +4359,7 @@ mod tests {
                 created_from: None,
                 rank_ctx: None,
                 grouping_ctx: None,
+                promote_on_attach_fail: false,
             },
             &mut mat,
             |_| Ok(()),
@@ -3576,6 +4455,7 @@ mod tests {
                 created_from: None,
                 rank_ctx: None,
                 grouping_ctx: None,
+                promote_on_attach_fail: false,
             },
             &mut mat,
             |msg| {
@@ -3818,6 +4698,7 @@ mod tests {
                 created_from: None,
                 rank_ctx: None,
                 grouping_ctx: None,
+                promote_on_attach_fail: false,
             },
             &mut mat,
             |msg| {
