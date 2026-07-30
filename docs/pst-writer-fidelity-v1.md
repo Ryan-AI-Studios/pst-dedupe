@@ -285,24 +285,24 @@ NID         (4 bytes)  = IPM_SUBTREE folder's NID, little-endian
 
 The message store's own PC also carries **`PidTagRecordKey`** (MAPI tag
 `0x0FF9`, `PtypBinary`) — a 16-byte value generated once per write by
-`generate_store_record_key()` (`crates/pst-writer/src/production.rs`) and
-reused, byte-for-byte, as the EntryID's ProviderUID above. This closes a
-round-5 cross-model review finding: earlier v1 wrote no `PidTagRecordKey` at
-all and hardcoded the EntryID's ProviderUID to an arbitrary all-zero
-placeholder. A store-internal EntryID's provider UID is conventionally the
-store's own unique record key, not an arbitrary value — the fix makes the
-EntryID genuinely self-consistent and identifies this specific store, rather
-than pointing at a degenerate zero placeholder.
+`derive_store_record_key()` (`crates/pst-writer/src/production.rs`, track
+**0087**) and reused, byte-for-byte, as the EntryID's ProviderUID above. This
+closes a round-5 cross-model review finding: earlier v1 wrote no
+`PidTagRecordKey` at all and hardcoded the EntryID's ProviderUID to an
+arbitrary all-zero placeholder. A store-internal EntryID's provider UID is
+conventionally the store's own unique record key, not an arbitrary value —
+the fix makes the EntryID genuinely self-consistent and identifies this
+specific store, rather than pointing at a degenerate zero placeholder.
 
-`generate_store_record_key()` is a best-effort unique identifier, **not** a
-cryptographic GUID: per this crate's minimal-dependency convention (no
-`uuid`, no `rand`), it derives the 16 bytes from write-time-varying inputs
-already available (`SystemTime::now()` nanoseconds, `std::process::id()`, the
-destination path, and the message count) hashed four times with
-`crc32fast::hash` under different salts. It only guarantees non-zero,
-self-consistent (same bytes in `PidTagRecordKey` and the EntryID), and
-reasonably-unique-per-invocation — never a cryptographically strong or
-globally unique value.
+**Default mode (0087):** domain-separated SHA-256 over a length-prefixed
+preimage (algo v1 + `volume_index` + message count + content fingerprint from
+ordered MID/subject/submit/folder). **No** wall-clock, PID, or destination
+path in the default preimage — same logical winners ⇒ same RecordKey across
+re-runs and dest paths. Optional job-global `store_key_material` rebinds each
+volume key to the whole export. Ephemeral (time+pid) is an opts-only escape
+hatch. Full volume-file `sha256_hex` match remains best-effort (B-tree/layout);
+see `docs/unique-pst-export.md` CoC section and D-0079-deterministic-key
+(closed).
 
 This is **still not** independently verified against a real Outlook-opened
 PST — flagged as a residual for operator scanpst/Outlook evidence (spec
@@ -315,10 +315,10 @@ the embedded NID matches the actual IPM_SUBTREE folder's NID (see
 `crates/pst-writer/tests/writer_v1.rs::hierarchy_places_unique_mail_under_ipm_subtree_with_store_entryid`);
 `PidTagRecordKey` is present, 16 bytes, and non-zero, and equals the EntryID's
 ProviderUID bytes exactly (see
-`store_record_key_present_nonzero_and_matches_entry_id_provider_uid`); and two
-separate writes produce different record keys, proving the value is genuinely
-generated per write rather than a hardcoded constant (see
-`store_record_key_differs_across_separate_writes`).
+`store_record_key_present_nonzero_and_matches_entry_id_provider_uid`); same
+content on different paths yields identical keys; different content or
+`volume_index` yields different keys (see
+`store_record_key_differs_across_separate_writes` and volume-index tests).
 
 ### `PidTagIpmWastebasketEntryId` / `PidTagFinderEntryId` — implemented (round 9; supersedes the round-5/6 decline)
 
@@ -643,15 +643,15 @@ lifetimes and form a small, predictable space, so a stale temp file left by
 a previous crashed run — or, worst case, an adversarial or mistaken input
 file that happens to already carry that exact name — could collide with it.
 This crate does not add a new dependency (`tempfile`/`uuid`/`rand`) for
-this; instead it follows its own established `generate_store_record_key`
-pattern (see that function's docs) for dependency-free entropy: `<entropy>`
-is an 8-hex-digit `crc32fast::hash` over wall-clock nanoseconds since the
-epoch plus the process ID, computed once per process and cached
-(`process_entropy_suffix`) so repeated calls for the same destination within
-one run — including the integration test calling `temp_sibling_path`
-directly to predict the exact value `write_unicode_pst` will compute —
-agree, while a different process (a later run, a restarted one, or an
-attacker without this process's PID/start time) gets a different suffix.
+this; instead it uses dependency-free process entropy via
+`process_entropy_suffix` (wall-clock nanoseconds + PID, 8-hex `crc32fast`
+cache per process — **staging only**, not final PST store identity; store
+RecordKey determinism is track **0087** / `derive_store_record_key`).
+Repeated calls for the same destination within one run — including the
+integration test calling `temp_sibling_path` directly to predict the exact
+value `write_unicode_pst` will compute — agree, while a different process
+(a later run, a restarted one, or an attacker without this process's
+PID/start time) gets a different suffix.
 This is explicitly *defense in depth*, not the sole guarantee: it reduces
 the ambient chance of a collision, while the explicit
 `protected_source_paths` check above (which now also covers the temp path)

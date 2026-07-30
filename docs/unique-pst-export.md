@@ -96,6 +96,22 @@ Source PSTs are **read-only**. The writer never mutates inputs.
 
 Split is **between messages only** (after a full keep-set winner family is written). Progress sink uses **physical** temp size (`current_physical_size`), not payload-sum alone.
 
+### Store RecordKey & re-run reproducibility (0087)
+
+| Claim | Status |
+|---|---|
+| **Logical store identity** (`PidTagRecordKey` / EntryID ProviderUID) | **Hard guarantee** under default deterministic mode |
+| Full volume-file `sha256_hex` / `md5_hex` match across re-runs | **Best-effort** — subject to B-tree / page layout stability |
+| Dest path in preimage | **Never** — same winners → same RecordKey on different `--out` paths |
+
+Default mode is **deterministic**. Summary JSON reports `store_record_key_mode: "deterministic"`. Preimage is domain-separated SHA-256 (algo v1) over `volume_index` + message count + content fingerprint (length-prefixed MID / subject / submit time / folder path per message in write order). unique-pst also passes a **job-global** seed (`store_key_material`) from ordered keep-set winner loci so multi-volume keys bind to the whole job.
+
+**Volume-layout coupling (not a bug):** changing `--max-volume-bytes` (or any policy that changes which messages land on which volume) **breaks** per-volume RecordKey and volume-digest reproducibility even when the global winner set is identical. Re-run stability requires **identical chunking layout**, not only identical winners.
+
+**RecordKey vs volume-hash:** RecordKey seals **logical store identity**. Volume digests remain useful custody seals when layout is stable; when they drift, use the **0079 structural equivalence oracle** (`export_oracle::compare_export_packs`) — content/structure parity still holds.
+
+**Optional 0086 synergy (docs only, not mandated):** operators already paying for `--strong-content-hash body-recip-attach` may pass an aggregate strong-content / keep-set fingerprint as `store_key_material` so the store key is attachment-byte-aware. Default volume-local fingerprint remains **metadata-only** (MID/subject/time/folder) so unique-pst never forces attach I/O solely for store keys.
+
 ### Oversized family vs soft limit
 
 A single winner (parent + attaches) may **exceed** `--max-volume-bytes` by itself. The export **allows the exceed** rather than severing the family or failing the run. The volume row may set `volume_exceeded_soft_limit: true`.
@@ -149,6 +165,7 @@ Additive fields (always present; older tools may ignore):
 | `bytes_written_total` | Sum of completed volume sizes |
 | `prepared_bytes_peak` | Peak retained body + buffered-attach bytes in `prepared` |
 | `hash_ms` | Final-hash (SHA-256+MD5) wall across volumes |
+| `store_record_key_mode` | **0087** — `"deterministic"` (default) or `"ephemeral"` |
 
 Soft warning when `prepared_bytes_peak` exceeds **1 GiB** (stability; see D-0079-stream-prepare).
 

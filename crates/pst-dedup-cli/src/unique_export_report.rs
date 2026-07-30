@@ -598,6 +598,11 @@ pub struct UniqueExportSummary {
     /// Messages where body scan caps truncated additional candidates (0085).
     #[serde(default)]
     pub body_cloud_link_truncated_messages: u64,
+    /// Store RecordKey mode for this export (0087). Default `"deterministic"`.
+    /// Values: `"deterministic"` | `"ephemeral"`.
+    /// Always set by unique-pst writers; `default` reserved if Deserialize is added.
+    #[serde(default)]
+    pub store_record_key_mode: String,
 }
 
 /// Structured error on the summary / JSON stdout.

@@ -500,6 +500,18 @@ impl Default for FolderLayoutPolicy {
     }
 }
 
+/// How the store's 16-byte `PidTagRecordKey` / EntryID ProviderUID is built
+/// (track **0087**). Default is **deterministic** from export inputs — not
+/// wall-clock / PID salted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StoreRecordKeyMode {
+    /// Domain-separated SHA-256 preimage (§2.6). Path-independent.
+    #[default]
+    Deterministic,
+    /// Escape hatch: time + pid style key for rare "force unique store identity".
+    Ephemeral,
+}
+
 /// Options for [`write_unicode_pst`].
 #[derive(Debug, Clone)]
 pub struct WritePstOpts {
@@ -527,6 +539,16 @@ pub struct WritePstOpts {
     /// When true, write Bcc recipient TC rows and `PidTagDisplayBcc` (0082).
     /// Default **false**: To+Cc only; BCC omitted from the deliverable by policy.
     pub include_bcc_recipients: bool,
+    /// 0-based volume index for multi-volume unique-pst (0087). Default `0`.
+    /// Bound into the store RecordKey so each volume is a distinct store.
+    pub volume_index: u32,
+    /// Optional job-global 32-byte seed (0087). When `Some`, each volume key is
+    /// bound to the whole export job and re-bound with `volume_index` + the
+    /// volume-local message fingerprint. When `None`, only the volume-local
+    /// fingerprint is used (bare writer tests / single-shot writes).
+    pub store_key_material: Option<[u8; 32]>,
+    /// Deterministic (default) or ephemeral store RecordKey mode (0087).
+    pub store_record_key_mode: StoreRecordKeyMode,
 }
 
 impl Default for WritePstOpts {
@@ -538,6 +560,9 @@ impl Default for WritePstOpts {
             max_embedded_depth: 3,
             parents_only: false,
             include_bcc_recipients: false,
+            volume_index: 0,
+            store_key_material: None,
+            store_record_key_mode: StoreRecordKeyMode::Deterministic,
         }
     }
 }
@@ -1531,7 +1556,12 @@ pub fn write_unicode_pst_streaming(
         layout.current_physical_size(),
     );
 
+    // 0087: accumulate volume-local fingerprint fields in write order while
+    // streaming (bodies/attaches are freed after each message; only MID /
+    // subject / submit / folder land in the store-key preimage).
+    let mut volume_local_hasher = Sha256::new();
     for (msg_index, mut msg) in msg_iter.enumerate() {
+        update_volume_local_fingerprint(&mut volume_local_hasher, &msg);
         let parent = folder_plan.assign_message(&mut layout, &msg, opts, msg_index);
         let body_incomplete = msg.body_incomplete;
         let body_unavailable = msg.body_unavailable;
@@ -1599,6 +1629,7 @@ pub fn write_unicode_pst_streaming(
         }
     }
     let messages_written = message_nids.len() as u64;
+    let volume_local_fp: [u8; 32] = volume_local_hasher.finalize().into();
 
     // Folder counters come from the incremental plan (not pre-scanned).
     counters.folders_created = folder_plan.folders_created;
@@ -1634,9 +1665,21 @@ pub fn write_unicode_pst_streaming(
     // ProviderUID must be the *same* value: a store-internal EntryID's
     // provider UID is conventionally the store's own unique record key, not
     // an arbitrary placeholder, so every EntryID genuinely identifies this
-    // specific store. Generated once per write and reused in all three
-    // EntryIDs plus the record key property itself.
-    let record_key = generate_store_record_key(path, messages_written as usize);
+    // specific store. Derived once per write (0087: deterministic by default
+    // from volume messages + optional job material; path is never in preimage)
+    // and reused in all three EntryIDs plus the record key property itself.
+    let record_key = match opts.store_record_key_mode {
+        StoreRecordKeyMode::Deterministic => {
+            let content_fp = resolve_content_fingerprint(
+                opts.store_key_material.as_ref(),
+                opts.volume_index,
+                messages_written,
+                &volume_local_fp,
+            );
+            derive_store_record_key(opts.volume_index, messages_written, &content_fp)
+        }
+        StoreRecordKeyMode::Ephemeral => generate_ephemeral_store_record_key(messages_written),
+    };
     let ipm_subtree_entry_id = build_folder_entry_id(ipm_subtree_nid, &record_key);
     let wastebasket_entry_id = build_folder_entry_id(deleted_items_nid, &record_key);
     let finder_entry_id = build_folder_entry_id(search_root_nid, &record_key);
@@ -1917,22 +1960,14 @@ fn trim_folder_plan_to_written(plan: &mut FolderPlan, written: usize) {
 /// Process-wide entropy suffix for temp-staging filenames (see
 /// `temp_sibling_path`), computed lazily once per process and cached.
 ///
-/// Follows this file's `generate_store_record_key` pattern rather than
-/// adding a new crate dependency (`uuid`/`rand`/`tempfile`): a
-/// `crc32fast::hash` over wall-clock nanoseconds since the epoch plus the
-/// current process ID. It is deliberately cached per-process (not
-/// recomputed on every call) so that repeated `temp_sibling_path` calls for
-/// the same destination within one run — including a test calling it
-/// directly to predict what `write_unicode_pst` will compute internally —
-/// observe the identical value; a fresh process (a later run, a crashed-and-
-/// restarted one, or an attacker who doesn't share this process's PID/start
-/// time) gets a different one. This only needs to reduce the *ambient*
-/// chance that a temp-staging name collides with an unrelated file (e.g. a
-/// leftover artifact from a previous crashed run, or an adversarial/
-/// mistaken input named to match the old purely-PID-based scheme) — it is
-/// not the sole protection: `write_unicode_pst` also runs an explicit
-/// `check_not_protected_source` against the computed temp path before ever
-/// calling `File::create` on it.
+/// Staging-only entropy (time + pid CRC32) — **not** final PST bytes and not
+/// the store RecordKey path (0087 uses deterministic SHA-256 for that). A
+/// `crc32fast::hash` over wall-clock nanoseconds plus process ID is cached
+/// per-process so repeated `temp_sibling_path` calls for the same destination
+/// within one run observe the identical value. This only needs to reduce the
+/// ambient chance that a temp-staging name collides with an unrelated file;
+/// `write_unicode_pst` also runs `check_not_protected_source` against the
+/// computed temp path before `File::create`.
 fn process_entropy_suffix() -> &'static str {
     static SUFFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     SUFFIX.get_or_init(|| {
@@ -3461,37 +3496,159 @@ fn build_folder_entry_id(folder_nid: u64, provider_uid: &[u8; 16]) -> Vec<u8> {
     id
 }
 
-/// Best-effort unique 16-byte "store record key" for this write, used as both
-/// the store's `PidTagRecordKey` (0x0FF9) and the EntryID's ProviderUID (see
-/// `build_folder_entry_id`) so the two are self-consistent.
-///
-/// This is **not** a cryptographic GUID and makes no uniqueness guarantee
-/// beyond "reasonably unlikely to collide across separate writer
-/// invocations". Per this crate's minimal-dependency convention (see
-/// `.agents/skills/coding-core/SKILL.md`: "Keep dependencies permissive and
-/// minimal" — `pst-writer` already depends on `crc32fast`, `chrono`, and
-/// `byteorder` and adds no new crate for this), it is derived from
-/// write-time-varying inputs already available without pulling in `uuid` or
-/// `rand`: wall-clock nanoseconds since the epoch, the current process ID,
-/// and the destination path together with the message count (something
-/// write-specific). Each of four differently-salted `crc32fast::hash` calls
-/// over that input produces one `u32`; concatenated they form 16 bytes. This
-/// only needs to be non-zero, self-consistent (used identically in both
-/// places it's written), and reasonably unique per invocation — it is
-/// explicitly not a substitute for a real GUID/UUID.
-fn generate_store_record_key(path: &Path, message_count: usize) -> [u8; 16] {
+// ── Store PidTagRecordKey derivation (0087 — deterministic by default) ─────
+//
+// Preimage (normative, length-prefixed variable fields only):
+//
+//   preimage =
+//     b"pst-dedup/store-record-key/v1\0"
+//     || algo_version_u32_le          // 1
+//     || volume_index_u32_le
+//     || message_count_u64_le
+//     || content_fingerprint          // 32 bytes
+//
+//   record_key_16 = SHA-256(preimage)[0..16]
+//   if all zero: key[0] = 0x5A
+//
+// content_fingerprint:
+//   - If store_key_material is Some:
+//       SHA-256( b"pst-dedup/store-key-material/v1\0"
+//                || material || volume_index_u32_le
+//                || message_count_u64_le || volume_local_fingerprint )
+//   - Else: volume_local_fingerprint only
+//
+// volume_local_fingerprint = SHA-256 over write-order messages:
+//   for each msg:
+//     b"msg\0"
+//     || len_u32_le || utf8(internet_message_id)  // empty ok
+//     || len_u32_le || utf8(subject)
+//     || submit_time_filetime_i64_le              // None → 0
+//     || len_u32_le || utf8(source_folder_path)
+//
+// Dest path, wall clock, and PID are never in the deterministic preimage.
+
+/// Domain separator for the outer store-record-key preimage (0087 §2.6).
+pub const STORE_RECORD_KEY_DOMAIN: &[u8] = b"pst-dedup/store-record-key/v1\0";
+/// Domain separator when rebinding job-global `store_key_material` (0087 §2.6.1).
+pub const STORE_KEY_MATERIAL_DOMAIN: &[u8] = b"pst-dedup/store-key-material/v1\0";
+/// Domain separator for job-global winner-loci digests used as `store_key_material`.
+pub const JOB_KEY_MATERIAL_DOMAIN: &[u8] = b"pst-dedup/job-key-material/v1\0";
+/// Algorithm version embedded in the store-record-key preimage.
+pub const STORE_RECORD_KEY_ALGO_VERSION: u32 = 1;
+
+/// Pure 16-byte store RecordKey from volume index, message count, and a
+/// 32-byte content fingerprint (0087 §2.6). Destination path is **not** an
+/// input — path independence is intentional.
+pub fn derive_store_record_key(
+    volume_index: u32,
+    message_count: u64,
+    content_fingerprint: &[u8; 32],
+) -> [u8; 16] {
+    let mut hasher = Sha256::new();
+    hasher.update(STORE_RECORD_KEY_DOMAIN);
+    hasher.update(STORE_RECORD_KEY_ALGO_VERSION.to_le_bytes());
+    hasher.update(volume_index.to_le_bytes());
+    hasher.update(message_count.to_le_bytes());
+    hasher.update(content_fingerprint);
+    let digest = hasher.finalize();
+    let mut key = [0u8; 16];
+    key.copy_from_slice(&digest[..16]);
+    apply_all_zero_guard(&mut key);
+    key
+}
+
+/// Resolve `content_fingerprint` (32 bytes) from optional job material +
+/// volume-local fingerprint (0087 §2.6.1).
+pub fn resolve_content_fingerprint(
+    store_key_material: Option<&[u8; 32]>,
+    volume_index: u32,
+    message_count: u64,
+    volume_local_fingerprint: &[u8; 32],
+) -> [u8; 32] {
+    match store_key_material {
+        None => *volume_local_fingerprint,
+        Some(material) => {
+            let mut hasher = Sha256::new();
+            hasher.update(STORE_KEY_MATERIAL_DOMAIN);
+            hasher.update(material);
+            hasher.update(volume_index.to_le_bytes());
+            hasher.update(message_count.to_le_bytes());
+            hasher.update(volume_local_fingerprint);
+            hasher.finalize().into()
+        }
+    }
+}
+
+/// SHA-256 volume-local fingerprint over ordered messages (write order).
+/// Length-prefixed fields only — no null-terminated variable framing.
+pub fn volume_local_fingerprint_from_messages<'a>(
+    messages: impl IntoIterator<Item = &'a WriteMessage>,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for msg in messages {
+        update_volume_local_fingerprint(&mut hasher, msg);
+    }
+    hasher.finalize().into()
+}
+
+/// Append one message's length-prefixed fingerprint record to `hasher`.
+fn update_volume_local_fingerprint(hasher: &mut Sha256, msg: &WriteMessage) {
+    let mid = msg.message_id.as_deref().unwrap_or("");
+    let subject = msg.subject.as_str();
+    let submit = msg.submit_time.unwrap_or(0);
+    let folder = msg.source_folder_path.as_deref().unwrap_or("");
+    hasher.update(b"msg\0");
+    append_len_prefixed_utf8(hasher, mid);
+    append_len_prefixed_utf8(hasher, subject);
+    hasher.update(submit.to_le_bytes());
+    append_len_prefixed_utf8(hasher, folder);
+}
+
+#[inline]
+fn append_len_prefixed_utf8(hasher: &mut Sha256, s: &str) {
+    let bytes = s.as_bytes();
+    let len = bytes.len() as u32;
+    hasher.update(len.to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// Job-global 32-byte seed from ordered keep-set winner loci (source path,
+/// folder path, nid). Used as [`WritePstOpts::store_key_material`] so each
+/// volume key is bound to the whole export job (0087 §2.5).
+pub fn job_store_key_material_from_loci<'a>(
+    loci: impl IntoIterator<Item = (&'a str, &'a str, u64)>,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(JOB_KEY_MATERIAL_DOMAIN);
+    for (source_path, folder_path, nid) in loci {
+        hasher.update(b"win\0");
+        append_len_prefixed_utf8(&mut hasher, source_path);
+        append_len_prefixed_utf8(&mut hasher, folder_path);
+        hasher.update(nid.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
+#[inline]
+fn apply_all_zero_guard(key: &mut [u8; 16]) {
+    if key.iter().all(|&b| b == 0) {
+        key[0] = 0x5A;
+    }
+}
+
+/// Ephemeral (non-default) store key: wall-clock + pid + count. Escape hatch
+/// only — not used for chain-of-custody reproducibility.
+fn generate_ephemeral_store_record_key(message_count: u64) -> [u8; 16] {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let pid = std::process::id();
-    let path_bytes = path.to_string_lossy().into_owned().into_bytes();
 
-    let mut seed_input = Vec::with_capacity(path_bytes.len() + 32);
+    let mut seed_input = Vec::with_capacity(32);
     seed_input.extend_from_slice(&nanos.to_le_bytes());
     seed_input.extend_from_slice(&pid.to_le_bytes());
-    seed_input.extend_from_slice(&(message_count as u64).to_le_bytes());
-    seed_input.extend_from_slice(&path_bytes);
+    seed_input.extend_from_slice(&message_count.to_le_bytes());
 
     let mut key = [0u8; 16];
     let salts: [u32; 4] = [0x5A17_0001, 0x5A17_0002, 0x5A17_0003, 0x5A17_0004];
@@ -3502,6 +3659,7 @@ fn generate_store_record_key(path: &Path, message_count: usize) -> [u8; 16] {
         let hash = crc32fast::hash(&salted);
         key[i * 4..i * 4 + 4].copy_from_slice(&hash.to_le_bytes());
     }
+    apply_all_zero_guard(&mut key);
     key
 }
 
@@ -5442,5 +5600,154 @@ mod tests {
             "BCC must not be written"
         );
         let _ = fs::remove_file(&path);
+    }
+
+    // ── 0087 store RecordKey pure derivation ────────────────────────────────
+
+    fn hex16(key: &[u8; 16]) -> String {
+        key.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn store_record_key_golden_empty_volume() {
+        // Empty message list → SHA-256("") as volume_local.
+        let volume_local = volume_local_fingerprint_from_messages(std::iter::empty());
+        let expected_empty_sha: [u8; 32] = {
+            let d = Sha256::digest([]);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&d);
+            out
+        };
+        assert_eq!(volume_local, expected_empty_sha);
+
+        let content = resolve_content_fingerprint(None, 0, 0, &volume_local);
+        assert_eq!(content, volume_local);
+        let key = derive_store_record_key(0, 0, &content);
+
+        // Independent re-derivation of the §2.6 preimage.
+        let mut hasher = Sha256::new();
+        hasher.update(STORE_RECORD_KEY_DOMAIN);
+        hasher.update(STORE_RECORD_KEY_ALGO_VERSION.to_le_bytes());
+        hasher.update(0u32.to_le_bytes());
+        hasher.update(0u64.to_le_bytes());
+        hasher.update(volume_local);
+        let digest = hasher.finalize();
+        let mut expected = [0u8; 16];
+        expected.copy_from_slice(&digest[..16]);
+        apply_all_zero_guard(&mut expected);
+        assert_eq!(key, expected);
+        assert_ne!(key, [0u8; 16]);
+
+        // Locked golden hex for empty volume / algo v1 / volume_index 0.
+        // Re-pin only when intentionally changing the preimage formula.
+        assert_eq!(hex16(&key), "b0a1ca291fa355c1ebb3f9ec13a7b879");
+    }
+
+    #[test]
+    fn store_record_key_differs_by_content_and_volume_index() {
+        let m1 = WriteMessage {
+            message_id: Some("<a@ex.com>".into()),
+            subject: "one".into(),
+            submit_time: Some(100),
+            source_folder_path: Some("Inbox".into()),
+            ..WriteMessage::default()
+        };
+        let m2 = WriteMessage {
+            message_id: Some("<b@ex.com>".into()),
+            subject: "two".into(),
+            submit_time: Some(200),
+            source_folder_path: Some("Sent".into()),
+            ..WriteMessage::default()
+        };
+        let fp1 = volume_local_fingerprint_from_messages([&m1]);
+        let fp2 = volume_local_fingerprint_from_messages([&m2]);
+        assert_ne!(fp1, fp2);
+
+        let k1 = derive_store_record_key(0, 1, &resolve_content_fingerprint(None, 0, 1, &fp1));
+        let k2 = derive_store_record_key(0, 1, &resolve_content_fingerprint(None, 0, 1, &fp2));
+        assert_ne!(k1, k2, "different content → different keys");
+
+        let k_v0 = derive_store_record_key(0, 1, &resolve_content_fingerprint(None, 0, 1, &fp1));
+        let k_v1 = derive_store_record_key(1, 1, &resolve_content_fingerprint(None, 1, 1, &fp1));
+        assert_ne!(k_v0, k_v1, "volume_index 0 vs 1 → different keys");
+    }
+
+    #[test]
+    fn store_record_key_seed_material_changes_fingerprint() {
+        let m = WriteMessage {
+            message_id: Some("<s@ex.com>".into()),
+            subject: "seed".into(),
+            ..WriteMessage::default()
+        };
+        let local = volume_local_fingerprint_from_messages([&m]);
+        let seed_a = [0x11u8; 32];
+        let seed_b = [0x22u8; 32];
+        let c_a = resolve_content_fingerprint(Some(&seed_a), 0, 1, &local);
+        let c_b = resolve_content_fingerprint(Some(&seed_b), 0, 1, &local);
+        let c_none = resolve_content_fingerprint(None, 0, 1, &local);
+        assert_ne!(c_a, c_b);
+        assert_ne!(c_a, c_none);
+        let k_a = derive_store_record_key(0, 1, &c_a);
+        let k_a2 = derive_store_record_key(0, 1, &c_a);
+        assert_eq!(k_a, k_a2, "same seed + volume → same key");
+        assert_ne!(
+            derive_store_record_key(0, 1, &c_b),
+            k_a,
+            "different seeds → different keys"
+        );
+    }
+
+    #[test]
+    fn store_record_key_length_prefix_boundary_no_collision() {
+        // Under naive concat mid||subject both yield "ab". Length-prefix must
+        // distinguish (mid="ab", subject="") from (mid="a", subject="b").
+        let a = WriteMessage {
+            message_id: Some("ab".into()),
+            subject: String::new(),
+            ..WriteMessage::default()
+        };
+        let b = WriteMessage {
+            message_id: Some("a".into()),
+            subject: "b".into(),
+            ..WriteMessage::default()
+        };
+        let naive_a = format!(
+            "{}{}",
+            a.message_id.as_deref().unwrap_or(""),
+            a.subject.as_str()
+        );
+        let naive_b = format!(
+            "{}{}",
+            b.message_id.as_deref().unwrap_or(""),
+            b.subject.as_str()
+        );
+        assert_eq!(naive_a, naive_b, "setup: naive concat collides");
+        let fa = volume_local_fingerprint_from_messages([&a]);
+        let fb = volume_local_fingerprint_from_messages([&b]);
+        assert_ne!(
+            fa, fb,
+            "length-prefixed volume_local must not collide on boundary case"
+        );
+        let ka = derive_store_record_key(0, 1, &fa);
+        let kb = derive_store_record_key(0, 1, &fb);
+        assert_ne!(ka, kb);
+    }
+
+    #[test]
+    fn store_record_key_all_zero_guard() {
+        // Force all-zero truncated digest path via direct guard unit.
+        let mut key = [0u8; 16];
+        apply_all_zero_guard(&mut key);
+        assert_eq!(key[0], 0x5A);
+        assert!(key[1..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn job_store_key_material_from_loci_stable() {
+        let a = job_store_key_material_from_loci([("C:\\a.pst", "Inbox", 42u64)]);
+        let b = job_store_key_material_from_loci([("C:\\a.pst", "Inbox", 42u64)]);
+        let c = job_store_key_material_from_loci([("C:\\a.pst", "Inbox", 43u64)]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 }

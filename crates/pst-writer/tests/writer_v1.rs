@@ -1229,12 +1229,10 @@ fn custom_folder_display_name_is_honored() {
     cleanup(&path);
 }
 
-// ── Store PidTagRecordKey / EntryID ProviderUID self-consistency ───────────
+// ── Store PidTagRecordKey / EntryID ProviderUID self-consistency (0087) ────
 //
-// Round-5 cross-model review finding (Part A): the store previously never
-// wrote PidTagRecordKey (0x0FF9) at all, and the EntryID's 16-byte
-// ProviderUID was a hardcoded all-zero placeholder unrelated to it. Fixed so
-// both carry the same per-write-generated, non-cryptographic 16-byte value.
+// Deterministic domain-separated SHA-256 by default. ProviderUID == RecordKey.
+// Path is never in the preimage; different content / volume_index → different keys.
 
 fn read_store_record_key_and_entry_id_provider_uid(path: &Path) -> (Vec<u8>, Vec<u8>) {
     let mut pst = pst_reader::PstFile::open(path).expect("open");
@@ -1285,15 +1283,13 @@ fn store_record_key_present_nonzero_and_matches_entry_id_provider_uid() {
 
 #[test]
 fn store_record_key_differs_across_separate_writes() {
+    // 0087: differentiation is by content (or volume_index), not wall clock.
     let path_a = scratch_path("record_key_write_a");
     let path_b = scratch_path("record_key_write_b");
     cleanup(&path_a);
     cleanup(&path_b);
 
     write_unicode_pst(&path_a, Vec::new(), &[], &WritePstOpts::default()).expect("write a");
-    // A different message count feeds into record-key generation alongside
-    // wall-clock/pid, so this also guards against a key that's a function of
-    // the (identical-in-this-test) destination path alone.
     let msg = short_message("<record-key-b@example.com>", "second write");
     write_unicode_pst(&path_b, vec![msg], &[], &WritePstOpts::default()).expect("write b");
 
@@ -1302,9 +1298,122 @@ fn store_record_key_differs_across_separate_writes() {
 
     assert_ne!(
         record_key_a, record_key_b,
-        "two separate writes must produce different record keys, proving this is \
-         genuinely generated per-write and not a hardcoded constant"
+        "different message sets must produce different deterministic record keys"
     );
+
+    cleanup(&path_a);
+    cleanup(&path_b);
+}
+
+#[test]
+fn store_record_key_same_content_different_paths_identical() {
+    let path_a = scratch_path("record_key_path_a");
+    let path_b = scratch_path("record_key_path_b");
+    cleanup(&path_a);
+    cleanup(&path_b);
+
+    let msg = short_message("<same-key@example.com>", "path independence");
+    write_unicode_pst(&path_a, vec![msg.clone()], &[], &WritePstOpts::default()).expect("a");
+    write_unicode_pst(&path_b, vec![msg], &[], &WritePstOpts::default()).expect("b");
+
+    let (ka, ua) = read_store_record_key_and_entry_id_provider_uid(&path_a);
+    let (kb, ub) = read_store_record_key_and_entry_id_provider_uid(&path_b);
+    assert_eq!(
+        ka, kb,
+        "same content → same RecordKey regardless of dest path"
+    );
+    assert_eq!(ua, ub, "ProviderUID follows RecordKey");
+    assert_eq!(ka, ua);
+
+    cleanup(&path_a);
+    cleanup(&path_b);
+}
+
+#[test]
+fn store_record_key_volume_index_changes_key() {
+    let path_a = scratch_path("record_key_vol0");
+    let path_b = scratch_path("record_key_vol1");
+    cleanup(&path_a);
+    cleanup(&path_b);
+
+    let msg = short_message("<vol@example.com>", "volume index");
+    let opts0 = WritePstOpts {
+        volume_index: 0,
+        ..WritePstOpts::default()
+    };
+    let opts1 = WritePstOpts {
+        volume_index: 1,
+        ..WritePstOpts::default()
+    };
+    write_unicode_pst(&path_a, vec![msg.clone()], &[], &opts0).expect("v0");
+    write_unicode_pst(&path_b, vec![msg], &[], &opts1).expect("v1");
+
+    let (ka, _) = read_store_record_key_and_entry_id_provider_uid(&path_a);
+    let (kb, _) = read_store_record_key_and_entry_id_provider_uid(&path_b);
+    assert_ne!(ka, kb, "volume_index 0 vs 1 → different keys");
+
+    cleanup(&path_a);
+    cleanup(&path_b);
+}
+
+#[test]
+fn store_record_key_material_seed_override() {
+    let path_a = scratch_path("record_key_seed_a");
+    let path_b = scratch_path("record_key_seed_b");
+    cleanup(&path_a);
+    cleanup(&path_b);
+
+    let msg = short_message("<seed@example.com>", "material");
+    let opts_a = WritePstOpts {
+        store_key_material: Some([0xAAu8; 32]),
+        ..WritePstOpts::default()
+    };
+    let opts_b = WritePstOpts {
+        store_key_material: Some([0xBBu8; 32]),
+        ..WritePstOpts::default()
+    };
+    write_unicode_pst(&path_a, vec![msg.clone()], &[], &opts_a).expect("a");
+    write_unicode_pst(&path_b, vec![msg], &[], &opts_b).expect("b");
+
+    let (ka, _) = read_store_record_key_and_entry_id_provider_uid(&path_a);
+    let (kb, _) = read_store_record_key_and_entry_id_provider_uid(&path_b);
+    assert_ne!(ka, kb, "different store_key_material → different keys");
+
+    cleanup(&path_a);
+    cleanup(&path_b);
+}
+
+#[test]
+fn store_record_key_ephemeral_writes_differ() {
+    // Spec §2.11.9: if ephemeral mode ships, two writes must differ.
+    // Sleep 2ms between writes so wall-clock nanos cannot collide.
+    use pst_writer::StoreRecordKeyMode;
+    use std::thread;
+    use std::time::Duration;
+
+    let path_a = scratch_path("record_key_ephem_a");
+    let path_b = scratch_path("record_key_ephem_b");
+    cleanup(&path_a);
+    cleanup(&path_b);
+
+    let msg = short_message("<ephem@example.com>", "ephemeral escape");
+    let opts = WritePstOpts {
+        store_record_key_mode: StoreRecordKeyMode::Ephemeral,
+        ..WritePstOpts::default()
+    };
+    write_unicode_pst(&path_a, vec![msg.clone()], &[], &opts).expect("a");
+    thread::sleep(Duration::from_millis(2));
+    write_unicode_pst(&path_b, vec![msg], &[], &opts).expect("b");
+
+    let (ka, ua) = read_store_record_key_and_entry_id_provider_uid(&path_a);
+    let (kb, ub) = read_store_record_key_and_entry_id_provider_uid(&path_b);
+    assert_ne!(
+        ka, kb,
+        "two ephemeral writes must produce different RecordKeys"
+    );
+    assert_eq!(ka, ua, "ephemeral ProviderUID still matches RecordKey");
+    assert_eq!(kb, ub);
+    assert_ne!(ka, [0u8; 16], "ephemeral key must be non-zero");
 
     cleanup(&path_a);
     cleanup(&path_b);

@@ -197,8 +197,9 @@ After 0073–0081, the highest-value deferred cluster is **structured MAPI recip
 | [0084-NamedPropCloudAttach](0084-NamedPropCloudAttach/spec.md) | **Completed** | MS-PST NPMAP (`0x61`) resolve + **attachment-table** cloud detect; `ATTACH_CLOUD_LINK` + ledger `cloud_url`/`cloud_provider`; pointer preserve (anti-ghost); Mode A incomplete; closes **D-0080** detect≠hydrate; residual body-inline links; Codex luna PASS |
 | [0085-BodyCloudLinks](0085-BodyCloudLinks/spec.md) | **Completed** | Body-inline **document-shaped** SharePoint/OneDrive URL scan (`:w:/:x:/:p:…`); `export_body_cloud_links.csv` (query preserved); closes **D-0084-body-cloud-links**; Mode A non-interaction + known gap; sovereign residual **D-0085-sovereign-cloud-hosts**; Codex luna PASS WITH DEFERRED P3 |
 | [0086-AttachContentIdentity](0086-AttachContentIdentity/spec.md) | **Completed** | Tier-2.5 **`body-recip-attach`**: full-stream per-attach SHA-256 + Choice B unread sentinels; fail-closed enum; closes **D-0076-attach-content**; Codex luna PASS WITH DEFERRED P3 |
+| [0087-DeterministicStoreRecordKey](0087-DeterministicStoreRecordKey/spec.md) | **Completed** | Deterministic `PidTagRecordKey` / ProviderUID (length-prefix SHA-256 preimage; no wall-clock/PID/path); cross-process + multi-volume key proofs; DoD-3 path A on fixture; closes **D-0079-deterministic-key**; Codex luna PASS |
 
-**Suggested order:** 0082–**0086** Completed. Later Series M residuals: D-0079-deterministic-key (product), D-0073-eml full ledger, D-0084-cloud-named-prop-write, D-0085-sovereign-cloud-hosts; **D-0086-embedded-email-hash**, **D-0086-digest-probe-unify**.
+**Suggested order:** 0082–**0087** Completed. Later Series M residuals: D-0073-eml full ledger, D-0085-sovereign-cloud-hosts (research-unlocked 2026-07: `*.sharepoint.us` / `*.sharepoint-mil.us`), D-0084-cloud-named-prop-write; **D-0086-embedded-email-hash**, **D-0086-digest-probe-unify**.
 
 ## Notes
 

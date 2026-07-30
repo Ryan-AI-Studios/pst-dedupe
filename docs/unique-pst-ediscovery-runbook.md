@@ -24,6 +24,19 @@ Before first scan:
 
 Risks of manual Outlook / legacy Exchange dumps (disclose when used): incomplete cloud attachments, altered metadata, weaker audit continuity, and operator-local path leakage into report packs.
 
+### Deterministic store RecordKey (0087)
+
+Under default mode, unique-PST **`PidTagRecordKey` / EntryID ProviderUID** is derived from stable export inputs (not wall-clock or process id). Two re-runs over the **same winners**, **same tool version**, and **same volume layout** produce the **same logical store identity**. Destination path is intentionally excluded from the preimage.
+
+| Custody note | Meaning |
+|---|---|
+| RecordKey match across re-runs | Logical store identity is stable — usable as a content-bound identity field |
+| Volume `sha256_hex` / `md5_hex` | Best-effort full-file seal; may still differ if B-tree/page allocation layout shifts |
+| Structural oracle | When volume hashes differ, 0079 `compare_export_packs` is the honest content/structure check |
+| `--max-volume-bytes` change | Expected non-repro for **per-volume** keys and digests even if the global winner set is unchanged |
+
+**Honest wording for the record:** *Store Record Key is deterministic (logical identity). Byte-for-byte volume hash reproducibility is subject to B-tree/layout stability.*
+
 ---
 
 ## 1. Honesty / ships-vs-not
@@ -262,7 +275,7 @@ Typical `--report-dir` contents:
 
 | Artifact | Role |
 |---|---|
-| `summary.json` | `unique_export_report_v1` — fidelity, exit, `export_risk`, `phase_timings`, digests, `retryable`, `bcc_suppressed_message_count`, body-cloud counters (**0085**) |
+| `summary.json` | `unique_export_report_v1` — fidelity, exit, `export_risk`, `phase_timings`, digests, `retryable`, `bcc_suppressed_message_count`, body-cloud counters (**0085**), `store_record_key_mode` (**0087**, default `deterministic`) |
 | `export_messages.csv` | Winner → volume crosswalk (mandatory when messages written); includes `bcc_suppressed` (**0082**), `body_cloud_link_count` (**0085**) |
 | `export_body_cloud_links.csv` | Body-inline document-shaped cloud URL hit-list (**0085**; always when report pack written) |
 | `export_attachments.csv` | Attach failure ledger when `--attach-ledger=full` |

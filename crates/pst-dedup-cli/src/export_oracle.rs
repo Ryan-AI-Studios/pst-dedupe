@@ -1,8 +1,9 @@
 //! Export equivalence oracle for unique-pst (track 0079 §3.2).
 //!
-//! Unique-pst output is **not** byte-reproducible (D10: store record key uses
-//! `SystemTime::now()` + pid). This oracle compares **structure and content**,
-//! not raw PST bytes.
+//! Unique-pst **store RecordKey** is deterministic by default (0087). Full
+//! volume-file byte-identity remains best-effort (B-tree/layout). This oracle
+//! compares **structure and content**, not raw PST bytes — still the DoD-3
+//! fallback when `sha256_hex` differs across re-runs.
 //!
 //! Compared (exact, modulo allowlist):
 //! - `keepset.json`, `decisions.csv`, `export_messages.csv`, `export_attachments.csv`
