@@ -28,9 +28,10 @@ use dedup_engine::keepset::{
 };
 use pst_reader::PstFile;
 use pst_writer::{
-    from_canonical_message_owned, temp_sibling_path, write_unicode_pst_streaming, AttachRead,
-    AttachStreamSource, FolderLayoutPolicy, WriteMessage, WriteProgress, WriteProgressSink,
-    WritePstOpts, WriteStage, WriterError,
+    from_canonical_message_owned, job_store_key_material_from_loci, temp_sibling_path,
+    write_unicode_pst_streaming, AttachRead, AttachStreamSource, FolderLayoutPolicy,
+    StoreRecordKeyMode, WriteMessage, WriteProgress, WriteProgressSink, WritePstOpts, WriteStage,
+    WriterError,
 };
 use sha2::{Digest, Sha256};
 
@@ -1186,6 +1187,7 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
         messages_with_body_cloud_links: 0,
         body_cloud_links_total: 0,
         body_cloud_link_truncated_messages: 0,
+        store_record_key_mode: "deterministic".to_string(),
     };
     if let Err(e) = write_summary_json(ctx.summary_path, &summary) {
         tracing::warn!(
@@ -1985,6 +1987,16 @@ pub fn run_unique_pst_with_options(
     };
     let parents_only = effective_family == FamilyPolicy::ParentsOnly || args.no_attachments;
 
+    // 0087: job-global store_key_material from ordered keep-set winner loci so
+    // each volume key is bound to the whole export (re-bound with volume_index
+    // + volume-local fingerprint inside the writer).
+    let store_key_material = job_store_key_material_from_loci(keep_set.winners.iter().map(|w| {
+        (
+            w.locus.source_path.as_str(),
+            w.locus.folder_path.as_str(),
+            w.locus.nid,
+        )
+    }));
     let write_opts_base = WritePstOpts {
         folder_display_name: "Unique Mail".to_string(),
         folder_layout,
@@ -1993,6 +2005,10 @@ pub fn run_unique_pst_with_options(
         parents_only,
         // 0082: default OFF (BCC omit / over-disclosure policy).
         include_bcc_recipients: args.include_bcc_recipients,
+        // 0087: filled per-volume below; defaults here for base clone.
+        volume_index: 0,
+        store_key_material: Some(store_key_material),
+        store_record_key_mode: StoreRecordKeyMode::Deterministic,
     };
 
     // ── Phase 3: multi-volume streaming write ───────────────────────────────
@@ -2288,6 +2304,8 @@ pub fn run_unique_pst_with_options(
         // when we just deleted, false when fresh. Writer refuses existing unless overwrite.
         let mut vol_opts = write_opts_base.clone();
         vol_opts.overwrite = true; // we already enforced / deleted
+                                   // unique-pst volume_index is 1-based in reports; writer opts use 0-based.
+        vol_opts.volume_index = volume_index.saturating_sub(1);
 
         let remaining = &mut prepared[cursor..];
         let start_cursor = cursor;
@@ -3000,6 +3018,10 @@ pub fn run_unique_pst_with_options(
         messages_with_body_cloud_links,
         body_cloud_links_total,
         body_cloud_link_truncated_messages,
+        store_record_key_mode: match write_opts_base.store_record_key_mode {
+            StoreRecordKeyMode::Deterministic => "deterministic".to_string(),
+            StoreRecordKeyMode::Ephemeral => "ephemeral".to_string(),
+        },
     };
 
     // Fail-closed: if summary.json itself fails, force non-success exit even if

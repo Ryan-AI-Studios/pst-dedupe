@@ -148,3 +148,16 @@
 | 5 | **0079** Performance | **Completed** — Codex luna PASS WITH DEFERRED P3. Phases 0–5; `--jobs` skipped (D-0079-operator-multigb). |
 | 6 | **0080** Output QC | **Completed** — Codex luna PASS WITH DEFERRED P3 — source-differential QC + `fidelity_contract_v1` allowlist; risk-weighted deterministic sample; scanpst `-no repair` (closes **D-0068-02** automatable half) + optional libpff/libpst counts-only sidecar; **COM declined** (new Outlook has no object model; classic EOL 2029). Folds into 0078 `VERIFY_FAILED` — no new exit integers. Contract-before-default-on gate; default `--qc-level sample` after fixture matrix green |
 | 7 | **0081** Deps + runbook | Can draft early; finalize after 0073/0077 |
+
+## Series M — Unique export fidelity residuals (0082–0087+)
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0082** RecipientTableFidelity | **Completed** — recipient TC read+write + Tier-2.5 SMTP/EX |
+| 2 | **0083** PromoteOnAttachFail | **Completed** — Mode A pre-write promote |
+| 3 | **0084** NamedPropCloudAttach | **Completed** — attach-table cloud detect + pointer preserve |
+| 4 | **0085** BodyCloudLinks | **Completed** — body-inline document-shaped URLs; residual D-0085-sovereign |
+| 5 | **0086** AttachContentIdentity | **Completed** — `body-recip-attach` + Choice B unread |
+| 6 | **0087** DeterministicStoreRecordKey | **Completed** — deterministic PidTagRecordKey / CoC volume digests; closes D-0079-deterministic-key |
+
+**Next after 0087 (not yet drafted):** D-0073-eml ledger parity; D-0085-sovereign-cloud-hosts (research-unlocked); D-0084-cloud-named-prop-write; D-0086-*.

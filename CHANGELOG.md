@@ -7,6 +7,14 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0087 — Deterministic store RecordKey)
+
+- Production `write_unicode_pst*` defaults to a **deterministic** 16-byte store `PidTagRecordKey` / EntryID ProviderUID (domain-separated SHA-256; length-prefixed MID/subject/submit/folder fingerprint; path-independent).
+- `WritePstOpts`: `volume_index`, optional `store_key_material`, `store_record_key_mode` (`Deterministic` default / `Ephemeral` escape).
+- unique-pst threads 0-based volume index and a job-global seed from ordered keep-set winner loci; summary reports `store_record_key_mode`.
+- **Hard guarantee:** same winners + same layout → same RecordKey across re-runs and dest paths. **Best-effort:** full volume `sha256_hex` (B-tree/layout); 0079 structural oracle remains the honest fallback.
+- Closes **D-0079-deterministic-key**. Volume-layout coupling and CoC wording in unique-pst export + eDiscovery runbook.
+
 ### Added (0086 — Attach-content strong identity)
 
 - **`--strong-content-hash body-recip-attach`** live on scan / dups / keep-set / unique-eml / unique-pst (default remains `off`).

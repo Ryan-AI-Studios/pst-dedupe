@@ -1643,6 +1643,206 @@ fn unique_pst_parent_baseline_oracle_when_env_set() {
     diff_att.assert_equivalent();
 }
 
+/// 0087 DoD-2/DoD-3: two **separate process** CLI invocations, identical inputs,
+/// different dest paths → same store RecordKey **and** ProviderUID; attempt
+/// reported volume `sha256_hex` match (path A) or structural oracle (path B).
+#[test]
+fn unique_pst_cross_process_deterministic_record_key() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out_a = dir.path().join("a.pst");
+    let report_a = dir.path().join("report_a");
+    let out_b = dir.path().join("b.pst");
+    let report_b = dir.path().join("report_b");
+
+    // Two genuine process spawns (not in-process re-entry) — load-bearing for
+    // HashMap RandomState cross-process regressions.
+    let mut report_sha_a = String::new();
+    let mut report_sha_b = String::new();
+    for (out, report, sha_out) in [
+        (&out_a, &report_a, &mut report_sha_a),
+        (&out_b, &report_b, &mut report_sha_b),
+    ] {
+        let result = Command::new(bin())
+            .args([
+                "unique-pst",
+                sample.to_str().expect("utf8"),
+                "--out",
+                out.to_str().expect("utf8"),
+                "--report-dir",
+                report.to_str().expect("utf8"),
+                "--json",
+                "--no-attachments",
+            ])
+            .output()
+            .expect("spawn unique-pst");
+        assert!(
+            result.status.success(),
+            "stderr={} stdout={}",
+            String::from_utf8_lossy(&result.stderr),
+            String::from_utf8_lossy(&result.stdout)
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("json");
+        assert_eq!(
+            v["store_record_key_mode"].as_str(),
+            Some("deterministic"),
+            "summary must report deterministic mode"
+        );
+        let vols = v["export"]["volumes"].as_array().expect("volumes");
+        assert!(!vols.is_empty(), "must report ≥1 volume");
+        let reported = vols[0]["sha256_hex"]
+            .as_str()
+            .expect("sha256_hex on volume 0")
+            .to_string();
+        // Report digest must match on-disk hash for the primary volume path.
+        let vol_path = vols[0]["path"].as_str().expect("path");
+        assert_eq!(
+            reported,
+            sha256_file(Path::new(vol_path)),
+            "reported sha256_hex must match on-disk volume bytes"
+        );
+        *sha_out = reported;
+    }
+
+    let (key_a, uid_a) = read_store_record_key_and_provider_uid(&out_a);
+    let (key_b, uid_b) = read_store_record_key_and_provider_uid(&out_b);
+    assert_eq!(
+        key_a, key_b,
+        "0087 DoD-2: cross-process same inputs → identical PidTagRecordKey"
+    );
+    assert_eq!(
+        uid_a, uid_b,
+        "0087 DoD-2: cross-process same inputs → identical EntryID ProviderUID"
+    );
+    assert_eq!(
+        key_a, uid_a,
+        "0087: ProviderUID must equal PidTagRecordKey on run A"
+    );
+    assert_eq!(
+        key_b, uid_b,
+        "0087: ProviderUID must equal PidTagRecordKey on run B"
+    );
+    assert_ne!(key_a, vec![0u8; 16]);
+
+    // DoD-3: compare **reported** volume digests first; fall back to oracle.
+    if report_sha_a == report_sha_b {
+        eprintln!(
+            "0087 DoD-3 path A: cross-process reported volume sha256_hex match ({report_sha_a})"
+        );
+    } else {
+        eprintln!(
+            "0087 DoD-3 path B: reported sha256 differ (a={report_sha_a} b={report_sha_b}); structural oracle"
+        );
+        let diff = pst_dedup_cli::export_oracle::compare_export_packs(
+            &report_a, &out_a, &report_b, &out_b,
+        );
+        diff.assert_equivalent();
+        eprintln!(
+            "0087 DoD-3 path B PASS: structural equivalence holds; \
+             RecordKey is deterministic (logical identity). Byte-for-byte volume \
+             hash reproducibility is subject to B-tree/layout stability."
+        );
+    }
+}
+
+/// 0087 DoD-5: multi-volume unique-pst produces **distinct** per-volume RecordKeys
+/// (0-based volume_index plumbing) under shared job-global material.
+#[test]
+fn unique_pst_multi_volume_distinct_record_keys() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--max-volume-bytes",
+            "4096",
+            "--json",
+            "--no-attachments",
+        ])
+        .output()
+        .expect("spawn multi-volume unique-pst");
+    assert!(
+        result.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("json");
+    assert_eq!(v["store_record_key_mode"].as_str(), Some("deterministic"));
+    let vols = v["export"]["volumes"].as_array().expect("volumes");
+    let unique = v["keep_set"]["stats"]["unique"].as_u64().unwrap_or(0);
+    if unique <= 1 {
+        eprintln!("skip multi-volume key assert: unique={unique}");
+        return;
+    }
+    assert!(
+        vols.len() >= 2,
+        "expected multi-volume with max_volume_bytes=4096, got {}",
+        vols.len()
+    );
+
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    for vol in vols {
+        let p = Path::new(vol["path"].as_str().expect("path"));
+        let reported = vol["sha256_hex"].as_str().expect("sha256_hex");
+        assert_eq!(
+            reported,
+            sha256_file(p),
+            "per-volume reported digest must match on-disk"
+        );
+        let (key, uid) = read_store_record_key_and_provider_uid(p);
+        assert_eq!(key, uid, "ProviderUID == RecordKey on volume {:?}", p);
+        assert_ne!(key, vec![0u8; 16]);
+        keys.push(key);
+    }
+    // Distinct volume_index → distinct keys (shared job material still rebinds).
+    for i in 0..keys.len() {
+        for j in (i + 1)..keys.len() {
+            assert_ne!(
+                keys[i], keys[j],
+                "volume {i} and {j} must have different RecordKeys (0-based volume_index)"
+            );
+        }
+    }
+}
+
+fn read_store_record_key_and_provider_uid(path: &Path) -> (Vec<u8>, Vec<u8>) {
+    let mut pst = pst_reader::PstFile::open(path).expect("open");
+    let raw = pst
+        .read_node_data(pst_reader::NodeId(0x21))
+        .expect("store raw");
+    let pc = pst_reader::ltp::pc::PropContext::load(raw).expect("store pc");
+    let record_key = pc
+        .get_binary(0x0FF9)
+        .expect("get")
+        .expect("PidTagRecordKey present");
+    let entry_id = pc
+        .get_binary(0x35E0)
+        .expect("get")
+        .expect("PidTagIpmSubtreeEntryId present");
+    assert_eq!(entry_id.len(), 24, "EntryID must be 24 bytes");
+    let provider_uid = entry_id[4..20].to_vec();
+    (record_key, provider_uid)
+}
+
 /// 0083: `--promote-on-attach-fail` is accepted; summary records the flag and counters.
 #[test]
 fn unique_pst_promote_on_attach_fail_flag_summary() {

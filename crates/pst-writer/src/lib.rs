@@ -22,13 +22,15 @@ pub mod eml;
 pub mod production;
 
 pub use production::{
-    build_bth_checked, build_pc_v2, build_tc_inline_checked, from_canonical_message,
-    from_canonical_message_owned, temp_sibling_path, write_unicode_pst,
-    write_unicode_pst_streaming, write_unicode_pst_with_streams, AttachEventSeverity,
-    AttachEventSink, AttachRead, AttachStreamSource, AttachmentFidelityEvent,
-    AttachmentFidelityKind, FolderLayoutPolicy, PcValue, WriteAttachment, WriteMessage,
-    WriteProgress, WriteProgressSink, WritePstOpts, WritePstReport, WriteRecipient,
-    WriteRecipientType, WriteStage,
+    build_bth_checked, build_pc_v2, build_tc_inline_checked, derive_store_record_key,
+    from_canonical_message, from_canonical_message_owned, job_store_key_material_from_loci,
+    resolve_content_fingerprint, temp_sibling_path, volume_local_fingerprint_from_messages,
+    write_unicode_pst, write_unicode_pst_streaming, write_unicode_pst_with_streams,
+    AttachEventSeverity, AttachEventSink, AttachRead, AttachStreamSource, AttachmentFidelityEvent,
+    AttachmentFidelityKind, FolderLayoutPolicy, PcValue, StoreRecordKeyMode, WriteAttachment,
+    WriteMessage, WriteProgress, WriteProgressSink, WritePstOpts, WritePstReport, WriteRecipient,
+    WriteRecipientType, WriteStage, JOB_KEY_MATERIAL_DOMAIN, STORE_KEY_MATERIAL_DOMAIN,
+    STORE_RECORD_KEY_ALGO_VERSION, STORE_RECORD_KEY_DOMAIN,
 };
 
 // EagerWriteCtx is defined above on Layout; re-exported for tests/integrations.

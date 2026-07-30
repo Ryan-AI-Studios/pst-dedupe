@@ -353,7 +353,7 @@ Deferred triage + operator soak       ← real PSTs local-only; bugfix tracks on
 Series K Clean Unique export (CLI)    ← planned product path (0065–0072 Proposed)
 ```
 
-Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedTeamFixes/spec.md) **Completed**; [`0064`](0064-DeskPlatformConnectUx/spec.md) **Completed**. Series K [`0065`](0065-ScanIntegrityReport/spec.md)–[`0072`](0072-DeskUniquePstWizard/spec.md) **Completed**. Series L (0073–0081 unique-export hardening) **Completed**. Series M: **0082**–**0086** Completed (recipients + Mode A promote + named props / cloud attach + body-inline cloud links + attach-content strong identity).
+Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedTeamFixes/spec.md) **Completed**; [`0064`](0064-DeskPlatformConnectUx/spec.md) **Completed**. Series K [`0065`](0065-ScanIntegrityReport/spec.md)–[`0072`](0072-DeskUniquePstWizard/spec.md) **Completed**. Series L (0073–0081 unique-export hardening) **Completed**. Series M: **0082**–**0087** Completed (0087 deterministic store RecordKey / CoC volume digests; D-0079 closed).
 
 ### Wave 6 — Unique export fidelity residuals (Series M)
 
@@ -364,6 +364,7 @@ Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedT
 | **0084** | NamedPropCloudAttach | **Completed** | **P0 M** | MS-PST NPMAP (`0x61`) + **attach-table** cloud detect; `ATTACH_CLOUD_LINK` + `cloud_url`/`cloud_provider` ledger; pointer preserve; Mode A incomplete; closes **D-0080** (detect≠hydrate); residual body-inline links; Codex luna PASS. |
 | **0085** | BodyCloudLinks | **Completed** | **P0 M** | Body-inline **document-shaped** URL scan (`:x:` Excel incl.); hit-list CSV query-preserved; Mode A known gap documented; closes **D-0084-body-cloud-links**; residual **D-0085-sovereign-cloud-hosts**; Codex luna PASS WITH DEFERRED P3. |
 | **0086** | AttachContentIdentity | **Completed** | **P1 M** | Enable `body-recip-attach`: full-stream attach SHA-256; **Choice B** unread sentinels; fail-closed strict enum; NIST KAT; closes **D-0076-attach-content**; residual **D-0086-embedded-email-hash** / **D-0086-digest-probe-unify**; Codex luna PASS WITH DEFERRED P3. |
+| **0087** | DeterministicStoreRecordKey | **Completed** | **P1 M** | Deterministic `PidTagRecordKey`/ProviderUID (length-prefix SHA-256 preimage; no wall-clock/PID/path); job-global seed + volume-layout honesty; cross-process + multi-volume key proofs; DoD-3 path A on fixture; closes **D-0079-deterministic-key**. Codex luna PASS. |
 
 ### What each step is for
 
