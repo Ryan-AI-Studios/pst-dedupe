@@ -4,6 +4,7 @@
 //! built on top of LTP property/table contexts.
 
 pub mod attachment;
+pub mod embedded;
 pub mod folder;
 pub mod message;
 pub mod named_prop;

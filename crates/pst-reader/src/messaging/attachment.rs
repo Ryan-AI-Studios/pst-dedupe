@@ -367,6 +367,14 @@ impl Read for AttachmentDataReader {
 }
 
 impl AttachmentDataReader {
+    /// In-memory payload reader (heap-resident attach binary).
+    pub(crate) fn from_memory(data: Vec<u8>) -> Self {
+        Self {
+            inner: AttachReaderInner::Memory { data, pos: 0 },
+            crc_suspect: false,
+        }
+    }
+
     /// True when the full payload is already buffered in memory (small attaches).
     pub fn is_buffered(&self) -> bool {
         matches!(self.inner, AttachReaderInner::Memory { .. })
@@ -375,6 +383,11 @@ impl AttachmentDataReader {
     /// True when block CRC/BID mismatch was counted during open or stream read.
     pub fn crc_suspect(&self) -> bool {
         self.crc_suspect
+    }
+
+    /// Mark CRC/BID taint from an outer open scope (0090 nested open path).
+    pub(crate) fn mark_crc_suspect(&mut self) {
+        self.crc_suspect = true;
     }
 }
 
@@ -672,7 +685,7 @@ impl PstFile {
         Err(PstError::PropertyNotFound(nid::PID_TAG_ATTACH_DATA_BINARY))
     }
 
-    fn resolve_subnode_data_stream(
+    pub(crate) fn resolve_subnode_data_stream(
         &mut self,
         att_entry: &SubnodeEntry,
         data_nid: NodeId,
@@ -693,7 +706,7 @@ impl PstFile {
         Ok(Some(self.open_block_stream(sub.bid_data, crypt)?))
     }
 
-    fn open_block_stream(
+    pub(crate) fn open_block_stream(
         &mut self,
         bid_data: BlockId,
         crypt: CryptMethod,

@@ -151,7 +151,7 @@ pub fn looks_like_x500_dn(s: &str) -> bool {
     u.contains("/O=") || u.contains("/OU=") || u.contains("/CN=")
 }
 
-fn opt_row_string(s: Result<Option<String>>) -> Option<String> {
+pub(crate) fn opt_row_string(s: Result<Option<String>>) -> Option<String> {
     match s {
         Ok(Some(v)) => nonempty_str(Some(&v)).map(|t| t.to_string()),
         Ok(None) | Err(_) => None,

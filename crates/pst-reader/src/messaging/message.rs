@@ -151,7 +151,7 @@ impl ExtractedMessage {
 }
 
 /// Whether a body property error is truncation/CRC corruption (BODY_TRUNCATED path).
-fn is_truncation_or_crc(err: &PstError) -> bool {
+pub(crate) fn is_truncation_or_crc(err: &PstError) -> bool {
     matches!(
         err,
         PstError::DataTruncated { .. } | PstError::CrcMismatch { .. }

@@ -431,6 +431,26 @@ impl DedupIndex {
             self.stats.strong_hash_attach_truncated.saturating_add(1);
     }
 
+    /// Count a successfully parsed embedded-message identity hash (0090).
+    pub fn record_strong_hash_embedded_parsed(&mut self) {
+        self.stats.strong_hash_embedded_parsed =
+            self.stats.strong_hash_embedded_parsed.saturating_add(1);
+    }
+
+    /// Count a nested embed halted by depth-limit sentinel (0090).
+    pub fn record_strong_hash_embedded_depth_limit(&mut self) {
+        self.stats.strong_hash_embedded_depth_limit = self
+            .stats
+            .strong_hash_embedded_depth_limit
+            .saturating_add(1);
+    }
+
+    /// Count an embedded parse failure → unread sentinel (0090).
+    pub fn record_strong_hash_embedded_unparsed(&mut self) {
+        self.stats.strong_hash_embedded_unparsed =
+            self.stats.strong_hash_embedded_unparsed.saturating_add(1);
+    }
+
     /// Note: `--tier1-backfill` merge is a keep-set / `group_candidates` post-pass.
     /// Streaming insert cannot retroactively merge already-emitted uniques; CLI
     /// rejects the flag on `scan`/`dups`. Callers that need merges must re-group via

@@ -329,6 +329,15 @@ pub struct GroupingStats {
     /// Attach-content digest run hit budget/cancel truncation (0086; 0 or 1 typically).
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub strong_hash_attach_truncated: u64,
+    /// Embedded messages successfully parsed into `embedded-msg-hash/v1` (0090).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub strong_hash_embedded_parsed: u64,
+    /// Nested embeds halted by depth-limit sentinel (0090).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub strong_hash_embedded_depth_limit: u64,
+    /// Embedded parse failed → Choice B unread (0090 honesty).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub strong_hash_embedded_unparsed: u64,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub tier2_preview_bytes_over_budget: u64,
 }
@@ -361,6 +370,9 @@ impl GroupingStats {
         self.strong_hash_attach_digested += other.strong_hash_attach_digested;
         self.strong_hash_attach_bytes += other.strong_hash_attach_bytes;
         self.strong_hash_attach_truncated += other.strong_hash_attach_truncated;
+        self.strong_hash_embedded_parsed += other.strong_hash_embedded_parsed;
+        self.strong_hash_embedded_depth_limit += other.strong_hash_embedded_depth_limit;
+        self.strong_hash_embedded_unparsed += other.strong_hash_embedded_unparsed;
         self.tier2_preview_bytes_over_budget += other.tier2_preview_bytes_over_budget;
     }
 

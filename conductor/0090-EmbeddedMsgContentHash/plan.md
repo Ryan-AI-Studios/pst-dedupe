@@ -10,36 +10,36 @@
 
 ## Phase 0 — Design lock → DoD-1 (partial)
 
-- [ ] Re-read 0086 Choice B + `hash_attachment_stream` unread-on-open-fail.
-- [ ] Lock preimage bytes exactly as `spec.md` §2.4–2.5 (header included; attach index order; inline flag; depth 0 = this embed).
-- [ ] Lock parser split: rfc822 (method 1) vs subnode (method 5).
-- [ ] Lock depth-limit sentinel domain sep (not raw blob).
-- [ ] Confirm D-0067 remains **export** residual.
+- [x] Re-read 0086 Choice B + `hash_attachment_stream` unread-on-open-fail.
+- [x] Lock preimage bytes exactly as `spec.md` §2.4–2.5 (header included; attach index order; inline flag; depth 0 = this embed).
+- [x] Lock parser split: rfc822 (method 1) vs subnode (method 5).
+- [x] Lock depth-limit sentinel domain sep (not raw blob).
+- [x] Confirm D-0067 remains **export** residual.
 
 ## Phase 1 — Reader identity load → DoD-1, DoD-2
 
-- [ ] Implement budgeted `read_embedded_message_identity` (name as convenient).
-- [ ] Fail closed → caller unread sentinel.
-- [ ] Unit tests on synthetic writer fixture with method-5 attach if available; else generate in-test.
-- [ ] No production `unwrap`/`expect`.
+- [x] Implement budgeted `read_embedded_message_identity` (name as convenient).
+- [x] Fail closed → caller unread sentinel.
+- [x] Unit tests on synthetic writer fixture with method-5 attach if available; else generate in-test.
+- [x] No production `unwrap`/`expect`.
 
 ## Phase 2 — Preimage + CLI wire → DoD-1, DoD-3
 
-- [ ] `embedded-msg-hash/v1` helper (engine or CLI module with tests).
-- [ ] Wire `attach_content_hash.rs` / `scan.rs` for method 5 + rfc822.
-- [ ] Golden: nested subject change splits; nested body change splits; depth cap.
+- [x] `embedded-msg-hash/v1` helper (engine or CLI module with tests).
+- [x] Wire `attach_content_hash.rs` / `scan.rs` for method 5 + rfc822.
+- [x] Golden: nested subject change splits; nested body change splits; depth cap.
 
 ## Phase 3 — Docs + honesty → DoD-4, DoD-5
 
-- [ ] Operator docs: **not Relativity parity**; why recursive-in-parent.
-- [ ] Surface unparsed / depth-cap flags on keep-set/report path as specified.
-- [ ] Close/narrow `D-0086-embedded-email-hash`; leave `D-0067-embedded-depth` open.
-- [ ] Note optional operator-local embedded-msg PST smoke in `review.md`.
+- [x] Operator docs: **not Relativity parity**; why recursive-in-parent.
+- [x] Surface unparsed / depth-cap flags on keep-set/report path as specified.
+- [x] Close/narrow `D-0086-embedded-email-hash`; leave `D-0067-embedded-depth` open.
+- [x] Note optional operator-local embedded-msg PST smoke in `review.md`.
 
 ## Phase 4 — Finalize → DoD-6
 
-- [ ] `review.md`; conductor **Completed**; ledger commit.
-- [ ] Handoff to 0091: digest API now includes embedded-aware results — unify against this API.
+- [x] `review.md`; conductor **Completed**; ledger commit.
+- [x] Handoff to 0091: digest API now includes embedded-aware results — unify against this API.
 
 ---
 

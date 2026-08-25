@@ -210,6 +210,31 @@ impl PropContext {
         Some((prop_type, value_hnid))
     }
 
+    /// Stored byte length for string/binary props without UTF decode / `String` alloc.
+    ///
+    /// Covers heap-resident and already-resolved subnode values for
+    /// `PtypString` (0x001F), `PtypString8` (0x001E), and `PtypBinary` (0x0102).
+    /// Returns `Ok(None)` when the property is absent, unresolved, or another type.
+    pub fn prop_value_byte_len(&self, prop_id: u16) -> Result<Option<usize>> {
+        let Some((prop_type, value_hnid)) = self.get_raw_hnid(prop_id) else {
+            return Ok(None);
+        };
+        match prop_type {
+            0x001F | 0x001E | 0x0102 => {
+                let hid = Hid(value_hnid);
+                if hid.is_null() {
+                    return Ok(Some(0));
+                }
+                if hid.hid_type() != 0 {
+                    // Subnode-stored: length of already-resolved bytes (no decode).
+                    return Ok(self.subnodes.get(&value_hnid).map(|b| b.len()));
+                }
+                Ok(Some(self.heap.get(hid)?.len()))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Resolve a property value from its type and HNID.
     fn resolve_value(&self, prop_type: u16, value_hnid: u32) -> Result<Option<PropertyValue>> {
         match prop_type {
@@ -373,13 +398,27 @@ pub fn load_pc<R: Read + Seek>(
     crypt: CryptMethod,
 ) -> Result<PropContext> {
     let nbt_entry = nbt.get(nid).ok_or(PstError::NodeNotFound(nid.0))?;
-    let data = block::read_block_data(reader, bbt, nbt_entry.bid_data, crypt)?;
+    load_pc_from_bids(reader, bbt, nbt_entry.bid_data, nbt_entry.bid_sub, crypt)
+}
+
+/// Load a Property Context from raw data/subnode block IDs (no NBT lookup).
+///
+/// Used for embedded messages that live only under an attachment subnode tree
+/// (0090) — they are not NBT entries, so [`load_pc`] cannot resolve them.
+pub fn load_pc_from_bids<R: Read + Seek>(
+    reader: &mut R,
+    bbt: &BbtIndex,
+    bid_data: crate::ndb::BlockId,
+    bid_sub: crate::ndb::BlockId,
+    crypt: CryptMethod,
+) -> Result<PropContext> {
+    let data = block::read_block_data(reader, bbt, bid_data, crypt)?;
 
     let mut subnodes = HashMap::new();
-    if !nbt_entry.bid_sub.is_null() {
+    if !bid_sub.is_null() {
         let needed = referenced_subnode_nids(&data)?;
         if !needed.is_empty() {
-            let entries = block::list_subnode_entries(reader, bbt, nbt_entry.bid_sub)?;
+            let entries = block::list_subnode_entries(reader, bbt, bid_sub)?;
             for entry in entries {
                 let raw_nid = entry.nid.0 as u32;
                 if needed.contains(&raw_nid) {
@@ -391,6 +430,92 @@ pub fn load_pc<R: Read + Seek>(
     }
 
     PropContext::load_with_subnodes(data, subnodes)
+}
+
+/// Like [`load_pc_from_bids`], but refuse oversize body subnodes before materializing.
+///
+/// When `body_prop_id` is stored as a subnode, peeks payload size via
+/// [`block::block_payload_len_hint`] (BBT `cb` or XBLOCK `lcbTotal`) and returns
+/// [`PstError::ResourceLimit`] if over `body_byte_budget` — without
+/// `read_block_data` / insert into `PropContext.subnodes`.
+pub fn load_pc_from_bids_with_body_budget<R: Read + Seek>(
+    reader: &mut R,
+    bbt: &BbtIndex,
+    bid_data: crate::ndb::BlockId,
+    bid_sub: crate::ndb::BlockId,
+    crypt: CryptMethod,
+    body_prop_id: u16,
+    body_byte_budget: u64,
+) -> Result<PropContext> {
+    let data = block::read_block_data(reader, bbt, bid_data, crypt)?;
+    let body_value_hnid = body_subnode_value_hnid(&data, body_prop_id)?;
+
+    let mut subnodes = HashMap::new();
+    if !bid_sub.is_null() {
+        let needed = referenced_subnode_nids(&data)?;
+        if !needed.is_empty() {
+            let entries = block::list_subnode_entries(reader, bbt, bid_sub)?;
+
+            // Preflight body subnode size before any needed-entry assemble/copy.
+            if let Some(body_hnid) = body_value_hnid {
+                for entry in &entries {
+                    let raw_nid = entry.nid.0 as u32;
+                    if raw_nid != body_hnid || !needed.contains(&raw_nid) {
+                        continue;
+                    }
+                    let hint = block::block_payload_len_hint(reader, bbt, entry.bid_data, crypt)?;
+                    if hint > body_byte_budget {
+                        return Err(PstError::ResourceLimit(format!(
+                            "embedded body prop 0x{body_prop_id:04x} subnode payload \
+                             hint={hint} exceeds budget={body_byte_budget}"
+                        )));
+                    }
+                }
+            }
+
+            for entry in entries {
+                let raw_nid = entry.nid.0 as u32;
+                if needed.contains(&raw_nid) {
+                    let bytes = block::read_block_data(reader, bbt, entry.bid_data, crypt)?;
+                    subnodes.insert(raw_nid, bytes);
+                }
+            }
+        }
+    }
+
+    PropContext::load_with_subnodes(data, subnodes)
+}
+
+/// Subnode NID used by `body_prop_id` when that property is subnode-stored.
+///
+/// Same HNID rule as [`referenced_subnode_nids`] (`PtypString` / `PtypBinary`
+/// with nonzero `hidType`), filtered to a single property id.
+fn body_subnode_value_hnid(data: &[u8], body_prop_id: u16) -> Result<Option<u32>> {
+    let block_size = if data.len() <= MAX_BLOCK_DATA {
+        data.len()
+    } else {
+        MAX_BLOCK_DATA
+    };
+    let heap = Heap::parse(data.to_vec(), block_size)?;
+    let bth_header = bth::read_bth_header(&heap, heap.header.hid_user_root)?;
+    let records = bth::collect_records(&heap, &bth_header)?;
+
+    let key = body_prop_id.to_le_bytes();
+    for record in &records {
+        if record.key != key || record.data.len() < 6 {
+            continue;
+        }
+        let prop_type = LittleEndian::read_u16(&record.data[0..2]);
+        let value_hnid = LittleEndian::read_u32(&record.data[2..6]);
+        if matches!(prop_type, 0x001F | 0x0102) {
+            let hid = Hid(value_hnid);
+            if hid.hid_type() != 0 {
+                return Ok(Some(value_hnid));
+            }
+        }
+        return Ok(None);
+    }
+    Ok(None)
 }
 
 /// Decode a UTF-16LE byte slice to a Rust String.
@@ -611,6 +736,13 @@ mod targeted_subnode_tests {
              the BBT and would error out if it were fetched)",
         );
 
+        assert_eq!(
+            pc.prop_value_byte_len(0x1000)
+                .expect("body len")
+                .expect("body present"),
+            body_bytes.len(),
+            "prop_value_byte_len must report subnode binary length without decode"
+        );
         let body = pc
             .get_binary(0x1000)
             .expect("get body")
@@ -625,5 +757,96 @@ mod targeted_subnode_tests {
             .expect("get subject")
             .expect("subject present");
         assert_eq!(subject, "Test");
+    }
+
+    #[test]
+    fn load_pc_from_bids_with_body_budget_rejects_before_subnode_insert() {
+        // Body subnode is an XBLOCK with huge lcbTotal and a missing child BID.
+        // Budgeted load must ResourceLimit on the hint — never call read_block_data
+        // (which would BlockNotFound on the missing leaf).
+        const SUBNODE_BODY_NID: u32 = 0x1F;
+        const PC_DATA_BID: u64 = 0x10;
+        const SLBLOCK_BID: u64 = 0x12;
+        const BODY_XBLOCK_BID: u64 = 0x22; // internal
+        const MISSING_LEAF_BID: u64 = 0x8888;
+        const LCB_TOTAL: u32 = 2_000_000;
+        const BUDGET: u64 = 1024;
+
+        assert!(BlockId(BODY_XBLOCK_BID).is_internal());
+
+        let pc_data = build_synthetic_pc_data(SUBNODE_BODY_NID);
+
+        let mut xblock = vec![0x01u8, 0x01];
+        xblock.extend_from_slice(&1u16.to_le_bytes());
+        xblock.extend_from_slice(&LCB_TOTAL.to_le_bytes());
+        xblock.extend_from_slice(&MISSING_LEAF_BID.to_le_bytes());
+
+        let mut slblock = Vec::new();
+        slblock.push(0x02);
+        slblock.push(0x00);
+        slblock.extend_from_slice(&1u16.to_le_bytes());
+        slblock.extend_from_slice(&0u32.to_le_bytes());
+        slblock.extend_from_slice(&(SUBNODE_BODY_NID as u64).to_le_bytes());
+        slblock.extend_from_slice(&BODY_XBLOCK_BID.to_le_bytes());
+        slblock.extend_from_slice(&0u64.to_le_bytes());
+
+        let mut file = Vec::new();
+        let pc_offset = push_raw_block(&mut file, &pc_data);
+        let slblock_offset = push_raw_block(&mut file, &slblock);
+        let xblock_offset = push_raw_block(&mut file, &xblock);
+
+        let mut bbt_entries = HashMap::new();
+        bbt_entries.insert(
+            PC_DATA_BID,
+            BbtEntry {
+                bref: Bref {
+                    bid: PC_DATA_BID,
+                    ib: pc_offset,
+                },
+                cb: pc_data.len() as u16,
+                c_ref: 1,
+            },
+        );
+        bbt_entries.insert(
+            SLBLOCK_BID,
+            BbtEntry {
+                bref: Bref {
+                    bid: SLBLOCK_BID,
+                    ib: slblock_offset,
+                },
+                cb: slblock.len() as u16,
+                c_ref: 1,
+            },
+        );
+        bbt_entries.insert(
+            BODY_XBLOCK_BID,
+            BbtEntry {
+                bref: Bref {
+                    bid: BODY_XBLOCK_BID,
+                    ib: xblock_offset,
+                },
+                cb: xblock.len() as u16,
+                c_ref: 1,
+            },
+        );
+        let bbt = BbtIndex::from_entries_for_test(bbt_entries);
+        let mut reader = Cursor::new(file);
+
+        match load_pc_from_bids_with_body_budget(
+            &mut reader,
+            &bbt,
+            BlockId(PC_DATA_BID),
+            BlockId(SLBLOCK_BID),
+            CryptMethod::None,
+            0x1000, // PID_TAG_BODY
+            BUDGET,
+        ) {
+            Err(err) => assert!(
+                matches!(err, PstError::ResourceLimit(_)),
+                "expected ResourceLimit from payload hint, got {err:?} \
+                 (BlockNotFound would mean we assembled past the preflight)"
+            ),
+            Ok(_) => panic!("over-budget body XBLOCK must refuse before assemble"),
+        }
     }
 }
