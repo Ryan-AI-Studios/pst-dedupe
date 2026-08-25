@@ -548,3 +548,197 @@ fn unique_eml_deterministic_rerun() {
         assert_eq!(a["content_hash_hex"], b["content_hash_hex"]);
     }
 }
+
+/// 0089: default --attach-ledger=full writes export_attachments.csv at pack root with locked header.
+#[test]
+fn unique_eml_attach_ledger_csv_header_at_pack_root() {
+    use pst_dedup_cli::unique_export_report::EXPORT_ATTACHMENTS_CSV_HEADER;
+
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("pack");
+
+    let result = Command::new(bin())
+        .args([
+            "unique-eml",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--attach-ledger",
+            "full",
+            "--json",
+        ])
+        .output()
+        .expect("run unique-eml");
+    assert!(
+        result.status.success() || result.status.code() == Some(64),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+
+    let ledger = out.join("export_attachments.csv");
+    assert!(
+        ledger.is_file(),
+        "default/full attach ledger must write {{out}}/export_attachments.csv"
+    );
+    let csv = fs::read_to_string(&ledger).expect("csv");
+    let first = csv.lines().next().expect("header line");
+    assert_eq!(
+        first, EXPORT_ATTACHMENTS_CSV_HEADER,
+        "header must match unique-pst EXPORT_ATTACHMENTS_CSV_HEADER byte-for-byte"
+    );
+
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout) {
+        assert_eq!(
+            v["attachment_ledger_mode"].as_str(),
+            Some("full"),
+            "summary must echo ledger mode"
+        );
+        assert_eq!(
+            v["attachment_ledger"].as_str(),
+            Some("export_attachments.csv")
+        );
+    }
+}
+
+/// 0089: --attach-ledger=off must not write CSV; exit honesty still from counters.
+#[test]
+fn unique_eml_attach_ledger_off_no_csv() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("pack");
+
+    let result = Command::new(bin())
+        .args([
+            "unique-eml",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--attach-ledger",
+            "off",
+            "--json",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        result.status.success() || result.status.code() == Some(64),
+        "stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        !out.join("export_attachments.csv").is_file(),
+        "attach-ledger=off must not write CSV"
+    );
+}
+
+/// 0089 Codex P2: production `unique-eml` orchestration must enqueue soft-fail rows.
+///
+/// Builds a synthetic PST with a cloud/web-ref attach (no offline bytes). Running the
+/// real CLI must write `{out}/export_attachments.csv` with the locked header **and** at
+/// least one fail-severity data row. Would fail if the write-loop event→sink wiring
+/// in `unique_eml_cmd` were disconnected.
+#[test]
+fn unique_eml_production_soft_fail_writes_ledger_row() {
+    use pst_dedup_cli::unique_export_report::EXPORT_ATTACHMENTS_CSV_HEADER;
+    use pst_writer::{write_unicode_pst, WriteAttachment, WriteMessage, WritePstOpts};
+
+    let dir = TempDir::new().expect("tmp");
+    let pst_path = dir.path().join("cloud_attach.pst");
+    let mut msg = WriteMessage {
+        message_id: Some("<0089-cloud-ledger@ex.com>".into()),
+        subject: "0089 cloud soft-fail".into(),
+        sender: Some("alice@example.com".into()),
+        display_to: Some("bob@example.com".into()),
+        body_plain: Some("body with cloud attach".into()),
+        source_folder_path: Some("Inbox".into()),
+        submit_time: Some(100),
+        ..WriteMessage::default()
+    };
+    msg.attachments = vec![WriteAttachment {
+        filename: "cloud.docx".into(),
+        size: 100,
+        attach_method: Some(7), // ATTACH_BY_WEB_REFERENCE
+        data: None,
+        stream_available: false,
+        is_cloud_link: true,
+        cloud_provider: Some("OneDrivePro".into()),
+        cloud_url: Some("https://contoso.sharepoint.com/sites/x/cloud.docx".into()),
+        ..WriteAttachment::default()
+    }];
+    write_unicode_pst(&pst_path, vec![msg], &[], &WritePstOpts::default()).expect("write pst");
+
+    let out = dir.path().join("pack");
+    let result = Command::new(bin())
+        .args([
+            "unique-eml",
+            pst_path.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--attach-ledger",
+            "full",
+            "--json",
+        ])
+        .output()
+        .expect("run unique-eml");
+
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let code = result.status.code().unwrap_or(1);
+    assert!(
+        code == 0 || code == 64,
+        "unique-eml exit={code} stderr={stderr} stdout={stdout}"
+    );
+
+    let ledger = out.join("export_attachments.csv");
+    assert!(
+        ledger.is_file(),
+        "production soft-fail must write export_attachments.csv; stderr={stderr}"
+    );
+    let csv = fs::read_to_string(&ledger).expect("csv");
+    let mut lines = csv.lines().filter(|l| !l.is_empty());
+    let header = lines.next().expect("header");
+    assert_eq!(header, EXPORT_ATTACHMENTS_CSV_HEADER);
+
+    let fail_rows: Vec<&str> = lines
+        .filter(|l| l.contains(",fail,") || l.contains(",ATTACH_"))
+        .collect();
+    assert!(
+        !fail_rows.is_empty(),
+        "expected ≥1 soft-fail data row through run_unique_eml wiring; csv=\n{csv}"
+    );
+    let joined = fail_rows.join("\n");
+    assert!(
+        joined.contains("ATTACH_CLOUD_LINK") || joined.contains("ATTACH_STREAM_OPEN_FAILED"),
+        "expected 0073 reason on production row; rows={joined}"
+    );
+
+    // Default fail-on-partial: attach soft-fail → exit 64 / partial fidelity.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout) {
+        let failed = v["attach_parts_failed"].as_u64().unwrap_or(0);
+        assert!(
+            failed >= 1,
+            "attach_parts_failed must be ≥1 from production counters; v={v}"
+        );
+        assert_eq!(
+            v["attachment_ledger"].as_str(),
+            Some("export_attachments.csv")
+        );
+        if failed > 0 {
+            assert_eq!(
+                code, 64,
+                "attach soft-fail must exit 64 when fail-on-partial"
+            );
+            assert_eq!(v["exit_code"].as_u64(), Some(64));
+        }
+    }
+}

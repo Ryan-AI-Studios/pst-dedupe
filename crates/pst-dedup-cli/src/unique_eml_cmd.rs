@@ -15,8 +15,8 @@ use crate::keep_set_cmd::rank_context_from_cli;
 use dedup_engine::integrity::{IntegrityThresholds, ScanMode, SCAN_INTEGRITY_SCHEMA};
 use dedup_engine::keepset::{
     finalize_with_materialize_opts, recoverable_items_hint, resolve_groups_with_grouping,
-    sort_input_paths, write_keep_set_json, DecisionCsvWriter, FamilyPolicy, KeepPolicy,
-    KeepSetProvenance, MaterializeFinalizeOpts, MessageMaterializer,
+    sort_input_paths, write_keep_set_json, CanonicalMessage, DecisionCsvWriter, FamilyPolicy,
+    KeepPolicy, KeepSetProvenance, MaterializeFinalizeOpts, MessageMaterializer,
 };
 use dedup_engine::{
     clamp_files_per_volume, merge_pack_degraded, validate_volume_prefix, write_canonical_eml,
@@ -29,6 +29,12 @@ use crate::error::{CliError, Result};
 use crate::paths::{is_same_or_under, paths_equal, resolve_cli_path_maybe_missing};
 use crate::pst_materializer::{PstAttachStreamSource, PstMaterializer};
 use crate::scan::{evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions, ScanSummary};
+use crate::unique_export_report::{
+    format_ledger_source_path, resolve_input_source_id, AttachLedgerFinish, AttachLedgerMode,
+    AttachLedgerRow, AttachLedgerSink, LedgerPathMode, EXPORT_ATTACHMENTS_CSV_NAME,
+};
+use dedup_engine::EmlAttachEvent;
+use std::collections::BTreeMap;
 
 /// CLI options for `unique-eml`.
 pub struct UniqueEmlCliArgs {
@@ -82,8 +88,13 @@ pub struct UniqueEmlCliArgs {
     /// Opt-in risk gate level (0078).
     pub fail_on_export_risk: Option<String>,
     /// Mode A pre-write promote-on-attach-fail (0083). Default false.
-    /// Full attach-ledger CSV for eml remains residual **D-0073-eml**.
     pub promote_on_attach_fail: bool,
+    /// Attachment failure ledger: `full` (default CSV+histogram), `summary-only`, or `off` (0089).
+    pub attach_ledger: AttachLedgerMode,
+    /// Max rows written to `export_attachments.csv` (default 500000).
+    pub attach_ledger_max_rows: u64,
+    /// How `source_path` columns are written: `full` (default) or `basename` (0081/0089).
+    pub ledger_path_mode: LedgerPathMode,
 }
 
 #[derive(Debug, Serialize)]
@@ -103,9 +114,18 @@ struct UniqueEmlSummaryOut {
     volumes: u64,
     attach_parts_written: u64,
     embedded_messages_written: u64,
-    /// Data-path attach fail counter for fidelity (0078 narrow half of D-0073-eml).
-    /// Full attach ledger CSV remains deferred to D-0073-eml residual.
+    /// Data-path attach fail counter for fidelity (0078); classify source of truth.
     attach_parts_failed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachment_ledger: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachment_ledger_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachment_ledger_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachment_ledger_rows_written: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachments_failed_by_reason: Option<BTreeMap<String, u64>>,
     #[serde(default)]
     fidelity: crate::export_outcome::ExportFidelity,
     #[serde(default)]
@@ -262,6 +282,71 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         }
     }
 
+    // 0089: attach ledger at pack root (`{out}/export_attachments.csv`).
+    let input_path_strings: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    let mut ledger_init_error: Option<String> = None;
+    let mut attach_ledger = match AttachLedgerSink::new(
+        args.attach_ledger,
+        args.attach_ledger_max_rows,
+        &out,
+        &input_path_strings,
+        args.ledger_path_mode,
+    ) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            let msg = format!("attach ledger init failed: {e}");
+            tracing::warn!("{msg}");
+            if args.attach_ledger != AttachLedgerMode::Off {
+                // Operator requested ledger — fail closed (do not continue with None).
+                ledger_init_error = Some(msg);
+            }
+            None
+        }
+    };
+
+    // 0083 Mode A honesty: mark promoted winners + emit soft-skip incomplete rows.
+    // Drain soft_skip records before any consume/drop of resolved attach-skip data.
+    if let Some(ledger) = attach_ledger.as_mut() {
+        for w in &keep_set.winners {
+            if w.promoted_from_failure {
+                ledger.mark_promoted_winner(&w.locus.source_path, w.locus.nid);
+            }
+        }
+        for rec in &resolved.soft_skip_attach_records {
+            let source_id = resolve_input_source_id(&rec.source_path, &input_path_strings);
+            let peer_source_id =
+                resolve_input_source_id(&rec.peer_source_path, &input_path_strings)
+                    .map(|id| id.to_string())
+                    .unwrap_or_default();
+            let row = AttachLedgerRow {
+                source_id: source_id.map(|id| id.to_string()).unwrap_or_default(),
+                source_path: format_ledger_source_path(&rec.source_path, args.ledger_path_mode),
+                folder_path: rec.folder_path.clone(),
+                msg_nid: rec.msg_nid,
+                attach_nid: rec.attach_nid.map(|n| n.to_string()).unwrap_or_default(),
+                attach_index: rec.attach_index,
+                filename: rec.filename.clone(),
+                size: if rec.size == 0 {
+                    String::new()
+                } else {
+                    rec.size.to_string()
+                },
+                attach_method: rec.attach_method,
+                reason_code: rec.reason_code.clone(),
+                severity: "fail".into(),
+                volume_path: String::new(),
+                volume_index: String::new(),
+                winner_promoted: true,
+                peer_source_id,
+                peer_msg_nid: rec.peer_msg_nid.to_string(),
+                message_subject: String::new(),
+                cloud_provider: rec.cloud_provider.clone(),
+                cloud_url: rec.cloud_url.clone(),
+            };
+            ledger.enqueue_soft_skip_row(row);
+        }
+    }
+
     // Phase 2c: write EMLs in keep_set.winners order (path+nid), re-materializing each
     // winner once so export counters match keep_set.json stability without holding all bodies.
     let mut pack = VolumePackWriter::new(out.clone(), files_per_volume, volume_prefix)
@@ -316,6 +401,28 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
                 manifest.stats.attach_parts_written += wres.attachments_file_written;
                 manifest.stats.embedded_messages_written += wres.embedded_messages_written;
                 manifest.stats.attach_parts_failed += wres.attachments_failed;
+
+                if let Some(ledger) = attach_ledger.as_mut() {
+                    let vol_path = abs_path
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    ledger.set_volume(&vol_path, pack.current_volume);
+                    for ev in &wres.attachment_events {
+                        let row = attach_ledger_row_from_eml_event(
+                            ev,
+                            &msg,
+                            &input_path_strings,
+                            args.ledger_path_mode,
+                            &vol_path,
+                            pack.current_volume,
+                            ledger
+                                .promoted_winner_loci
+                                .contains(&(msg.locus.source_path.clone(), msg.locus.nid)),
+                        );
+                        ledger.enqueue_soft_skip_row(row);
+                    }
+                }
 
                 let content_hash_hex = msg
                     .content_hash
@@ -397,8 +504,31 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         None
     };
 
-    // 0078: data-path counters (narrow D-0073-eml) — attach_parts_failed is ground truth
-    // for ATTACH_SOFT_FAIL; full ledger CSV still deferred.
+    // Flush attach ledger before classify; init/flush errors are report hard-fail.
+    let mut report_ok = true;
+    if let Some(msg) = ledger_init_error.take() {
+        report_ok = false;
+        if pack_err.is_none() {
+            pack_err = Some(msg);
+        }
+    }
+    let attach_ledger_finish = match attach_ledger.take() {
+        Some(ledger) => match ledger.finish() {
+            Ok(f) => Some(f),
+            Err(e) => {
+                let msg = format!("attach ledger flush failed: {e}");
+                tracing::warn!("{msg}");
+                report_ok = false;
+                if pack_err.is_none() {
+                    pack_err = Some(msg);
+                }
+                None
+            }
+        },
+        None => None,
+    };
+
+    // 0078/0089: attach_parts_failed counters remain classify ground truth (ledger additive).
     let attach_failed = manifest.stats.attach_parts_failed;
     // Pack hard fail only when count mismatch or write errors; attach soft alone is partial.
     let export_ok_input = crate::export_outcome::ExportOkInput {
@@ -410,7 +540,7 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         unique: keep_set.stats.unique,
         attach_failed_total: attach_failed,
         body_soft_fail_total: 0,
-        report_ok: true,
+        report_ok,
     };
     let risk_gate = args
         .fail_on_export_risk
@@ -435,6 +565,14 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         crate::export_outcome::QuarantineResult::NotAttempted,
     );
 
+    let (
+        attachment_ledger,
+        attachment_ledger_mode,
+        attachment_ledger_truncated,
+        attachment_ledger_rows_written,
+        attachments_failed_by_reason,
+    ) = ledger_summary_fields(args.attach_ledger, attach_ledger_finish.as_ref());
+
     // DoD-22: write a dedicated summary.json containing fidelity/exit fields (not
     // manifest.json, which lacks them). Path is self-locating.
     let summary_path = out.join("summary.json");
@@ -458,6 +596,11 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         attach_parts_written: manifest.stats.attach_parts_written,
         embedded_messages_written: manifest.stats.embedded_messages_written,
         attach_parts_failed: attach_failed,
+        attachment_ledger,
+        attachment_ledger_mode,
+        attachment_ledger_truncated,
+        attachment_ledger_rows_written,
+        attachments_failed_by_reason,
         fidelity: classified.fidelity,
         exit_code: classified.exit.as_u8(),
         exit_reason: classified
@@ -599,6 +742,12 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
     }
     println!("  manifest:      {}", manifest_path.display());
     println!("  summary:       {summary_path_str}");
+    if payload.attachment_ledger.is_some() {
+        println!(
+            "  attach_ledger: {}",
+            out.join(EXPORT_ATTACHMENTS_CSV_NAME).display()
+        );
+    }
     if let Some(p) = &decision_csv_out {
         println!("  decision_csv:  {p}");
     }
@@ -613,6 +762,85 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         let _ = writeln!(std::io::stderr(), "summary: {summary_path_str}");
     }
     Ok(classified.exit)
+}
+
+/// Map an engine soft-fail event into a 0073 attach-ledger CSV row (0089).
+fn attach_ledger_row_from_eml_event(
+    ev: &EmlAttachEvent,
+    msg: &CanonicalMessage,
+    input_paths: &[String],
+    path_mode: LedgerPathMode,
+    volume_path: &str,
+    volume_index: u32,
+    winner_promoted: bool,
+) -> AttachLedgerRow {
+    let source_id = resolve_input_source_id(&msg.locus.source_path, input_paths);
+    AttachLedgerRow {
+        source_id: source_id.map(|id| id.to_string()).unwrap_or_default(),
+        source_path: format_ledger_source_path(&msg.locus.source_path, path_mode),
+        folder_path: msg.locus.folder_path.clone(),
+        msg_nid: msg.locus.nid,
+        attach_nid: ev.attach_nid.map(|n| n.to_string()).unwrap_or_default(),
+        attach_index: ev.attach_index,
+        filename: ev.filename.clone(),
+        size: ev.size.map(|n| n.to_string()).unwrap_or_default(),
+        attach_method: ev.attach_method,
+        reason_code: ev.reason_code.clone(),
+        severity: ev.severity.clone(),
+        volume_path: volume_path.to_string(),
+        volume_index: if volume_index == 0 {
+            String::new()
+        } else {
+            volume_index.to_string()
+        },
+        winner_promoted,
+        peer_source_id: String::new(),
+        peer_msg_nid: String::new(),
+        message_subject: ev
+            .message_subject
+            .clone()
+            .or_else(|| msg.subject.clone())
+            .unwrap_or_default(),
+        cloud_provider: ev.cloud_provider.clone(),
+        cloud_url: ev.cloud_url.clone(),
+    }
+}
+
+type LedgerSummaryFields = (
+    Option<String>,
+    Option<String>,
+    Option<bool>,
+    Option<u64>,
+    Option<BTreeMap<String, u64>>,
+);
+
+fn ledger_summary_fields(
+    mode: AttachLedgerMode,
+    finish: Option<&AttachLedgerFinish>,
+) -> LedgerSummaryFields {
+    match mode {
+        AttachLedgerMode::Off => (None, None, None, None, None),
+        AttachLedgerMode::SummaryOnly => {
+            let hist = finish.map(|f| f.failed_by_reason.clone());
+            (
+                None,
+                Some(mode.as_str().to_string()),
+                Some(false),
+                Some(0),
+                hist,
+            )
+        }
+        AttachLedgerMode::Full => match finish {
+            Some(f) => (
+                Some(EXPORT_ATTACHMENTS_CSV_NAME.to_string()),
+                Some(mode.as_str().to_string()),
+                Some(f.truncated),
+                Some(f.rows_written),
+                Some(f.failed_by_reason.clone()),
+            ),
+            None => (None, Some(mode.as_str().to_string()), None, None, None),
+        },
+    }
 }
 
 /// Refuse path layouts that would delete or overwrite source PSTs.
@@ -833,5 +1061,290 @@ mod tests {
         assert_eq!(ks.winners.len() as u64, ks.stats.unique);
         assert_eq!(ks.stats.unique, 1);
         assert!(ks.stats.duplicates > 0, "dup peers are not winners");
+    }
+
+    /// 0089: soft-fail EmlAttachEvent → CSV at pack root with identical header.
+    #[test]
+    fn soft_fail_eml_event_writes_export_attachments_csv_header() {
+        use crate::unique_export_report::EXPORT_ATTACHMENTS_CSV_HEADER;
+        use dedup_engine::eml_pack::{write_canonical_eml, EmlWriteOpts, NullAttachStreamSource};
+        use dedup_engine::integrity::RecoverableIntegrity;
+        use dedup_engine::keepset::{CanonicalAttachment, MessageLocus};
+
+        let msg = CanonicalMessage {
+            locus: MessageLocus {
+                source_path: r"C:\in\a.pst".into(),
+                source_pst: "a.pst".into(),
+                folder_path: "Inbox".into(),
+                nid: 0x100,
+                is_orphaned: false,
+            },
+            message_id: Some("<0089@test>".into()),
+            subject: Some("soft fail attach".into()),
+            sender: Some("a@b.c".into()),
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            recipients: Vec::new(),
+            message_flags: None,
+            submit_time: None,
+            size: Some(10),
+            message_class: None,
+            body_plain: Some("plain body".into()),
+            body_html: None,
+            attachments: vec![CanonicalAttachment {
+                filename: "missing.bin".into(),
+                size: 10,
+                mime: Some("application/octet-stream".into()),
+                data: None,
+                stream_available: true,
+                attach_nid: Some(999),
+                attach_method: Some(1),
+                is_cloud_link: false,
+                cloud_provider: None,
+                cloud_url: None,
+            }],
+            fidelity: RecoverableIntegrity::clean(),
+            message_id_norm: Some("0089@test".into()),
+            content_hash: [0u8; 32],
+            edrm_mih_hex: None,
+            body_incomplete: false,
+            body_unavailable: false,
+        };
+        let dir = tempfile::tempdir().expect("tmp");
+        let out = dir.path().join("pack");
+        fs::create_dir_all(&out).expect("mkdir");
+        let eml_path = out.join("msg.eml");
+        let mut src = NullAttachStreamSource;
+        let wres = write_canonical_eml(&eml_path, &msg, &mut src, &EmlWriteOpts::default())
+            .expect("write");
+        assert_eq!(wres.attachments_failed, 1);
+        assert_eq!(wres.attachment_events.len(), 1);
+
+        let inputs = vec![r"C:\in\a.pst".to_string()];
+        let mut sink = AttachLedgerSink::new(
+            AttachLedgerMode::Full,
+            500_000,
+            &out,
+            &inputs,
+            LedgerPathMode::Full,
+        )
+        .expect("sink");
+        sink.set_volume(&out.join("VOL001").display().to_string(), 1);
+        for ev in &wres.attachment_events {
+            let row = attach_ledger_row_from_eml_event(
+                ev,
+                &msg,
+                &inputs,
+                LedgerPathMode::Full,
+                &out.join("VOL001").display().to_string(),
+                1,
+                false,
+            );
+            sink.enqueue_soft_skip_row(row);
+        }
+        let finish = sink.finish().expect("finish");
+        assert_eq!(finish.rows_written, 1);
+
+        let csv_path = out.join(EXPORT_ATTACHMENTS_CSV_NAME);
+        assert!(csv_path.is_file(), "export_attachments.csv at pack root");
+        let csv = fs::read_to_string(&csv_path).expect("csv");
+        let first = csv.lines().next().expect("header");
+        assert_eq!(first, EXPORT_ATTACHMENTS_CSV_HEADER);
+        assert!(csv.contains("ATTACH_STREAM_OPEN_FAILED"));
+        assert!(csv.contains("missing.bin"));
+    }
+
+    /// 0089 Mode A: soft-skip loser rows carry winner_promoted; promoted write-fail does too.
+    #[test]
+    fn mode_a_soft_skip_and_promoted_winner_rows() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let inputs = vec![r"C:\in\a.pst".to_string(), r"C:\in\b.pst".to_string()];
+        let mut sink = AttachLedgerSink::new(
+            AttachLedgerMode::Full,
+            500_000,
+            dir.path(),
+            &inputs,
+            LedgerPathMode::Full,
+        )
+        .expect("sink");
+        sink.enqueue_soft_skip_row(AttachLedgerRow {
+            source_id: "0".into(),
+            source_path: r"C:\in\a.pst".into(),
+            folder_path: "Inbox".into(),
+            msg_nid: 10,
+            attach_nid: "99".into(),
+            attach_index: 0,
+            filename: "missing.bin".into(),
+            size: "100".into(),
+            attach_method: 1,
+            reason_code: "ATTACH_STREAM_OPEN_FAILED".into(),
+            severity: "fail".into(),
+            volume_path: String::new(),
+            volume_index: String::new(),
+            winner_promoted: true,
+            peer_source_id: "1".into(),
+            peer_msg_nid: "20".into(),
+            message_subject: String::new(),
+            cloud_provider: String::new(),
+            cloud_url: String::new(),
+        });
+        sink.mark_promoted_winner(r"C:\in\b.pst", 20);
+        let msg = CanonicalMessage {
+            locus: dedup_engine::keepset::MessageLocus {
+                source_path: r"C:\in\b.pst".into(),
+                source_pst: "b.pst".into(),
+                folder_path: "Inbox".into(),
+                nid: 20,
+                is_orphaned: false,
+            },
+            message_id: None,
+            subject: Some("winner".into()),
+            sender: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            recipients: Vec::new(),
+            message_flags: None,
+            submit_time: None,
+            size: None,
+            message_class: None,
+            body_plain: Some("x".into()),
+            body_html: None,
+            attachments: Vec::new(),
+            fidelity: dedup_engine::integrity::RecoverableIntegrity::clean(),
+            message_id_norm: None,
+            content_hash: [0u8; 32],
+            edrm_mih_hex: None,
+            body_incomplete: false,
+            body_unavailable: false,
+        };
+        let ev = EmlAttachEvent {
+            attach_index: 0,
+            filename: "still-bad.bin".into(),
+            size: Some(1),
+            attach_method: 1,
+            attach_nid: Some(7),
+            reason_code: "ATTACH_STREAM_OPEN_FAILED".into(),
+            severity: "fail".into(),
+            error_detail: "stream not available".into(),
+            cloud_provider: String::new(),
+            cloud_url: String::new(),
+            message_subject: Some("winner".into()),
+        };
+        let promoted = sink
+            .promoted_winner_loci
+            .contains(&(msg.locus.source_path.clone(), msg.locus.nid));
+        assert!(promoted);
+        let row = attach_ledger_row_from_eml_event(
+            &ev,
+            &msg,
+            &inputs,
+            LedgerPathMode::Full,
+            "",
+            0,
+            promoted,
+        );
+        sink.enqueue_soft_skip_row(row);
+        let _ = sink.finish().expect("finish");
+        let csv = fs::read_to_string(dir.path().join(EXPORT_ATTACHMENTS_CSV_NAME)).expect("csv");
+        assert!(
+            csv.lines()
+                .any(|l| l.contains("missing.bin") && l.contains(",true,")),
+            "soft-skip loser must have winner_promoted: {csv}"
+        );
+        assert!(
+            csv.lines()
+                .any(|l| l.contains("still-bad.bin") && l.contains(",true,")),
+            "promoted winner write-fail must have winner_promoted: {csv}"
+        );
+    }
+
+    /// 0089: row-cap emits ATTACH_LEDGER_TRUNCATED marker.
+    #[test]
+    fn attach_ledger_row_cap_truncated_marker() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let inputs = vec![r"C:\in\a.pst".to_string()];
+        let mut sink = AttachLedgerSink::new(
+            AttachLedgerMode::Full,
+            2, // leave one slot for marker after first data row
+            dir.path(),
+            &inputs,
+            LedgerPathMode::Full,
+        )
+        .expect("sink");
+        for i in 0..3u32 {
+            sink.enqueue_soft_skip_row(AttachLedgerRow {
+                source_id: "0".into(),
+                source_path: r"C:\in\a.pst".into(),
+                folder_path: "Inbox".into(),
+                msg_nid: 1,
+                attach_nid: i.to_string(),
+                attach_index: i,
+                filename: format!("f{i}.bin"),
+                size: "1".into(),
+                attach_method: 1,
+                reason_code: "ATTACH_STREAM_OPEN_FAILED".into(),
+                severity: "fail".into(),
+                volume_path: String::new(),
+                volume_index: String::new(),
+                winner_promoted: false,
+                peer_source_id: String::new(),
+                peer_msg_nid: String::new(),
+                message_subject: String::new(),
+                cloud_provider: String::new(),
+                cloud_url: String::new(),
+            });
+        }
+        let finish = sink.finish().expect("finish");
+        assert!(finish.truncated);
+        let csv = fs::read_to_string(dir.path().join(EXPORT_ATTACHMENTS_CSV_NAME)).expect("csv");
+        assert!(
+            csv.contains("ATTACH_LEDGER_TRUNCATED"),
+            "cap must emit truncated marker: {csv}"
+        );
+    }
+
+    /// 0089: ledger init fail with mode=full must fail closed (report_ok=false → non-success).
+    #[test]
+    fn attach_ledger_init_fail_full_fail_closed() {
+        use crate::export_outcome::{classify_export, ExportFidelity, ExportOkInput, RiskGate};
+
+        let dir = tempfile::tempdir().expect("tmp");
+        // Plant a directory where the CSV file should be created → File::create fails.
+        let blocker = dir.path().join(EXPORT_ATTACHMENTS_CSV_NAME);
+        fs::create_dir_all(&blocker).expect("blocker dir");
+        let inputs = vec![r"C:\in\a.pst".to_string()];
+        let init = AttachLedgerSink::new(
+            AttachLedgerMode::Full,
+            500_000,
+            dir.path(),
+            &inputs,
+            LedgerPathMode::Full,
+        );
+        assert!(init.is_err(), "init must fail when CSV path is a directory");
+
+        // Mirror unique_eml_cmd: mode != Off + init Err → report_ok=false.
+        let input = ExportOkInput {
+            scan_ok: true,
+            verify_ok: true,
+            export_err_absent: true,
+            export_partial: false,
+            messages_written_total: 1,
+            unique: 1,
+            attach_failed_total: 0,
+            body_soft_fail_total: 0,
+            report_ok: false,
+        };
+        let o = classify_export(
+            input,
+            dedup_engine::integrity::PreflightRecommendation::Ok,
+            RiskGate::Off,
+            true,
+            false,
+        );
+        assert_ne!(o.exit.as_u8(), 0, "ledger init fail must be non-success");
+        assert_ne!(o.fidelity, ExportFidelity::Complete);
+        assert!(o.reasons.contains(&"REPORT_WRITE_FAILED"));
     }
 }

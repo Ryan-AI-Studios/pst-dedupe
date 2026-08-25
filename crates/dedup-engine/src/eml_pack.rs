@@ -63,6 +63,29 @@ impl Default for EmlWriteOpts {
     }
 }
 
+/// Soft-fail / skip event for one attachment during EML write (0089).
+///
+/// CLI maps these into `export_attachments.csv` rows. Reason codes use the 0073
+/// taxonomy (`AttachmentFidelityKind::as_code`); never `ATTACH_PART_FAILED`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EmlAttachEvent {
+    pub attach_index: u32,
+    pub filename: String,
+    /// Declared size when non-zero; `None` when unknown/zero.
+    pub size: Option<u64>,
+    /// PidTagAttachMethod; `-1` when unknown.
+    pub attach_method: i32,
+    pub attach_nid: Option<u64>,
+    pub reason_code: String,
+    /// `fail` or `info` (write soft-skips are `fail`).
+    pub severity: String,
+    /// Optional diagnostics (not a CSV primary key).
+    pub error_detail: String,
+    pub cloud_provider: String,
+    pub cloud_url: String,
+    pub message_subject: Option<String>,
+}
+
 /// Per-message write stats (also used for manifest rows).
 #[derive(Clone, Debug, Default)]
 pub struct EmlWriteResult {
@@ -71,6 +94,8 @@ pub struct EmlWriteResult {
     pub attachments_failed: u64,
     /// True when an embedded part was labeled message/rfc822 but not recursively parsed.
     pub embedded_message_unparsed: bool,
+    /// Soft-fail attach events (0089); length matches [`Self::attachments_failed`].
+    pub attachment_events: Vec<EmlAttachEvent>,
 }
 
 /// EML pack write errors.
@@ -821,13 +846,16 @@ fn prepare_attachments(
     result: &mut EmlWriteResult,
 ) -> Result<Vec<PreparedPart>, EmlWriteError> {
     let mut out = Vec::new();
-    for att in &parent.attachments {
+    for (idx, att) in parent.attachments.iter().enumerate() {
         match prepare_one_attach(parent, att, attach_streams, opts, depth) {
             Ok(part) => out.push(part),
             Err(e) => {
                 // Soft skip: no headers, no boundary, no fake body (H1).
                 tracing_soft_attach_fail(parent, att, &e);
                 result.attachments_failed += 1;
+                result
+                    .attachment_events
+                    .push(eml_attach_event_from_soft_fail(parent, att, idx as u32, &e));
                 // Embedded open failures still mark residual unparsed honesty flag.
                 if is_embedded_message(att) {
                     result.embedded_message_unparsed = true;
@@ -836,6 +864,70 @@ fn prepare_attachments(
         }
     }
     Ok(out)
+}
+
+/// Map an EML soft-fail cause to a 0073 ledger `reason_code`.
+///
+/// Unmapped causes become `ATTACH_UNKNOWN` (row is never dropped). Do **not** use
+/// pack-manifest [`REASON_ATTACH_PART_FAILED`] here.
+pub fn map_eml_attach_fail_reason(att: &CanonicalAttachment, err: &EmlWriteError) -> &'static str {
+    if att.is_cloud_link {
+        return "ATTACH_CLOUD_LINK";
+    }
+    match err {
+        EmlWriteError::Io(_) => "ATTACH_STREAM_OPEN_FAILED",
+        EmlWriteError::Other(s) => {
+            let lower = s.to_ascii_lowercase();
+            if lower.contains("stream not available")
+                || lower.contains("missing attach_nid")
+                || lower.contains("no attach stream source")
+                || lower.contains("attach_nid=")
+                || lower.contains("open")
+                || lower.contains("not found")
+                || lower.contains("null")
+            {
+                "ATTACH_STREAM_OPEN_FAILED"
+            } else {
+                "ATTACH_UNKNOWN"
+            }
+        }
+        EmlWriteError::PathBudget(_) => "ATTACH_UNKNOWN",
+    }
+}
+
+fn eml_attach_event_from_soft_fail(
+    parent: &CanonicalMessage,
+    att: &CanonicalAttachment,
+    attach_index: u32,
+    err: &EmlWriteError,
+) -> EmlAttachEvent {
+    let filename = if att.filename.is_empty() {
+        if is_embedded_message(att) {
+            "embedded.eml".to_string()
+        } else {
+            "attachment.bin".to_string()
+        }
+    } else {
+        att.filename.clone()
+    };
+    let size = if att.size > 0 {
+        Some(u64::from(att.size))
+    } else {
+        None
+    };
+    EmlAttachEvent {
+        attach_index,
+        filename,
+        size,
+        attach_method: att.attach_method.unwrap_or(-1),
+        attach_nid: att.attach_nid,
+        reason_code: map_eml_attach_fail_reason(att, err).to_string(),
+        severity: "fail".into(),
+        error_detail: err.to_string(),
+        cloud_provider: att.cloud_provider.clone().unwrap_or_default(),
+        cloud_url: att.cloud_url.clone().unwrap_or_default(),
+        message_subject: parent.subject.clone(),
+    }
 }
 
 fn prepare_one_attach(
@@ -1465,6 +1557,14 @@ mod tests {
         let s = String::from_utf8_lossy(&buf);
         assert_eq!(res.attachments_failed, 1);
         assert_eq!(res.attachments_file_written, 0);
+        assert_eq!(res.attachment_events.len() as u64, res.attachments_failed);
+        assert_eq!(
+            res.attachment_events[0].reason_code,
+            "ATTACH_STREAM_OPEN_FAILED"
+        );
+        assert_eq!(res.attachment_events[0].filename, "missing.bin");
+        assert_eq!(res.attachment_events[0].attach_index, 0);
+        assert_eq!(res.attachment_events[0].severity, "fail");
         // No fake error payload.
         assert!(
             !s.contains("attach open failed"),
@@ -1477,6 +1577,34 @@ mod tests {
             "all-fail should not force mixed:\n{s}"
         );
         assert!(s.contains("plain body"));
+    }
+
+    #[test]
+    fn soft_fail_cloud_link_maps_attach_cloud_link() {
+        let mut msg = base_msg();
+        msg.attachments.push(CanonicalAttachment {
+            filename: "cloud.docx".into(),
+            size: 1,
+            mime: Some("application/octet-stream".into()),
+            data: None,
+            stream_available: false,
+            attach_nid: Some(42),
+            attach_method: Some(7),
+            is_cloud_link: true,
+            cloud_provider: Some("OneDriveForBusiness".into()),
+            cloud_url: Some("https://contoso.sharepoint.com/x".into()),
+        });
+        let mut src = NullAttachStreamSource;
+        let mut buf = Vec::new();
+        let res = write_canonical_eml_to(&mut buf, &msg, &mut src, &EmlWriteOpts::default(), 0)
+            .expect("write");
+        assert_eq!(res.attachments_failed, 1);
+        assert_eq!(res.attachment_events.len(), 1);
+        assert_eq!(res.attachment_events[0].reason_code, "ATTACH_CLOUD_LINK");
+        assert_eq!(
+            res.attachment_events[0].cloud_provider,
+            "OneDriveForBusiness"
+        );
     }
 
     #[test]
@@ -1513,6 +1641,12 @@ mod tests {
         let s = String::from_utf8_lossy(&buf);
         assert_eq!(res.attachments_file_written, 1);
         assert_eq!(res.attachments_failed, 1);
+        assert_eq!(res.attachment_events.len() as u64, res.attachments_failed);
+        assert_eq!(res.attachment_events[0].attach_index, 1);
+        assert_eq!(
+            res.attachment_events[0].reason_code,
+            "ATTACH_STREAM_OPEN_FAILED"
+        );
         assert!(s.contains("multipart/mixed"));
         assert!(s.contains("good.txt"));
         assert!(!s.contains("bad.bin"));
