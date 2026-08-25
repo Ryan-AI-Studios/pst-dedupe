@@ -19,8 +19,13 @@ mod heap_test;
 use byteorder::{LittleEndian, WriteBytesExt};
 
 pub mod eml;
+pub mod named_prop_map;
 pub mod production;
 
+pub use named_prop_map::{
+    build_named_prop_map_pc, AllowlistedNamedProp, NamedPropWritePlan, NAMEID_BUCKET_COUNT,
+    NAME_ATTACHMENT_PERMISSION_TYPE, NAME_ATTACHMENT_URL,
+};
 pub use production::{
     build_bth_checked, build_pc_v2, build_tc_inline_checked, derive_store_record_key,
     from_canonical_message, from_canonical_message_owned, job_store_key_material_from_loci,
@@ -1244,10 +1249,11 @@ pub fn write_pst_from_emls<P: AsRef<Path>>(output_path: P, emls: &[eml::EmlMessa
     };
     layout.add_node(NID_MESSAGE_STORE, store_heap, 0);
 
-    // ── Build named property map (stub) ──────────────────────────────────────
+    // ── Named property map (0092 shared builder; EML fixtures = empty plan) ───
     let named_heap = {
         let mut heap = HeapBuilder::new(0x6C);
-        let hid = build_pc(&mut heap, &[]);
+        let named_props = named_prop_map::build_named_prop_map_pc(&NamedPropWritePlan::empty());
+        let hid = production::build_pc_v2(&mut heap, &named_props)?;
         heap.finalize(hid)
     };
     layout.add_node(NID_NAME_TO_ID_MAP, named_heap, 0);

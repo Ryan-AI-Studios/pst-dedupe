@@ -30,8 +30,8 @@ use pst_reader::PstFile;
 use pst_writer::{
     from_canonical_message_owned, job_store_key_material_from_loci, temp_sibling_path,
     write_unicode_pst_streaming, AttachRead, AttachStreamSource, FolderLayoutPolicy,
-    StoreRecordKeyMode, WriteMessage, WriteProgress, WriteProgressSink, WritePstOpts, WriteStage,
-    WriterError,
+    NamedPropWritePlan, StoreRecordKeyMode, WriteMessage, WriteProgress, WriteProgressSink,
+    WritePstOpts, WriteStage, WriterError,
 };
 use sha2::{Digest, Sha256};
 
@@ -781,6 +781,9 @@ struct VolumeProgressSink {
     last_logged_messages: u64,
     /// True until the first WritingMessages tick (always log first).
     first_write_log: bool,
+    /// When true (0092 planned NPMAP batch), volume boundary is the iterator
+    /// limit only — do not early-finalize mid-batch on physical size.
+    planned_batch: bool,
 }
 
 impl WriteProgressSink for VolumeProgressSink {
@@ -831,6 +834,11 @@ impl WriteProgressSink for VolumeProgressSink {
     }
 
     fn should_stop_and_finalize(&self, p: &WriteProgress) -> bool {
+        if self.planned_batch {
+            // 0092: planned batch owns the volume boundary so NPMAP emit-when-used
+            // matches the messages actually written (physical size is soft).
+            return false;
+        }
         let Some(max) = self.max_volume_bytes else {
             return false;
         };
@@ -1201,19 +1209,58 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
 struct TakeWriteMsgs<'a> {
     slice: &'a mut [PreparedWinner],
     pos: usize,
+    /// Exclusive end index within `slice` (0092: align NPMAP plan with batch).
+    limit: usize,
 }
 
 impl Iterator for TakeWriteMsgs<'_> {
     type Item = WriteMessage;
 
     fn next(&mut self) -> Option<WriteMessage> {
-        if self.pos >= self.slice.len() {
+        if self.pos >= self.limit || self.pos >= self.slice.len() {
             return None;
         }
         let msg = std::mem::take(&mut self.slice[self.pos].write_msg);
         self.pos += 1;
         Some(msg)
     }
+}
+
+/// Estimate how many prepared winners fit in the next volume (0092 plan scope).
+///
+/// Uses retained DTO bytes as a proxy for physical size. Physical stop may still
+/// fire earlier inside the writer; capping the iterator keeps the NPMAP plan from
+/// including later-volume cloud attaches.
+fn estimate_volume_batch_end(
+    prepared: &[PreparedWinner],
+    start: usize,
+    max_volume_bytes: Option<u64>,
+    parents_only: bool,
+) -> usize {
+    if start >= prepared.len() {
+        return start;
+    }
+    if parents_only {
+        // No attaches written — still write all remaining message bodies in this
+        // volume under the usual size cap (plan stays empty separately).
+    }
+    let Some(max) = max_volume_bytes else {
+        return prepared.len();
+    };
+    let mut acc = 0u64;
+    let mut end = start;
+    while end < prepared.len() {
+        let sz = prepared_winner_retained_bytes(&prepared[end]).max(1);
+        if end > start && acc.saturating_add(sz) > max {
+            break;
+        }
+        acc = acc.saturating_add(sz);
+        end += 1;
+    }
+    if end == start {
+        end = start + 1;
+    }
+    end.min(prepared.len())
 }
 
 /// Run unique-pst orchestration end-to-end (CLI entry).
@@ -2003,6 +2050,8 @@ pub fn run_unique_pst_with_options(
             w.locus.nid,
         )
     }));
+    // 0092: named_prop_plan is filled per volume below (emit-only-when-used).
+    // parents_only / --no-attachments → empty plan (no attach PCs written).
     let write_opts_base = WritePstOpts {
         folder_display_name: "Unique Mail".to_string(),
         folder_layout,
@@ -2015,6 +2064,7 @@ pub fn run_unique_pst_with_options(
         volume_index: 0,
         store_key_material: Some(store_key_material),
         store_record_key_mode: StoreRecordKeyMode::Deterministic,
+        named_prop_plan: NamedPropWritePlan::empty(),
     };
 
     // ── Phase 3: multi-volume streaming write ───────────────────────────────
@@ -2301,6 +2351,9 @@ pub fn run_unique_pst_with_options(
                 .unwrap_or_else(Instant::now),
             last_logged_messages: 0,
             first_write_log: true,
+            // 0092: when max_volume_bytes drives batch limits, do not mid-batch
+            // physical early-finalize (NPMAP plan must match written messages).
+            planned_batch: args.max_volume_bytes.is_some(),
         };
         let mut adapter = WriterAttachAdapter {
             inner: &mut attach_src,
@@ -2313,11 +2366,25 @@ pub fn run_unique_pst_with_options(
                                    // unique-pst volume_index is 1-based in reports; writer opts use 0-based.
         vol_opts.volume_index = volume_index.saturating_sub(1);
 
+        // 0092: plan from this volume's message batch only (emit-only-when-used).
+        let batch_end =
+            estimate_volume_batch_end(&prepared, cursor, args.max_volume_bytes, parents_only);
+        vol_opts.named_prop_plan = if parents_only {
+            NamedPropWritePlan::empty()
+        } else {
+            NamedPropWritePlan::scan_messages_with_depth(
+                prepared[cursor..batch_end].iter().map(|p| &p.write_msg),
+                write_opts_base.max_embedded_depth,
+            )
+        };
+
         let remaining = &mut prepared[cursor..];
         let start_cursor = cursor;
+        let batch_limit = batch_end.saturating_sub(cursor);
         let iter = TakeWriteMsgs {
             slice: remaining,
             pos: 0,
+            limit: batch_limit,
         };
 
         let vol_path_str = vol_path.display().to_string();
@@ -2488,11 +2555,9 @@ pub fn run_unique_pst_with_options(
                     break;
                 }
 
-                if !report.finalized_early {
-                    // Consumed all remaining (or empty).
-                    break;
-                }
-                // Early finalize: continue remaining winners on next volume.
+                // Batch capped for 0092 NPMAP plan alignment may exhaust the
+                // iterator without writer early-finalize; still continue volumes.
+                let more_remain = cursor < prepared.len();
                 if written == 0 {
                     export_partial = true;
                     export_error = Some(format!(
@@ -2501,6 +2566,11 @@ pub fn run_unique_pst_with_options(
                     failed_volume_index = Some(volume_index);
                     break;
                 }
+                if !report.finalized_early && !more_remain {
+                    // Consumed all remaining.
+                    break;
+                }
+                // Early finalize or planned batch boundary: next volume.
             }
             Err(e) => {
                 // Discard volume-local attach events (do not pollute ledger).

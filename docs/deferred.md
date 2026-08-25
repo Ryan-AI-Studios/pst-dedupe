@@ -848,7 +848,8 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0084-body-cloud-links | P2 | Body-only / inline paste SharePoint/OneDrive URLs without MAPI attachment-table rows | **Closed in 0085:** offline document-shaped body URL scan (`export_body_cloud_links.csv` + `body_cloud_link_count`); commercial allowlist + caps; SafeLinks unwrap; no invent attach; no Mode A incomplete from body hits; Mode A physical-vs-inline known gap documented | **closed / 0085** |
-| D-0084-cloud-named-prop-write | P3 | Full allowlist named-prop re-emit on unique-PST (NPMAP write + PSETID_Attachment props on attach PC) | 0084 pointer preserve uses classic tags (`PidTagAttachLongPathname` / method / filename) + mandatory ledger URL. Writer store NPMAP remains a **stub**. If counsel review proves classic tags insufficient for URL visibility in Outlook, expand here. **Promoted:** track **0092-CloudNamedPropWrite** (Ready) | **0092** Ready |
+| D-0084-cloud-named-prop-write | P3 | Full allowlist named-prop re-emit on unique-PST (NPMAP write + PSETID_Attachment props on attach PC) | **Closed in 0092:** allowlisted NPMAP write (streams + hash buckets, BucketCount=251) + MUST `PidNameAttachmentProviderType` / MAY Url when present; emit-only-when-used; classic LongPathname+Pathname retained. Residual: full named-prop encyclopedia / arbitrary source NPMAP clone still out of scope | **closed / 0092** |
+| D-0092-permission-type-extract | P3 | Source extract of `AttachmentPermissionType` into canonical/`WriteAttachment` | 0092 writer can emit PermissionType when `cloud_permission_type: Some`, but reader/canonical always map `None`. MAY-if-present; ProviderType MUST complete. Codex luna r6 PASS WITH DEFERRED P3 | residual / after **0092** |
 
 ## From track 0085-BodyCloudLinks
 

@@ -205,8 +205,8 @@ const CONTRACT_V1: &[ContractProperty] = &[
     },
     ContractProperty {
         name: "named_properties",
-        status: ContractStatus::DroppedByDesign,
-        reason: "Minimal named-prop map stub only; no full named property set",
+        status: ContractStatus::BestEffort,
+        reason: "0092: allowlisted NPMAP (PSETID_Attachment ProviderType/Url/PermissionType) written when used; empty stub when unused; full named-prop encyclopedia still out of scope",
     },
     ContractProperty {
         name: "PidTagRtfCompressed",
@@ -227,12 +227,12 @@ const CONTRACT_V1: &[ContractProperty] = &[
         name: "cloud_modern_attachments",
         // BestEffort: attach-table + body-inline document-shaped detect offline; payload never Preserved.
         status: ContractStatus::BestEffort,
-        reason: "0084+0085+0088: attachment-table web-ref / OneDrive-SharePoint cloud attaches are detected (ATTACH_CLOUD_LINK + incomplete for Mode A) AND body-inline document-shaped SharePoint/OneDrive URLs are detected offline (export_body_cloud_links.csv / body_cloud_link_count; commercial + US GCC High/DoD hosts). Offline payload is NOT collected and must never be claimed Preserved. Body hits do NOT set is_attach_incomplete / Mode A promote (known gap: physical attach peer is NOT preferred over HTML-inline-only via Mode A). D-0085-sovereign-cloud-hosts closed in 0088; residual D-0088-usgovcloud-microsoft-tld for future .microsoft TLD content hosts. Pointer metadata preserved on unique-PST when known; full named-prop re-emit residual D-0084-cloud-named-prop-write",
+        reason: "0084+0085+0088+0092: attachment-table web-ref / OneDrive-SharePoint cloud attaches are detected (ATTACH_CLOUD_LINK + incomplete for Mode A) AND body-inline document-shaped SharePoint/OneDrive URLs are detected offline (export_body_cloud_links.csv / body_cloud_link_count; commercial + US GCC High/DoD hosts). Offline payload is NOT collected and must never be claimed Preserved. Body hits do NOT set is_attach_incomplete / Mode A promote (known gap: physical attach peer is NOT preferred over HTML-inline-only via Mode A). D-0085-sovereign-cloud-hosts closed in 0088; residual D-0088-usgovcloud-microsoft-tld for future .microsoft TLD content hosts. Pointer metadata + allowlisted named props (ProviderType/Url/Permission when known) preserved on unique-PST; D-0084-cloud-named-prop-write closed in 0092 (encyclopedia residual out of scope)",
     },
     ContractProperty {
         name: "PidNameAttachmentProviderType",
-        status: ContractStatus::BestEffort,
-        reason: "0084: readable when present via NPMAP GUID+name resolve (PSETID_Attachment / AttachmentProviderType); absence is not a defect; provider string open (OneDrivePro/OneDriveConsumer/other). Payload never Preserved offline",
+        status: ContractStatus::Preserved,
+        reason: "0092: re-emitted on unique-PST cloud pointer attaches when source had a known provider (NPMAP allowlisted write + attach PC); absence on source is not a defect; provider string open (OneDrivePro/OneDriveConsumer/other). Payload never Preserved offline",
     },
     ContractProperty {
         name: "message_content_digest",
@@ -322,8 +322,23 @@ mod tests {
             p.reason
         );
         let provider = c.get("PidNameAttachmentProviderType").expect("present");
-        assert_ne!(provider.status, ContractStatus::Preserved);
-        assert_eq!(provider.status, ContractStatus::BestEffort);
+        assert_eq!(
+            provider.status,
+            ContractStatus::Preserved,
+            "0092 writes ProviderType back when source had it"
+        );
+        assert!(
+            provider.reason.contains("0092") || provider.reason.contains("re-emit"),
+            "reason should cite 0092 write-back: {}",
+            provider.reason
+        );
+        let named = c.get("named_properties").expect("present");
+        assert_eq!(named.status, ContractStatus::BestEffort);
+        assert!(
+            p.reason.contains("D-0084-cloud-named-prop-write") && p.reason.contains("closed"),
+            "cloud reason must note D-0084 closed: {}",
+            p.reason
+        );
     }
 
     /// 0082 DoD-6: recipient_table is Preserved (not DroppedByDesign).

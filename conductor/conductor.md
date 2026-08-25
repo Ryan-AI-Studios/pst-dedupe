@@ -203,7 +203,7 @@ After 0073–0081, the highest-value deferred cluster is **structured MAPI recip
 
 ## Series M (continued) — Unique export fidelity residuals (0088–0092)
 
-Promoted from deferred (2026-08-24). **0088–0091 Completed**; **0092** Ready.
+Promoted from deferred (2026-08-24). **0088–0092 Completed**.
 
 | Track | Status | Summary |
 |---|---|---|
@@ -211,7 +211,7 @@ Promoted from deferred (2026-08-24). **0088–0091 Completed**; **0092** Ready.
 | [0089-UniqueEmlAttachLedger](0089-UniqueEmlAttachLedger/spec.md) | **Completed** | unique-eml `export_attachments.csv` parity via `EmlAttachEvent` DTO (closes **D-0073-eml**); Codex luna final PASS |
 | [0090-EmbeddedMsgContentHash](0090-EmbeddedMsgContentHash/spec.md) | **Completed** | Bounded `embedded-msg-hash/v1` (not Relativity parity) for method-5 subnode + rfc822 under body-recip-attach (closes **D-0086-embedded-email-hash**) |
 | [0091-DigestProbeUnify](0091-DigestProbeUnify/spec.md) | **Completed** | CLI record-don’t-tee: Pass-1 Real by-value digest seeds Full/ok; Pass-2 skips re-stream + charges once (closes **D-0086-digest-probe-unify**); Codex luna r3 PASS |
-| [0092-CloudNamedPropWrite](0092-CloudNamedPropWrite/spec.md) | **Ready** | Allowlisted NPMAP write + `PidNameAttachmentProviderType` (closes **D-0084-cloud-named-prop-write**) |
+| [0092-CloudNamedPropWrite](0092-CloudNamedPropWrite/spec.md) | **Completed** | Allowlisted NPMAP write + `PidNameAttachmentProviderType` (closes **D-0084-cloud-named-prop-write**); Codex luna r6 PASS WITH DEFERRED P3 (**D-0092-permission-type-extract**) |
 
 **Suggested order:** 0088 ∥ 0089 → 0090 → 0091 → 0092 (writer; optional until counsel needs Outlook named-prop visibility).
 
@@ -220,7 +220,7 @@ Promoted from deferred (2026-08-24). **0088–0091 Completed**; **0092** Ready.
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0091 Completed**; continuation **0092 Ready**.
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write).
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).

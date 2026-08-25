@@ -114,6 +114,8 @@ const PID_TAG_ATTACH_MIME_TAG: u16 = 0x370E;
 const PID_TAG_ATTACH_FILENAME: u16 = 0x3704;
 const PID_TAG_ATTACH_LONG_FILENAME: u16 = 0x3707;
 const PID_TAG_ATTACH_LONG_PATHNAME: u16 = 0x370D;
+/// PidTagAttachPathname — optional classic short path (0092 older-client tolerance).
+const PID_TAG_ATTACH_PATHNAME: u16 = 0x3708;
 const PID_TAG_ATTACH_SIZE: u16 = 0x0E20;
 /// MS-OXCMSG attach methods used by CloudLink pointer-row honesty (0084).
 const ATTACH_BY_REFERENCE: i32 = 0x0000_0002;
@@ -231,6 +233,8 @@ pub struct WriteAttachment {
     pub cloud_provider: Option<String>,
     /// Best-effort URL/path written on classic long-pathname when present.
     pub cloud_url: Option<String>,
+    /// Optional `AttachmentPermissionType` (0092 MAY) — written only when `Some`.
+    pub cloud_permission_type: Option<i32>,
 }
 
 /// Owned [`Read`] for chunked attachment payload (track 0070).
@@ -549,6 +553,9 @@ pub struct WritePstOpts {
     pub store_key_material: Option<[u8; 32]>,
     /// Deterministic (default) or ephemeral store RecordKey mode (0087).
     pub store_record_key_mode: StoreRecordKeyMode,
+    /// Allowlisted NPMAP write plan (0092). Empty → empty stub map.
+    /// Callers should [`NamedPropWritePlan::scan_messages`] before streaming write.
+    pub named_prop_plan: crate::named_prop_map::NamedPropWritePlan,
 }
 
 impl Default for WritePstOpts {
@@ -563,6 +570,7 @@ impl Default for WritePstOpts {
             volume_index: 0,
             store_key_material: None,
             store_record_key_mode: StoreRecordKeyMode::Deterministic,
+            named_prop_plan: crate::named_prop_map::NamedPropWritePlan::empty(),
         }
     }
 }
@@ -956,6 +964,7 @@ pub fn from_canonical_message(
             is_cloud_link: a.is_cloud_link,
             cloud_provider: a.cloud_provider.clone(),
             cloud_url: a.cloud_url.clone(),
+            cloud_permission_type: None,
         })
         .collect();
     // Only true list_attachments failure: AttachMetaFailed with an empty list.
@@ -1054,6 +1063,7 @@ pub fn from_canonical_message_owned(
             is_cloud_link: a.is_cloud_link,
             cloud_provider: a.cloud_provider,
             cloud_url: a.cloud_url,
+            cloud_permission_type: None,
         })
         .collect();
     let write_msg = WriteMessage {
@@ -1268,10 +1278,11 @@ pub fn write_unicode_pst_streaming(
     // One-pass consume: no full DTO collect. Multi-GB attach bytes never live as
     // one full attach Vec (chunked stream + eager leaf spill).
 
-    // ── Named property map (stub; minimal for open) ──────────────────────────
+    // ── Named property map (0092: allowlisted NPMAP when plan non-empty) ─────
     let named_heap = {
         let mut heap = HeapBuilder::new(0x6C);
-        let hid = build_pc_v2(&mut heap, &[])?;
+        let named_props = crate::named_prop_map::build_named_prop_map_pc(&opts.named_prop_plan);
+        let hid = build_pc_v2(&mut heap, &named_props)?;
         heap.finalize(hid)
     };
     layout.add_node_data(NID_NAME_TO_ID_MAP, named_heap, 0, 0)?;
@@ -2774,21 +2785,26 @@ struct WrittenAttach {
     filename: String,
 }
 
-/// Write a CloudLink metadata/pointer attach row (0084 DoD-4b).
+/// Write a CloudLink metadata/pointer attach row (0084 DoD-4b / 0092 named props).
 ///
 /// - No `PidTagAttachDataBinary` (never invent payload bytes).
 /// - Method: original web-ref/method when present, else `ATTACH_BY_WEB_REFERENCE`.
-/// - Best-effort URL on `PidTagAttachLongPathname` when `cloud_url` known.
+/// - Best-effort URL on `PidTagAttachLongPathname` (+ optional Pathname 0x3708).
+/// - Allowlisted named props from [`NamedPropWritePlan`] when present.
 /// - Always emits fail-severity `ATTACH_CLOUD_LINK` (payload not collected offline).
+#[allow(clippy::too_many_arguments)] // named_prop_plan + ledger sink for 0092/0073
 fn write_cloud_link_pointer_attach(
     layout: &mut Layout,
     msg: &WriteMessage,
     attach: &WriteAttachment,
     attach_index: u32,
+    named_prop_plan: &crate::named_prop_map::NamedPropWritePlan,
     counters: &mut WriteCounters,
     attach_nid_counter: &mut u32,
     attach_event_sink: &mut Option<&mut dyn AttachEventSink>,
 ) -> Result<Option<WrittenAttach>> {
+    use crate::named_prop_map::AllowlistedNamedProp;
+
     // Preserve empty filename honestly — do not invent "cloud-link".
     let filename = attach.filename.clone();
     let short = short_attach_filename(&filename);
@@ -2827,6 +2843,26 @@ fn write_cloud_link_pointer_attach(
             PID_TAG_ATTACH_LONG_PATHNAME,
             PcValue::String(url.to_string()),
         ));
+        // Optional classic short pathname for older-client tolerance (0092).
+        props.push((PID_TAG_ATTACH_PATHNAME, PcValue::String(url.to_string())));
+        if let Some(npid) = named_prop_plan.npid(AllowlistedNamedProp::AttachmentUrl) {
+            props.push((npid, PcValue::String(url.to_string())));
+        }
+    }
+    if let Some(provider) = attach
+        .cloud_provider
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        if let Some(npid) = named_prop_plan.npid(AllowlistedNamedProp::AttachmentProviderType) {
+            props.push((npid, PcValue::String(provider.to_string())));
+        }
+    }
+    if let Some(perm) = attach.cloud_permission_type {
+        if let Some(npid) = named_prop_plan.npid(AllowlistedNamedProp::AttachmentPermissionType) {
+            props.push((npid, PcValue::I32(perm)));
+        }
     }
     if let Some(mime) = &attach.mime {
         props.push((PID_TAG_ATTACH_MIME_TAG, PcValue::String(mime.clone())));
@@ -2884,6 +2920,7 @@ fn write_one_attachment(
     depth: u32,
     max_depth: u32,
     include_bcc_recipients: bool,
+    named_prop_plan: &crate::named_prop_map::NamedPropWritePlan,
     counters: &mut WriteCounters,
     attach_nid_counter: &mut u32,
     streams: &mut Option<&mut dyn AttachStreamSource>,
@@ -2899,6 +2936,7 @@ fn write_one_attachment(
             msg,
             attach,
             attach_index,
+            named_prop_plan,
             counters,
             attach_nid_counter,
             attach_event_sink,
@@ -2966,6 +3004,7 @@ fn write_one_attachment(
             depth + 1,
             max_depth,
             include_bcc_recipients,
+            named_prop_plan,
             counters,
             streams,
             attach_event_sink,
@@ -3166,6 +3205,7 @@ fn build_embedded_message_object(
     depth: u32,
     max_depth: u32,
     include_bcc_recipients: bool,
+    named_prop_plan: &crate::named_prop_map::NamedPropWritePlan,
     counters: &mut WriteCounters,
     streams: &mut Option<&mut dyn AttachStreamSource>,
     attach_event_sink: &mut Option<&mut dyn AttachEventSink>,
@@ -3178,6 +3218,7 @@ fn build_embedded_message_object(
         msg,
         max_depth,
         include_bcc_recipients,
+        named_prop_plan,
         counters,
         depth,
         streams,
@@ -3195,6 +3236,7 @@ fn build_message_payload(
     msg: &WriteMessage,
     max_depth: u32,
     include_bcc_recipients: bool,
+    named_prop_plan: &crate::named_prop_map::NamedPropWritePlan,
     counters: &mut WriteCounters,
     depth: u32,
     streams: &mut Option<&mut dyn AttachStreamSource>,
@@ -3302,6 +3344,7 @@ fn build_message_payload(
             depth,
             max_depth,
             include_bcc_recipients,
+            named_prop_plan,
             counters,
             &mut attach_nid_counter,
             streams,
@@ -3457,6 +3500,7 @@ fn build_message_node(
         msg_ref,
         max_depth,
         opts.include_bcc_recipients,
+        &opts.named_prop_plan,
         counters,
         depth,
         streams,

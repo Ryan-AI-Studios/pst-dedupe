@@ -7,7 +7,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** `C:\dev\Dedupe-plan.md` → Series M continuation
 - **Cross-repo contract:** n/a
-- **Status:** Ready — not started (review-folded 2026-08-24)
+- **Status:** Completed (Codex luna r6 PASS WITH DEFERRED P3; 2026-08-25)
 - **Depends on:** 0068 · 0069 · 0084 (all **Completed**); reader `named_prop` encode helpers available
 - **Spec authored:** 2026-08-24
 - **Series:** M (Unique export fidelity residuals — continuation)
@@ -81,7 +81,7 @@ PC `0x61` must implement the streams Outlook/scanpst care about:
 1. `PidTagNameToIdGuidStream` (0x0002)
 2. `PidTagNameToIdEntryStream` (0x0003)
 3. `PidTagNameToIdStringStream` (0x0004)
-4. **Hash buckets** `0x1000`–`0x103E` (63) per MS-PST §2.4.7 — `ComputeNamedPropHash(guid, lid/name) % 63`
+4. **Hash buckets** starting at `0x1000` with **`PidTagNameidBucketCount` = 251** (MS-PST §2.4.7.5 SHOULD; access 2026-08-25) — bucket index `((dwPropertyID ^ wGuidN) % 251)`; only non-empty buckets emitted
 
 `pst-reader` ignoring the hash table means **DoD-1 reader round-trip is necessary but not sufficient.** Promote scanpst-on-copy (when present) to DoD.
 
