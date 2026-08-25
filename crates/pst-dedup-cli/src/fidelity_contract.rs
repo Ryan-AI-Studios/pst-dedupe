@@ -227,7 +227,7 @@ const CONTRACT_V1: &[ContractProperty] = &[
         name: "cloud_modern_attachments",
         // BestEffort: attach-table + body-inline document-shaped detect offline; payload never Preserved.
         status: ContractStatus::BestEffort,
-        reason: "0084+0085: attachment-table web-ref / OneDrive-SharePoint cloud attaches are detected (ATTACH_CLOUD_LINK + incomplete for Mode A) AND body-inline document-shaped SharePoint/OneDrive URLs are detected offline (export_body_cloud_links.csv / body_cloud_link_count; commercial hosts only). Offline payload is NOT collected and must never be claimed Preserved. Body hits do NOT set is_attach_incomplete / Mode A promote (known gap: physical attach peer is NOT preferred over HTML-inline-only via Mode A). Sovereign-cloud host variants residual D-0085-sovereign-cloud-hosts. Pointer metadata preserved on unique-PST when known; full named-prop re-emit residual D-0084-cloud-named-prop-write",
+        reason: "0084+0085+0088: attachment-table web-ref / OneDrive-SharePoint cloud attaches are detected (ATTACH_CLOUD_LINK + incomplete for Mode A) AND body-inline document-shaped SharePoint/OneDrive URLs are detected offline (export_body_cloud_links.csv / body_cloud_link_count; commercial + US GCC High/DoD hosts). Offline payload is NOT collected and must never be claimed Preserved. Body hits do NOT set is_attach_incomplete / Mode A promote (known gap: physical attach peer is NOT preferred over HTML-inline-only via Mode A). D-0085-sovereign-cloud-hosts closed in 0088; residual D-0088-usgovcloud-microsoft-tld for future .microsoft TLD content hosts. Pointer metadata preserved on unique-PST when known; full named-prop re-emit residual D-0084-cloud-named-prop-write",
     },
     ContractProperty {
         name: "PidNameAttachmentProviderType",
@@ -312,8 +312,13 @@ mod tests {
             p.reason
         );
         assert!(
-            p.reason.contains("D-0085-sovereign-cloud-hosts") || p.reason.contains("Sovereign"),
-            "reason must name sovereign host residual: {}",
+            p.reason.contains("D-0085-sovereign-cloud-hosts") && p.reason.contains("closed"),
+            "reason must note D-0085 closed: {}",
+            p.reason
+        );
+        assert!(
+            p.reason.contains("D-0088-usgovcloud-microsoft-tld") || p.reason.contains(".microsoft"),
+            "reason must name .microsoft TLD residual: {}",
             p.reason
         );
         let provider = c.get("PidNameAttachmentProviderType").expect("present");

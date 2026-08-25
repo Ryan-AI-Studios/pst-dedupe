@@ -199,14 +199,28 @@ After 0073–0081, the highest-value deferred cluster is **structured MAPI recip
 | [0086-AttachContentIdentity](0086-AttachContentIdentity/spec.md) | **Completed** | Tier-2.5 **`body-recip-attach`**: full-stream per-attach SHA-256 + Choice B unread sentinels; fail-closed enum; closes **D-0076-attach-content**; Codex luna PASS WITH DEFERRED P3 |
 | [0087-DeterministicStoreRecordKey](0087-DeterministicStoreRecordKey/spec.md) | **Completed** | Deterministic `PidTagRecordKey` / ProviderUID (length-prefix SHA-256 preimage; no wall-clock/PID/path); cross-process + multi-volume key proofs; DoD-3 path A on fixture; closes **D-0079-deterministic-key**; Codex luna PASS |
 
-**Suggested order:** 0082–**0087** Completed. Later Series M residuals: D-0073-eml full ledger, D-0085-sovereign-cloud-hosts (research-unlocked 2026-07: `*.sharepoint.us` / `*.sharepoint-mil.us`), D-0084-cloud-named-prop-write; **D-0086-embedded-email-hash**, **D-0086-digest-probe-unify**.
+**Suggested order:** 0082–**0087** Completed.
+
+## Series M (continued) — Unique export fidelity residuals (0088–0092)
+
+Promoted from deferred (2026-08-24). **0088 Completed**; **0089–0092** remain Ready until FEATURE ledger TXs start.
+
+| Track | Status | Summary |
+|---|---|---|
+| [0088-SovereignCloudHosts](0088-SovereignCloudHosts/spec.md) | **Completed** | GCC High / DoD sovereign SharePoint+OneDrive host allowlist + `*.safelinks.protection.office365.us` (closes **D-0085-sovereign-cloud-hosts**; residual **D-0088-usgovcloud-microsoft-tld**); Codex luna PASS WITH DEFERRED P3 |
+| [0089-UniqueEmlAttachLedger](0089-UniqueEmlAttachLedger/spec.md) | **Ready** | unique-eml `export_attachments.csv` parity via `EmlAttachEvent` DTO (closes **D-0073-eml**) |
+| [0090-EmbeddedMsgContentHash](0090-EmbeddedMsgContentHash/spec.md) | **Ready** | Bounded `embedded-msg-hash/v1` (not Relativity parity) for method-5 subnode + rfc822 under body-recip-attach (closes **D-0086-embedded-email-hash**) |
+| [0091-DigestProbeUnify](0091-DigestProbeUnify/spec.md) | **Ready** | CLI record-don’t-tee: skip L3 re-stream when digest already read (closes **D-0086-digest-probe-unify**) |
+| [0092-CloudNamedPropWrite](0092-CloudNamedPropWrite/spec.md) | **Ready** | Allowlisted NPMAP write + `PidNameAttachmentProviderType` (closes **D-0084-cloud-named-prop-write**) |
+
+**Suggested order:** 0088 ∥ 0089 → 0090 → 0091 → 0092 (writer; optional until counsel needs Outlook named-prop visibility).
 
 ## Notes
 
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual).
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0088 Completed**; continuation **0089–0092 Ready**.
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).

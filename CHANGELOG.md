@@ -7,6 +7,13 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0088 — Sovereign cloud host allowlist)
+
+- Body-cloud host allowlist extended with US GCC High / DoD suffixes: `*.sharepoint.us`, `admin.onedrive.us`, `*.sharepoint-mil.us`, `*.dps.mil`.
+- SafeLinks unwrap for `*.safelinks.protection.office365.us` (nested target re-tested against document-shaped allowlist).
+- `pst-reader` attach-path cloud heuristic tightened to suffix-safe host checks (rejects `notsharepoint.attacker.com`).
+- Closes **D-0085-sovereign-cloud-hosts**. Opens **D-0088-usgovcloud-microsoft-tld** (future `.microsoft` TLD content hosts). 21Vianet excluded; GCC Moderate uses commercial endpoints.
+
 ### Added (0087 — Deterministic store RecordKey)
 
 - Production `write_unicode_pst*` defaults to a **deterministic** 16-byte store `PidTagRecordKey` / EntryID ProviderUID (domain-separated SHA-256; length-prefixed MID/subject/submit/folder fingerprint; path-independent).

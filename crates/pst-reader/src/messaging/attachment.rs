@@ -83,6 +83,101 @@ pub fn looks_like_url(s: &str) -> bool {
         || lower.starts_with("onedrive:")
 }
 
+/// DNS suffixes for attach-table cloud pointer heuristics (commercial + US GCC High/DoD).
+/// Local to this file — do not pull `dedup-engine` into `pst-reader` (0088).
+/// Keep in sync with `dedup-engine` `ALLOWED_CLOUD_HOST_SUFFIXES` /
+/// `ALLOWED_CLOUD_HOST_EXACT`.
+const CLOUD_POINTER_HOST_SUFFIXES: &[&str] = &[
+    "sharepoint.com",
+    "sharepoint-df.com",
+    "onedrive.live.com",
+    "1drv.ms",
+    "sharepoint.us",
+    "sharepoint-mil.us",
+    "dps.mil",
+];
+
+const CLOUD_POINTER_HOST_EXACT: &[&str] = &["admin.onedrive.us"];
+
+fn host_matches_dns_suffix(host: &str, suffix: &str) -> bool {
+    if host == suffix {
+        return true;
+    }
+    let Some(rest) = host.strip_suffix(suffix) else {
+        return false;
+    };
+    rest.ends_with('.')
+}
+
+fn is_allowed_cloud_pointer_host(host: &str) -> bool {
+    if CLOUD_POINTER_HOST_EXACT.contains(&host) {
+        return true;
+    }
+    CLOUD_POINTER_HOST_SUFFIXES
+        .iter()
+        .any(|&suffix| host_matches_dns_suffix(host, suffix))
+}
+
+fn extract_url_host_lower(url_lower: &str) -> Option<&str> {
+    let after = url_lower
+        .strip_prefix("https://")
+        .or_else(|| url_lower.strip_prefix("http://"))
+        .or_else(|| url_lower.strip_prefix("file://"))?;
+    let host_port = after.split(['/', '?', '#']).next().unwrap_or("");
+    if host_port.is_empty() {
+        return None;
+    }
+    let host_port = host_port.rsplit('@').next().unwrap_or(host_port);
+    let host = host_port.split(':').next().unwrap_or(host_port);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+/// Suffix-safe cloud host mention (rejects `notsharepoint.attacker.com`).
+fn text_mentions_cloud_host(lower: &str) -> bool {
+    if let Some(host) = extract_url_host_lower(lower) {
+        if is_allowed_cloud_pointer_host(host) {
+            return true;
+        }
+    }
+    for &needle in CLOUD_POINTER_HOST_EXACT
+        .iter()
+        .chain(CLOUD_POINTER_HOST_SUFFIXES.iter())
+    {
+        for (idx, _) in lower.match_indices(needle) {
+            let ok_left = idx == 0 || {
+                let b = lower.as_bytes()[idx - 1];
+                b == b'.' || b == b'/' || b == b'@' || !b.is_ascii_alphanumeric()
+            };
+            let end = idx + needle.len();
+            // Path/query/fragment or end — not another DNS label (`1drv.ms.attacker.com`).
+            let ok_right = end >= lower.len() || {
+                let b = lower.as_bytes()[end];
+                matches!(b, b'/' | b'?' | b':' | b'#' | b'"' | b'\'' | b' ')
+            };
+            if ok_left && ok_right {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True when path/filename text is URL-shaped or mentions an allowed cloud host suffix.
+fn looks_like_cloud_pointer(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if looks_like_url(t) {
+        return true;
+    }
+    text_mentions_cloud_host(&t.to_ascii_lowercase())
+}
+
 /// True when attach method is **web-reference** (cloud/modern shaped).
 ///
 /// Independent OR signal #2 (0084): third-party cloud add-ins may use
@@ -135,7 +230,7 @@ fn extract_cloud_url(pc: &PropContext, filename: &str) -> Option<String> {
     ];
     for c in candidates.into_iter().flatten() {
         let t = c.trim();
-        if !t.is_empty() && (looks_like_url(t) || t.contains("sharepoint") || t.contains("1drv.")) {
+        if looks_like_cloud_pointer(t) {
             return Some(t.to_string());
         }
     }
@@ -182,11 +277,8 @@ pub fn classify_attach_pc(
     let named_cloud = provider.is_some() && !has_payload;
     // Signal 2: non-portable / web-ref method + no payload (even without named prop).
     let method_cloud = is_cloud_shaped_method(attach_method) && !has_payload;
-    // Signal 3 (conservative): empty data + URL-shaped path/filename.
-    let url_fallback = !has_payload
-        && url
-            .as_deref()
-            .is_some_and(|u| looks_like_url(u) || u.contains("sharepoint") || u.contains("1drv."));
+    // Signal 3 (conservative): empty data + URL-shaped / cloud-host path/filename.
+    let url_fallback = !has_payload && url.as_deref().is_some_and(looks_like_cloud_pointer);
 
     if named_cloud || method_cloud || url_fallback {
         AttachKind::CloudLink { provider, url }
@@ -827,6 +919,21 @@ mod classify_tests {
         assert!(!is_cloud_shaped_method(Some(nid::ATTACH_BY_REF_ONLY)));
         assert!(!is_cloud_shaped_method(Some(nid::ATTACH_BY_REF_RESOLVE)));
         assert!(!is_cloud_shaped_method(Some(nid::ATTACH_OLE)));
+    }
+
+    #[test]
+    fn cloud_pointer_suffix_safe_rejects_lookalike() {
+        assert!(!text_mentions_cloud_host("notsharepoint.attacker.com"));
+        assert!(!text_mentions_cloud_host("evil1drv.ms.attacker.com/x"));
+        assert!(!looks_like_cloud_pointer("notsharepoint.attacker.com/doc"));
+        assert!(looks_like_cloud_pointer("contoso.sharepoint.com/x"));
+        assert!(looks_like_cloud_pointer(
+            "https://contoso-my.sharepoint.us/:w:/r/personal/u/Documents/a.docx"
+        ));
+        assert!(looks_like_cloud_pointer(
+            "contoso-my.sharepoint-mil.us/personal/u/Documents/a.docx"
+        ));
+        assert!(text_mentions_cloud_host("tenant.dps.mil/sites/L/a.xlsx"));
     }
 
     #[test]

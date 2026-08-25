@@ -761,7 +761,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0073-promote | P1 | Mode A pre-write promote-on-attach-fail | **Closed in 0083**: `--promote-on-attach-fail` (default off); three `decided_by` strings; Mode C fallback; `winner_promoted` wired. **Mode B write-time promote permanently declined.** | **closed / 0083** |
-| D-0073-eml | P2 | unique-eml attach skip ledger parity | **Narrowed by 0078** (not closed): 0078 adds only the *data-path* attach counters unique-eml needs to compute `fidelity`/exit 64 honestly. **0083** threads Mode A flag on the shared materialize finalizer; the full ledger-CSV parity (locus, reason taxonomy, row-cap) remains open here. | residual / narrowed **0078** / Mode A path **0083** |
+| D-0073-eml | P2 | unique-eml attach skip ledger parity | **Narrowed by 0078** (not closed): 0078 adds only the *data-path* attach counters unique-eml needs to compute `fidelity`/exit 64 honestly. **0083** threads Mode A flag on the shared materialize finalizer; the full ledger-CSV parity (locus, reason taxonomy, row-cap) remains open. **Promoted:** track **0089-UniqueEmlAttachLedger** (Ready) | **0089** Ready |
 | D-0073-gui | P3 | GUI wizard attach-ledger mode / summary UI | CLI flags default full; GUI uses defaults via UniquePstCliArgs | residual polish |
 | D-0073-basename | P3 | `--ledger-path-mode=full\|basename` handoff redaction | **Closed in 0081**: flag default `full`; applies to `export_messages.csv` + `export_attachments.csv` path columns only; `source_id` join key; Matter Archive mapping mandated in runbook | **closed / 0081** |
 | D-0073-vec-events | P3 | Writer still accumulates `attachment_fidelity_events` Vec | **Closed in 0077**: first-N cap 1000 + `attachment_fidelity_events_truncated` / `_total`. **0079 declined the channel-only redesign with reason** (§2.4): converting a bounded 1000-element `Vec` to a channel adds a thread and a failure mode to save at most a few hundred KiB. Recorded so it is not re-raised as a free win. | **closed / 0077; declined 0079** |
@@ -848,21 +848,22 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0084-body-cloud-links | P2 | Body-only / inline paste SharePoint/OneDrive URLs without MAPI attachment-table rows | **Closed in 0085:** offline document-shaped body URL scan (`export_body_cloud_links.csv` + `body_cloud_link_count`); commercial allowlist + caps; SafeLinks unwrap; no invent attach; no Mode A incomplete from body hits; Mode A physical-vs-inline known gap documented | **closed / 0085** |
-| D-0084-cloud-named-prop-write | P3 | Full allowlist named-prop re-emit on unique-PST (NPMAP write + PSETID_Attachment props on attach PC) | 0084 pointer preserve uses classic tags (`PidTagAttachLongPathname` / method / filename) + mandatory ledger URL. Writer store NPMAP remains a **stub**. If counsel review proves classic tags insufficient for URL visibility in Outlook, expand here | residual / writer |
+| D-0084-cloud-named-prop-write | P3 | Full allowlist named-prop re-emit on unique-PST (NPMAP write + PSETID_Attachment props on attach PC) | 0084 pointer preserve uses classic tags (`PidTagAttachLongPathname` / method / filename) + mandatory ledger URL. Writer store NPMAP remains a **stub**. If counsel review proves classic tags insufficient for URL visibility in Outlook, expand here. **Promoted:** track **0092-CloudNamedPropWrite** (Ready) | **0092** Ready |
 
 ## From track 0085-BodyCloudLinks
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0085-sovereign-cloud-hosts | P3 | GCC High / DoD / other sovereign-cloud SharePoint + SafeLinks hostname suffixes | Commercial allowlist shipped in 0085. **Research update 2026-07-29 (0087 Phase-0 note):** Microsoft publishes GCC High `*.sharepoint.us` + `admin.onedrive.us` (endpoints updated 2026-07-01) and DoD `*.sharepoint-mil.us` + `*.dps.mil` (2026-06-30). SafeLinks sovereign host matrix still thinner than SharePoint — next thin track can allowlist SP/OneDrive sovereign hosts with tests; do not claim coverage until shipped | residual / research-unlocked; not 0087 |
+| D-0085-sovereign-cloud-hosts | P3 | GCC High / DoD / other sovereign-cloud SharePoint + SafeLinks hostname suffixes | **Closed in 0088:** body-cloud allowlist extended with `*.sharepoint.us`, `admin.onedrive.us`, `*.sharepoint-mil.us`, `*.dps.mil`, and SafeLinks `*.safelinks.protection.office365.us`. 21Vianet (`*.sharepoint.cn`) excluded; GCC Moderate uses commercial endpoints (no extra hosts). SafeLinks unwrap mainly historical (SP/OD no longer wrapped per Learn 2026-05-22) | **closed / 0088** |
+| D-0088-usgovcloud-microsoft-tld | P3 | GCC High `.microsoft` TLD content hosts (`*.usgovcloud.microsoft`, `*-usercontent.microsoft`, …) | Learn GCC High ID 23 (2026-07-01). **Out of 0088 P0** — do not guess document-shaped paths; record so it is not a silent miss later | residual / after **0088** |
 | D-0080-unexplained-byte-edit | P3 | `unexplained_loss` is allowlist fail-closed for properties not in `fidelity_contract_v1`; PST byte-edits of preserved fields produce `defect`, not `unexplained_loss`. DoD-9 defect class proven by truncate/flip/CC strip; `unexplained_loss` proven by production record path + `extra_source_props` (unmapped property observation channel). | **By design (keep `extra_source_props`):** allowlist fail-closed for property names absent from `fidelity_contract_v1`. Production path: `record_classified_finding` + digest `extra_source_props` (QC product sidecar, not a probe). Truncated/corrupt PST ⇒ `defect`. Inventing an uncontracted MAPI prop via pure byte-edit is not a realistic writer failure mode. | residual / design |
 
 ## From track 0086-AttachContentIdentity
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0086-embedded-email-hash | P3 | Recursive Relativity-style four-component hash for `ATTACH_EMBEDDED_MSG` | P0 (0086) hashes raw attach data stream as standard SHA-256 blob | residual |
-| D-0086-digest-probe-unify | P3 | Unify 0074 Full (L3) probe + identity digest into one streaming pass | 0086 keeps identity digest separate from integrity probe; double I/O residual when both enabled | residual / perf |
+| D-0086-embedded-email-hash | P3 | Recursive Relativity-style four-component hash for `ATTACH_EMBEDDED_MSG` | P0 (0086) hashes raw attach data stream as standard SHA-256 blob. **Promoted:** track **0090-EmbeddedMsgContentHash** (Ready) | **0090** Ready |
+| D-0086-digest-probe-unify | P3 | Unify 0074 Full (L3) probe + identity digest into one streaming pass | 0086 keeps identity digest separate from integrity probe; double I/O residual when both enabled. **Promoted:** track **0091-DigestProbeUnify** (Ready) | **0091** Ready |
 
 ## From track 0062-ReleaseHardeningRc
 
