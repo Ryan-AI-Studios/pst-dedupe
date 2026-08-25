@@ -30,7 +30,7 @@ single-block only; keep using it only for existing fixture callers.
 | Multi-GB streaming write | **Yes (v1.2 / 0070)** | `write_unicode_pst_streaming`: AMap-aware layout, chunked attach stream, progress + `stop_and_finalize`, SHA-256/MD5 report; see **Scale** section. |
 | Encrypted / Permute output | **No** | Residual; unencrypted only. |
 | ANSI PST | **No** | Never. |
-| Recipient table | **Yes (0082)** | Store template NID **`0x692`** (zero rows, **14 MUST columns** per MS-PST Recipient Table Template). Every written message gets a per-message recipient TC subnode (may be **zero rows** when source had none / unreadable — empty TC still present). One row per **included** recipient; optional extra column `PidTagSmtpAddress` (`0x39FE`) when known. Structural columns synthesized when source omits them (`ObjectType=6`, Responsibility, RecordKey/EntryId/SearchKey patterns, etc.). |
+| Recipient table | **Yes (0082 / 0093)** | Store template NID **`0x692`** (zero rows, **14 MUST columns** per MS-PST Recipient Table Template). Every written message gets a per-message recipient TC subnode (may be **zero rows** when source had none / unreadable — empty TC still present). One row per **included** recipient; optional extra column `PidTagSmtpAddress` (`0x39FE`) when known. Structural columns synthesized when source omits them (`ObjectType=6`, Responsibility, RecordKey/EntryId/SearchKey patterns, etc.). **0093 Strategy B:** single-page HN is budget-capped (To→Cc→Bcc order; starting hint 48 rows is **not** an invariant — event reports actual kept). Truncation emits `RECIPIENT_TC_TRUNCATED` + summary counters; Display* on the message PC stay full. Multi-page/subnode TC = residual **D-0093-recipient-tc-multipage**. |
 | Named-prop set beyond the store stub | **Allowlisted (0092)** | When used: real NPMAP (GUID/entry/string + hash buckets, BucketCount=251) for `PSETID_Attachment` allowlist (`AttachmentProviderType` MUST when known; Url/PermissionType MAY if present). Empty stub when unused. Full encyclopedia still out of scope (**D-0084-cloud-named-prop-write** closed for allowlisted write). |
 | RTF | **No** | v1 never writes `PidTagRtfCompressed` or any RTF-native hint — there is nothing RTF-related to clear because nothing RTF-related is ever produced. |
 | `PidTagMessageFlags` | `MSGFLAG_READ` (0x1); `\| MSGFLAG_HASATTACH` (0x10) when ≥1 attach written | Paperclip + read default (0069). |
@@ -498,18 +498,19 @@ See `crates/pst-writer/tests/writer_v1.rs::report_counts_incomplete_and_unavaila
 
 ## Large single-property values: subnode storage
 
-A single HN heap allocation cannot span more than one heap page — this is
-inherent to the MS-PST Heap-on-Node format (`HNPAGEMAP` offsets are local to
-one physical block), not a writer shortcut. Any `body_plain` (UTF-16LE bytes)
-or `body_html` value larger than **3580 bytes** is written as a **subnode**
-(MS-PST §2.3.3.3) instead of an inline heap allocation, referenced by NID
-rather than HID. `pst-reader`'s `PropContext` did not previously resolve
-subnode-typed HNIDs for `PtypString`/`PtypBinary` (it silently returned
-`None`), which would have blocked round-trip verification of large bodies —
-that gap was fixed in `pst_reader::ltp::pc` as part of this track (see that
-module's doc comments and the "reader compatibility" note in the final
-implementation report), per the explicit allowance to fix a genuine reader bug
-blocking round-trip verification rather than working around it in the writer.
+This writer's `HeapBuilder` is **single-page** (`MAX_BLOCK_DATA` = 8176). Values
+that would overflow that page are moved to a **subnode** (NID in `dwValueHnid`)
+instead of being clipped. MS-PST itself allows multi-block HN (§2.3.1.6) and a
+format per-value threshold of **3580** before subnode (§2.6.1.2.2 / §2.6.2.3.2);
+our inlined threshold **`MAX_HEAP_VALUE_SIZE` = 2048** is a **documented
+single-page HeapBuilder deviation**, not an inherent MS-PST limit (track **0093**).
+
+Any `body_plain` / `body_html` above 2048 bytes (post-encoding) is diverted to a
+subnode. Helper strings (MID / subject / sender / Display* / `message_class`)
+use the same per-value helper **and** a **cumulative** escalate+reprobe on the
+MessageSize probe heap so multiple ~2 KiB helpers cannot hard-fail the page.
+`pst-reader`'s `PropContext` resolves subnode-typed HNIDs for `PtypString` /
+`PtypBinary` so round-trip verification works.
 
 Bodies larger than one external data block (8176 bytes) always use
 XBLOCK/XXBLOCK chaining regardless of whether they were inline or
@@ -665,8 +666,8 @@ written through.
   data via XBLOCK/XXBLOCK (`Layout::write_data_chain`) instead.
 - Values that would overflow one heap page hard-fail (`WriterError::Layout`)
   rather than silently corrupt/truncate a page, *unless* the writer proactively
-  diverts them to a subnode first (body/HTML — the only genuinely unbounded
-  fields on `WriteMessage`).
+  diverts them to a subnode first (body/HTML **and** helper strings under the
+  0093 cumulative budget — never silent Display* clip).
 
 ## CanonicalMessage → WriteMessage adapter
 

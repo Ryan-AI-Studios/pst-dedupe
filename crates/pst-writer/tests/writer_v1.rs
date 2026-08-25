@@ -1029,8 +1029,8 @@ fn message_size_does_not_double_count_inline_body() {
     cleanup(&path);
 
     // 1000 ASCII chars => exactly 2000 UTF-16LE bytes, well under
-    // MAX_HEAP_VALUE_SIZE (3580) so this body is written inline, not diverted
-    // to a subnode.
+    // MAX_HEAP_VALUE_SIZE (2048 single-page deviation) so this body is written
+    // inline, not diverted to a subnode.
     let body: String = "A".repeat(1000);
     let mut msg = short_message("<inline_size@example.com>", "Inline size check");
     msg.body_plain = Some(body);

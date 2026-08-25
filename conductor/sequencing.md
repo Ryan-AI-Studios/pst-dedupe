@@ -105,7 +105,12 @@
 | 47 | P1 M | **0089** UniqueEmlAttachLedger | ✅ Completed | unique-eml attach ledger via EmlAttachEvent (closes D-0073-eml) |
 | 48 | P2 M | **0090** EmbeddedMsgContentHash | ✅ Completed | embedded-msg-hash/v1 subnode+rfc822 (D-0086-embedded-email-hash) |
 | 49 | P2 M | **0091** DigestProbeUnify | ✅ Completed | Record-don’t-tee digest→probe skip (D-0086-digest-probe-unify) |
-| 50 | P2 M | **0092** CloudNamedPropWrite | ⬜ Ready | Allowlisted NPMAP write (D-0084-cloud-named-prop-write) |
+| 50 | P2 M | **0092** CloudNamedPropWrite | ✅ Completed | Allowlisted NPMAP write (D-0084-cloud-named-prop-write); residual D-0092 → **0096** |
+| 51 | P1 N | **0093** WriterHeapRecipientRobustness | ✅ Completed | Strategy B + cumulative heap; closes D-0068-01; residuals D-0093-*; Codex luna r4 PASS |
+| 52 | P1 N | **0094** EmbeddedMsgNestedExport | ⬜ Ready | Method-5 nested export (D-0067-embedded-depth); INC* 374 EMBEDDED_UNPARSED |
+| 53 | P2 N | **0095** UniquePstFolderTreeNormalize | ⬜ Ready | folder_tree_structure QC defect / D-0070 prefix |
+| 54 | P3 N | **0096** PermissionTypeExtract | ⬜ Ready | Closes D-0092-permission-type-extract |
+| 55 | P3 N | **0097** BodyCloudTruncationHonesty | ⬜ Ready | Empty BODY_CLOUD_LINK_TRUNCATED ledger honesty |
 
 ## Series K spine (clean unique export)
 
@@ -165,4 +170,16 @@
 | 5 | **0086** AttachContentIdentity | **Completed** — `body-recip-attach` + Choice B unread |
 | 6 | **0087** DeterministicStoreRecordKey | **Completed** — deterministic PidTagRecordKey / CoC volume digests; closes D-0079-deterministic-key |
 
-**Next after 0091:** **0092** CloudNamedPropWrite (D-0084-cloud-named-prop-write). **0090**/**0091** closed D-0086-embedded-email-hash / D-0086-digest-probe-unify. D-0073-eml and D-0085-sovereign-cloud-hosts closed in **0089** / **0088**.
+**Series M closed through 0092.** **0090**/**0091** closed D-0086-embedded-email-hash / D-0086-digest-probe-unify. D-0073-eml and D-0085-sovereign-cloud-hosts closed in **0089** / **0088**.
+
+## Series N — Operator fidelity (INC0102784 post-0092)
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0093** WriterHeapRecipientRobustness | Land uncommitted heap diversion (cumulative/adaptive; 2048 documented deviation); Strategy **B** locked (budget-aware cap, To>Cc>Bcc, KnownGap) |
+| 2 | **0094** EmbeddedMsgNestedExport | Highest attach soft-fail ROI — stop hardcoding `embedded_message: None` |
+| 3 | **0095** UniquePstFolderTreeNormalize | QC hard_fail `folder_tree_structure` |
+| 3b | **0097** BodyCloudTruncationHonesty | Parallel with 0095 |
+| 4 | **0096** PermissionTypeExtract | 0092 MAY residual; low signal on INC* (0 attach-table cloud) |
+
+**Suggested:** 0093 → 0094 → 0095 ∥ 0097 → 0096.

@@ -28,18 +28,16 @@
 //!
 //! ## Large single-property values: subnode storage (not silent truncation)
 //!
-//! A single HN heap allocation cannot span more than one heap page (the
-//! `HNPAGEMAP` for each page only knows offsets local to that page — see
-//! `pst_reader::ltp::hn::Heap::get`). This is inherent to the MS-PST format, not
-//! a writer shortcut: MS-PST §2.3.3.3 requires values that don't fit a heap page
-//! to be moved to a **subnode** instead, referenced by NID rather than HID. Any
-//! `body_plain` / `body_html` value larger than [`MAX_HEAP_VALUE_SIZE`] is written
-//! this way. `pst-reader`'s `PropContext` did not previously resolve subnode-typed
-//! HNIDs for PtypString/PtypBinary (it silently returned `None`), which would have
-//! blocked round-trip verification of large bodies — that gap was fixed in
-//! `pst_reader::ltp::pc` (see its module docs) as part of this track, per the
-//! explicit allowance to fix a genuine reader bug blocking round-trip
-//! verification rather than working around it in the writer.
+//! This writer's [`HeapBuilder`] is **single-page** (`MAX_BLOCK_DATA` = 8176).
+//! Values that would overflow that page are moved to a **subnode** (NID in
+//! `dwValueHnid`) instead of being clipped. MS-PST itself allows multi-block HN
+//! (§2.3.1.6) and a format per-value threshold of 3580 before subnode
+//! (§2.6.1.2.2 / §2.6.2.3.2); our [`MAX_HEAP_VALUE_SIZE`] = 2048 is a **documented
+//! single-page HeapBuilder deviation**, not an inherent MS-PST limit. Helper
+//! strings (MID / subject / sender / Display* / `message_class`) also divert
+//! under a **cumulative** budget (escalate largest inline helpers when the
+//! MessageSize probe heap would overflow). `pst-reader`'s `PropContext` resolves
+//! subnode-typed HNIDs for PtypString/PtypBinary so round-trip verification works.
 //!
 //! ## Scope (v1.1 / track 0069)
 //!
@@ -172,11 +170,32 @@ const MAX_FOLDER_DEPTH: usize = 32;
 /// storage/decoding. Documented judgment call — see final report.
 const PTYP_MULTIPLE_INTEGER_32: u16 = 0x1003;
 
-/// Above this size (bytes, post-encoding) a PtypString/PtypBinary value is moved
-/// to a subnode instead of inlined in the HN heap (see module docs). Chosen with
-/// generous headroom under one heap page (~8100 usable bytes) so the handful of
-/// other small message properties always fit alongside it.
-const MAX_HEAP_VALUE_SIZE: usize = 3580;
+/// Max inlined PC heap value (UTF-16 / binary), in bytes post-encoding.
+///
+/// **Single-page HeapBuilder budget** (`MAX_BLOCK_DATA` = 8176), not the MS-PST
+/// format per-value rule (3580 → HN, >3580 → subnode). Headroom leaves room for
+/// HN header, sibling props, BTH leaf, and HNPAGEMAP on one page. Aggregate
+/// helper strings still use escalate+reprobe when per-value diversion is not
+/// enough (track 0093).
+const MAX_HEAP_VALUE_SIZE: usize = 2048;
+
+/// Starting maximum rows for a single-page recipient TC (hint, not an invariant).
+/// Budget-aware build may keep fewer; event reports the actual kept count.
+const RECIPIENT_TC_ROW_HINT: usize = 48;
+
+/// Cap on in-process `recipient_tc_truncated_events` (mirrors attach-event shape).
+pub const RECIPIENT_TC_EVENTS_CAP: usize = 1000;
+
+/// Helper string props eligible for cumulative subnode diversion (0093).
+const HELPER_STRING_PIDS: &[u16] = &[
+    PID_TAG_INTERNET_MESSAGE_ID,
+    PID_TAG_SUBJECT,
+    PID_TAG_SENDER_EMAIL_ADDRESS,
+    PID_TAG_DISPLAY_TO,
+    PID_TAG_DISPLAY_CC,
+    PID_TAG_DISPLAY_BCC,
+    PID_TAG_MESSAGE_CLASS,
+];
 
 /// Max BID entries in one XBLOCK/XXBLOCK: `(MAX_BLOCK_DATA - 8) / 8`.
 const MAX_XBLOCK_ENTRIES: usize = (MAX_BLOCK_DATA - 8) / 8;
@@ -670,6 +689,16 @@ pub struct WritePstReport {
     pub attachment_fidelity_events_truncated: bool,
     /// Exact count of successful attach streams that hit warning-only CRC (uncapped; 0077).
     pub attach_stream_crc_events: u64,
+    /// Messages whose recipient TC was budget-truncated (0093 Strategy B; uncapped).
+    pub recipient_tc_truncated_messages: u64,
+    /// Total recipient rows dropped by TC budget cap (0093; uncapped).
+    pub recipient_rows_truncated: u64,
+    /// Per-message recipient TC truncate events (capped Vec; see total/truncated).
+    pub recipient_tc_truncated_events: Vec<RecipientTcTruncatedEvent>,
+    /// Total truncate events observed (may exceed Vec len when capped).
+    pub recipient_tc_truncated_events_total: u64,
+    /// True when truncate events past the first-N cap were dropped from the Vec.
+    pub recipient_tc_truncated_events_truncated: bool,
     /// SHA-256 (hex, lowercase) of the final PST file bytes after all seeks
     /// and before rename. Strategy: hash the complete temp file after NDB
     /// finalize (header/BBT/NBT/AMaps written); matches on-disk bytes after
@@ -844,10 +873,46 @@ struct WriteCounters {
     attachment_fidelity_events_truncated: bool,
     /// Exact count of [`AttachmentFidelityKind::StreamCrc`] events (uncapped; 0077 export_risk).
     attach_stream_crc_events: u64,
+    recipient_tc_truncated_messages: u64,
+    recipient_rows_truncated: u64,
+    recipient_tc_truncated_events: Vec<RecipientTcTruncatedEvent>,
+    recipient_tc_truncated_events_total: u64,
+    recipient_tc_truncated_events_truncated: bool,
 }
 
 /// Cap on in-process `attachment_fidelity_events` (0077 / D-0073-vec-events).
 pub const ATTACHMENT_FIDELITY_EVENTS_CAP: usize = 1000;
+
+/// Writer-surfaced recipient TC truncation (0093 Strategy B).
+///
+/// Reason code is always [`RecipientTcTruncatedEvent::REASON`]. QC treats a
+/// matching event as `KnownGap`; unexplained row loss without an event is Defect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipientTcTruncatedEvent {
+    pub message_subject: String,
+    pub source_path: String,
+    pub folder_path: String,
+    pub msg_nid: u64,
+    /// Normalized / raw Message-ID when known (QC join key fallback).
+    pub message_id: String,
+    pub source_count: u32,
+    pub kept_count: u32,
+    pub kept_to: u32,
+    pub kept_cc: u32,
+    pub kept_bcc: u32,
+    pub dropped_to: u32,
+    pub dropped_cc: u32,
+    pub dropped_bcc: u32,
+}
+
+impl RecipientTcTruncatedEvent {
+    /// Stable reason code for summary / QC (`SCREAMING_SNAKE`).
+    pub const REASON: &'static str = "RECIPIENT_TC_TRUNCATED";
+
+    pub fn reason(&self) -> &'static str {
+        Self::REASON
+    }
+}
 
 /// Build a locus-bearing attach event from message + attachment DTOs.
 fn make_attach_event(
@@ -1898,11 +1963,126 @@ pub fn write_unicode_pst_streaming(
         attachment_fidelity_events_total: counters.attachment_fidelity_events_total,
         attachment_fidelity_events_truncated: counters.attachment_fidelity_events_truncated,
         attach_stream_crc_events: counters.attach_stream_crc_events,
+        recipient_tc_truncated_messages: counters.recipient_tc_truncated_messages,
+        recipient_rows_truncated: counters.recipient_rows_truncated,
+        recipient_tc_truncated_events: counters.recipient_tc_truncated_events,
+        recipient_tc_truncated_events_total: counters.recipient_tc_truncated_events_total,
+        recipient_tc_truncated_events_truncated: counters.recipient_tc_truncated_events_truncated,
         sha256_hex,
         md5_hex,
         hash_ms,
         finalized_early,
     })
+}
+
+fn record_recipient_tc_truncated(counters: &mut WriteCounters, event: RecipientTcTruncatedEvent) {
+    counters.recipient_tc_truncated_messages =
+        counters.recipient_tc_truncated_messages.saturating_add(1);
+    let dropped = event.source_count.saturating_sub(event.kept_count) as u64;
+    counters.recipient_rows_truncated = counters.recipient_rows_truncated.saturating_add(dropped);
+    counters.recipient_tc_truncated_events_total = counters
+        .recipient_tc_truncated_events_total
+        .saturating_add(1);
+    if counters.recipient_tc_truncated_events.len() < RECIPIENT_TC_EVENTS_CAP {
+        counters.recipient_tc_truncated_events.push(event);
+    } else {
+        counters.recipient_tc_truncated_events_truncated = true;
+    }
+}
+
+fn is_heap_page_overflow(err: &WriterError) -> bool {
+    matches!(err, WriterError::Layout(msg) if msg.contains("heap page overflow"))
+}
+
+fn recipient_class_rank(t: WriteRecipientType) -> u8 {
+    match t {
+        WriteRecipientType::To => 0,
+        WriteRecipientType::Cc => 1,
+        WriteRecipientType::Bcc => 2,
+        WriteRecipientType::Other(_) => 3,
+    }
+}
+
+/// Order To → Cc → Bcc (stable within class). Do not rely on source order.
+fn order_recipients_for_tc<'a>(rows: &[&'a WriteRecipient]) -> Vec<&'a WriteRecipient> {
+    let mut indexed: Vec<(usize, &'a WriteRecipient)> = rows.iter().copied().enumerate().collect();
+    indexed.sort_by(|a, b| {
+        recipient_class_rank(a.1.recipient_type)
+            .cmp(&recipient_class_rank(b.1.recipient_type))
+            .then(a.0.cmp(&b.0))
+    });
+    indexed.into_iter().map(|(_, r)| r).collect()
+}
+
+fn count_recipients_by_class(rows: &[&WriteRecipient]) -> (u32, u32, u32) {
+    let mut to = 0u32;
+    let mut cc = 0u32;
+    let mut bcc = 0u32;
+    for r in rows {
+        match r.recipient_type {
+            WriteRecipientType::To => to = to.saturating_add(1),
+            WriteRecipientType::Cc => cc = cc.saturating_add(1),
+            WriteRecipientType::Bcc => bcc = bcc.saturating_add(1),
+            WriteRecipientType::Other(_) => {}
+        }
+    }
+    (to, cc, bcc)
+}
+
+/// Divert the largest remaining inline helper string to a subnode.
+/// Returns `true` when a property was diverted.
+fn escalate_largest_inline_helper(
+    props: &mut [(u16, PcValue)],
+    layout: &mut Layout,
+    subnode_counter: &mut u32,
+    subnode_entries: &mut Vec<(u64, u64, u64)>,
+    written_content_bytes: &mut u64,
+) -> Result<bool> {
+    let mut best_idx: Option<usize> = None;
+    let mut best_len = 0usize;
+    for (i, (pid, val)) in props.iter().enumerate() {
+        if !HELPER_STRING_PIDS.contains(pid) {
+            continue;
+        }
+        if let PcValue::String(s) = val {
+            let n = utf16le_bytes(s).len();
+            if n >= best_len {
+                best_len = n;
+                best_idx = Some(i);
+            }
+        }
+    }
+    let Some(i) = best_idx else {
+        return Ok(false);
+    };
+    let pid = props[i].0;
+    let s = match &props[i].1 {
+        PcValue::String(s) => s.clone(),
+        _ => return Ok(false),
+    };
+    let bytes = utf16le_bytes(&s);
+    *written_content_bytes = written_content_bytes.saturating_add(bytes.len() as u64);
+    let sub_nid = next_subnode_nid(subnode_counter);
+    let bid_data = layout.write_data_chain(bytes)?;
+    subnode_entries.push((sub_nid, bid_data, 0));
+    props[i] = (pid, PcValue::SubnodeString(sub_nid));
+    Ok(true)
+}
+
+/// Build recipient TC heap with budget-aware row cap (catch-and-retry).
+/// `ordered` must already be To→Cc→Bcc. Returns (heap bytes, kept count).
+fn build_recipient_table_budget_aware(ordered: &[&WriteRecipient]) -> Result<(Vec<u8>, usize)> {
+    let mut keep = ordered.len().min(RECIPIENT_TC_ROW_HINT);
+    loop {
+        let mut heap = HeapBuilder::new(0xBC);
+        match build_recipient_table_tc(&mut heap, &ordered[..keep]) {
+            Ok((hid, _)) => return Ok((heap.finalize(hid), keep)),
+            Err(e) if is_heap_page_overflow(&e) && keep > 0 => {
+                keep = keep.saturating_sub(1);
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Lowercase hex of a raw digest (sha2 0.11 / md-5 hybrid-array output).
@@ -3260,31 +3440,47 @@ fn build_message_payload(
     let mut written_attaches: Vec<WrittenAttach> = Vec::new();
 
     let mut props: Vec<(u16, PcValue)> = Vec::new();
-    if let Some(mid) = &msg.message_id {
-        props.push((PID_TAG_INTERNET_MESSAGE_ID, PcValue::String(mid.clone())));
-    }
-    props.push((PID_TAG_SUBJECT, PcValue::String(msg.subject.clone())));
-    if let Some(sender) = &msg.sender {
-        props.push((
-            PID_TAG_SENDER_EMAIL_ADDRESS,
-            PcValue::String(sender.clone()),
-        ));
-    }
-    if let Some(display_to) = &msg.display_to {
-        props.push((PID_TAG_DISPLAY_TO, PcValue::String(display_to.clone())));
-    }
-    if let Some(display_cc) = &msg.display_cc {
-        if !display_cc.trim().is_empty() {
-            props.push((PID_TAG_DISPLAY_CC, PcValue::String(display_cc.clone())));
+    // Per-value diversion vs MAX_HEAP_VALUE_SIZE; cumulative escalate happens at
+    // the MessageSize probe (multiple ~2 KiB helpers can still overflow 8176).
+    {
+        let mut push_string_prop = |pid: u16, s: &str| -> Result<()> {
+            let bytes = utf16le_bytes(s);
+            if bytes.len() > MAX_HEAP_VALUE_SIZE {
+                written_content_bytes += bytes.len() as u64;
+                let sub_nid = next_subnode_nid(&mut subnode_counter);
+                let bid_data = layout.write_data_chain(bytes)?;
+                subnode_entries.push((sub_nid, bid_data, 0));
+                props.push((pid, PcValue::SubnodeString(sub_nid)));
+            } else {
+                props.push((pid, PcValue::String(s.to_string())));
+            }
+            Ok(())
+        };
+        if let Some(mid) = &msg.message_id {
+            push_string_prop(PID_TAG_INTERNET_MESSAGE_ID, mid)?;
         }
-    }
-    // PidTagDisplayBcc only when opt-in BCC disclosure is enabled (0082 §2.5 rule 5).
-    if include_bcc_recipients {
-        if let Some(display_bcc) = &msg.display_bcc {
-            if !display_bcc.trim().is_empty() {
-                props.push((PID_TAG_DISPLAY_BCC, PcValue::String(display_bcc.clone())));
+        push_string_prop(PID_TAG_SUBJECT, &msg.subject)?;
+        if let Some(sender) = &msg.sender {
+            push_string_prop(PID_TAG_SENDER_EMAIL_ADDRESS, sender)?;
+        }
+        if let Some(display_to) = &msg.display_to {
+            push_string_prop(PID_TAG_DISPLAY_TO, display_to)?;
+        }
+        if let Some(display_cc) = &msg.display_cc {
+            if !display_cc.trim().is_empty() {
+                push_string_prop(PID_TAG_DISPLAY_CC, display_cc)?;
             }
         }
+        // PidTagDisplayBcc only when opt-in BCC disclosure is enabled (0082 §2.5 rule 5).
+        if include_bcc_recipients {
+            if let Some(display_bcc) = &msg.display_bcc {
+                if !display_bcc.trim().is_empty() {
+                    push_string_prop(PID_TAG_DISPLAY_BCC, display_bcc)?;
+                }
+            }
+        }
+        let message_class = msg.message_class.as_deref().unwrap_or("IPM.Note");
+        push_string_prop(PID_TAG_MESSAGE_CLASS, message_class)?;
     }
     if let Some(submit_time) = msg.submit_time {
         props.push((PID_TAG_CLIENT_SUBMIT_TIME, PcValue::Time(submit_time)));
@@ -3293,11 +3489,6 @@ fn build_message_payload(
         props.push((PID_TAG_CREATION_TIME, PcValue::Time(submit_time)));
         props.push((PID_TAG_LAST_MODIFICATION_TIME, PcValue::Time(submit_time)));
     }
-    let message_class = msg
-        .message_class
-        .clone()
-        .unwrap_or_else(|| "IPM.Note".to_string());
-    props.push((PID_TAG_MESSAGE_CLASS, PcValue::String(message_class)));
 
     if let Some(plain) = plain_text {
         let bytes = utf16le_bytes(plain);
@@ -3384,16 +3575,44 @@ fn build_message_payload(
 
     // Recipient table TC at fixed NID 0x692 — always present (MS-PST MUST),
     // including zero rows. BCC rows filtered unless include_bcc_recipients.
-    let recip_rows: Vec<&WriteRecipient> = msg
+    // Strategy B (0093): To→Cc→Bcc order, then budget-aware keep (≤ ROW_HINT).
+    let recip_filtered: Vec<&WriteRecipient> = msg
         .recipients
         .iter()
         .filter(|r| include_bcc_recipients || !r.recipient_type.is_bcc())
         .collect();
-    let recip_table_heap = {
-        let mut heap = HeapBuilder::new(0xBC);
-        let (hid, _heap_after) = build_recipient_table_tc(&mut heap, &recip_rows)?;
-        heap.finalize(hid)
-    };
+    let recip_ordered = order_recipients_for_tc(&recip_filtered);
+    let (recip_table_heap, recip_kept) = build_recipient_table_budget_aware(&recip_ordered)?;
+    if recip_kept < recip_ordered.len() {
+        let source_slice = &recip_ordered[..];
+        let kept_slice = &recip_ordered[..recip_kept];
+        let (src_to, src_cc, src_bcc) = count_recipients_by_class(source_slice);
+        let (kept_to, kept_cc, kept_bcc) = count_recipients_by_class(kept_slice);
+        let event = RecipientTcTruncatedEvent {
+            message_subject: msg.subject.clone(),
+            source_path: msg.source_path.clone().unwrap_or_default(),
+            folder_path: msg.source_folder_path.clone().unwrap_or_default(),
+            msg_nid: msg.source_msg_nid.unwrap_or(0),
+            message_id: msg.message_id.clone().unwrap_or_default(),
+            source_count: recip_ordered.len() as u32,
+            kept_count: recip_kept as u32,
+            kept_to,
+            kept_cc,
+            kept_bcc,
+            dropped_to: src_to.saturating_sub(kept_to),
+            dropped_cc: src_cc.saturating_sub(kept_cc),
+            dropped_bcc: src_bcc.saturating_sub(kept_bcc),
+        };
+        tracing::warn!(
+            total = event.source_count,
+            kept = event.kept_count,
+            kept_to = event.kept_to,
+            kept_cc = event.kept_cc,
+            kept_bcc = event.kept_bcc,
+            "recipient TC truncated to fit single-page heap; DisplayTo/Cc/Bcc unchanged"
+        );
+        record_recipient_tc_truncated(counters, event);
+    }
     let recip_table_len = recip_table_heap.len() as u64;
     let recip_table_bid = layout.write_data_chain(recip_table_heap)?;
     subnode_entries.push((NID_RECIPIENT_TABLE, recip_table_bid, 0));
@@ -3402,21 +3621,44 @@ fn build_message_payload(
     props.push((PID_TAG_HAS_ATTACHMENTS, PcValue::Bool(has_attaches)));
     props.push((PID_TAG_MESSAGE_FLAGS, PcValue::I32(flags)));
 
-    // MessageSize: probe PC without MessageSize, add subnode/attach bytes.
-    let mut probe_heap = HeapBuilder::new(0x6C);
-    let probe_hid = build_pc_v2(&mut probe_heap, &props)?;
-    let probe_bytes = probe_heap.finalize(probe_hid);
-    let message_size_u64 = probe_bytes.len() as u64 + written_content_bytes;
-    let message_size = i32::try_from(message_size_u64).map_err(|_| {
-        WriterError::BodyTooLarge(format!(
-            "computed message size {message_size_u64} bytes exceeds \
-             PidTagMessageSize's PT_LONG (MS-OXPROPS) range ({} bytes max) — \
-             refusing to silently clamp a size that would misrepresent what \
-             was written",
-            i32::MAX
-        ))
-    })?;
-    props.push((PID_TAG_MESSAGE_SIZE, PcValue::I32(message_size)));
+    // MessageSize probe with placeholder so the final PC (same props + real size)
+    // cannot tip the single-page budget. On overflow, escalate largest remaining
+    // inline helpers to subnodes and re-probe (0093 cumulative budget).
+    props.push((PID_TAG_MESSAGE_SIZE, PcValue::I32(0)));
+    let message_size = loop {
+        let mut probe_heap = HeapBuilder::new(0x6C);
+        match build_pc_v2(&mut probe_heap, &props) {
+            Ok(probe_hid) => {
+                let probe_bytes = probe_heap.finalize(probe_hid);
+                let message_size_u64 = probe_bytes.len() as u64 + written_content_bytes;
+                break i32::try_from(message_size_u64).map_err(|_| {
+                    WriterError::BodyTooLarge(format!(
+                        "computed message size {message_size_u64} bytes exceeds \
+                         PidTagMessageSize's PT_LONG (MS-OXPROPS) range ({} bytes max) — \
+                         refusing to silently clamp a size that would misrepresent what \
+                         was written",
+                        i32::MAX
+                    ))
+                })?;
+            }
+            Err(e) if is_heap_page_overflow(&e) => {
+                let diverted = escalate_largest_inline_helper(
+                    &mut props,
+                    layout,
+                    &mut subnode_counter,
+                    &mut subnode_entries,
+                    &mut written_content_bytes,
+                )?;
+                if !diverted {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    if let Some((_, v)) = props.iter_mut().find(|(p, _)| *p == PID_TAG_MESSAGE_SIZE) {
+        *v = PcValue::I32(message_size);
+    }
 
     let mut heap = HeapBuilder::new(0x6C);
     let hid = build_pc_v2(&mut heap, &props)?;
@@ -3428,7 +3670,7 @@ fn build_message_payload(
         layout.add_subnode_leaf(&subnode_entries)?
     };
 
-    Ok((msg_heap_bytes, sub_bid, message_size_u64))
+    Ok((msg_heap_bytes, sub_bid, message_size as u64))
 }
 
 #[allow(clippy::too_many_arguments)] // streams + attach_event_sink for 0073 fidelity
@@ -3976,6 +4218,7 @@ fn build_recipient_table_tc(
     heap: &mut HeapBuilder,
     rows: &[&WriteRecipient],
 ) -> Result<(u32, usize)> {
+    // Caller applies Strategy B budget-aware keep + To→Cc→Bcc ordering.
     let (columns, total_row_width) = build_template_tc_columns(&RECIPIENT_TABLE_COLUMNS);
     let ncols = columns.len();
     let bitmap_bytes = ncols.div_ceil(8);

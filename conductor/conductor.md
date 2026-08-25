@@ -215,12 +215,26 @@ Promoted from deferred (2026-08-24). **0088–0092 Completed**.
 
 **Suggested order:** 0088 ∥ 0089 → 0090 → 0091 → 0092 (writer; optional until counsel needs Outlook named-prop visibility).
 
+## Series N — Operator fidelity (INC0102784 post-0092)
+
+Promoted from operator unique-pst smoke on Desktop `INC0102784.pst` + `INC0102784-2.pst` (2026-08-25): 4055 msgs written; exit `VERIFY_FAILED`+`ATTACH_SOFT_FAIL`; 374/374 attach fails = `ATTACH_EMBEDDED_UNPARSED`; QC defects = `folder_tree_structure` + `recipient_table` (interim 48-row cap); body-cloud CSV 62 empty truncates vs 3 real links; attach-table cloud providers = 0 (0092 NPMAP not exercised on this corpus). Evidence under `output/inc0102784-0092-full/` (operator-local; not committed).
+
+| Track | Status | Summary |
+|---|---|---|
+| [0093-WriterHeapRecipientRobustness](0093-WriterHeapRecipientRobustness/spec.md) | **Completed** | Strategy B + cumulative heap; closes **D-0068-01**; residuals **D-0093-recipient-tc-multipage** / **D-0093-attachment-tc-page**; Codex luna r4 PASS |
+| [0094-EmbeddedMsgNestedExport](0094-EmbeddedMsgNestedExport/spec.md) | **Ready** | Wire method-5 nested `WriteMessage` through materialize→writer (stop hardcoding `embedded_message: None`); closes/narrows **D-0067-embedded-depth** |
+| [0095-UniquePstFolderTreeNormalize](0095-UniquePstFolderTreeNormalize/spec.md) | **Ready** | Fix preserve-layout QC `folder_tree_structure` defect (Unique Mail / double Top of Personal Folders); narrows **D-0070-multi-source-stream-prefix** |
+| [0096-PermissionTypeExtract](0096-PermissionTypeExtract/spec.md) | **Ready** | Source extract of `AttachmentPermissionType` into canonical/write (closes **D-0092-permission-type-extract**) |
+| [0097-BodyCloudTruncationHonesty](0097-BodyCloudTruncationHonesty/spec.md) | **Ready** | Honest body-cloud truncate ledger (eliminate empty-URL `BODY_CLOUD_LINK_TRUNCATED` spam) |
+
+**Suggested order:** **0093** → **0094** (highest attach soft-fail ROI) → **0095** ∥ **0097** → **0096** (0092 residual; low INC* signal).
+
 ## Notes
 
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write).
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093 Completed**; **0094–0097 Ready** (INC0102784 operator fidelity follow-ups).
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).

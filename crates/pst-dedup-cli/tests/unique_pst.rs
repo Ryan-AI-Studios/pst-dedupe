@@ -2280,6 +2280,7 @@ fn unique_pst_mode_a_promote_qc_sample_keys_final_winner() {
         body_incomplete: false,
         crc_suspect: false,
         subject_non_ascii: false,
+        display_to: String::new(),
         display_cc: String::new(),
         display_bcc: String::new(),
     };
@@ -2297,6 +2298,7 @@ fn unique_pst_mode_a_promote_qc_sample_keys_final_winner() {
         source_differential: true,
         parents_only: false,
         include_bcc_recipients: false,
+        recipient_tc_truncations: &[],
         probe_unexplained_property: None,
     });
     assert!(
@@ -2363,6 +2365,7 @@ fn unique_pst_mode_a_promote_qc_sample_keys_final_winner() {
         body_incomplete: false,
         crc_suspect: false,
         subject_non_ascii: false,
+        display_to: String::new(),
         display_cc: String::new(),
         display_bcc: String::new(),
     };
@@ -2381,6 +2384,7 @@ fn unique_pst_mode_a_promote_qc_sample_keys_final_winner() {
         source_differential: true,
         parents_only: false,
         include_bcc_recipients: false,
+        recipient_tc_truncations: &[],
         probe_unexplained_property: None,
     });
     assert!(

@@ -258,10 +258,83 @@ pub struct ExportSection {
     /// Total attach events observed (may exceed Vec len when truncated; 0077).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_fidelity_events_total: Option<u64>,
+    /// Messages whose recipient TC was budget-truncated (0093 Strategy B).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_tc_truncated_messages: Option<u64>,
+    /// Total recipient rows dropped by TC budget cap (0093).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_rows_truncated: Option<u64>,
+    /// Whether in-process truncate-event Vec was capped (0093).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_tc_truncated_events_truncated: Option<bool>,
+    /// Total truncate events observed (may exceed Vec len; 0093).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_tc_truncated_events_total: Option<u64>,
+    /// First-N writer truncate events for clean-room QC (0093).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_tc_truncations: Option<Vec<RecipientTcTruncationRow>>,
     /// Whether BCC rows / `PidTagDisplayBcc` were written (0082 `--include-bcc-recipients`).
     /// Default false. Clean-room `qc-pst` reads this so re-QC matches the export policy.
     #[serde(default)]
     pub include_bcc_recipients: bool,
+}
+
+/// Serializable recipient TC truncate row for `summary.json` (0093).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecipientTcTruncationRow {
+    pub reason: String,
+    pub message_subject: String,
+    pub source_path: String,
+    pub folder_path: String,
+    pub msg_nid: u64,
+    pub message_id: String,
+    pub source_count: u32,
+    pub kept_count: u32,
+    pub kept_to: u32,
+    pub kept_cc: u32,
+    pub kept_bcc: u32,
+    pub dropped_to: u32,
+    pub dropped_cc: u32,
+    pub dropped_bcc: u32,
+}
+
+impl RecipientTcTruncationRow {
+    pub fn from_writer_event(ev: &pst_writer::RecipientTcTruncatedEvent) -> Self {
+        Self {
+            reason: ev.reason().to_string(),
+            message_subject: ev.message_subject.clone(),
+            source_path: ev.source_path.clone(),
+            folder_path: ev.folder_path.clone(),
+            msg_nid: ev.msg_nid,
+            message_id: ev.message_id.clone(),
+            source_count: ev.source_count,
+            kept_count: ev.kept_count,
+            kept_to: ev.kept_to,
+            kept_cc: ev.kept_cc,
+            kept_bcc: ev.kept_bcc,
+            dropped_to: ev.dropped_to,
+            dropped_cc: ev.dropped_cc,
+            dropped_bcc: ev.dropped_bcc,
+        }
+    }
+
+    pub fn to_writer_event(&self) -> pst_writer::RecipientTcTruncatedEvent {
+        pst_writer::RecipientTcTruncatedEvent {
+            message_subject: self.message_subject.clone(),
+            source_path: self.source_path.clone(),
+            folder_path: self.folder_path.clone(),
+            msg_nid: self.msg_nid,
+            message_id: self.message_id.clone(),
+            source_count: self.source_count,
+            kept_count: self.kept_count,
+            kept_to: self.kept_to,
+            kept_cc: self.kept_cc,
+            kept_bcc: self.kept_bcc,
+            dropped_to: self.dropped_to,
+            dropped_cc: self.dropped_cc,
+            dropped_bcc: self.dropped_bcc,
+        }
+    }
 }
 
 /// Inputs for post-export risk evaluation (0077).
@@ -2006,6 +2079,11 @@ mod tests {
             failed_volume_index: None,
             attachment_fidelity_events_truncated: None,
             attachment_fidelity_events_total: None,
+            recipient_tc_truncated_messages: None,
+            recipient_rows_truncated: None,
+            recipient_tc_truncated_events_truncated: None,
+            recipient_tc_truncated_events_total: None,
+            recipient_tc_truncations: None,
             include_bcc_recipients: false,
         };
         finish.apply_to_export_section(&mut export);
@@ -2113,6 +2191,11 @@ mod tests {
             failed_volume_index: None,
             attachment_fidelity_events_truncated: None,
             attachment_fidelity_events_total: None,
+            recipient_tc_truncated_messages: None,
+            recipient_rows_truncated: None,
+            recipient_tc_truncated_events_truncated: None,
+            recipient_tc_truncated_events_total: None,
+            recipient_tc_truncations: None,
             include_bcc_recipients: false,
         };
         finish.apply_to_export_section(&mut export);
