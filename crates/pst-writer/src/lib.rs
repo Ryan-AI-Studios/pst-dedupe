@@ -32,9 +32,10 @@ pub use production::{
     resolve_content_fingerprint, temp_sibling_path, volume_local_fingerprint_from_messages,
     write_unicode_pst, write_unicode_pst_streaming, write_unicode_pst_with_streams,
     AttachEventSeverity, AttachEventSink, AttachRead, AttachStreamSource, AttachmentFidelityEvent,
-    AttachmentFidelityKind, FolderLayoutPolicy, PcValue, StoreRecordKeyMode, WriteAttachment,
-    WriteMessage, WriteProgress, WriteProgressSink, WritePstOpts, WritePstReport, WriteRecipient,
-    WriteRecipientType, WriteStage, JOB_KEY_MATERIAL_DOMAIN, STORE_KEY_MATERIAL_DOMAIN,
+    AttachmentFidelityKind, FolderLayoutPolicy, PcValue, RecipientTcTruncatedEvent,
+    StoreRecordKeyMode, WriteAttachment, WriteMessage, WriteProgress, WriteProgressSink,
+    WritePstOpts, WritePstReport, WriteRecipient, WriteRecipientType, WriteStage,
+    JOB_KEY_MATERIAL_DOMAIN, RECIPIENT_TC_EVENTS_CAP, STORE_KEY_MATERIAL_DOMAIN,
     STORE_RECORD_KEY_ALGO_VERSION, STORE_RECORD_KEY_DOMAIN,
 };
 
@@ -1008,7 +1009,12 @@ impl HeapBuilder {
         if projected > MAX_BLOCK_DATA {
             return Err(WriterError::Layout(format!(
                 "heap page overflow: {projected} bytes would exceed single-block capacity {MAX_BLOCK_DATA} \
-                 (value should be diverted to a subnode instead of inlined)"
+                 (value should be diverted to a subnode instead of inlined) \
+                 [heap_data={} alloc_bytes={} pagemap={} allocs={}]",
+                self.data.len(),
+                bytes.len(),
+                projected_pagemap,
+                projected_alloc_count
             )));
         }
         Ok(self.alloc(bytes))

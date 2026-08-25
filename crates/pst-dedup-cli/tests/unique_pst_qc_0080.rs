@@ -112,6 +112,7 @@ fn cand(i: u64, body: usize) -> QcSampleCandidate {
         body_incomplete: false,
         crc_suspect: false,
         subject_non_ascii: false,
+        display_to: String::new(),
         display_cc: String::new(),
         display_bcc: String::new(),
     }
@@ -215,6 +216,7 @@ fn qc_input_ex<'a>(
         source_differential,
         parents_only,
         include_bcc_recipients,
+        recipient_tc_truncations: &[],
         probe_unexplained_property: None,
     }
 }
@@ -3562,6 +3564,220 @@ fn recipient_table_qc_include_bcc_true_matches_full_set() {
     assert!(
         report.messages_compared >= 1,
         "expected at least one message compared"
+    );
+}
+
+/// 0093 DoD-2: short-name source (all rows fit) vs long-name output (budget
+/// truncate) + **real** writer event → known_gap; without event → defect;
+/// event kept≠out_written → defect (honesty).
+#[test]
+fn recipient_tc_truncate_event_is_known_gap_not_defect() {
+    use pst_writer::{WriteRecipient, WriteRecipientType};
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let long = "N".repeat(180);
+    let n = 24usize;
+    let mut short_recips = Vec::new();
+    let mut long_recips = Vec::new();
+    for i in 0..n {
+        // Same SMTP identity on both sides so QC mismatch is count/subset, not rename.
+        let email = format!("r{i}@ex.com");
+        short_recips.push(WriteRecipient {
+            recipient_type: WriteRecipientType::To,
+            display_name: Some(format!("To{i}")),
+            address_type: Some("SMTP".into()),
+            email_address: Some(email.clone()),
+            smtp_address: Some(email.clone()),
+        });
+        long_recips.push(WriteRecipient {
+            recipient_type: WriteRecipientType::To,
+            display_name: Some(format!("{long}-display-{i}")),
+            address_type: Some("SMTP".into()),
+            email_address: Some(email.clone()),
+            smtp_address: Some(email),
+        });
+    }
+    let display_to: String = (0..n)
+        .map(|i| format!("To{i} <r{i}@ex.com>"))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    // Source: short names → all 24 TC rows fit (no truncate).
+    let mut src_msg = base_msg("<recip-trunc@ex.com>", "Many recip", "body");
+    src_msg.display_to = Some(display_to.clone());
+    src_msg.recipients = short_recips;
+    src_msg.source_path = Some(src.display().to_string());
+    src_msg.source_msg_nid = Some(0x2100);
+    let src_report =
+        write_unicode_pst(&src, vec![src_msg], &[], &WritePstOpts::default()).expect("src");
+    assert_eq!(
+        src_report.recipient_tc_truncated_messages, 0,
+        "short-name source must not truncate"
+    );
+
+    // Output: long TC display names → budget keep < 24; Display* stays the same full string.
+    let mut out_msg = base_msg("<recip-trunc@ex.com>", "Many recip", "body");
+    out_msg.display_to = Some(display_to.clone());
+    out_msg.recipients = long_recips;
+    out_msg.source_path = Some(src.display().to_string());
+    out_msg.source_msg_nid = Some(0x2100);
+    let out_report =
+        write_unicode_pst(&out, vec![out_msg], &[], &WritePstOpts::default()).expect("out");
+    assert!(
+        out_report.recipient_tc_truncated_messages >= 1,
+        "long-name out must truncate"
+    );
+    let real_ev = out_report
+        .recipient_tc_truncated_events
+        .first()
+        .expect("real truncate event")
+        .clone();
+    assert!(
+        real_ev.kept_count < n as u32,
+        "kept must be < source row count; kept={}",
+        real_ev.kept_count
+    );
+
+    let src_nid = first_message_nid(&src).expect("src nid");
+    // Align event locus to QC candidate keys (source path + nid).
+    let mut trunc = real_ev;
+    trunc.source_path = src.display().to_string();
+    trunc.msg_nid = src_nid;
+    trunc.message_id = "<recip-trunc@ex.com>".into();
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "recip-trunc@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 0,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        source_id: String::new(),
+        bcc_suppressed: false,
+        body_cloud_link_count: 0,
+        subject: "Many recip".into(),
+    }];
+    let mut c = cand(1, 10);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "recip-trunc@ex.com".into();
+    c.subject = "Many recip".into();
+    c.display_to = display_to;
+
+    let cands = [c.clone()];
+    let truncs = [trunc.clone()];
+    let mut input = qc_input_ex(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &cands,
+        (true, false, false),
+    );
+    input.recipient_tc_truncations = &truncs;
+    let report = run_unique_pst_qc(input);
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    assert!(
+        csv.contains("recipient_table") && csv.contains("known_gap"),
+        "truncate+matching kept must be known_gap; findings={csv} counts={:?}",
+        report.findings
+    );
+    assert_eq!(
+        report.findings.defect, 0,
+        "must not defect when truncate event kept matches out: {:?}",
+        report.findings
+    );
+    assert!(report.findings.known_gap >= 1);
+    let kept_token = format!("kept={}", trunc.kept_count);
+    assert!(
+        csv.contains(&kept_token),
+        "detail must report actual kept from event ({kept_token}); csv={csv}"
+    );
+
+    // Negative: same mismatch without event → defect.
+    let report_dir2 = dir.path().join("report2");
+    fs::create_dir_all(&report_dir2).expect("report2");
+    let report2 = run_unique_pst_qc(qc_input_ex(
+        QcLevel::Full,
+        &report_dir2,
+        &volumes,
+        &export_rows,
+        &[c.clone()],
+        (true, false, false),
+    ));
+    assert!(
+        report2.findings.defect >= 1,
+        "mismatch without event must defect: {:?}",
+        report2.findings
+    );
+
+    // Honesty: event kept ≠ out_written → defect even when event present.
+    let mut bad = trunc.clone();
+    bad.kept_count = bad.kept_count.saturating_add(99);
+    let report_dir3 = dir.path().join("report3");
+    fs::create_dir_all(&report_dir3).expect("report3");
+    let truncs_bad = [bad];
+    let cands3 = [c.clone()];
+    let mut input3 = qc_input_ex(
+        QcLevel::Full,
+        &report_dir3,
+        &volumes,
+        &export_rows,
+        &cands3,
+        (true, false, false),
+    );
+    input3.recipient_tc_truncations = &truncs_bad;
+    let report3 = run_unique_pst_qc(input3);
+    assert!(
+        report3.findings.defect >= 1,
+        "kept≠out_written must defect: {:?}",
+        report3.findings
+    );
+
+    // Honesty: event.source_count ≠ src written set → defect (Codex r3).
+    let mut bad_src = trunc;
+    bad_src.source_count = 1;
+    let report_dir4 = dir.path().join("report4");
+    fs::create_dir_all(&report_dir4).expect("report4");
+    let truncs_bad_src = [bad_src];
+    let cands4 = [c];
+    let mut input4 = qc_input_ex(
+        QcLevel::Full,
+        &report_dir4,
+        &volumes,
+        &export_rows,
+        &cands4,
+        (true, false, false),
+    );
+    input4.recipient_tc_truncations = &truncs_bad_src;
+    let report4 = run_unique_pst_qc(input4);
+    assert!(
+        report4.findings.defect >= 1,
+        "event.source_count≠src_written must defect: {:?}",
+        report4.findings
+    );
+}
+
+/// 0093: longest display_to is selected as a sample stratum.
+#[test]
+fn sample_selection_includes_longest_display_to() {
+    let mut cands: Vec<_> = (0..10).map(|i| cand(i, 10)).collect();
+    cands[7].display_to = "x".repeat(5000);
+    let sel = select_sample_indices(&cands, 3);
+    assert!(
+        sel.contains(&7),
+        "longest display_to index must be in sample; sel={sel:?}"
     );
 }
 

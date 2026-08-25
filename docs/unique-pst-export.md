@@ -498,6 +498,10 @@ Messages with **no readable recipient table** still use the pre-0082 display-str
 
 **Reviewer note:** two near-identical messages in the unique-PST with `bcc_suppressed=true` are **not** a dedupe failure — BCC variance was kept for identity and omitted from the deliverable by policy. See the [runbook](unique-pst-ediscovery-runbook.md).
 
+### Recipient TC single-page budget (0093)
+
+Per-message recipient tables are single-page HN today. Very large To/Cc/Bcc lists may be **budget-truncated** (To first, then Cc, then Bcc; starting hint 48 is not an invariant). Summary surfaces `recipient_tc_truncated_messages`, `recipient_rows_truncated`, and `recipient_tc_truncations[]` (`RECIPIENT_TC_TRUNCATED`). Display* strings stay full. Differential QC treats a matching truncate event as **`known_gap`** (not `defect`); unexplained row loss without an event remains a defect. Multi-page TC = residual **D-0093-recipient-tc-multipage**.
+
 **Inline attachments:** signature logos can false-split attachment-parity comparisons. `--identity-ignore-inline-attachments` (opt-in, merge-increasing) uses MAPI flags (`PidTagAttachContentId` / rendered-in-body / hidden), not a size threshold.
 
 **Scope:** `--dedupe-scope global` (default) vs `per-source` (custodial / vertical — each source’s winners survive). Under `per-source`, the All Custodians aggregate correctly degenerates (each winner lists one source).

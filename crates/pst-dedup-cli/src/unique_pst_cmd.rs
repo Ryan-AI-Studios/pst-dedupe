@@ -1163,6 +1163,11 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
             failed_volume_index: None,
             attachment_fidelity_events_truncated: None,
             attachment_fidelity_events_total: None,
+            recipient_tc_truncated_messages: None,
+            recipient_rows_truncated: None,
+            recipient_tc_truncated_events_truncated: None,
+            recipient_tc_truncated_events_total: None,
+            recipient_tc_truncations: None,
             include_bcc_recipients: false,
         },
         verification: VerificationReport {
@@ -2141,6 +2146,12 @@ pub fn run_unique_pst_with_options(
     let mut attach_fidelity_events_truncated = false;
     // 0077 P1-2: final-write ATTACH_STREAM_CRC Info events → export_risk only.
     let mut attach_stream_crc_events: u64 = 0;
+    // 0093 Strategy B: recipient TC truncate counters + events for summary/QC.
+    let mut recipient_tc_truncated_messages: u64 = 0;
+    let mut recipient_rows_truncated: u64 = 0;
+    let mut recipient_tc_truncated_events_total: u64 = 0;
+    let mut recipient_tc_truncated_events_truncated = false;
+    let mut recipient_tc_truncations: Vec<pst_writer::RecipientTcTruncatedEvent> = Vec::new();
     let mut export_partial = false;
     let mut export_error: Option<String> = None;
     // Summary error.code for retryable classification (0082 P2-1).
@@ -2542,6 +2553,21 @@ pub fn run_unique_pst_with_options(
                 // Uncapped counter (not the first-N Vec) so export_risk sees CRC past the cap.
                 attach_stream_crc_events =
                     attach_stream_crc_events.saturating_add(report.attach_stream_crc_events);
+                recipient_tc_truncated_messages = recipient_tc_truncated_messages
+                    .saturating_add(report.recipient_tc_truncated_messages);
+                recipient_rows_truncated =
+                    recipient_rows_truncated.saturating_add(report.recipient_rows_truncated);
+                recipient_tc_truncated_events_total = recipient_tc_truncated_events_total
+                    .saturating_add(report.recipient_tc_truncated_events_total);
+                recipient_tc_truncated_events_truncated = recipient_tc_truncated_events_truncated
+                    || report.recipient_tc_truncated_events_truncated;
+                for ev in report.recipient_tc_truncated_events {
+                    if recipient_tc_truncations.len() < pst_writer::RECIPIENT_TC_EVENTS_CAP {
+                        recipient_tc_truncations.push(ev);
+                    } else {
+                        recipient_tc_truncated_events_truncated = true;
+                    }
+                }
 
                 cursor = start_cursor + written;
                 messages_written_prior =
@@ -2825,6 +2851,7 @@ pub fn run_unique_pst_with_options(
                             body_incomplete: false,
                             crc_suspect: false,
                             subject_non_ascii: !row.subject.is_ascii(),
+                            display_to: String::new(),
                             display_cc: String::new(),
                             display_bcc: String::new(),
                         })
@@ -2844,6 +2871,7 @@ pub fn run_unique_pst_with_options(
             source_differential: true,
             parents_only,
             include_bcc_recipients: args.include_bcc_recipients,
+            recipient_tc_truncations: &recipient_tc_truncations,
             probe_unexplained_property: None,
         });
         phase_timings.qc_ms = t_qc.elapsed().as_millis() as u64;
@@ -2961,6 +2989,16 @@ pub fn run_unique_pst_with_options(
             failed_volume_index,
             attachment_fidelity_events_truncated: Some(attach_fidelity_events_truncated),
             attachment_fidelity_events_total: Some(attach_fidelity_events_total),
+            recipient_tc_truncated_messages: Some(recipient_tc_truncated_messages),
+            recipient_rows_truncated: Some(recipient_rows_truncated),
+            recipient_tc_truncated_events_truncated: Some(recipient_tc_truncated_events_truncated),
+            recipient_tc_truncated_events_total: Some(recipient_tc_truncated_events_total),
+            recipient_tc_truncations: Some(
+                recipient_tc_truncations
+                    .iter()
+                    .map(crate::unique_export_report::RecipientTcTruncationRow::from_writer_event)
+                    .collect(),
+            ),
             include_bcc_recipients: args.include_bcc_recipients,
         };
         if let Some(finish) = attach_ledger_finish.as_ref() {

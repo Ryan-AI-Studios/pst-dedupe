@@ -96,6 +96,9 @@ pub struct QcSampleCandidate {
     /// Source CRC_SUSPECT integrity flag (body/digest explain only — never CC).
     pub crc_suspect: bool,
     pub subject_non_ascii: bool,
+    /// PidTagDisplayTo for sampling stratum (0093 longest-display_to).
+    #[serde(default)]
+    pub display_to: String,
     pub display_cc: String,
     pub display_bcc: String,
 }
@@ -203,6 +206,9 @@ pub struct QcRunInput<'a> {
     /// When true, BCC rows / `PidTagDisplayBcc` were written (`--include-bcc-recipients`).
     /// Recipient-table compare and display_bcc known_gap accounting honor this (0082).
     pub include_bcc_recipients: bool,
+    /// Writer-surfaced recipient TC truncations (0093 Strategy B).
+    /// Matching event + row-set mismatch → `KnownGap`; mismatch without event → Defect.
+    pub recipient_tc_truncations: &'a [pst_writer::RecipientTcTruncatedEvent],
     /// Test / diagnostic hook: when set, classify this property once and record the finding
     /// (exercises `unexplained_loss` → hard_fail wiring beyond unit-only `classify`).
     pub probe_unexplained_property: Option<&'a str>,
@@ -273,7 +279,7 @@ pub fn select_sample_indices(candidates: &[QcSampleCandidate], sample_max: usize
             break;
         }
     }
-    // Longest subject / sender
+    // Longest subject / sender / display_to (0093)
     push_prio(
         candidates
             .iter()
@@ -286,6 +292,13 @@ pub fn select_sample_indices(candidates: &[QcSampleCandidate], sample_max: usize
             .iter()
             .enumerate()
             .max_by_key(|(_, c)| c.sender.len())
+            .map(|(i, _)| i),
+    );
+    push_prio(
+        candidates
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, c)| c.display_to.len())
             .map(|(i, _)| i),
     );
     // Degraded / ledger
@@ -388,6 +401,7 @@ pub fn candidates_from_export_and_meta(
                 body_incomplete: false,
                 crc_suspect: false,
                 subject_non_ascii: !row.subject.is_ascii(),
+                display_to: String::new(),
                 display_cc: String::new(),
                 display_bcc: String::new(),
             });
@@ -463,9 +477,37 @@ pub fn candidate_from_write_msg(input: CandidateFromWriteMsg<'_>) -> QcSampleCan
         body_incomplete: write_msg.body_incomplete,
         crc_suspect: false, // filled by unique-pst from keep-set integrity when known
         subject_non_ascii: !subject.is_ascii(),
+        display_to: write_msg.display_to.clone().unwrap_or_default(),
         display_cc: write_msg.display_cc.clone().unwrap_or_default(),
         display_bcc: display_bcc.to_string(),
     }
+}
+
+/// Find a writer truncate event matching this QC candidate (0093).
+///
+/// Prefer `source_path` + `msg_nid`; fall back to normalized Message-ID.
+pub fn matching_recipient_tc_truncate<'a>(
+    events: &'a [pst_writer::RecipientTcTruncatedEvent],
+    cand: &QcSampleCandidate,
+) -> Option<&'a pst_writer::RecipientTcTruncatedEvent> {
+    let cand_path = normalize_path_key(&cand.source_path);
+    let by_locus = events
+        .iter()
+        .find(|e| e.msg_nid == cand.source_nid && normalize_path_key(&e.source_path) == cand_path);
+    if by_locus.is_some() {
+        return by_locus;
+    }
+    let mid = normalize_mid_key(&cand.message_id_norm);
+    if mid.is_empty() {
+        return None;
+    }
+    events
+        .iter()
+        .find(|e| !e.message_id.is_empty() && normalize_mid_key(&e.message_id) == mid)
+}
+
+fn normalize_path_key(s: &str) -> String {
+    s.trim().replace('/', "\\").to_ascii_lowercase()
 }
 
 /// Effective ledger-fail names: candidate (live export) ∪ clean-room digest flags.
@@ -817,6 +859,7 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
                             contract: &contract,
                             parents_only: input.parents_only,
                             include_bcc_recipients: input.include_bcc_recipients,
+                            recipient_tc_truncations: input.recipient_tc_truncations,
                         });
                         vol_msgs_compared = vol_msgs_compared.saturating_add(1);
                         messages_compared = messages_compared.saturating_add(1);
@@ -1420,6 +1463,7 @@ struct CompareOneArgs<'a> {
     contract: &'a FidelityContract,
     parents_only: bool,
     include_bcc_recipients: bool,
+    recipient_tc_truncations: &'a [pst_writer::RecipientTcTruncatedEvent],
 }
 
 fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
@@ -1433,6 +1477,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
         contract,
         parents_only,
         include_bcc_recipients,
+        recipient_tc_truncations,
     } = args;
     let mut findings = Vec::new();
     let mut attachments_compared = 0u64;
@@ -1666,20 +1711,72 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             } else {
                 "written To+Cc set"
             };
-            let (class, _) = contract.classify("recipient_table", false);
-            findings.push(QcFinding {
-                class,
-                property: "recipient_table".into(),
-                volume_index: cand.volume_index,
-                source_path: cand.source_path.clone(),
-                source_nid: cand.source_nid,
-                message_id_norm: cand.message_id_norm.clone(),
-                detail: format!(
-                    "recipient table mismatch ({set_label}) src={src_keys:?} out={out_keys:?} src_total={} out_total={}",
-                    src.recipients.len(),
-                    out.recipients.len()
-                ),
-            });
+            // 0093 Strategy B: writer-surfaced truncate → KnownGap (not Defect).
+            // Predicate is the event (actual kept), never `out.len()==48`.
+            // Honesty: out written-set size must equal event.kept_count; otherwise Defect
+            // (corruption / unrelated loss alongside a truncate record).
+            if let Some(ev) = matching_recipient_tc_truncate(recipient_tc_truncations, cand) {
+                let out_written = out_keys.len() as u32;
+                let src_written = src_keys.len() as u32;
+                // Bind event to both sides: lying source_count must not KnownGap.
+                if out_written == ev.kept_count && src_written == ev.source_count {
+                    findings.push(QcFinding {
+                        class: FindingClass::KnownGap,
+                        property: "recipient_table".into(),
+                        volume_index: cand.volume_index,
+                        source_path: cand.source_path.clone(),
+                        source_nid: cand.source_nid,
+                        message_id_norm: cand.message_id_norm.clone(),
+                        detail: format!(
+                            "recipient TC truncated by writer ({}) source={} kept={} \
+                             kept_to/cc/bcc={}/{}/{} dropped_to/cc/bcc={}/{}/{} \
+                             ({set_label}) src_total={} out_total={}",
+                            ev.reason(),
+                            ev.source_count,
+                            ev.kept_count,
+                            ev.kept_to,
+                            ev.kept_cc,
+                            ev.kept_bcc,
+                            ev.dropped_to,
+                            ev.dropped_cc,
+                            ev.dropped_bcc,
+                            src.recipients.len(),
+                            out.recipients.len()
+                        ),
+                    });
+                } else {
+                    findings.push(QcFinding {
+                        class: FindingClass::Defect,
+                        property: "recipient_table".into(),
+                        volume_index: cand.volume_index,
+                        source_path: cand.source_path.clone(),
+                        source_nid: cand.source_nid,
+                        message_id_norm: cand.message_id_norm.clone(),
+                        detail: format!(
+                            "recipient table mismatch with truncate event but \
+                             out_written={out_written} event.kept={} \
+                             src_written={src_written} event.source={} \
+                             ({set_label}) src={src_keys:?} out={out_keys:?}",
+                            ev.kept_count, ev.source_count
+                        ),
+                    });
+                }
+            } else {
+                let (class, _) = contract.classify("recipient_table", false);
+                findings.push(QcFinding {
+                    class,
+                    property: "recipient_table".into(),
+                    volume_index: cand.volume_index,
+                    source_path: cand.source_path.clone(),
+                    source_nid: cand.source_nid,
+                    message_id_norm: cand.message_id_norm.clone(),
+                    detail: format!(
+                        "recipient table mismatch ({set_label}) src={src_keys:?} out={out_keys:?} src_total={} out_total={}",
+                        src.recipients.len(),
+                        out.recipients.len()
+                    ),
+                });
+            }
         }
     }
 
@@ -2417,6 +2514,7 @@ pub fn run_qc_pst(
     // Infer include-bcc write policy from export CSV (bcc_suppressed never true when included).
     let include_bcc_recipients = load_include_bcc_for_qc(report_dir, &export_rows);
 
+    let truncations = load_recipient_tc_truncations_for_qc(report_dir);
     Ok(run_unique_pst_qc(QcRunInput {
         level,
         sample_max,
@@ -2430,8 +2528,90 @@ pub fn run_qc_pst(
         source_differential,
         parents_only,
         include_bcc_recipients,
+        recipient_tc_truncations: &truncations,
         probe_unexplained_property: None,
     }))
+}
+
+/// Load writer truncate events from `summary.json` for clean-room `qc-pst`.
+///
+/// **Fail-closed (0093 Codex):** malformed entries are skipped (not defaulted to
+/// zeros). Missing/invalid `reason`, missing required counts, or inconsistent
+/// kept/dropped totals never become KnownGap explanations.
+fn load_recipient_tc_truncations_for_qc(
+    report_dir: &Path,
+) -> Vec<pst_writer::RecipientTcTruncatedEvent> {
+    let summary_path = report_dir.join("summary.json");
+    let Ok(text) = fs::read_to_string(&summary_path) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(arr) = v
+        .pointer("/export/recipient_tc_truncations")
+        .and_then(|x| x.as_array())
+    else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(parse_recipient_tc_truncation_json)
+        .collect()
+}
+
+/// Parse one summary truncate row; `None` when malformed (fail-closed).
+fn parse_recipient_tc_truncation_json(
+    item: &serde_json::Value,
+) -> Option<pst_writer::RecipientTcTruncatedEvent> {
+    use crate::unique_export_report::RecipientTcTruncationRow;
+    let row: RecipientTcTruncationRow = serde_json::from_value(item.clone()).ok()?;
+    if row.reason != pst_writer::RecipientTcTruncatedEvent::REASON {
+        return None;
+    }
+    // Must be able to join to a QC candidate (locus and/or Message-ID).
+    if row.source_path.trim().is_empty() && row.message_id.trim().is_empty() && row.msg_nid == 0 {
+        return None;
+    }
+    if row.kept_count > row.source_count {
+        return None;
+    }
+    if row.source_count == 0 || row.kept_count == row.source_count {
+        // Truncate event with nothing dropped is not a valid explanation.
+        return None;
+    }
+    let kept_classes = row
+        .kept_to
+        .checked_add(row.kept_cc)?
+        .checked_add(row.kept_bcc)?;
+    if kept_classes > row.kept_count {
+        return None;
+    }
+    let dropped_classes = row
+        .dropped_to
+        .checked_add(row.dropped_cc)?
+        .checked_add(row.dropped_bcc)?;
+    // Dropped class rows cannot exceed rows not kept (Other types may make
+    // kept_classes + dropped_classes < source_count, but never over-drop).
+    let max_dropped = row.source_count.checked_sub(row.kept_count)?;
+    if dropped_classes > max_dropped {
+        return None;
+    }
+    let class_total = kept_classes.checked_add(dropped_classes)?;
+    if class_total > row.source_count {
+        return None;
+    }
+    // Per-class identity: kept_X + dropped_X must not exceed source_count.
+    for (k, d) in [
+        (row.kept_to, row.dropped_to),
+        (row.kept_cc, row.dropped_cc),
+        (row.kept_bcc, row.dropped_bcc),
+    ] {
+        let sum = k.checked_add(d)?;
+        if sum > row.source_count {
+            return None;
+        }
+    }
+    Some(row.to_writer_event())
 }
 
 /// Infer `--include-bcc-recipients` from export report for clean-room re-QC.
@@ -2528,6 +2708,9 @@ fn hydrate_candidates_from_digests(report_dir: &Path, candidates: &mut [QcSample
         }
         if c.body_html_len == 0 && m.body_html_len > 0 {
             c.body_html_len = m.body_html_len;
+        }
+        if c.display_to.is_empty() && !m.display_to.is_empty() {
+            c.display_to = m.display_to.clone();
         }
         if c.display_cc.is_empty() && !m.display_cc.is_empty() {
             c.display_cc = m.display_cc.clone();
@@ -2940,6 +3123,7 @@ mod tests {
             body_incomplete: false,
             crc_suspect: false,
             subject_non_ascii: !subj.is_ascii(),
+            display_to: String::new(),
             display_cc: String::new(),
             display_bcc: String::new(),
         }
@@ -3383,5 +3567,101 @@ mod tests {
             rows[0].source_path, "mailbox.pst",
             "must not invent source_id 0 resolve when column missing"
         );
+    }
+
+    #[test]
+    fn parse_truncate_json_rejects_missing_kept_and_bad_reason() {
+        let good = serde_json::json!({
+            "reason": "RECIPIENT_TC_TRUNCATED",
+            "message_subject": "s",
+            "source_path": r"C:\a.pst",
+            "folder_path": "Inbox",
+            "msg_nid": 42u64,
+            "message_id": "<m@x>",
+            "source_count": 10u32,
+            "kept_count": 3u32,
+            "kept_to": 3u32,
+            "kept_cc": 0u32,
+            "kept_bcc": 0u32,
+            "dropped_to": 7u32,
+            "dropped_cc": 0u32,
+            "dropped_bcc": 0u32
+        });
+        assert!(parse_recipient_tc_truncation_json(&good).is_some());
+
+        let mut missing_kept = good.clone();
+        missing_kept.as_object_mut().unwrap().remove("kept_count");
+        assert!(parse_recipient_tc_truncation_json(&missing_kept).is_none());
+
+        let mut bad_reason = good.clone();
+        bad_reason
+            .as_object_mut()
+            .unwrap()
+            .insert("reason".into(), serde_json::json!("NOPE"));
+        assert!(parse_recipient_tc_truncation_json(&bad_reason).is_none());
+
+        let zeros = serde_json::json!({
+            "reason": "RECIPIENT_TC_TRUNCATED",
+            "message_subject": "",
+            "source_path": "",
+            "folder_path": "",
+            "msg_nid": 0u64,
+            "message_id": "",
+            "source_count": 0u32,
+            "kept_count": 0u32,
+            "kept_to": 0u32,
+            "kept_cc": 0u32,
+            "kept_bcc": 0u32,
+            "dropped_to": 0u32,
+            "dropped_cc": 0u32,
+            "dropped_bcc": 0u32
+        });
+        assert!(parse_recipient_tc_truncation_json(&zeros).is_none());
+
+        let mut inconsistent = good.clone();
+        inconsistent
+            .as_object_mut()
+            .unwrap()
+            .insert("kept_count".into(), serde_json::json!(2u32));
+        assert!(parse_recipient_tc_truncation_json(&inconsistent).is_none());
+
+        // Over-drop: dropped_classes > source_count - kept_count (Codex r2).
+        let overdrop = serde_json::json!({
+            "reason": "RECIPIENT_TC_TRUNCATED",
+            "message_subject": "s",
+            "source_path": r"C:\a.pst",
+            "folder_path": "Inbox",
+            "msg_nid": 42u64,
+            "message_id": "<m@x>",
+            "source_count": 10u32,
+            "kept_count": 3u32,
+            "kept_to": 0u32,
+            "kept_cc": 0u32,
+            "kept_bcc": 0u32,
+            "dropped_to": 10u32,
+            "dropped_cc": 0u32,
+            "dropped_bcc": 0u32
+        });
+        assert!(parse_recipient_tc_truncation_json(&overdrop).is_none());
+        // Saturating overflow must not accept impossible dropped totals (Codex r3).
+        let overflow = serde_json::json!({
+            "reason": "RECIPIENT_TC_TRUNCATED",
+            "message_subject": "s",
+            "source_path": r"C:\a.pst",
+            "folder_path": "Inbox",
+            "msg_nid": 42u64,
+            "message_id": "<m@x>",
+            "source_count": u32::MAX,
+            "kept_count": 0u32,
+            "kept_to": 0u32,
+            "kept_cc": 0u32,
+            "kept_bcc": 0u32,
+            "dropped_to": u32::MAX,
+            "dropped_cc": u32::MAX,
+            "dropped_bcc": u32::MAX
+        });
+        assert!(parse_recipient_tc_truncation_json(&overflow).is_none());
+        // Valid with Other-type headroom: kept_classes < kept_count OK.
+        assert!(parse_recipient_tc_truncation_json(&good).is_some());
     }
 }

@@ -2058,3 +2058,250 @@ fn regression_large_body_still_round_trips() {
 
     cleanup(&path);
 }
+
+// ── 0093: cumulative helper-string diversion (multiple 1.5–2 KiB strings) ─────
+
+#[test]
+fn cumulative_helper_strings_divert_without_heap_overflow() {
+    let path = scratch_path("heap_multi_helpers");
+    cleanup(&path);
+
+    // Spec DoD-1: multiple helpers in the 1.5–2 KiB *UTF-16 encoded* band
+    // (under per-value 2048 so only cumulative escalate+reprobe saves the page).
+    // ASCII: N chars → 2N UTF-16 bytes; use ~950 chars → ~1900 bytes each.
+    let band = |seed: &str| -> String {
+        let mut s = String::new();
+        while s.len() < 950 {
+            s.push_str(seed);
+        }
+        s.truncate(950);
+        s
+    };
+    let subject = band("SUBJ-");
+    let sender = band("SENDER@ex.com;");
+    let display_to = band("To Person <to@ex.com>; ");
+    let display_cc = band("Cc Person <cc@ex.com>; ");
+    let message_class = band("IPM.Note.Custom.");
+
+    assert!(
+        (1500..2048).contains(&(subject.len() * 2)),
+        "subject UTF-16 bytes should be in 1.5–2KiB band, got {}",
+        subject.len() * 2
+    );
+
+    let mut msg = base_msg("<heap-multi@ex.com>", &subject);
+    msg.sender = Some(sender.clone());
+    msg.display_to = Some(display_to.clone());
+    msg.display_cc = Some(display_cc.clone());
+    msg.message_class = Some(message_class.clone());
+    msg.body_plain = Some("short body".into());
+
+    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default())
+        .expect("write must not heap-overflow with multiple ~2KiB helpers");
+    assert_eq!(report.messages_written, 1);
+
+    let nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let extract = pst.read_message_extract(nid).expect("extract");
+    assert_eq!(extract.subject.as_deref(), Some(subject.as_str()));
+    assert_eq!(extract.sender_email.as_deref(), Some(sender.as_str()));
+    assert_eq!(extract.display_to.as_deref(), Some(display_to.as_str()));
+    assert_eq!(extract.display_cc.as_deref(), Some(display_cc.as_str()));
+    assert_eq!(
+        extract.message_class.as_deref(),
+        Some(message_class.as_str()),
+        "message_class must round-trip via diversion helper"
+    );
+
+    cleanup(&path);
+}
+
+// ── 0093: Strategy B recipient TC — ≥136 rows, To-first, Display* full ───────
+
+#[test]
+fn recipient_tc_budget_truncates_with_event_and_keeps_display() {
+    let path = scratch_path("recip_tc_budget");
+    cleanup(&path);
+
+    let mut recipients = Vec::new();
+    // Intentionally interleave classes so order-before-cap is exercised.
+    for i in 0..40 {
+        recipients.push(WriteRecipient {
+            recipient_type: WriteRecipientType::Bcc,
+            display_name: Some(format!("Bcc{i}")),
+            address_type: Some("SMTP".into()),
+            email_address: Some(format!("bcc{i}@ex.com")),
+            smtp_address: Some(format!("bcc{i}@ex.com")),
+        });
+    }
+    for i in 0..50 {
+        recipients.push(WriteRecipient {
+            recipient_type: WriteRecipientType::Cc,
+            display_name: Some(format!("Cc{i}")),
+            address_type: Some("SMTP".into()),
+            email_address: Some(format!("cc{i}@ex.com")),
+            smtp_address: Some(format!("cc{i}@ex.com")),
+        });
+    }
+    for i in 0..50 {
+        recipients.push(WriteRecipient {
+            recipient_type: WriteRecipientType::To,
+            display_name: Some(format!("To{i}")),
+            address_type: Some("SMTP".into()),
+            email_address: Some(format!("to{i}@ex.com")),
+            smtp_address: Some(format!("to{i}@ex.com")),
+        });
+    }
+    assert_eq!(recipients.len(), 140);
+
+    let display_to = (0..50)
+        .map(|i| format!("To{i} <to{i}@ex.com>"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let display_cc = (0..50)
+        .map(|i| format!("Cc{i} <cc{i}@ex.com>"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let display_bcc = (0..40)
+        .map(|i| format!("Bcc{i} <bcc{i}@ex.com>"))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let mut msg = base_msg("<recip-budget@ex.com>", "Many recipients");
+    msg.source_path = Some(r"C:\src\budget.pst".into());
+    msg.source_msg_nid = Some(0x2044);
+    msg.display_to = Some(display_to.clone());
+    msg.display_cc = Some(display_cc.clone());
+    msg.display_bcc = Some(display_bcc.clone());
+    msg.recipients = recipients;
+
+    let opts = WritePstOpts {
+        include_bcc_recipients: true,
+        ..WritePstOpts::default()
+    };
+    let report = write_unicode_pst(&path, vec![msg], &[], &opts).expect("write completes");
+    assert_eq!(report.messages_written, 1);
+    assert!(
+        report.recipient_tc_truncated_messages >= 1,
+        "expected truncate counter: {:?}",
+        report.recipient_tc_truncated_messages
+    );
+    assert!(
+        report.recipient_rows_truncated > 0,
+        "expected rows truncated > 0"
+    );
+    assert!(
+        !report.recipient_tc_truncated_events.is_empty(),
+        "expected RECIPIENT_TC_TRUNCATED event"
+    );
+    let ev = &report.recipient_tc_truncated_events[0];
+    assert_eq!(ev.reason(), "RECIPIENT_TC_TRUNCATED");
+    assert_eq!(ev.source_count, 140);
+    assert!(ev.kept_count < ev.source_count);
+    assert!(ev.kept_count > 0);
+    // To-first: with 50 To rows and hint 48, all kept should be To when names are short.
+    assert_eq!(
+        ev.kept_to, ev.kept_count,
+        "To-first: only To kept when To>=hint"
+    );
+    assert_eq!(ev.kept_cc, 0);
+    assert_eq!(ev.kept_bcc, 0);
+
+    let nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let recips = pst.list_recipients(nid).expect("list");
+    assert_eq!(recips.len() as u32, ev.kept_count);
+    assert!(
+        recips
+            .iter()
+            .all(|r| r.recipient_type == pst_reader::RecipientType::To),
+        "kept rows must be To-first: {recips:?}"
+    );
+
+    let extract = pst.read_message_extract(nid).expect("extract");
+    assert_eq!(extract.display_to.as_deref(), Some(display_to.as_str()));
+    assert_eq!(extract.display_cc.as_deref(), Some(display_cc.as_str()));
+    assert_eq!(extract.display_bcc.as_deref(), Some(display_bcc.as_str()));
+
+    cleanup(&path);
+}
+
+/// 0093 DoD-2 proof: long per-row strings force budget keep **below** ROW_HINT 48.
+#[test]
+fn recipient_tc_budget_keep_below_hint_with_long_names() {
+    let path = scratch_path("recip_tc_budget_long");
+    cleanup(&path);
+
+    // ~7–8 HIDs/row; long UTF-16 display/email/smtp force catch-and-retry under 48.
+    let long = "N".repeat(180);
+    let mut recipients = Vec::new();
+    for i in 0..60 {
+        let email = format!("{long}{i}@example.com");
+        recipients.push(WriteRecipient {
+            recipient_type: if i < 30 {
+                WriteRecipientType::To
+            } else {
+                WriteRecipientType::Cc
+            },
+            display_name: Some(format!("{long}-display-{i}")),
+            address_type: Some("SMTP".into()),
+            email_address: Some(email.clone()),
+            smtp_address: Some(email),
+        });
+    }
+    let display_to = (0..30)
+        .map(|i| format!("{long}-display-{i} <{long}{i}@example.com>"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let display_cc = (30..60)
+        .map(|i| format!("{long}-display-{i} <{long}{i}@example.com>"))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let mut msg = base_msg("<recip-long@ex.com>", "Long recip names");
+    msg.source_path = Some(r"C:\src\long.pst".into());
+    msg.source_msg_nid = Some(0x2055);
+    msg.display_to = Some(display_to.clone());
+    msg.display_cc = Some(display_cc.clone());
+    msg.recipients = recipients;
+
+    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default())
+        .expect("write must complete under long-name budget pressure");
+    assert!(
+        report.recipient_tc_truncated_messages >= 1,
+        "expected truncate: {:?}",
+        report.recipient_tc_truncated_messages
+    );
+    let ev = report
+        .recipient_tc_truncated_events
+        .first()
+        .expect("truncate event");
+    assert_eq!(ev.source_count, 60);
+    assert!(
+        ev.kept_count < 48,
+        "long names must force kept < ROW_HINT 48; kept={}",
+        ev.kept_count
+    );
+    assert!(ev.kept_count > 0);
+    // To-first under budget: all kept should be To while To count (30) >= kept.
+    assert_eq!(ev.kept_to, ev.kept_count);
+    assert_eq!(ev.kept_cc, 0);
+
+    let nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let recips = pst.list_recipients(nid).expect("list");
+    assert_eq!(recips.len() as u32, ev.kept_count);
+    let extract = pst.read_message_extract(nid).expect("extract");
+    assert_eq!(
+        extract.display_to.as_deref(),
+        Some(display_to.as_str()),
+        "DisplayTo must stay full (not clipped)"
+    );
+    assert_eq!(
+        extract.display_cc.as_deref(),
+        Some(display_cc.as_str()),
+        "DisplayCc must stay full (not clipped)"
+    );
+
+    cleanup(&path);
+}
