@@ -238,6 +238,8 @@ pub struct ScanOutcome {
     pub candidates: Vec<RecoverableScanItem>,
     /// True when dedup CSV was already streamed during the scan.
     pub csv_streamed: bool,
+    /// Pass-1 Real attach digests for Pass-2 probe skip (0091; empty when unused).
+    pub digest_probe_cache: crate::attach_probe::ProbeResultCache,
 }
 
 /// Outcome of rebuilding dedup relationships from a surviving candidate set.
@@ -500,6 +502,8 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     let mut index = DedupIndex::with_capacity_and_context(100_000, grouping.clone());
     // 0086: run-level attach-content digest budgets (only used when identity includes attach).
     let mut attach_hash_state = crate::attach_content_hash::AttachContentHashState::default();
+    // 0091: seed Full/ok probe cache from Real digests for Pass-2 skip (unique-pst + scan).
+    let mut digest_probe_cache = crate::attach_probe::ProbeResultCache::new();
     let mut all_rows: Vec<ReportRow> = Vec::new();
     let mut candidates: Vec<RecoverableScanItem> = Vec::new();
     let mut scan_order: u64 = 0;
@@ -867,6 +871,25 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                                             } => {
                                                 info.content_sha256 = Some(digest);
                                                 index.record_strong_hash_attach_digested(bytes);
+                                                // 0091: Real by-value full-stream only (not embedded /
+                                                // unsupported methods — probe method gate must win).
+                                                if crate::attach_probe::ProbeResultCache::digest_seed_eligible(
+                                                    a.attach_method,
+                                                ) {
+                                                    let (mtime, src_sz) =
+                                                        crate::attach_probe::path_mtime_and_size(
+                                                            &path_str,
+                                                        );
+                                                    digest_probe_cache.seed_from_digest_stream(
+                                                        &path_str,
+                                                        msg_nid.0,
+                                                        a.nid.0,
+                                                        a.size,
+                                                        mtime,
+                                                        src_sz,
+                                                        bytes,
+                                                    );
+                                                }
                                             }
                                             crate::attach_content_hash::AttachDigestResult::Embedded {
                                                 digest,
@@ -1394,6 +1417,8 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     let mut attach_truncated = false;
     let mut attach_cancelled = false;
     let mut peer_probe_capped_groups = 0u64;
+    let mut attach_probe_bytes = 0u64;
+    let mut attach_digest_stream_skips = 0u64;
     let mut unique_count = index.unique_count;
     let mut duplicate_count = index.duplicate_count;
     let mut tier1_hits = index.tier1_hits;
@@ -1443,6 +1468,9 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             }
         }));
 
+        // Consume digest seeds into Pass 2; do not replace with probe results
+        // (unique-pst reads digest_probe_cache only when scan skipped probe).
+        let seed = std::mem::take(&mut digest_probe_cache);
         let (probe_summary, _probe_cache) = probe_scan_items(
             &mut candidates,
             budgets,
@@ -1450,6 +1478,7 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             opts.mode,
             opts.cancel.clone(),
             progress_cb,
+            Some(seed),
         );
         probe_completed = true;
         attach_attempted = probe_summary.attempted;
@@ -1457,6 +1486,8 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         attach_truncated = probe_summary.truncated;
         attach_cancelled = probe_summary.cancelled || scan_cancel_requested(&opts.cancel);
         peer_probe_capped_groups = probe_summary.peer_probe_capped_groups;
+        attach_probe_bytes = probe_summary.bytes;
+        attach_digest_stream_skips = probe_summary.digest_stream_skips;
 
         if attach_cancelled {
             // Cancel during probe is not attach corruption; leave tallies as pre-cancel.
@@ -1714,6 +1745,8 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         attach_probe_truncated: attach_truncated,
         peer_probe_capped_groups,
         attach_probe_cancelled: attach_cancelled,
+        attach_probe_bytes,
+        attach_digest_stream_skips,
     });
 
     let page_crc_total: u64 = file_stats.iter().map(|f| f.page_crc_mismatches).sum();
@@ -1771,6 +1804,7 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         rows: all_rows,
         candidates,
         csv_streamed,
+        digest_probe_cache,
     })
 }
 

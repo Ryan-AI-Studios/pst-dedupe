@@ -7,6 +7,13 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0091 — Digest + probe unify)
+
+- When `--strong-content-hash body-recip-attach` and `--deep-attach-preflight` both run, Pass-1 **Real by-value** attach digests seed a Full/ok probe cache; Pass-2 skips second stream I/O while still charging probe tallies once (`digest_stream_skips`).
+- Method gate runs before cache hits; zero-ms probe timeout honored on seeds; `AttachProbePreflight` exposes `bytes_probed` + `digest_stream_skips`.
+- Single-feature paths unchanged; Embedded/Unread/DepthLimit/unsupported-method digests do not seed.
+- Closes **D-0086-digest-probe-unify**.
+
 ### Added (0090 — Embedded message content hash)
 
 - Under `--strong-content-hash body-recip-attach`, method-5 / `message/rfc822` embeds use **`embedded-msg-hash/v1`** (header + body + recipients + child attaches in table index order) instead of unread-sentinel-only or raw-blob-only.

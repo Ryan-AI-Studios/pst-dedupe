@@ -406,6 +406,12 @@ pub struct AttachProbePreflight {
     /// Additive JSON; absent in older payloads deserializes as `false`.
     #[serde(default)]
     pub cancelled: bool,
+    /// Logical probe bytes charged (may equal digest bytes on 0091 unify path).
+    #[serde(default)]
+    pub bytes_probed: u64,
+    /// Pass-2 attaches that skipped stream I/O because Pass-1 digest already proved Full (0091).
+    #[serde(default)]
+    pub digest_stream_skips: u64,
 }
 
 impl AttachProbePreflight {
@@ -422,10 +428,13 @@ impl AttachProbePreflight {
             coverage_note: "deep attach preflight disabled".into(),
             peer_probe_capped_groups: 0,
             cancelled: false,
+            bytes_probed: 0,
+            digest_stream_skips: 0,
         }
     }
 
     /// Build from probe tallies.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_tallies(
         level: &str,
         attempted: u64,
@@ -434,6 +443,8 @@ impl AttachProbePreflight {
         max_attach_fail_rate: f64,
         peer_probe_capped_groups: u64,
         cancelled: bool,
+        bytes_probed: u64,
+        digest_stream_skips: u64,
     ) -> Self {
         let fail_rate = if attempted == 0 {
             0.0
@@ -467,6 +478,8 @@ impl AttachProbePreflight {
             coverage_note,
             peer_probe_capped_groups,
             cancelled,
+            bytes_probed,
+            digest_stream_skips,
         }
     }
 }
@@ -550,6 +563,10 @@ pub struct PreflightInputs {
     pub peer_probe_capped_groups: u64,
     /// Probe pass aborted by cooperative cancel (incomplete coverage).
     pub attach_probe_cancelled: bool,
+    /// Logical probe bytes charged (0091 may equal digest bytes without second I/O).
+    pub attach_probe_bytes: u64,
+    /// Digest-seeded stream skips (0091).
+    pub attach_digest_stream_skips: u64,
 }
 
 impl PreflightInputs {
@@ -578,6 +595,8 @@ impl PreflightInputs {
             attach_probe_truncated: false,
             peer_probe_capped_groups: 0,
             attach_probe_cancelled: false,
+            attach_probe_bytes: 0,
+            attach_digest_stream_skips: 0,
         }
     }
 }
@@ -608,6 +627,8 @@ pub fn compute_preflight(input: &PreflightInputs) -> PreflightReport {
             input.thresholds.max_attach_fail_rate,
             input.peer_probe_capped_groups,
             input.attach_probe_cancelled,
+            input.attach_probe_bytes,
+            input.attach_digest_stream_skips,
         )
     } else {
         AttachProbePreflight::disabled()
@@ -1154,7 +1175,7 @@ mod tests {
 
     #[test]
     fn attach_probe_cancelled_sets_coverage_incomplete() {
-        let report = AttachProbePreflight::from_tallies("head", 10, 1, false, 0.05, 0, true);
+        let report = AttachProbePreflight::from_tallies("head", 10, 1, false, 0.05, 0, true, 0, 0);
         assert!(report.cancelled);
         assert!(report.truncated, "cancel implies incomplete coverage");
         assert!(

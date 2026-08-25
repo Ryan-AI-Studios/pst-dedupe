@@ -103,8 +103,8 @@
 | 45 | P2 opt. | **0072** DeskUniquePstWizard | ✅ Completed | (H) Optional GUI wizard over run_unique_pst |
 | 46 | P2 M | **0088** SovereignCloudHosts | ✅ Completed | Sovereign SP/OneDrive + office365.us SafeLinks (closes D-0085; residual D-0088-usgovcloud-microsoft-tld) |
 | 47 | P1 M | **0089** UniqueEmlAttachLedger | ✅ Completed | unique-eml attach ledger via EmlAttachEvent (closes D-0073-eml) |
-| 48 | P2 M | **0090** EmbeddedMsgContentHash | ⬜ Ready | embedded-msg-hash/v1 subnode+rfc822 (D-0086-embedded-email-hash) |
-| 49 | P2 M | **0091** DigestProbeUnify | ⬜ Ready | Record-don’t-tee digest→probe skip (D-0086-digest-probe-unify) |
+| 48 | P2 M | **0090** EmbeddedMsgContentHash | ✅ Completed | embedded-msg-hash/v1 subnode+rfc822 (D-0086-embedded-email-hash) |
+| 49 | P2 M | **0091** DigestProbeUnify | ✅ Completed | Record-don’t-tee digest→probe skip (D-0086-digest-probe-unify) |
 | 50 | P2 M | **0092** CloudNamedPropWrite | ⬜ Ready | Allowlisted NPMAP write (D-0084-cloud-named-prop-write) |
 
 ## Series K spine (clean unique export)
@@ -165,4 +165,4 @@
 | 5 | **0086** AttachContentIdentity | **Completed** — `body-recip-attach` + Choice B unread |
 | 6 | **0087** DeterministicStoreRecordKey | **Completed** — deterministic PidTagRecordKey / CoC volume digests; closes D-0079-deterministic-key |
 
-**Next after 0087–0089:** **0090** EmbeddedMsgContentHash → **0091** DigestProbeUnify → **0092** CloudNamedPropWrite (D-0086-*; D-0084-cloud-named-prop-write). D-0073-eml and D-0085-sovereign-cloud-hosts closed in **0089** / **0088**.
+**Next after 0091:** **0092** CloudNamedPropWrite (D-0084-cloud-named-prop-write). **0090**/**0091** closed D-0086-embedded-email-hash / D-0086-digest-probe-unify. D-0073-eml and D-0085-sovereign-cloud-hosts closed in **0089** / **0088**.

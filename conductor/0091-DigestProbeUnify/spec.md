@@ -7,7 +7,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** `C:\dev\Dedupe-plan.md` → Series M continuation
 - **Cross-repo contract:** n/a
-- **Status:** Ready — not started (review-folded 2026-08-24)
+- **Status:** Completed — internal r1 (2026-08-25); Codex `review.md` pending orchestrator
 - **Depends on:** 0074 · 0086 · **0090 Completed preferred** (digest API stable)
 - **Spec authored:** 2026-08-24
 - **Series:** M (Unique export fidelity residuals — continuation)
@@ -49,9 +49,9 @@ A `dedup-engine`-private tee **cannot** unify these without moving code. Unify i
 
 1. **Shape: record, don't tee (default).** Persist digest-pass per-attach outcomes (read-ok / bytes / CRC-suspect / digest). Probe pass **consults and skips** already-full-streamed attaches (0074 `stream_available` cache precedent). Literal single-walk tee is **declined as default** because it would probe attaches the two-pass baseline never probes and cannot honor `deep_attach_max_probe_time_ms` the same way.
 2. **Win condition:** **zero extra reads** when the digest already proved L3 readability — not “one tee instead of two.”
-3. **Equivalence:** Dual-enabled unified path must match two-pass results for keep-set winners, probe reason codes, preflight recommendation, and exit (within documented budget accounting).
+3. **Equivalence:** Dual-enabled unified path must match two-pass results for keep-set winners, probe reason codes, preflight recommendation, and exit (within documented budget accounting). **Timeout exception (DoD-1):** entry-expired / `max_probe_time_ms == 0` is honored on seeded hits; positive mid-stream wall-clock during a prior digest is not re-simulated (digest already proved Full readability).
 4. **Single-feature paths unchanged.**
-5. **Budget precedence:** apply **stricter-of** digest vs probe byte/count caps; preserve the *loser* truncation semantics (document in Phase 0 table). Telemetry: `strong_hash_attach_bytes` and `attach_probe.bytes_probed` may both reflect the **same** physical bytes **without double-charging wall-clock / physical I/O counters**.
+5. **Budget precedence:** apply **stricter-of** digest vs probe byte/count caps; preserve the *loser* truncation semantics (document in Phase 0 table). Telemetry: `strong_hash_attach_bytes` and `attach_probe.bytes_probed` / `digest_stream_skips` may both reflect the **same** physical bytes **without double-charging wall-clock / physical I/O counters**.
 6. **No `--jobs`.** No `PstFile` BufReader redesign (`D-0079-reader-buffer`).
 7. Synthetic fixtures; optional operator multi-GB note only.
 8. Soft-dep: **after 0090** so embedded digest results are the API being cached.
@@ -111,11 +111,11 @@ A `dedup-engine`-private tee **cannot** unify these without moving code. Unify i
 
 ## 7. Definition of Done
 
-- [ ] **DoD-1 — Unify:** Dual-enabled path does **not** re-stream attaches already fully digested (zero extra reads on that set). Document any unavoidable exception with a test.
-- [ ] **DoD-2 — Equivalence:** Fixture `keep_set.winners`, preflight recommendation, exit_code, and attach-probe tallies match two-pass baseline.
-- [ ] **DoD-3 — Isolation:** Deep-preflight-only and body-recip-attach-only unchanged.
-- [ ] **DoD-4 — Deferred:** `D-0086-digest-probe-unify` closed.
-- [ ] **DoD-5 — Recorded:** `review.md`; conductor **Completed**; ledger TX committed.
+- [x] **DoD-1 — Unify:** Dual-enabled path does **not** re-stream attaches already fully digested (zero extra reads on that set). Document any unavoidable exception with a test.
+- [x] **DoD-2 — Equivalence:** Fixture `keep_set.winners`, preflight recommendation, exit_code, and attach-probe tallies match two-pass baseline.
+- [x] **DoD-3 — Isolation:** Deep-preflight-only and body-recip-attach-only unchanged.
+- [x] **DoD-4 — Deferred:** `D-0086-digest-probe-unify` closed.
+- [ ] **DoD-5 — Recorded:** `review.md`; conductor **Completed**; ledger TX committed. *(conductor/plan/CHANGELOG + review.internal.r1 done; Codex review.md + ledger commit pending)*
 
 ## 8. Verification commands
 
