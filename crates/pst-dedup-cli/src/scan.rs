@@ -832,18 +832,34 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                                         let mut info =
                                             AttachmentInfo::new(a.filename.clone(), a.size);
                                         info.is_inline = a.is_inline;
-                                        let result =
-                                            crate::attach_content_hash::hash_attachment_stream(
-                                                &mut pst,
-                                                msg_nid,
-                                                a.nid,
-                                                &a.filename,
-                                                a.size,
-                                                a.is_cloud_link,
-                                                &budgets,
-                                                &mut attach_hash_state,
-                                                &opts.cancel,
-                                            );
+                                        let parent = match pst.message_node_from_nbt(msg_nid) {
+                                            Ok(p) => p,
+                                            Err(_) => {
+                                                let sentinel = dedup_engine::attach_unread_sentinel(
+                                                    &a.filename,
+                                                    a.size,
+                                                );
+                                                info.content_sha256 = Some(sentinel);
+                                                index.record_strong_hash_attach_unread();
+                                                out.push(info);
+                                                continue;
+                                            }
+                                        };
+                                        let result = crate::attach_content_hash::hash_attachment_for_identity(
+                                            &mut pst,
+                                            &parent,
+                                            a.nid,
+                                            &a.filename,
+                                            a.size,
+                                            a.attach_method,
+                                            a.mime_tag.as_deref(),
+                                            a.is_cloud_link,
+                                            0,
+                                            grouping.ignore_inline_attachments,
+                                            &budgets,
+                                            &mut attach_hash_state,
+                                            &opts.cancel,
+                                        );
                                         match result {
                                             crate::attach_content_hash::AttachDigestResult::Real {
                                                 digest,
@@ -852,11 +868,25 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
                                                 info.content_sha256 = Some(digest);
                                                 index.record_strong_hash_attach_digested(bytes);
                                             }
+                                            crate::attach_content_hash::AttachDigestResult::Embedded {
+                                                digest,
+                                                ..
+                                            } => {
+                                                // Embedded identity: QC uses embedded_* counters
+                                                // flushed from attach_hash_state — not stream digests.
+                                                info.content_sha256 = Some(digest);
+                                            }
                                             crate::attach_content_hash::AttachDigestResult::Unread {
                                                 sentinel,
                                             } => {
                                                 info.content_sha256 = Some(sentinel);
                                                 index.record_strong_hash_attach_unread();
+                                            }
+                                            crate::attach_content_hash::AttachDigestResult::DepthLimit {
+                                                sentinel,
+                                            } => {
+                                                info.content_sha256 = Some(sentinel);
+                                                // Depth-limit honesty: embedded_depth_limit flush only.
                                             }
                                         }
                                         out.push(info);
@@ -1346,6 +1376,16 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     if attach_hash_state.truncated {
         index.record_strong_hash_attach_truncated();
     }
+    // 0090: embedded-msg identity honesty counters.
+    for _ in 0..attach_hash_state.embedded_parsed {
+        index.record_strong_hash_embedded_parsed();
+    }
+    for _ in 0..attach_hash_state.embedded_depth_limit {
+        index.record_strong_hash_embedded_depth_limit();
+    }
+    for _ in 0..attach_hash_state.embedded_unparsed {
+        index.record_strong_hash_embedded_unparsed();
+    }
 
     // ── Deep attach preflight (0074, opt-in) ────────────────────────────────
     // Skipped when parents_only equivalent: include_attachments == false.
@@ -1509,11 +1549,17 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             let pre_attach_digested = grouping_stats.strong_hash_attach_digested;
             let pre_attach_bytes = grouping_stats.strong_hash_attach_bytes;
             let pre_attach_truncated = grouping_stats.strong_hash_attach_truncated;
+            let pre_emb_parsed = grouping_stats.strong_hash_embedded_parsed;
+            let pre_emb_depth = grouping_stats.strong_hash_embedded_depth_limit;
+            let pre_emb_unparsed = grouping_stats.strong_hash_embedded_unparsed;
             grouping_stats = rebuild.grouping_stats;
             grouping_stats.strong_hash_attach_unread = pre_attach_unread;
             grouping_stats.strong_hash_attach_digested = pre_attach_digested;
             grouping_stats.strong_hash_attach_bytes = pre_attach_bytes;
             grouping_stats.strong_hash_attach_truncated = pre_attach_truncated;
+            grouping_stats.strong_hash_embedded_parsed = pre_emb_parsed;
+            grouping_stats.strong_hash_embedded_depth_limit = pre_emb_depth;
+            grouping_stats.strong_hash_embedded_unparsed = pre_emb_unparsed;
             // Per-file messages already adjusted by apply_strict_probe_skips; rebuild dups.
             recompute_per_file_dup_from_results(&mut file_stats, &rebuild.results);
             // Stash for post-probe row.result rewrite (strict only).

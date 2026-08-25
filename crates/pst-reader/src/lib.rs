@@ -67,6 +67,9 @@ pub use error::{PstError, Result};
 pub use integrity_telemetry::{IntegritySnapshot, MessageScope};
 // `with_crc_scope` / `message_scope_enter` live on the `integrity_telemetry` module.
 pub use messaging::attachment::{AttachmentDataReader, AttachmentInfo, AttachmentMeta};
+pub use messaging::embedded::{
+    EmbeddedChildAttach, EmbeddedIdentityFields, MessageNodeRef, MAX_EMBEDDED_IDENTITY_DEPTH,
+};
 pub use messaging::folder::FolderInfo;
 pub use messaging::message::{
     filetime_to_rfc3339, filetime_to_unix, is_calendar_message_class, ExtractedMessage,
@@ -79,7 +82,10 @@ pub use messaging::named_prop::{
 pub use messaging::recipient::{
     looks_like_x500_dn, message_flags_is_unsent, Recipient, RecipientType,
 };
-pub use ndb::nid::{MSGFLAG_UNSENT, PID_TAG_MESSAGE_FLAGS, PID_TAG_RECIPIENT_TYPE};
+pub use ndb::nid::{
+    ATTACH_EMBEDDED_MSG, MSGFLAG_UNSENT, PID_TAG_MESSAGE_FLAGS, PID_TAG_RECIPIENT_TYPE,
+};
+pub use ndb::BlockId;
 pub use ndb::NodeId;
 
 use std::fs::File;

@@ -160,6 +160,54 @@ pub fn read_block_data<R: Read + Seek>(
     }
 }
 
+/// Peek declared payload size for a BID without assembling child data blocks.
+///
+/// - External data block: returns BBT `cb` (Permute/Cyclic decrypt is length-preserving).
+/// - XBLOCK / XXBLOCK: reads only the root internal block and returns header `lcbTotal`
+///   without walking `rgBIDs` or materializing leaves.
+///
+/// Used by budgeted PC loads (0090 method-5) so oversize body subnodes can be refused
+/// before `read_block_data` copies payload into `PropContext.subnodes`.
+pub fn block_payload_len_hint<R: Read + Seek>(
+    reader: &mut R,
+    bbt: &BbtIndex,
+    bid: BlockId,
+    _crypt: CryptMethod,
+) -> Result<u64> {
+    if bid.is_null() {
+        return Ok(0);
+    }
+
+    let raw = read_raw_block(reader, bbt, bid)?;
+    let bbt_entry = bbt.get(bid).ok_or(PstError::BlockNotFound(bid.0))?;
+    let payload = &raw[..bbt_entry.cb as usize];
+
+    if !bid.is_internal() {
+        return Ok(u64::from(bbt_entry.cb));
+    }
+
+    // XBLOCK/XXBLOCK header: btype(1)+cLevel(1)+cEntries(2)+lcbTotal(4)
+    if payload.len() < 8 {
+        return Err(PstError::DataTruncated {
+            needed: 8,
+            available: payload.len(),
+        });
+    }
+
+    let btype = payload[0];
+    let clevel = payload[1];
+    match (btype, clevel) {
+        (0x01, 0x01) | (0x01, 0x02) => {
+            let lcb_total = LittleEndian::read_u32(&payload[4..8]);
+            Ok(u64::from(lcb_total))
+        }
+        _ => Err(PstError::InvalidBlockType {
+            expected: 0x01,
+            actual: btype,
+        }),
+    }
+}
+
 /// Reject attacker-controlled `lcbTotal` before any preallocation.
 pub(crate) fn check_xblock_assemble_limit(lcb_total: usize) -> Result<()> {
     if lcb_total > MAX_XBLOCK_ASSEMBLE {
@@ -606,6 +654,87 @@ mod tests {
         let err = read_xblock_data(&mut cursor, &bbt, &data, CryptMethod::None)
             .expect_err("must reject huge lcbTotal");
         assert!(matches!(err, PstError::ResourceLimit(_)));
+    }
+
+    #[test]
+    fn block_payload_len_hint_returns_xblock_lcb_total_without_leaves() {
+        use super::super::btree::{BbtEntry, BbtIndex};
+        use crate::header::Bref;
+
+        // Internal XBLOCK BID; header declares lcbTotal but lists a missing child BID.
+        // Hint must return lcbTotal without assembling (child absent from BBT).
+        const XBLOCK_BID: u64 = 0x22; // bit 1 set → internal
+        const MISSING_CHILD_BID: u64 = 0x9990;
+        const LCB_TOTAL: u32 = 1_500_000;
+
+        assert!(BlockId(XBLOCK_BID).is_internal());
+
+        let mut xblock = vec![0x01u8, 0x01]; // btype, cLevel=1 (XBLOCK)
+        xblock.extend_from_slice(&1u16.to_le_bytes()); // cEntries
+        xblock.extend_from_slice(&LCB_TOTAL.to_le_bytes());
+        xblock.extend_from_slice(&MISSING_CHILD_BID.to_le_bytes());
+
+        let mut file = Vec::new();
+        let offset = file.len() as u64;
+        file.extend_from_slice(&xblock);
+        let padded = (xblock.len() + 63) & !63;
+        file.resize(file.len() + (padded - xblock.len()), 0);
+        file.extend_from_slice(&[0u8; 16]);
+
+        let mut bbt_entries = HashMap::new();
+        bbt_entries.insert(
+            XBLOCK_BID,
+            BbtEntry {
+                bref: Bref {
+                    bid: XBLOCK_BID,
+                    ib: offset,
+                },
+                cb: xblock.len() as u16,
+                c_ref: 1,
+            },
+        );
+        // MISSING_CHILD_BID deliberately absent — read_block_data would fail.
+        let bbt = BbtIndex::from_entries_for_test(bbt_entries);
+        let mut cursor = Cursor::new(file);
+
+        let hint =
+            block_payload_len_hint(&mut cursor, &bbt, BlockId(XBLOCK_BID), CryptMethod::None)
+                .expect("hint must not need leaf data");
+        assert_eq!(hint, u64::from(LCB_TOTAL));
+    }
+
+    #[test]
+    fn block_payload_len_hint_returns_external_cb() {
+        use super::super::btree::{BbtEntry, BbtIndex};
+        use crate::header::Bref;
+
+        const DATA_BID: u64 = 0x10;
+        let payload = b"ABCDEFGH".to_vec();
+
+        let mut file = Vec::new();
+        let offset = file.len() as u64;
+        file.extend_from_slice(&payload);
+        let padded = (payload.len() + 63) & !63;
+        file.resize(file.len() + (padded - payload.len()), 0);
+        file.extend_from_slice(&[0u8; 16]);
+
+        let mut bbt_entries = HashMap::new();
+        bbt_entries.insert(
+            DATA_BID,
+            BbtEntry {
+                bref: Bref {
+                    bid: DATA_BID,
+                    ib: offset,
+                },
+                cb: payload.len() as u16,
+                c_ref: 1,
+            },
+        );
+        let bbt = BbtIndex::from_entries_for_test(bbt_entries);
+        let mut cursor = Cursor::new(file);
+        let hint = block_payload_len_hint(&mut cursor, &bbt, BlockId(DATA_BID), CryptMethod::None)
+            .expect("external hint");
+        assert_eq!(hint, payload.len() as u64);
     }
 
     #[test]

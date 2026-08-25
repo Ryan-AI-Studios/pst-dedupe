@@ -862,7 +862,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0086-embedded-email-hash | P3 | Recursive Relativity-style four-component hash for `ATTACH_EMBEDDED_MSG` | P0 (0086) hashes raw attach data stream as standard SHA-256 blob. **Promoted:** track **0090-EmbeddedMsgContentHash** (Ready) | **0090** Ready |
+| D-0086-embedded-email-hash | P3 | Recursive Relativity-style four-component hash for `ATTACH_EMBEDDED_MSG` | **Closed in 0090:** `embedded-msg-hash/v1` for method-5 subnode + rfc822 (header+body+recip+child attaches; depth/byte/count budgets; **not Relativity parity**). Full nested **export** remains **D-0067-embedded-depth** | **closed / 0090** |
 | D-0086-digest-probe-unify | P3 | Unify 0074 Full (L3) probe + identity digest into one streaming pass | 0086 keeps identity digest separate from integrity probe; double I/O residual when both enabled. **Promoted:** track **0091-DigestProbeUnify** (Ready) | **0091** Ready |
 
 ## From track 0062-ReleaseHardeningRc

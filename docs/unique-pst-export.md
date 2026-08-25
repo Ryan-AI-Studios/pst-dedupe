@@ -448,7 +448,21 @@ Identity always **full-streams** under these caps; 0074 deep-attach head probe i
 
 **Mode A interaction:** attach-content identity can place a complete physical copy and an incomplete/cloud copy into **different keep-set groups**. Mode A only promotes **within** a group — it is not a substitute for attach-content identity when attach-byte fidelity matters for grouping.
 
-**Embedded message attaches:** P0 hashes the **raw attach data stream** as a binary blob. Recursive Relativity-style four-component hash of embedded email is residual **D-0086-embedded-email-hash**.
+**Embedded message attaches (`embedded-msg-hash/v1`, 0090):** under `body-recip-attach`, method-5 (`ATTACH_EMBEDDED_MSG`) and by-value `message/rfc822` attaches contribute a **documented pst-dedup nested identity digest** — not unread-sentinel-only (method 5) and not raw-blob-only (rfc822). Preimage:
+
+```text
+SHA-256( b"pst-dedup/embedded-msg-hash/v1\0"
+  || depth_u8
+  || header_hash_32      // norm subject | submit_time | sender
+  || body_hash_32        // hash_full_body when body present (incl. empty); missing → embedded-body-missing/v1
+  || recipients_hash_32  // SHA-256 of Tier-2.5 recipient preimage
+  || attachments_hash_32 // child digests in **attach table index order**, each + ';'
+)
+```
+
+Missing nested body uses the domain-separated `embedded-body-missing/v1` sentinel component (not the empty-body `hash_full_body("")` digest). Nested body UTF-8 length is charged against the same per-attach / run byte caps as by-value streams. Child embeds recurse with `depth+1` until `MAX_EMBEDDED_MSG_DEPTH = 3`; at the cap use domain-separated `attach-depth-limit/v1` sentinel (not raw blob, not panic). Unreadable nested objects stay Choice B unread. Stats: `strong_hash_embedded_parsed` / `_depth_limit` / `_unparsed`.
+
+**Not Relativity dedupe parity.** Relativity Server hashes four components separately, extracts embedded emails as **child documents**, and does **not** fold nested email into the parent’s AttachmentHash. Recursive hash-in-parent is a pst-dedup product choice for parent-centric keep-sets (matter extract still models children elsewhere). Full recursive nested **export** remains residual **D-0067-embedded-depth**.
 
 ### Tier-2.5 recipient identity (0082)
 

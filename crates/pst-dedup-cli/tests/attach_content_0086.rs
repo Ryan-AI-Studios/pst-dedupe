@@ -228,6 +228,8 @@ fn hash_attachment_stream_real_and_empty() {
             a.nid,
             &a.filename,
             a.size,
+            a.attach_method,
+            a.mime_tag.as_deref(),
             a.is_cloud_link,
             &budgets,
             &mut state,
@@ -244,7 +246,9 @@ fn hash_attachment_stream_real_and_empty() {
             assert_eq!(bytes, 0);
             assert_eq!(digest, dedup_engine::EMPTY_CONTENT_SHA256);
         }
-        AttachDigestResult::Unread { .. } => {
+        AttachDigestResult::Unread { .. }
+        | AttachDigestResult::DepthLimit { .. }
+        | AttachDigestResult::Embedded { .. } => {
             panic!("size-0 empty stream must be real empty digest")
         }
     }

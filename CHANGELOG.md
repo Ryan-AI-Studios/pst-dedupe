@@ -7,6 +7,13 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0090 — Embedded message content hash)
+
+- Under `--strong-content-hash body-recip-attach`, method-5 / `message/rfc822` embeds use **`embedded-msg-hash/v1`** (header + body + recipients + child attaches in table index order) instead of unread-sentinel-only or raw-blob-only.
+- `pst-reader`: `MessageNodeRef` + `read_embedded_message_identity` (nested message is an attach subnode, not NBT); body subnode size peeked via BBT/XBLOCK metadata before materialize.
+- Depth cap sentinel `attach-depth-limit/v1` (max depth 3); missing-body `embedded-body-missing/v1`; honesty stats `strong_hash_embedded_parsed` / `_depth_limit` / `_unparsed`.
+- **Not Relativity dedupe parity.** Closes **D-0086-embedded-email-hash**; leaves **D-0067-embedded-depth** open.
+
 ### Added (0089 — Unique-EML attach ledger parity)
 
 - **`unique-eml`** streams `{out}/export_attachments.csv` (default `--attach-ledger=full`) with the same header as unique-pst (`EXPORT_ATTACHMENTS_CSV_HEADER`).

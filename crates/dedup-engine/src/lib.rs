@@ -11,6 +11,7 @@
 //! hash of: normalized subject + submit time + sender + body preview + attachment metadata.
 
 pub mod body_cloud_links;
+pub mod embedded_hash;
 pub mod eml_pack;
 pub mod exporter;
 pub mod grouping;
@@ -26,6 +27,12 @@ pub use body_cloud_links::{
     MAX_BODY_SCAN_CHARS, MAX_LINKS_PER_MESSAGE, MAX_URL_LEN,
 };
 
+pub use embedded_hash::{
+    attach_depth_limit_sentinel, compute_embedded_msg_hash_v1, embedded_attachments_hash,
+    embedded_body_missing_hash, embedded_header_hash, embedded_recipients_hash,
+    ATTACH_DEPTH_LIMIT_DOMAIN, EMBEDDED_BODY_MISSING_DOMAIN, EMBEDDED_MSG_HASH_DOMAIN,
+    MAX_EMBEDDED_MSG_DEPTH,
+};
 pub use eml_pack::{
     clamp_files_per_volume, format_date_utc_filetime, format_date_utc_unix, make_eml_pack_filename,
     map_eml_attach_fail_reason, merge_pack_degraded, normalize_body_crlf_bytes,
