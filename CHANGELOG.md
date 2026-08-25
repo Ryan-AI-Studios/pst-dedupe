@@ -7,6 +7,14 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0089 — Unique-EML attach ledger parity)
+
+- **`unique-eml`** streams `{out}/export_attachments.csv` (default `--attach-ledger=full`) with the same header as unique-pst (`EXPORT_ATTACHMENTS_CSV_HEADER`).
+- Engine `EmlAttachEvent` on `EmlWriteResult` (DTO only; no engine→CLI dependency); CLI maps events + Mode A `soft_skip_attach_records` / `mark_promoted_winner` into `AttachLedgerSink`.
+- Flags: `--attach-ledger`, `--attach-ledger-max-rows`, `--ledger-path-mode` (aligned with unique-pst). Fail-closed ledger init when mode ≠ `off`.
+- Exit 64 / `fidelity` still driven by `attach_parts_failed` counters (ledger additive; `off` still classifies from counters).
+- Closes **D-0073-eml**.
+
 ### Added (0088 — Sovereign cloud host allowlist)
 
 - Body-cloud host allowlist extended with US GCC High / DoD suffixes: `*.sharepoint.us`, `admin.onedrive.us`, `*.sharepoint-mil.us`, `*.dps.mil`.
@@ -62,7 +70,7 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 - Summary counters: `promote_on_attach_fail`, `promoted_after_attach_incomplete_count`, `mode_c_fallback_all_peers_incomplete_count`.
 - Attach ledger: `winner_promoted` / peer locus honesty for soft-skipped incomplete peers and promoted winners.
 - **Mode B** write-time mid-message promote **permanently declined**. Cross-custodian disclosure documented (Sedona term; `duplicate_sources` invariant after promote).
-- Closes **D-0073-promote**. **D-0073-eml** full ledger CSV remains residual (Mode A flag threads shared finalizer only).
+- Closes **D-0073-promote**. **D-0073-eml** full ledger CSV closed in **0089**.
 
 ### Added (0082 — Recipient table fidelity)
 
@@ -86,7 +94,7 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 ### Residuals
 
 - **D-0073-promote** — **closed / 0083** (Mode A flag; Mode B declined).
-- **D-0073-eml** — unique-eml has no full attach ledger CSV parity yet (Mode A flag shared).
+- **D-0073-eml** — **closed / 0089** (unique-eml attach ledger CSV parity).
 - **D-0073-gui** — no GUI attach-ledger / Mode A controls.
 
 ### Added (0081 — Unique export deps + operator docs)

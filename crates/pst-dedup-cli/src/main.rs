@@ -461,9 +461,20 @@ enum Commands {
         #[arg(long = "fail-on-export-risk", value_parser = parse_fail_on_export_risk)]
         fail_on_export_risk: Option<String>,
         /// Mode A pre-write promote-on-attach-fail (0083). Default off. Mode B not supported.
-        /// Full attach-ledger CSV for unique-eml remains residual D-0073-eml.
         #[arg(long = "promote-on-attach-fail", action = clap::ArgAction::SetTrue)]
         promote_on_attach_fail: bool,
+        /// Attachment failure ledger: `full` (default CSV+histogram), `summary-only`, or `off` (0089).
+        #[arg(long = "attach-ledger", default_value = "full", value_parser = parse_attach_ledger_mode)]
+        attach_ledger: pst_dedup_cli::unique_export_report::AttachLedgerMode,
+        /// Max rows written to `{out}/export_attachments.csv` (default 500000).
+        #[arg(
+            long = "attach-ledger-max-rows",
+            default_value_t = pst_dedup_cli::unique_export_report::DEFAULT_ATTACH_LEDGER_MAX_ROWS
+        )]
+        attach_ledger_max_rows: u64,
+        /// How `source_path` columns are written in export CSVs: `full` (default) or `basename` (0081/0089).
+        #[arg(long = "ledger-path-mode", default_value = "full", value_parser = parse_ledger_path_mode)]
+        ledger_path_mode: pst_dedup_cli::unique_export_report::LedgerPathMode,
     },
 
     /// Export unique messages as streaming PST volume(s) + report pack (`unique_export_report_v1`).
@@ -1276,6 +1287,9 @@ fn run(cli: Cli) -> Result<CliExit> {
             allow_partial_fidelity,
             fail_on_export_risk,
             promote_on_attach_fail,
+            attach_ledger,
+            attach_ledger_max_rows,
+            ledger_path_mode,
         } => {
             let mut all = paths;
             all.extend(input);
@@ -1340,6 +1354,9 @@ fn run(cli: Cli) -> Result<CliExit> {
                 allow_partial_fidelity,
                 fail_on_export_risk,
                 promote_on_attach_fail,
+                attach_ledger,
+                attach_ledger_max_rows,
+                ledger_path_mode,
             });
         }
         Commands::UniquePst(clap_args) => {
@@ -1544,6 +1561,20 @@ fn run(cli: Cli) -> Result<CliExit> {
 }
 
 /// Validate preflight rate knobs: finite and in [0.0, 1.0].
+fn parse_attach_ledger_mode(
+    s: &str,
+) -> std::result::Result<pst_dedup_cli::unique_export_report::AttachLedgerMode, String> {
+    pst_dedup_cli::unique_export_report::AttachLedgerMode::parse(s)
+        .ok_or_else(|| format!("invalid attach-ledger '{s}': expected full, summary-only, or off"))
+}
+
+fn parse_ledger_path_mode(
+    s: &str,
+) -> std::result::Result<pst_dedup_cli::unique_export_report::LedgerPathMode, String> {
+    pst_dedup_cli::unique_export_report::LedgerPathMode::parse(s)
+        .ok_or_else(|| format!("invalid ledger-path-mode '{s}': expected full or basename"))
+}
+
 fn parse_fail_on_export_risk(s: &str) -> std::result::Result<String, String> {
     pst_dedup_cli::export_outcome::RiskGate::parse(s)
         .filter(|g| *g != pst_dedup_cli::export_outcome::RiskGate::Off)

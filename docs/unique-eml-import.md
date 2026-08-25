@@ -22,6 +22,9 @@ mail clients. This is the Series K **interim** path while production PST write
 | `--files-per-volume` | Default **10000** EML files per volume folder (clamped 1000–50000). |
 | `--volume-prefix` | Default `VOL` → `VOL001`, `VOL002`, … |
 | `--family-policy parents_only` | Parent messages only — **no** attachment/embedded MIME parts. |
+| `--attach-ledger full\|summary-only\|off` | **0089** — attachment failure ledger (default **`full`**). CSV at `{out}/export_attachments.csv`. |
+| `--attach-ledger-max-rows <N>` | Cap on CSV rows (default **500000**); histogram never truncated. |
+| `--ledger-path-mode full\|basename` | How `source_path` is written in the attach ledger (default **`full`**). |
 | Integrity flags | Same as `scan` / `keep-set` (`--mode`, thresholds, `--allow-failed-files`). |
 
 **Locks:**
@@ -35,7 +38,9 @@ mail clients. This is the Series K **interim** path while production PST write
 
 ```text
 {out}/
-  manifest.json          # eml_pack_v1 (authoritative audit)
+  manifest.json              # eml_pack_v1 (authoritative audit)
+  summary.json               # fidelity / exit / attach ledger summary
+  export_attachments.csv     # 0089 attach failure ledger (mode=full)
   VOL001/
     000001_<id>_<subject>.eml
     …
@@ -51,8 +56,10 @@ mail clients. This is the Series K **interim** path while production PST write
 
 1. Open `{out}/manifest.json` — check `stats.eml_written`, `degraded_messages`,
    `attach_parts_failed`, `embedded_messages_written`.
-2. Review decision CSV for `dup_of` / `materialize_failed` rows.
-3. Spot-check a few `.eml` files (Date ends with `+0000`; attachments present when expected).
+2. Open `{out}/summary.json` — check `fidelity` / `exit_code` / `attachment_ledger*`.
+3. When attaches failed, review `{out}/export_attachments.csv` (same columns as unique-pst).
+4. Review decision CSV for `dup_of` / `materialize_failed` rows.
+5. Spot-check a few `.eml` files (Date ends with `+0000`; attachments present when expected).
 
 ## 4. Import into Outlook (manual)
 
@@ -81,6 +88,11 @@ mail clients. This is the Series K **interim** path while production PST write
 | Cloud/modern attaches | Hyperlink-only / cloud attaches are not downloaded (residual). |
 | Degraded winners | Still exported with `X-Pst-Dedupe-Degraded` + manifest flags. |
 | Partial pack | Non-zero integrity exit still flushes written EML + manifest stats. |
+
+**Attach ledger CSV (`export_attachments.csv`):** Unmapped EML soft-fail causes map to
+reason_code `ATTACH_UNKNOWN` (the row is never dropped). CSV `reason_code` values use the
+unique-pst **0073** taxonomy; pack-manifest aggregate `ATTACH_PART_FAILED` is **not** used
+as a CSV reason_code.
 
 ## 7. Related
 

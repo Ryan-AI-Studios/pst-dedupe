@@ -7,7 +7,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** `C:\dev\Dedupe-plan.md` → Series M continuation
 - **Cross-repo contract:** n/a
-- **Status:** Ready — not started (review-folded 2026-08-24)
+- **Status:** Completed
 - **Depends on:** 0073 · 0078 · 0083 · 0067 (all **Completed**)
 - **Spec authored:** 2026-08-24
 - **Series:** M (Unique export fidelity residuals — continuation)
@@ -126,12 +126,12 @@ unique_eml_cmd (pst-dedup-cli)
 
 ## 7. Definition of Done
 
-- [ ] **DoD-1 — Flags:** `unique-eml` accepts `--attach-ledger`, `--attach-ledger-max-rows`, `--ledger-path-mode` aligned with unique-pst; default `full`.
-- [ ] **DoD-2 — CSV:** Soft-fail/skip **and** Mode A `soft_skip_attach_records` produce `export_attachments.csv` at `--out/export_attachments.csv` with **identical header** to unique-pst (`EXPORT_ATTACHMENTS_CSV_HEADER`); `mark_promoted_winner` wired; injection-safe cells.
-- [ ] **DoD-3 — Cap:** Row-cap + truncated marker behavior matches 0073.
-- [ ] **DoD-4 — Exit:** Exit 64 / `fidelity` / counters correct with ledger on or off; ledger init failure in `full` **fail-closed**.
-- [ ] **DoD-5 — Deferred:** `D-0073-eml` closed.
-- [ ] **DoD-6 — Recorded:** `review.md`; conductor **Completed**; ledger TX committed.
+- [x] **DoD-1 — Flags:** `unique-eml` accepts `--attach-ledger`, `--attach-ledger-max-rows`, `--ledger-path-mode` aligned with unique-pst; default `full`.
+- [x] **DoD-2 — CSV:** Soft-fail/skip **and** Mode A `soft_skip_attach_records` produce `export_attachments.csv` at `--out/export_attachments.csv` with **identical header** to unique-pst (`EXPORT_ATTACHMENTS_CSV_HEADER`); `mark_promoted_winner` wired; injection-safe cells.
+- [x] **DoD-3 — Cap:** Row-cap + truncated marker behavior matches 0073.
+- [x] **DoD-4 — Exit:** Exit 64 / `fidelity` / counters correct with ledger on or off; ledger init failure in `full` **fail-closed**.
+- [x] **DoD-5 — Deferred:** `D-0073-eml` closed.
+- [x] **DoD-6 — Recorded:** `review.md`; conductor **Completed**; ledger TX committed.
 
 ## 8. Verification commands
 

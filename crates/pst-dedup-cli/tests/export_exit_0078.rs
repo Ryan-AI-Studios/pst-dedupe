@@ -427,6 +427,100 @@ fn unique_eml_production_writer_attach_soft_fail_classifies_64() {
     assert!(o.reasons.contains(&"ATTACH_SOFT_FAIL"));
 }
 
+/// 0089: attach-ledger=off must still classify exit 64 from attach counters.
+#[test]
+fn unique_eml_ledger_off_still_exit_64_from_counters() {
+    use dedup_engine::eml_pack::{write_canonical_eml, EmlWriteOpts, NullAttachStreamSource};
+    use dedup_engine::integrity::RecoverableIntegrity;
+    use dedup_engine::keepset::{CanonicalAttachment, CanonicalMessage, MessageLocus};
+    use pst_dedup_cli::export_outcome::{classify_export, ExportFidelity, ExportOkInput, RiskGate};
+    use pst_dedup_cli::unique_export_report::{AttachLedgerMode, AttachLedgerSink, LedgerPathMode};
+
+    let msg = CanonicalMessage {
+        locus: MessageLocus {
+            source_path: "synth.pst".into(),
+            source_pst: "synth.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 0x100,
+            is_orphaned: false,
+        },
+        message_id: Some("<0089-off@test>".into()),
+        subject: Some("soft fail attach".into()),
+        sender: Some("a@b.c".into()),
+        display_to: None,
+        display_cc: None,
+        display_bcc: None,
+        recipients: Vec::new(),
+        message_flags: None,
+        submit_time: None,
+        size: Some(10),
+        message_class: None,
+        body_plain: Some("plain body".into()),
+        body_html: None,
+        attachments: vec![CanonicalAttachment {
+            filename: "missing.bin".into(),
+            size: 10,
+            mime: Some("application/octet-stream".into()),
+            data: None,
+            stream_available: true,
+            attach_nid: Some(999),
+            attach_method: Some(1),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
+        }],
+        fidelity: RecoverableIntegrity::clean(),
+        message_id_norm: Some("0089-off@test".into()),
+        content_hash: [0u8; 32],
+        edrm_mih_hex: None,
+        body_incomplete: false,
+        body_unavailable: false,
+    };
+    let mut src = NullAttachStreamSource;
+    let dir = TempDir::new().expect("tmp");
+    let eml_path = dir.path().join("msg.eml");
+    let res = write_canonical_eml(&eml_path, &msg, &mut src, &EmlWriteOpts::default())
+        .expect("write_canonical_eml");
+    assert_eq!(res.attachments_failed, 1);
+    assert_eq!(res.attachment_events.len() as u64, res.attachments_failed);
+
+    // Ledger off: sink opens without CSV; counters alone drive classify.
+    let inputs = vec!["synth.pst".to_string()];
+    let sink = AttachLedgerSink::new(
+        AttachLedgerMode::Off,
+        500_000,
+        dir.path(),
+        &inputs,
+        LedgerPathMode::Full,
+    )
+    .expect("off sink");
+    let finish = sink.finish().expect("finish");
+    assert_eq!(finish.rows_written, 0);
+    assert!(!dir.path().join("export_attachments.csv").is_file());
+
+    let input = ExportOkInput {
+        scan_ok: true,
+        verify_ok: true,
+        export_err_absent: true,
+        export_partial: false,
+        messages_written_total: 1,
+        unique: 1,
+        attach_failed_total: res.attachments_failed,
+        body_soft_fail_total: 0,
+        report_ok: true,
+    };
+    let o = classify_export(
+        input,
+        dedup_engine::integrity::PreflightRecommendation::Ok,
+        RiskGate::Off,
+        true,
+        false,
+    );
+    assert_eq!(o.fidelity, ExportFidelity::Partial);
+    assert_eq!(o.exit.as_u8(), 64);
+    assert!(o.reasons.contains(&"ATTACH_SOFT_FAIL"));
+}
+
 #[test]
 fn cancel_exit_130_and_summary() {
     use std::sync::atomic::AtomicBool;
