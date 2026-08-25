@@ -89,18 +89,23 @@
 | 31 | P3 | **0058** MultiUserMatterService | ✅ Completed | Opt-in matter service + concurrent review; schema v36; unlocks **0059**/**0061** |
 | 32 | P3 | **0059** MultiTenantSso | ✅ Completed | Platform tenant registry + OIDC SSO; schema v37 |
 | 33 | P3 | **0060** MultiJurisdictionProduction | ✅ Completed | Production profiles + QC packs; schema v38 |
-| 34 | P3 | **0061** CloudBlobJobBackends | 🔄 In Progress | Opt-in BlobStore + JobBackend; schema v39; offline default; Series I close |
+| 34 | P3 | **0061** CloudBlobJobBackends | ✅ Completed | Opt-in BlobStore + JobBackend; schema v39; offline default; Series I close |
 | 35 | P0 cons. | **0062** ReleaseHardeningRc | ✅ Completed | RC freeze 0.2.0-rc.1 |
-| 36 | P0 cons. | **0063** SecurityRedTeamFixes | 🔄 Completed | Series I red team + P0/P1 fixes on RC freeze |
+| 36 | P0 cons. | **0063** SecurityRedTeamFixes | ✅ Completed | Series I red team + P0/P1 fixes on RC freeze |
 | 37 | P1 cons. | **0064** DeskPlatformConnectUx | ✅ Completed | Desk Connect + Solo produce profile UX (native egui); researched 2026-07-25 |
-| 38 | P0 K | **0065** ScanIntegrityReport | ⬜ Ready | (A) Multi-PST integrity: skip reasons, recoverable vs skipped |
-| 39 | P0 K | **0066** DedupKeepSetExport | ⬜ Ready | (B) Keep-set v1 + decision log + materialize + EDRM MIH |
+| 38 | P0 K | **0065** ScanIntegrityReport | ✅ Completed | (A) Multi-PST integrity: skip reasons, recoverable vs skipped |
+| 39 | P0 K | **0066** DedupKeepSetExport | ✅ Completed | (B) Keep-set v1 + decision log + materialize + EDRM MIH |
 | 40 | P0 K | **0067** UniqueEmlPackCli | ✅ Completed | (C) Unique EML pack from keep_set_v1 + MIME multipart |
 | 41 | P0 K | **0068** ProductionPstWriterV1 | ✅ Completed | (D) Writer v1: IPM_SUBTREE + XBLOCK full body |
 | 42 | P0 K | **0069** PstWriterFidelity | ✅ Completed | (E) Attachments + folder path preserve under IPM |
 | 43 | P1 K | **0070** PstWriterStreamingScale | ✅ Completed | (F) Multi-GB streaming write + stress |
 | 44 | P0 K | **0071** CliUniquePstAndReport | ✅ Completed | (G) unique-pst CLI + report pack + verify |
 | 45 | P2 opt. | **0072** DeskUniquePstWizard | ✅ Completed | (H) Optional GUI wizard over run_unique_pst |
+| 46 | P2 M | **0088** SovereignCloudHosts | ✅ Completed | Sovereign SP/OneDrive + office365.us SafeLinks (closes D-0085; residual D-0088-usgovcloud-microsoft-tld) |
+| 47 | P1 M | **0089** UniqueEmlAttachLedger | ⬜ Ready | unique-eml attach ledger via EmlAttachEvent (D-0073-eml) |
+| 48 | P2 M | **0090** EmbeddedMsgContentHash | ⬜ Ready | embedded-msg-hash/v1 subnode+rfc822 (D-0086-embedded-email-hash) |
+| 49 | P2 M | **0091** DigestProbeUnify | ⬜ Ready | Record-don’t-tee digest→probe skip (D-0086-digest-probe-unify) |
+| 50 | P2 M | **0092** CloudNamedPropWrite | ⬜ Ready | Allowlisted NPMAP write (D-0084-cloud-named-prop-write) |
 
 ## Series K spine (clean unique export)
 

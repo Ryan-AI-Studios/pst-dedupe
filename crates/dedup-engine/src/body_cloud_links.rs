@@ -1,4 +1,5 @@
-//! Offline body-surface detection of document-shaped SharePoint/OneDrive cloud links (0085).
+//! Offline body-surface detection of document-shaped SharePoint/OneDrive cloud links
+//! (0085 commercial; 0088 US GCC High / DoD sovereign hosts).
 //!
 //! Pure scanner: no network fetch, no Attachment Table synthesis. Caps and host/path
 //! allowlist follow Purview modern-attachment design inputs (not collection parity).
@@ -72,7 +73,8 @@ fn bare_url_re() -> Option<&'static Regex> {
         .as_ref()
 }
 
-/// Scan HTML and optional plain body for document-shaped commercial cloud links.
+/// Scan HTML and optional plain body for document-shaped cloud links
+/// (commercial + US GCC High / DoD allowlist).
 ///
 /// Order: HTML first (href then bare), then plain bare when plain is provided.
 /// Full-body scan (no quote/blockquote skip). Exact-string dedupe preserves query.
@@ -406,25 +408,60 @@ fn extract_host(url_lower: &str) -> Option<&str> {
     }
 }
 
+/// Commercial + GCC High/DoD SafeLinks wrapper hosts.
 fn is_safelinks_host(host: &str) -> bool {
-    host == "safelinks.protection.outlook.com"
-        || host.ends_with(".safelinks.protection.outlook.com")
+    host_matches_dns_suffix(host, "safelinks.protection.outlook.com")
+        || host_matches_dns_suffix(host, "safelinks.protection.office365.us")
 }
 
-fn is_commercial_cloud_host(host: &str) -> bool {
-    host == "sharepoint.com"
-        || host.ends_with(".sharepoint.com")
-        || host == "sharepoint-df.com"
-        || host.ends_with(".sharepoint-df.com")
-        || host == "onedrive.live.com"
-        || host.ends_with(".onedrive.live.com")
-        || host == "1drv.ms"
-        || host.ends_with(".1drv.ms")
+/// DNS suffixes for document-shaped cloud hosts (exact or one-or-more labels under).
+///
+/// Learn citations (access 2026-08-24): GCC High `*.sharepoint.us` + `admin.onedrive.us`
+/// (updated 2026-07-01); DoD `*.sharepoint-mil.us` + `*.dps.mil` (updated 2026-06-30).
+/// 21Vianet (`*.sharepoint.cn`) and `.microsoft` TLD content hosts are out of P0.
+///
+/// Keep in sync with `pst-reader` `CLOUD_POINTER_HOST_SUFFIXES` /
+/// `CLOUD_POINTER_HOST_EXACT` (0088: no shared crate / no reader→engine dep).
+const ALLOWED_CLOUD_HOST_SUFFIXES: &[&str] = &[
+    // Commercial (0085)
+    "sharepoint.com",
+    "sharepoint-df.com",
+    "onedrive.live.com",
+    "1drv.ms",
+    // US GCC High / DoD (0088)
+    "sharepoint.us",
+    "sharepoint-mil.us",
+    "dps.mil",
+];
+
+/// Exact hosts that are not covered by a broad suffix (admin-only sync endpoint).
+const ALLOWED_CLOUD_HOST_EXACT: &[&str] = &["admin.onedrive.us"];
+
+/// True when `host` equals `suffix` or is a DNS subdomain of it
+/// (`contoso.sharepoint.us` yes; `notsharepoint.us` no).
+fn host_matches_dns_suffix(host: &str, suffix: &str) -> bool {
+    if host == suffix {
+        return true;
+    }
+    let Some(rest) = host.strip_suffix(suffix) else {
+        return false;
+    };
+    rest.ends_with('.')
 }
 
-/// Document-shaped path/query markers (commercial allowlist).
+/// Allowed cloud document hosts (commercial + US GCC High / DoD).
+fn is_allowed_cloud_host(host: &str) -> bool {
+    if ALLOWED_CLOUD_HOST_EXACT.contains(&host) {
+        return true;
+    }
+    ALLOWED_CLOUD_HOST_SUFFIXES
+        .iter()
+        .any(|&suffix| host_matches_dns_suffix(host, suffix))
+}
+
+/// Document-shaped path/query markers on the cloud allowlist.
 fn is_document_shaped_cloud(url_lower: &str, host: &str) -> bool {
-    if !is_commercial_cloud_host(host) {
+    if !is_allowed_cloud_host(host) {
         return false;
     }
 
@@ -871,5 +908,102 @@ mod tests {
             scan.hits[0].url,
             "https://contoso.sharepoint.com/:x:/s/Legal/a.xlsx?d=1"
         );
+    }
+
+    // --- 0088 US GCC High / DoD sovereign hosts ---
+
+    #[test]
+    fn gcc_high_my_sharepoint_us_action_tokens() {
+        let cases = [
+            "https://contoso-my.sharepoint.us/:w:/r/personal/user/Documents/memo.docx",
+            "https://contoso-my.sharepoint.us/:x:/r/personal/user/Documents/book.xlsx?d=wabc",
+        ];
+        for url in cases {
+            let scan = scan_body_cloud_links(Some(&html_with(url)), None);
+            assert_eq!(scan.hits.len(), 1, "expected GCC High -my hit: {url}");
+            assert_eq!(scan.hits[0].url, url);
+        }
+    }
+
+    #[test]
+    fn dod_my_sharepoint_mil_us_action_tokens() {
+        let cases = [
+            "https://contoso-my.sharepoint-mil.us/:w:/r/personal/user/Documents/memo.docx",
+            "https://contoso-my.sharepoint-mil.us/:x:/r/personal/user/Documents/book.xlsx",
+        ];
+        for url in cases {
+            let scan = scan_body_cloud_links(Some(&html_with(url)), None);
+            assert_eq!(scan.hits.len(), 1, "expected DoD -my hit: {url}");
+            assert_eq!(scan.hits[0].url, url);
+        }
+    }
+
+    #[test]
+    fn dps_mil_document_shaped_hit() {
+        let url = "https://tenant.dps.mil/:x:/r/sites/Legal/Shared%20Documents/book.xlsx?d=1";
+        let scan = scan_body_cloud_links(Some(&html_with(url)), None);
+        assert_eq!(scan.hits.len(), 1, "dps.mil document-shaped must hit");
+        assert_eq!(scan.hits[0].url, url);
+    }
+
+    #[test]
+    fn gcc_high_safelinks_unwrap_to_sharepoint_us() {
+        let target = "https://contoso.sharepoint.us/:x:/s/Finance/book.xlsx?d=wabc123&csf=1";
+        let encoded = percent_encode_for_test(target);
+        let wrapper =
+            format!("https://nam.safelinks.protection.office365.us/?url={encoded}&data=foo");
+        let scan = scan_body_cloud_links(Some(&html_with(&wrapper)), None);
+        assert_eq!(scan.hits.len(), 1, "hits={:?}", scan.hits);
+        assert_eq!(scan.hits[0].url, target);
+        assert_eq!(scan.hits[0].source, BodyCloudUrlSource::SafeLinksUnwrap);
+        assert!(scan.hits[0].url.contains("?d=wabc123"));
+        assert!(scan.hits[0].url.contains("&csf=1"));
+    }
+
+    #[test]
+    fn sovereign_bare_roots_and_folder_f_excluded() {
+        let misses = [
+            "https://contoso.sharepoint.us/sites/HR",
+            "https://contoso-my.sharepoint.us/personal/user/Documents",
+            "https://contoso.sharepoint.us/:f:/s/Legal/folderShare",
+            "https://contoso.sharepoint-mil.us/sites/HR",
+            "https://contoso-my.sharepoint-mil.us/:f:/r/personal/user/Documents/folder",
+            "https://tenant.dps.mil/sites/HR",
+            "https://tenant.dps.mil/:f:/s/Legal/folderShare",
+        ];
+        for url in misses {
+            let scan = scan_body_cloud_links(Some(&html_with(url)), None);
+            assert!(
+                scan.hits.is_empty(),
+                "bare root / :f: must miss for sovereign: {url} → {:?}",
+                scan.hits
+            );
+        }
+    }
+
+    #[test]
+    fn host_suffix_rejects_lookalike() {
+        assert!(!is_allowed_cloud_host("notsharepoint.com"));
+        assert!(!is_allowed_cloud_host("notsharepoint.us"));
+        assert!(!is_allowed_cloud_host("evilsharepoint-mil.us"));
+        assert!(!is_allowed_cloud_host("notdps.mil"));
+        assert!(is_allowed_cloud_host("contoso.sharepoint.us"));
+        assert!(is_allowed_cloud_host("contoso-my.sharepoint-mil.us"));
+        assert!(is_allowed_cloud_host("admin.onedrive.us"));
+        assert!(!is_allowed_cloud_host("other.onedrive.us"));
+        // 21Vianet out of P0
+        assert!(!is_allowed_cloud_host("contoso.sharepoint.cn"));
+    }
+
+    #[test]
+    fn admin_onedrive_us_host_allowed_but_needs_document_shape() {
+        // Harmless include: host matches, but bare admin path is not document-shaped.
+        let bare = "https://admin.onedrive.us/";
+        let scan = scan_body_cloud_links(Some(&html_with(bare)), None);
+        assert!(
+            scan.hits.is_empty(),
+            "admin.onedrive.us alone must not produce body-cloud rows"
+        );
+        assert!(is_allowed_cloud_host("admin.onedrive.us"));
     }
 }

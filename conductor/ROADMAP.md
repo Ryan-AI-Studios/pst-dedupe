@@ -210,8 +210,8 @@ PST₁…PSTₙ ──► Open / Scan (harden) ──► Integrity (no source mu
 
 | ID | Letter | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|---|
-| **0065** | A | ScanIntegrityReport | **Ready** | **P0 K** | Multi-PST integrity: skip reasons, recoverable vs skipped, thresholds, strict/best-effort. Spec: `0065-ScanIntegrityReport/`. |
-| **0066** | B | DedupKeepSetExport | **Ready** | **P0 K** | Keep-set v1: first_seen/keep_largest/prefer_path, decision log, materialize winners, family attach policy, EDRM MIH. Spec: `0066-DedupKeepSetExport/`. |
+| **0065** | A | ScanIntegrityReport | **Completed** | **P0 K** | Multi-PST integrity: skip reasons, recoverable vs skipped, thresholds, strict/best-effort. Spec: `0065-ScanIntegrityReport/`. |
+| **0066** | B | DedupKeepSetExport | **Completed** | **P0 K** | Keep-set v1: first_seen/keep_largest/prefer_path, decision log, materialize winners, family attach policy, EDRM MIH. Spec: `0066-DedupKeepSetExport/`. |
 | **0067** | C | UniqueEmlPackCli | **Completed** | **P0 K** | Unique EML pack from keep_set_v1: MIME multipart+stream attaches, eml_pack_v1 manifest. Spec: `0067-UniqueEmlPackCli/`. |
 | **0068** | D | ProductionPstWriterV1 | **Completed** | **P0 K** | Production Unicode PST writer v1: IPM_SUBTREE + XBLOCK full body; Codex PASS WITH DEFERRED P3. Spec: `0068-ProductionPstWriterV1/`. |
 | **0069** | E | PstWriterFidelity | **Completed** | **P0 K** | Attachments + folder preserve under IPM; Codex luna PASS. Spec: `0069-PstWriterFidelity/`. |
@@ -293,9 +293,11 @@ PST₁…PSTₙ ──► Open / Scan (harden) ──► Integrity (no source mu
 31. ~~Series I **`0058`** Multi-user matter service~~ **done**  
 32. ~~Series I **`0059`** Multi-tenant + OIDC SSO~~ **done**  
 33. ~~Series I **`0060`** Multi-jurisdiction production profiles~~ **done**  
-34. Series I **`0061`** Cloud blob/job backends (**In Progress**) — Series I final track  
+34. Series I **`0061`** Cloud blob/job backends (**Completed**) — Series I closed  
 35. Series J **`0062`** RC hardening → **`0063`** red team → **`0064`** Desk Connect UX (**Completed**)
-36. Series K **`0065`–`0072`** Clean Unique export path (**Proposed** placeholders)
+36. Series K **`0065`–`0072`** Clean Unique export path (**Completed**)
+37. Series L **`0073`–`0081`** Unique export hardening (**Completed**)
+38. Series M **`0082`–`0088`** Fidelity residuals (**Completed** through sovereign hosts); **`0089`–`0092`** continuation (**Ready**)
 
 ### Wave 3 — Plugins & platform
 Intelligence / OCR packaging / AI / Teams (Series G–H), then Series I only if product commits to multi-user/cloud.
@@ -353,7 +355,7 @@ Deferred triage + operator soak       ← real PSTs local-only; bugfix tracks on
 Series K Clean Unique export (CLI)    ← planned product path (0065–0072 Proposed)
 ```
 
-Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedTeamFixes/spec.md) **Completed**; [`0064`](0064-DeskPlatformConnectUx/spec.md) **Completed**. Series K [`0065`](0065-ScanIntegrityReport/spec.md)–[`0072`](0072-DeskUniquePstWizard/spec.md) **Completed**. Series L (0073–0081 unique-export hardening) **Completed**. Series M: **0082**–**0087** Completed (0087 deterministic store RecordKey / CoC volume digests; D-0079 closed).
+Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedTeamFixes/spec.md) **Completed**; [`0064`](0064-DeskPlatformConnectUx/spec.md) **Completed**. Series K [`0065`](0065-ScanIntegrityReport/spec.md)–[`0072`](0072-DeskUniquePstWizard/spec.md) **Completed**. Series L (0073–0081 unique-export hardening) **Completed**. Series M: **0082**–**0088** Completed; **0089**–**0092** Ready.
 
 ### Wave 6 — Unique export fidelity residuals (Series M)
 
@@ -362,9 +364,16 @@ Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedT
 | **0082** | RecipientTableFidelity | **Completed** | **P0 M** | MS-PST recipient TC read+write (`0x692`); SMTP+EX Tier-2.5; BCC write opt-in + suppress ledger; `retryable`; closes D-0080/D-0076 recip + D-0078-retryable. |
 | **0083** | PromoteOnAttachFail | **Completed** | **P0 M** | Mode A pre-write promote-on-attach-fail (`--promote-on-attach-fail`); closes **D-0073-promote**; Mode B declined; Codex luna PASS. |
 | **0084** | NamedPropCloudAttach | **Completed** | **P0 M** | MS-PST NPMAP (`0x61`) + **attach-table** cloud detect; `ATTACH_CLOUD_LINK` + `cloud_url`/`cloud_provider` ledger; pointer preserve; Mode A incomplete; closes **D-0080** (detect≠hydrate); residual body-inline links; Codex luna PASS. |
-| **0085** | BodyCloudLinks | **Completed** | **P0 M** | Body-inline **document-shaped** URL scan (`:x:` Excel incl.); hit-list CSV query-preserved; Mode A known gap documented; closes **D-0084-body-cloud-links**; residual **D-0085-sovereign-cloud-hosts**; Codex luna PASS WITH DEFERRED P3. |
-| **0086** | AttachContentIdentity | **Completed** | **P1 M** | Enable `body-recip-attach`: full-stream attach SHA-256; **Choice B** unread sentinels; fail-closed strict enum; NIST KAT; closes **D-0076-attach-content**; residual **D-0086-embedded-email-hash** / **D-0086-digest-probe-unify**; Codex luna PASS WITH DEFERRED P3. |
+| **0085** | BodyCloudLinks | **Completed** | **P0 M** | Body-inline **document-shaped** URL scan (`:x:` Excel incl.); hit-list CSV query-preserved; Mode A known gap documented; closes **D-0084-body-cloud-links**; residual **D-0085-sovereign-cloud-hosts** → **0088**; Codex luna PASS WITH DEFERRED P3. |
+| **0086** | AttachContentIdentity | **Completed** | **P1 M** | Enable `body-recip-attach`: full-stream attach SHA-256; **Choice B** unread sentinels; fail-closed strict enum; NIST KAT; closes **D-0076-attach-content**; residual **D-0086-embedded-email-hash** / **D-0086-digest-probe-unify** → **0090**/**0091**; Codex luna PASS WITH DEFERRED P3. |
 | **0087** | DeterministicStoreRecordKey | **Completed** | **P1 M** | Deterministic `PidTagRecordKey`/ProviderUID (length-prefix SHA-256 preimage; no wall-clock/PID/path); job-global seed + volume-layout honesty; cross-process + multi-volume key proofs; DoD-3 path A on fixture; closes **D-0079-deterministic-key**. Codex luna PASS. |
+| **0088** | SovereignCloudHosts | **Completed** | **P2 M** | GCC High / DoD sovereign host allowlist + office365.us SafeLinks; closes **D-0085-sovereign-cloud-hosts**; residual **D-0088-usgovcloud-microsoft-tld**. Codex luna PASS WITH DEFERRED P3. |
+| **0089** | UniqueEmlAttachLedger | **Ready** | **P1 M** | unique-eml attach ledger CSV via `EmlAttachEvent` DTO; closes **D-0073-eml**. Spec: `0089-UniqueEmlAttachLedger/`. |
+| **0090** | EmbeddedMsgContentHash | **Ready** | **P2 M** | Bounded `embedded-msg-hash/v1` (not Relativity parity; method-5 subnode parse); closes **D-0086-embedded-email-hash**. Spec: `0090-EmbeddedMsgContentHash/`. |
+| **0091** | DigestProbeUnify | **Ready** | **P2 M** | CLI record-don’t-tee (skip L3 re-stream); closes **D-0086-digest-probe-unify**. Spec: `0091-DigestProbeUnify/`. |
+| **0092** | CloudNamedPropWrite | **Ready** | **P2 M** | Allowlisted NPMAP + `PidNameAttachmentProviderType`; closes **D-0084-cloud-named-prop-write**. Spec: `0092-CloudNamedPropWrite/`. |
+
+**Order:** 0088 ∥ 0089 → 0090 → 0091 → 0092.
 
 ### What each step is for
 
