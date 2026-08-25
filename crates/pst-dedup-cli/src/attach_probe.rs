@@ -111,6 +111,9 @@ pub struct AttachProbeSummary {
     pub peer_probe_capped_groups: u64,
     pub level: String,
     pub cancelled: bool,
+    /// Pass-2 attaches skipped because Pass-1 digest already proved Full readability (0091).
+    /// Logical `attempted`/`bytes` still charged once via `charge_pending`; no second stream I/O.
+    pub digest_stream_skips: u64,
 }
 
 /// Cache key identity for level-aware result cache.
@@ -128,14 +131,25 @@ struct CacheKey {
 }
 
 /// Cached probe result (level dominance: higher level ok satisfies lower).
+///
+/// `charge_pending`: digest-seeded Full ok entries charge probe budgets on the
+/// **first** Pass-2 hit only (0091 record-don't-tee); intra-pass re-hits do not.
 #[derive(Clone, Debug)]
 struct CacheEntry {
     level: ProbeLevel,
     ok: bool,
     reason: Option<IntegrityReason>,
+    bytes_read: u64,
+    charge_pending: bool,
 }
 
-/// In-process level-aware probe result cache (0074 §3.10).
+/// In-process level-aware probe result cache (0074 §3.10; 0091 digest seed).
+///
+/// Budget table when digest + probe both run (each pass keeps its own caps):
+/// | Cap | Digest | Probe | Digest-seeded skip |
+/// | max_attaches / max_bytes / per_attach | strong_hash_* | deep_attach_* | Charge logical
+///   attach count + probe-level bytes via `record_attempt` (no second stream) |
+/// | Time | n/a | deep_attach_max_probe_time_ms | Skip has no wall-clock timeout |
 #[derive(Default)]
 pub struct ProbeResultCache {
     entries: HashMap<CacheKey, CacheEntry>,
@@ -173,10 +187,45 @@ impl ProbeResultCache {
         Some(ProbeOutcome {
             ok: e.ok,
             reason: e.reason,
-            bytes_read: 0,
+            bytes_read: e.bytes_read,
             timed_out: false,
             level: e.level,
         })
+    }
+
+    /// True when a digest-seeded entry still needs a first Pass-2 logical charge.
+    /// Clears the flag so subsequent hits do not double-count.
+    #[allow(clippy::too_many_arguments)]
+    pub fn take_charge_pending(
+        &mut self,
+        path: &str,
+        msg_nid: u64,
+        attach_nid: u64,
+        size: u32,
+        mtime_secs: i64,
+        source_file_size: u64,
+        level: ProbeLevel,
+    ) -> bool {
+        let key = CacheKey {
+            path: path.to_string(),
+            msg_nid,
+            attach_nid,
+            size,
+            mtime_secs,
+            source_file_size,
+        };
+        let Some(e) = self.entries.get_mut(&key) else {
+            return false;
+        };
+        if e.level < level {
+            return false;
+        }
+        if e.charge_pending {
+            e.charge_pending = false;
+            true
+        } else {
+            false
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -214,6 +263,67 @@ impl ProbeResultCache {
                 level: outcome.level,
                 ok: outcome.ok,
                 reason: outcome.reason,
+                bytes_read: outcome.bytes_read,
+                charge_pending: false,
+            },
+        );
+    }
+
+    /// True when a Pass-1 digest result may seed Pass-2 probe cache (by-value only).
+    ///
+    /// `None` is treated as by-value (legacy rows). Embedded (5) is not seeded — nested
+    /// identity digests do not prove the same stream probe as L3 open_attachment_data.
+    pub fn digest_seed_eligible(attach_method: Option<i32>) -> bool {
+        matches!(attach_method, None | Some(ATTACH_BY_VALUE))
+    }
+
+    /// Seed a Full/ok entry from a Pass-1 Real attach digest (0091).
+    ///
+    /// Only `AttachDigestResult::Real` for by-value proves L3 readability — do not seed
+    /// from Embedded / Unread / DepthLimit / unsupported methods. First Pass-2 hit still
+    /// `record_attempt`s.
+    #[allow(clippy::too_many_arguments)]
+    pub fn seed_from_digest_stream(
+        &mut self,
+        path: &str,
+        msg_nid: u64,
+        attach_nid: u64,
+        size: u32,
+        mtime_secs: i64,
+        source_file_size: u64,
+        bytes_read: u64,
+    ) {
+        let outcome = ProbeOutcome {
+            ok: true,
+            reason: None,
+            bytes_read,
+            timed_out: false,
+            level: ProbeLevel::Full,
+        };
+        let key = CacheKey {
+            path: path.to_string(),
+            msg_nid,
+            attach_nid,
+            size,
+            mtime_secs,
+            source_file_size,
+        };
+        if let Some(existing) = self.entries.get(&key) {
+            if existing.level > outcome.level {
+                return;
+            }
+            if existing.level == outcome.level && !existing.ok {
+                return;
+            }
+        }
+        self.entries.insert(
+            key,
+            CacheEntry {
+                level: ProbeLevel::Full,
+                ok: true,
+                reason: None,
+                bytes_read,
+                charge_pending: true,
             },
         );
     }
@@ -421,10 +531,21 @@ impl AttachProbeEngine {
         cancel: Option<Arc<AtomicBool>>,
         progress: Option<ProbeProgressCb>,
     ) -> Self {
+        Self::with_cache(budgets, level, cancel, progress, ProbeResultCache::new())
+    }
+
+    /// Construct with a pre-seeded digest/probe cache (0091 Pass-2 unify).
+    pub fn with_cache(
+        budgets: ProbeBudgets,
+        level: ProbeLevel,
+        cancel: Option<Arc<AtomicBool>>,
+        progress: Option<ProbeProgressCb>,
+        cache: ProbeResultCache,
+    ) -> Self {
         let max_open = budgets.max_open_psts;
         Self {
             handles: PstHandleLru::new(max_open),
-            cache: ProbeResultCache::new(),
+            cache,
             cancel,
             progress,
             bytes_left: budgets.max_probe_bytes,
@@ -435,6 +556,20 @@ impl AttachProbeEngine {
             },
             budgets,
             level,
+        }
+    }
+
+    /// Logical bytes a probe at `self.level` would charge for a digest-proven stream.
+    ///
+    /// Matches two-pass caps: Head reads `min(per_attach, bytes_left)`; Full reads
+    /// up to `bytes_left`. Never charge more than a live probe could have read.
+    fn logical_probe_charge_bytes(&self, digest_bytes: u64) -> u64 {
+        match self.level {
+            ProbeLevel::Meta | ProbeLevel::Open => 0,
+            ProbeLevel::Head => digest_bytes
+                .min(self.budgets.per_attach_max_bytes)
+                .min(self.bytes_left),
+            ProbeLevel::Full => digest_bytes.min(self.bytes_left),
         }
     }
 
@@ -498,22 +633,9 @@ impl AttachProbeEngine {
         }
 
         let (mtime, source_file_size) = path_mtime_and_size(source_path);
-        if let Some(hit) = self.cache.get(
-            source_path,
-            msg_nid,
-            attach_nid,
-            attach_size,
-            mtime,
-            source_file_size,
-            self.level,
-        ) {
-            // Cache hit counts as attempted for honesty when we skip I/O? Spec: rates from
-            // attempted only. Cached reuse should still count once originally; re-use does not
-            // re-count. Return cached without incrementing attempted.
-            return hit;
-        }
 
-        // Method gate: only by-value and embedded are portable for stream probe.
+        // Method gate before cache: unsupported methods must not inherit a digest Full/ok
+        // seed (digest may have hashed readable binary for non-1/non-5 methods).
         if let Some(method) = attach_method {
             if method != ATTACH_BY_VALUE && method != ATTACH_EMBEDDED_MSG {
                 let outcome = ProbeOutcome {
@@ -537,7 +659,52 @@ impl AttachProbeEngine {
             }
         }
 
+        // Honor entry-expired / zero-ms deadline even for digest seeds (equivalence with
+        // live path). Positive mid-stream timeout during a prior digest is a documented
+        // DoD-1 exception: digest already proved Full readability.
         let deadline = Instant::now() + Duration::from_millis(self.budgets.max_probe_time_ms);
+        if Instant::now() >= deadline {
+            let outcome = ProbeOutcome {
+                ok: false,
+                reason: Some(IntegrityReason::AttachProbeTimeout),
+                bytes_read: 0,
+                timed_out: true,
+                level: self.level,
+            };
+            self.record_attempt(&outcome);
+            self.emit_progress(source_path);
+            return outcome;
+        }
+
+        if let Some(mut hit) = self.cache.get(
+            source_path,
+            msg_nid,
+            attach_nid,
+            attach_size,
+            mtime,
+            source_file_size,
+            self.level,
+        ) {
+            // Digest-seeded Full ok: first hit still charges probe tallies once (0091).
+            // Intra-pass re-hits (charge_pending already cleared) do not re-count.
+            if self.cache.take_charge_pending(
+                source_path,
+                msg_nid,
+                attach_nid,
+                attach_size,
+                mtime,
+                source_file_size,
+                self.level,
+            ) {
+                hit.bytes_read = self.logical_probe_charge_bytes(hit.bytes_read);
+                self.record_attempt(&hit);
+                self.summary.digest_stream_skips =
+                    self.summary.digest_stream_skips.saturating_add(1);
+                self.emit_progress(source_path);
+            }
+            return hit;
+        }
+
         let level = self.level;
         let per_attach = self.budgets.per_attach_max_bytes;
         let bytes_left = self.bytes_left;
@@ -1036,6 +1203,9 @@ fn apply_probe_fail(
 /// Skips when `include_attachments` is false (caller responsibility).
 /// Under [`ScanMode::Strict`], probe fails mark items for skip (caller removes + tallies).
 ///
+/// `seed_cache`: optional Pass-1 digest outcomes (0091); Full/ok seeds skip stream I/O
+/// on hit while still charging probe tallies once.
+///
 /// Returns the aggregate summary and the level-aware result cache for reuse
 /// (e.g. materializer `stream_available` without re-I/O).
 pub fn probe_scan_items(
@@ -1045,8 +1215,12 @@ pub fn probe_scan_items(
     mode: ScanMode,
     cancel: Option<Arc<AtomicBool>>,
     progress: Option<ProbeProgressCb>,
+    seed_cache: Option<ProbeResultCache>,
 ) -> (AttachProbeSummary, ProbeResultCache) {
-    let mut engine = AttachProbeEngine::new(budgets, level, cancel, progress);
+    let mut engine = match seed_cache {
+        Some(cache) => AttachProbeEngine::with_cache(budgets, level, cancel, progress, cache),
+        None => AttachProbeEngine::new(budgets, level, cancel, progress),
+    };
 
     for item in items.iter_mut() {
         if engine.cancelled() {
@@ -1142,6 +1316,8 @@ pub struct KeepSetProbeOpts<'a> {
     pub mode: ScanMode,
     pub cancel: Option<Arc<AtomicBool>>,
     pub progress: Option<ProbeProgressCb>,
+    /// Pass-1 digest probe cache (0091); empty/`None` = two-pass baseline.
+    pub seed_cache: Option<ProbeResultCache>,
 }
 
 /// Probe keep-set groups with peer cap (unique-pst winner path).
@@ -1167,6 +1343,7 @@ pub fn probe_keep_set_groups(
         mode,
         cancel,
         progress,
+        seed_cache,
     } = opts;
 
     // parents_only / no attachments: skip entirely.
@@ -1180,7 +1357,10 @@ pub fn probe_keep_set_groups(
         );
     }
 
-    let mut engine = AttachProbeEngine::new(budgets, level, cancel, progress);
+    let mut engine = match seed_cache {
+        Some(cache) => AttachProbeEngine::with_cache(budgets, level, cancel, progress, cache),
+        None => AttachProbeEngine::new(budgets, level, cancel, progress),
+    };
     let groups = group_candidates_ctx(items, &grouping).groups;
     let peer_cap = budgets.max_peer_probes_per_group.max(1);
 
@@ -1418,6 +1598,127 @@ mod tests {
             .is_some());
     }
 
+    /// Digest Full seed satisfies Head and charges once on first probe hit (0091).
+    #[test]
+    fn digest_probe_seed_full_satisfies_head_charges_once() {
+        let mut seed = ProbeResultCache::new();
+        seed.seed_from_digest_stream("a.pst", 1, 2, 100, 0, 0, 4096);
+        assert!(seed
+            .get("a.pst", 1, 2, 100, 0, 0, ProbeLevel::Head)
+            .is_some());
+        assert!(seed
+            .get("a.pst", 1, 2, 100, 0, 0, ProbeLevel::Full)
+            .is_some());
+
+        let mut engine = AttachProbeEngine::with_cache(
+            ProbeBudgets {
+                per_attach_max_bytes: 1024,
+                ..ProbeBudgets::default()
+            },
+            ProbeLevel::Head,
+            None,
+            None,
+            seed,
+        );
+        let first = engine.probe_attach("a.pst", 1, 2, 100, Some(ATTACH_BY_VALUE));
+        assert!(first.ok);
+        assert_eq!(engine.summary.attempted, 1);
+        assert_eq!(engine.summary.digest_stream_skips, 1);
+        assert_eq!(engine.summary.bytes, 1024); // Head caps logical charge
+        assert_eq!(engine.summary.failed, 0);
+
+        let second = engine.probe_attach("a.pst", 1, 2, 100, Some(ATTACH_BY_VALUE));
+        assert!(second.ok);
+        assert_eq!(
+            engine.summary.attempted, 1,
+            "intra-pass re-hit must not re-count"
+        );
+        assert_eq!(engine.summary.digest_stream_skips, 1);
+        assert_eq!(engine.summary.bytes, 1024);
+    }
+
+    /// Unsupported attach method must win over a wrongly seeded Full/ok cache entry.
+    #[test]
+    fn digest_probe_method_gate_before_seed_hit() {
+        let mut seed = ProbeResultCache::new();
+        seed.seed_from_digest_stream("a.pst", 1, 2, 100, 0, 0, 4096);
+        let mut engine = AttachProbeEngine::with_cache(
+            ProbeBudgets::default(),
+            ProbeLevel::Head,
+            None,
+            None,
+            seed,
+        );
+        // OLE / storage (3) is not by-value or embedded.
+        let outcome = engine.probe_attach("a.pst", 1, 2, 100, Some(3));
+        assert!(!outcome.ok);
+        assert_eq!(
+            outcome.reason,
+            Some(IntegrityReason::AttachMethodUnsupported)
+        );
+        assert_eq!(engine.summary.digest_stream_skips, 0);
+        assert_eq!(engine.summary.failed, 1);
+    }
+
+    /// Zero max_probe_time_ms times out even when digest seed is present.
+    #[test]
+    fn digest_probe_zero_timeout_honored_with_seed() {
+        let mut seed = ProbeResultCache::new();
+        seed.seed_from_digest_stream("a.pst", 1, 2, 100, 0, 0, 4096);
+        let mut engine = AttachProbeEngine::with_cache(
+            ProbeBudgets {
+                max_probe_time_ms: 0,
+                ..ProbeBudgets::default()
+            },
+            ProbeLevel::Head,
+            None,
+            None,
+            seed,
+        );
+        let outcome = engine.probe_attach("a.pst", 1, 2, 100, Some(ATTACH_BY_VALUE));
+        assert!(!outcome.ok);
+        assert!(outcome.timed_out);
+        assert_eq!(outcome.reason, Some(IntegrityReason::AttachProbeTimeout));
+        assert_eq!(engine.summary.digest_stream_skips, 0);
+    }
+
+    #[test]
+    fn digest_seed_eligible_by_value_only() {
+        assert!(ProbeResultCache::digest_seed_eligible(None));
+        assert!(ProbeResultCache::digest_seed_eligible(Some(
+            ATTACH_BY_VALUE
+        )));
+        assert!(!ProbeResultCache::digest_seed_eligible(Some(
+            ATTACH_EMBEDDED_MSG
+        )));
+        assert!(!ProbeResultCache::digest_seed_eligible(Some(3)));
+    }
+
+    /// Full digest seed must not charge more than remaining probe budget (two-pass Full
+    /// stops at `bytes_left`).
+    #[test]
+    fn digest_probe_seed_full_charge_capped_by_bytes_left() {
+        let mut seed = ProbeResultCache::new();
+        seed.seed_from_digest_stream("a.pst", 1, 2, 100, 0, 0, 10_000);
+        let mut engine = AttachProbeEngine::with_cache(
+            ProbeBudgets {
+                max_probe_bytes: 3_000,
+                per_attach_max_bytes: 64 * 1024,
+                ..ProbeBudgets::default()
+            },
+            ProbeLevel::Full,
+            None,
+            None,
+            seed,
+        );
+        let hit = engine.probe_attach("a.pst", 1, 2, 100, Some(ATTACH_BY_VALUE));
+        assert!(hit.ok);
+        assert_eq!(engine.summary.digest_stream_skips, 1);
+        assert_eq!(engine.summary.bytes, 3_000);
+        assert_eq!(engine.summary.attempted, 1);
+        assert!(engine.budget_exhausted());
+    }
+
     /// Mock Read that tracks max buffer size requested and returns large logical size
     /// in small chunks — proves L2 path never needs a fat Vec.
     struct ChunkedMock {
@@ -1542,6 +1843,7 @@ mod tests {
                 mode: ScanMode::BestEffort,
                 cancel: None,
                 progress: None,
+                seed_cache: None,
             },
         );
         assert_eq!(summary.attempted, 0);
@@ -1603,6 +1905,7 @@ mod tests {
                 mode: ScanMode::BestEffort,
                 cancel: None,
                 progress: None,
+                seed_cache: None,
             },
         );
         // One group, 6 peers, cap 3 → peer_probe_capped_groups = 1 (all fail open).
@@ -1679,6 +1982,7 @@ mod tests {
                 mode: ScanMode::BestEffort,
                 cancel: None,
                 progress: None,
+                seed_cache: None,
             },
         );
         assert_eq!(
@@ -1743,6 +2047,7 @@ mod tests {
                 mode: ScanMode::BestEffort,
                 cancel: None,
                 progress: None,
+                seed_cache: None,
             },
         );
         assert_eq!(
@@ -1797,6 +2102,7 @@ mod tests {
             budgets,
             ProbeLevel::Open,
             ScanMode::BestEffort,
+            None,
             None,
             None,
         );
@@ -1855,6 +2161,7 @@ mod tests {
             ScanMode::BestEffort,
             Some(cancel),
             None,
+            None,
         );
         assert!(summary.cancelled, "cancel flag must set summary.cancelled");
         assert_eq!(
@@ -1885,6 +2192,8 @@ mod tests {
             0.05,
             summary.peer_probe_capped_groups,
             summary.cancelled,
+            summary.bytes,
+            summary.digest_stream_skips,
         );
         assert!(pre.cancelled);
         assert!(pre.truncated);
@@ -1930,6 +2239,7 @@ mod tests {
             ProbeBudgets::default(),
             ProbeLevel::Open,
             ScanMode::Strict,
+            None,
             None,
             None,
         );
@@ -2205,6 +2515,7 @@ mod tests {
             ScanMode::Strict,
             None,
             None,
+            None,
         );
         // Simulate scan/unique-pst strict retain: drop probe-fail candidates.
         let pre_len = items.len();
@@ -2255,6 +2566,8 @@ mod tests {
             attach_probe_truncated: truncated,
             peer_probe_capped_groups: 0,
             attach_probe_cancelled: cancelled,
+            attach_probe_bytes: 0,
+            attach_digest_stream_skips: 0,
         })
     }
 
@@ -2435,6 +2748,8 @@ mod tests {
             attach_probe_truncated: false,
             peer_probe_capped_groups: 0,
             attach_probe_cancelled: true,
+            attach_probe_bytes: 0,
+            attach_digest_stream_skips: 0,
         });
         assert!(report.attach_probe.enabled);
         assert!(report.attach_probe.cancelled);

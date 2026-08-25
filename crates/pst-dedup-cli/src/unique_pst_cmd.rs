@@ -1551,6 +1551,8 @@ pub fn run_unique_pst_with_options(
                 attach_probe_truncated: false,
                 peer_probe_capped_groups: 0,
                 attach_probe_cancelled: true,
+                attach_probe_bytes: 0,
+                attach_digest_stream_skips: 0,
             });
             let artifact_state = crate::export_outcome::ArtifactState::Absent;
             let total_ms = started.elapsed().as_millis() as u64;
@@ -1608,6 +1610,7 @@ pub fn run_unique_pst_with_options(
                 }
             }
         }));
+        let digest_seed = std::mem::take(&mut outcome.digest_probe_cache);
         let (probe_summary, probe_cache) = probe_keep_set_groups(
             &mut outcome.candidates,
             KeepSetProbeOpts {
@@ -1620,6 +1623,7 @@ pub fn run_unique_pst_with_options(
                 mode: args.mode,
                 cancel: cancel.clone(),
                 progress: progress_cb,
+                seed_cache: Some(digest_seed),
             },
         );
         phase1b_probe_cache = Some((probe_cache, level));
@@ -1792,6 +1796,8 @@ pub fn run_unique_pst_with_options(
             attach_probe_truncated: probe_summary.truncated,
             peer_probe_capped_groups: probe_summary.peer_probe_capped_groups,
             attach_probe_cancelled: probe_summary.cancelled,
+            attach_probe_bytes: probe_summary.bytes,
+            attach_digest_stream_skips: probe_summary.digest_stream_skips,
         });
         if probe_summary.attempted > 0 || probe_summary.truncated || probe_summary.cancelled {
             emit_log(
