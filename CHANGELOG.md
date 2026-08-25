@@ -7,6 +7,13 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0092 — Cloud named-prop NPMAP write)
+
+- Production writer replaces empty `NID_NAME_TO_ID_MAP` stub with allowlisted NPMAP when used: GUID/entry/string streams + MS-PST hash buckets (`BucketCount=251`).
+- Cloud pointer attaches re-emit `PidNameAttachmentProviderType` when known; MAY copy `AttachmentUrl` from `cloud_url` when present; classic `PidTagAttachLongPathname` (+ optional `PidTagAttachPathname`) retained. `AttachmentPermissionType` is writable on `WriteAttachment` when set, but PST→canonical extract of PermissionType is not plumbed yet (MAY residual).
+- Emit-only-when-used via `NamedPropWritePlan` pre-scan (cloud-free exports keep empty stub).
+- Closes **D-0084-cloud-named-prop-write** (encyclopedia residual remains out of scope).
+
 ### Added (0091 — Digest + probe unify)
 
 - When `--strong-content-hash body-recip-attach` and `--deep-attach-preflight` both run, Pass-1 **Real by-value** attach digests seed a Full/ok probe cache; Pass-2 skips second stream I/O while still charging probe tallies once (`digest_stream_skips`).

@@ -1545,6 +1545,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                                 a.size,
                                 String::new(),
                                 a.payload_sha256.clone(),
+                                String::new(), // content-digest path has no provider
                             )
                         })
                         .collect(),
@@ -1591,7 +1592,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
         attaches: src
             .attaches
             .iter()
-            .map(|(f, s, _, h)| AttachDigestEntry {
+            .map(|(f, s, _, h, _)| AttachDigestEntry {
                 filename: f.clone(),
                 size: *s,
                 payload_sha256: h.clone(),
@@ -1716,17 +1717,48 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
         // Multiset of output attaches keyed by lowercase filename. Duplicate names
         // must not collapse: each source attach consumes exactly one output slot
         // (prefer filename+size+hash, then filename+hash, then filename+size).
-        let mut out_attach_pool: BTreeMap<String, Vec<(u64, String, bool)>> = BTreeMap::new();
-        for (f, sz, _, h) in &out.attaches {
+        let mut out_attach_pool: BTreeMap<String, Vec<(u64, String, String, bool)>> =
+            BTreeMap::new();
+        for (f, sz, _, h, prov) in &out.attaches {
             out_attach_pool
                 .entry(f.to_ascii_lowercase())
                 .or_default()
-                .push((*sz, h.clone(), false));
+                .push((*sz, h.clone(), prov.clone(), false));
         }
-        for (fnm, sz, _, ph) in &src.attaches {
+        for (fnm, sz, _, ph, src_prov) in &src.attaches {
             attachments_compared = attachments_compared.saturating_add(1);
             let fnm_key = fnm.to_ascii_lowercase();
             if ph.is_empty() {
+                // 0092: still match/consume an output slot for ProviderType on
+                // payload-less cloud pointers (multiset-safe).
+                let src_p = src_prov.trim();
+                let out_prov = out_attach_pool.get_mut(&fnm_key).and_then(|slots| {
+                    let i = slots
+                        .iter()
+                        .position(|(osz, _, _, used)| !*used && (*osz == *sz || *sz == 0))
+                        .or_else(|| slots.iter().position(|(_, _, _, used)| !*used))?;
+                    let prov = slots[i].2.clone();
+                    slots[i].3 = true;
+                    Some(prov)
+                });
+                if !src_p.is_empty() {
+                    let out_p = out_prov.as_deref().unwrap_or("").trim();
+                    let preserved = out_p == src_p;
+                    let (class, _) = contract.classify("PidNameAttachmentProviderType", preserved);
+                    if !preserved {
+                        findings.push(QcFinding {
+                            class,
+                            property: "PidNameAttachmentProviderType".into(),
+                            volume_index: cand.volume_index,
+                            source_path: cand.source_path.clone(),
+                            source_nid: cand.source_nid,
+                            message_id_norm: cand.message_id_norm.clone(),
+                            detail: format!(
+                                "attach {fnm} ProviderType src={src_p:?} out={out_p:?}"
+                            ),
+                        });
+                    }
+                }
                 // Empty source hash: only filename-specific ledger fail explains.
                 let explained = attach_ledger_explains_effective(cand, digest_for_cand, fnm);
                 let (class, _) = contract.classify("attachment_stream_soft_fail", explained);
@@ -1748,37 +1780,63 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             let pool = out_attach_pool.get_mut(&fnm_key);
             let consumed = pool.and_then(|slots| {
                 // Prefer exact size+hash, then hash-only, then size-only (hash mismatch).
-                let exact = slots.iter().position(|(osz, oh, used)| {
+                let exact = slots.iter().position(|(osz, oh, _, used)| {
                     !*used && *osz == *sz && oh.as_str() == ph.as_str()
                 });
                 if let Some(i) = exact {
-                    slots[i].2 = true;
-                    return Some(MatchKind::Exact);
+                    let out_prov = slots[i].2.clone();
+                    slots[i].3 = true;
+                    return Some((MatchKind::Exact, out_prov));
                 }
                 let hash_only = slots
                     .iter()
-                    .position(|(_, oh, used)| !*used && oh.as_str() == ph.as_str());
+                    .position(|(_, oh, _, used)| !*used && oh.as_str() == ph.as_str());
                 if let Some(i) = hash_only {
-                    slots[i].2 = true;
-                    return Some(MatchKind::HashOnly);
+                    let out_prov = slots[i].2.clone();
+                    slots[i].3 = true;
+                    return Some((MatchKind::HashOnly, out_prov));
                 }
                 let size_only = slots
                     .iter()
-                    .position(|(osz, _, used)| !*used && *osz == *sz);
+                    .position(|(osz, _, _, used)| !*used && *osz == *sz);
                 if let Some(i) = size_only {
                     let out_ph = slots[i].1.clone();
-                    slots[i].2 = true;
-                    return Some(MatchKind::HashMismatch(out_ph));
+                    let out_prov = slots[i].2.clone();
+                    slots[i].3 = true;
+                    return Some((MatchKind::HashMismatch(out_ph), out_prov));
                 }
-                let any = slots.iter().position(|(_, _, used)| !*used);
+                let any = slots.iter().position(|(_, _, _, used)| !*used);
                 if let Some(i) = any {
                     let out_ph = slots[i].1.clone();
-                    slots[i].2 = true;
-                    return Some(MatchKind::HashMismatch(out_ph));
+                    let out_prov = slots[i].2.clone();
+                    slots[i].3 = true;
+                    return Some((MatchKind::HashMismatch(out_ph), out_prov));
                 }
                 None
             });
-            match consumed {
+            // 0092: when source had ProviderType, require output preserve it.
+            if let Some((_, ref out_prov)) = consumed {
+                let src_p = src_prov.trim();
+                if !src_p.is_empty() {
+                    let preserved = out_prov.trim() == src_p;
+                    let (class, _) = contract.classify("PidNameAttachmentProviderType", preserved);
+                    if !preserved {
+                        findings.push(QcFinding {
+                            class,
+                            property: "PidNameAttachmentProviderType".into(),
+                            volume_index: cand.volume_index,
+                            source_path: cand.source_path.clone(),
+                            source_nid: cand.source_nid,
+                            message_id_norm: cand.message_id_norm.clone(),
+                            detail: format!(
+                                "attach {fnm} ProviderType src={src_p:?} out={:?}",
+                                out_prov.trim()
+                            ),
+                        });
+                    }
+                }
+            }
+            match consumed.map(|(k, _)| k) {
                 Some(MatchKind::Exact | MatchKind::HashOnly) => {}
                 Some(MatchKind::HashMismatch(out_ph)) => {
                     let (class, _) = contract.classify("attachment_payload_sha256", false);
@@ -1825,24 +1883,23 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             }
         }
         // Unexpected / unconsumed output attaches (extra multiset entries).
-        for (f, sz, _, h) in &out.attaches {
+        for (f, sz, _, h, _) in &out.attaches {
             let key = f.to_ascii_lowercase();
             let still_free = out_attach_pool
                 .get(&key)
                 .map(|slots| {
-                    slots
-                        .iter()
-                        .any(|(osz, oh, used)| !*used && *osz == *sz && oh.as_str() == h.as_str())
+                    slots.iter().any(|(osz, oh, _, used)| {
+                        !*used && *osz == *sz && oh.as_str() == h.as_str()
+                    })
                 })
                 .unwrap_or(false);
             if still_free {
                 // Mark one free slot consumed for reporting so we don't double-count.
                 if let Some(slots) = out_attach_pool.get_mut(&key) {
-                    if let Some(slot) = slots
-                        .iter_mut()
-                        .find(|(osz, oh, used)| !*used && *osz == *sz && oh.as_str() == h.as_str())
-                    {
-                        slot.2 = true;
+                    if let Some(slot) = slots.iter_mut().find(|(osz, oh, _, used)| {
+                        !*used && *osz == *sz && oh.as_str() == h.as_str()
+                    }) {
+                        slot.3 = true;
                     }
                 }
                 let (class, _) = contract.classify("attachment_by_value", false);

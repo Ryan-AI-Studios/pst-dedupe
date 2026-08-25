@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use pst_writer::{
     write_unicode_pst, write_unicode_pst_with_streams, AttachRead, AttachStreamSource,
-    AttachmentFidelityKind, FolderLayoutPolicy, WriteAttachment, WriteMessage, WritePstOpts,
-    WriteRecipient, WriteRecipientType,
+    AttachmentFidelityKind, FolderLayoutPolicy, NamedPropWritePlan, WriteAttachment, WriteMessage,
+    WritePstOpts, WriteRecipient, WriteRecipientType,
 };
 
 fn scratch_path(name: &str) -> PathBuf {
@@ -1551,7 +1551,12 @@ fn cloud_link_writes_pointer_row_and_ledger() {
         ..Default::default()
     });
 
-    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    let plan = NamedPropWritePlan::scan_messages(std::slice::from_ref(&msg));
+    let opts = WritePstOpts {
+        named_prop_plan: plan,
+        ..WritePstOpts::default()
+    };
+    let report = write_unicode_pst(&path, vec![msg], &[], &opts).expect("write");
     // Pointer row written (anti-ghost) AND fail ledger for missing payload.
     assert_eq!(
         report.attachments_written, 1,
@@ -1573,6 +1578,12 @@ fn cloud_link_writes_pointer_row_and_ledger() {
 
     // Reader sees attachment-table row (not silent omit).
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    // 0092: allowlisted NPMAP must resolve ProviderType.
+    assert_eq!(
+        pst.name_id_map().attachment_provider_type_npid(),
+        Some(0x8000),
+        "0092 NPMAP must map AttachmentProviderType"
+    );
     let folders = pst.folders().expect("folders");
     let nid = folders
         .iter()
@@ -1590,6 +1601,12 @@ fn cloud_link_writes_pointer_row_and_ledger() {
     assert!(
         attaches[0].is_cloud_link || attaches[0].attach_method == Some(7),
         "reader should see cloud method or classify cloud: {:?}",
+        attaches[0]
+    );
+    assert_eq!(
+        attaches[0].cloud_provider.as_deref(),
+        Some("OneDrivePro"),
+        "0092 ProviderType must round-trip on attach PC: {:?}",
         attaches[0]
     );
 
@@ -1615,7 +1632,12 @@ fn cloud_link_named_provider_by_value_writes_web_ref_method() {
         ..Default::default()
     });
 
-    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    let plan = NamedPropWritePlan::scan_messages(std::slice::from_ref(&msg));
+    let opts = WritePstOpts {
+        named_prop_plan: plan,
+        ..WritePstOpts::default()
+    };
+    let report = write_unicode_pst(&path, vec![msg], &[], &opts).expect("write");
     assert_eq!(report.attachments_written, 1);
     assert_eq!(report.attachments_failed, 1);
 
@@ -1639,6 +1661,22 @@ fn cloud_link_named_provider_by_value_writes_web_ref_method() {
 }
 
 #[test]
+fn cloud_free_export_keeps_empty_npmapping() {
+    // 0092 DoD-3: cloud-free exports must not grow a populated NPMAP.
+    let path = scratch_path("cloud_free_empty_npmap");
+    cleanup(&path);
+    let msg = base_msg("<plain@ex.com>", "No cloud");
+    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    assert_eq!(report.attachments_written, 0);
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    assert!(
+        pst.name_id_map().attachment_provider_type_npid().is_none(),
+        "cloud-free unique-PST must not emit AttachmentProviderType"
+    );
+    cleanup(&path);
+}
+
+#[test]
 fn cloud_link_preserves_empty_filename() {
     let path = scratch_path("cloud_link_empty_name");
     cleanup(&path);
@@ -1655,7 +1693,12 @@ fn cloud_link_preserves_empty_filename() {
         ..Default::default()
     });
 
-    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    let plan = NamedPropWritePlan::scan_messages(std::slice::from_ref(&msg));
+    let opts = WritePstOpts {
+        named_prop_plan: plan,
+        ..WritePstOpts::default()
+    };
+    let report = write_unicode_pst(&path, vec![msg], &[], &opts).expect("write");
     assert_eq!(report.attachments_written, 1);
     assert_eq!(report.attachments_failed, 1);
 

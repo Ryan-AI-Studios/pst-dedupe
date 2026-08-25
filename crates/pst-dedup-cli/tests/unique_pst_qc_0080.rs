@@ -504,6 +504,7 @@ fn attach_payload_mismatch_is_defect() {
         is_cloud_link: false,
         cloud_provider: None,
         cloud_url: None,
+        cloud_permission_type: None,
     }];
     write_simple_pst(&src, vec![src_msg]);
 
@@ -522,6 +523,7 @@ fn attach_payload_mismatch_is_defect() {
         is_cloud_link: false,
         cloud_provider: None,
         cloud_url: None,
+        cloud_permission_type: None,
     }];
     write_simple_pst(&out, vec![out_msg]);
 
@@ -1016,7 +1018,7 @@ fn clean_room_parents_only_with_source_digests_is_green() {
                 attaches: detail
                     .attaches
                     .iter()
-                    .map(|(f, s, _, h)| AttachDigestEntry {
+                    .map(|(f, s, _, h, _)| AttachDigestEntry {
                         filename: f.clone(),
                         size: *s,
                         payload_sha256: h.clone(),
@@ -3030,7 +3032,7 @@ fn clean_room_digest_ledger_fail_explains_missing_attach() {
                 attaches: detail
                     .attaches
                     .iter()
-                    .map(|(f, s, _, h)| AttachDigestEntry {
+                    .map(|(f, s, _, h, _)| AttachDigestEntry {
                         filename: f.clone(),
                         size: *s,
                         payload_sha256: h.clone(),
@@ -3560,5 +3562,188 @@ fn recipient_table_qc_include_bcc_true_matches_full_set() {
     assert!(
         report.messages_compared >= 1,
         "expected at least one message compared"
+    );
+}
+
+/// 0092: dropping ProviderType on a cloud pointer must defect when source had it.
+#[test]
+fn cloud_provider_type_missing_on_output_is_defect() {
+    use pst_writer::NamedPropWritePlan;
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let mut src_msg = base_msg("<cloudprov@ex.com>", "CloudProv", "body");
+    src_msg.attachments = vec![WriteAttachment {
+        filename: "doc.docx".into(),
+        size: 0,
+        attach_method: Some(7),
+        data: None,
+        is_cloud_link: true,
+        cloud_provider: Some("OneDrivePro".into()),
+        cloud_url: Some("https://contoso.sharepoint.com/x".into()),
+        ..WriteAttachment::default()
+    }];
+    let plan = NamedPropWritePlan::scan_messages(std::slice::from_ref(&src_msg));
+    write_unicode_pst(
+        &src,
+        vec![src_msg],
+        &[],
+        &WritePstOpts {
+            named_prop_plan: plan,
+            ..WritePstOpts::default()
+        },
+    )
+    .expect("src");
+
+    // Output: same cloud pointer but empty plan → no ProviderType named prop.
+    let mut out_msg = base_msg("<cloudprov@ex.com>", "CloudProv", "body");
+    out_msg.attachments = vec![WriteAttachment {
+        filename: "doc.docx".into(),
+        size: 0,
+        attach_method: Some(7),
+        data: None,
+        is_cloud_link: true,
+        cloud_provider: Some("OneDrivePro".into()),
+        cloud_url: Some("https://contoso.sharepoint.com/x".into()),
+        ..WriteAttachment::default()
+    }];
+    write_unicode_pst(&out, vec![out_msg], &[], &WritePstOpts::default()).expect("out");
+
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "cloudprov@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 1,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        source_id: String::new(),
+        bcc_suppressed: false,
+        body_cloud_link_count: 0,
+        subject: "CloudProv".into(),
+    }];
+    let mut c = cand(1, 4);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "cloudprov@ex.com".into();
+    c.subject = "CloudProv".into();
+    c.attach_count = 1;
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        true,
+        false,
+    ));
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    assert!(
+        csv.contains("PidNameAttachmentProviderType") || report.findings.defect > 0,
+        "missing ProviderType must defect; findings={csv} {:?}",
+        report.findings
+    );
+}
+
+/// 0092: two same-name payload-less cloud pointers with distinct providers must
+/// match/consume output slots independently (multiset ProviderType QC).
+#[test]
+fn duplicate_cloud_provider_types_match_independently() {
+    use pst_writer::NamedPropWritePlan;
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let cloud = |prov: &str| WriteAttachment {
+        filename: "same.docx".into(),
+        size: 0,
+        attach_method: Some(7),
+        data: None,
+        is_cloud_link: true,
+        cloud_provider: Some(prov.into()),
+        cloud_url: Some(format!("https://contoso.sharepoint.com/{prov}")),
+        ..WriteAttachment::default()
+    };
+
+    let mut src_msg = base_msg("<dupcloud@ex.com>", "DupCloud", "body");
+    src_msg.attachments = vec![cloud("OneDrivePro"), cloud("OneDriveConsumer")];
+    let plan = NamedPropWritePlan::scan_messages(std::slice::from_ref(&src_msg));
+    write_unicode_pst(
+        &src,
+        vec![src_msg],
+        &[],
+        &WritePstOpts {
+            named_prop_plan: plan.clone(),
+            ..WritePstOpts::default()
+        },
+    )
+    .expect("src");
+
+    let mut out_msg = base_msg("<dupcloud@ex.com>", "DupCloud", "body");
+    out_msg.attachments = vec![cloud("OneDrivePro"), cloud("OneDriveConsumer")];
+    write_unicode_pst(
+        &out,
+        vec![out_msg],
+        &[],
+        &WritePstOpts {
+            named_prop_plan: plan,
+            ..WritePstOpts::default()
+        },
+    )
+    .expect("out");
+
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "dupcloud@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 2,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        source_id: String::new(),
+        bcc_suppressed: false,
+        body_cloud_link_count: 0,
+        subject: "DupCloud".into(),
+    }];
+    let mut c = cand(1, 4);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "dupcloud@ex.com".into();
+    c.subject = "DupCloud".into();
+    c.attach_count = 2;
+
+    let _report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        true,
+        false,
+    ));
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    assert!(
+        !csv.contains("PidNameAttachmentProviderType"),
+        "both ProviderTypes must match independently; findings={csv}"
     );
 }
