@@ -657,6 +657,31 @@ mod tests {
         );
     }
 
+    /// 0096 lock 7: attachment meta preimage is filename:size only.
+    #[test]
+    fn attachment_meta_strings_are_filename_size_only() {
+        let a = AttachmentInfo {
+            filename: "Report.XLSX".into(),
+            size: 42,
+            is_inline: false,
+            ..AttachmentInfo::default()
+        };
+        let strings = attachment_meta_strings(&[a], false);
+        assert_eq!(strings, vec!["report.xlsx:42".to_string()]);
+        // Inline-ignored path still filename:size when not filtered.
+        let inline = AttachmentInfo {
+            filename: "cid.png".into(),
+            size: 7,
+            is_inline: true,
+            ..AttachmentInfo::default()
+        };
+        assert!(attachment_meta_strings(std::slice::from_ref(&inline), true).is_empty());
+        assert_eq!(
+            attachment_meta_strings(std::slice::from_ref(&inline), false),
+            vec!["cid.png:7".to_string()]
+        );
+    }
+
     #[test]
     fn test_content_hash_unicode_subject() {
         let h1 = compute_content_hash(Some("Re: Réunion"), None, None, None, &[]);

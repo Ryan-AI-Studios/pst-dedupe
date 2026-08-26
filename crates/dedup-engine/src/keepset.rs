@@ -736,6 +736,9 @@ pub struct CanonicalAttachment {
     /// Best-effort cloud URL/path for ledger actionability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud_url: Option<String>,
+    /// `PidNameAttachmentPermissionType` when present (0096 MAY; never invented).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_permission_type: Option<i32>,
     /// Lazy unique-pst winner nested extract (0094). Skipped in keep-set JSON.
     #[serde(skip)]
     pub embedded_message: Option<Box<NestedCanonicalMessage>>,
@@ -3500,6 +3503,7 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: Some(Box::new(NestedCanonicalMessage {
                 subject: Some("secret nest".into()),
                 body_plain: Some("huge".into()),
@@ -3541,6 +3545,7 @@ mod tests {
                     is_cloud_link: false,
                     cloud_provider: None,
                     cloud_url: None,
+                    cloud_permission_type: None,
                     embedded_message: embedded,
                     embedded_extract_limit: limit,
                 }
@@ -3607,6 +3612,115 @@ mod tests {
         );
     }
 
+    /// 0096 DoD-2: production scan maps attaches via `AttachmentInfo::new(filename, size)`
+    /// (pst-dedup-cli `scan.rs`). Permission-only canonical differences must not
+    /// change parent/strong hashes when projected that way; size control must.
+    #[test]
+    fn parent_hash_unchanged_when_cloud_permission_differs() {
+        use crate::hasher::{
+            compute_content_hash, compute_dedup_keys_ex, AttachmentInfo, StrongHashInput,
+        };
+
+        // Mirrors production scan projection (filename + size only).
+        let project = |a: &CanonicalAttachment| AttachmentInfo::new(a.filename.clone(), a.size);
+
+        let none = CanonicalAttachment {
+            filename: "link.xlsx".into(),
+            size: 0,
+            mime: None,
+            data: None,
+            stream_available: false,
+            attach_nid: Some(1),
+            attach_method: Some(7),
+            is_cloud_link: true,
+            cloud_provider: Some("OneDrivePro".into()),
+            cloud_url: Some("https://1drv.ms/x/s!abc".into()),
+            cloud_permission_type: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
+        };
+        let with_perm = CanonicalAttachment {
+            cloud_permission_type: Some(1),
+            ..none.clone()
+        };
+        assert_ne!(
+            none.cloud_permission_type, with_perm.cloud_permission_type,
+            "fixture must differ only in permission"
+        );
+
+        let subject = Some("Cloud");
+        let submit = Some(0x01D5B035EDA780_i64);
+        let sender = Some("alice@example.com");
+        let body = Some("body");
+        let info_none = project(&none);
+        let info_perm = project(&with_perm);
+        let h_none = compute_content_hash(
+            subject,
+            submit,
+            sender,
+            body,
+            std::slice::from_ref(&info_none),
+        );
+        let h_perm = compute_content_hash(
+            subject,
+            submit,
+            sender,
+            body,
+            std::slice::from_ref(&info_perm),
+        );
+        assert_eq!(
+            h_none, h_perm,
+            "permission-only canonical difference must not change content_hash via scan projection"
+        );
+
+        let strong = StrongHashInput {
+            identity: IdentityLevel::BodyRecipAttach,
+            body_sha256: None,
+            body_char_len: Some(4),
+            display_to: Some("bob@example.com"),
+            display_cc: None,
+            display_bcc: None,
+            recipients: None,
+            ignore_inline_attachments: false,
+        };
+        let k_none = compute_dedup_keys_ex(
+            None,
+            subject,
+            submit,
+            sender,
+            body,
+            std::slice::from_ref(&info_none),
+            &strong,
+        );
+        let k_perm = compute_dedup_keys_ex(
+            None,
+            subject,
+            submit,
+            sender,
+            body,
+            std::slice::from_ref(&info_perm),
+            &strong,
+        );
+        assert_eq!(k_none.content_hash, k_perm.content_hash);
+        assert_eq!(
+            k_none.strong_content_hash, k_perm.strong_content_hash,
+            "permission-only difference must not change strong_content_hash"
+        );
+
+        let size_changed = CanonicalAttachment { size: 1, ..none };
+        let h_size = compute_content_hash(
+            subject,
+            submit,
+            sender,
+            body,
+            std::slice::from_ref(&project(&size_changed)),
+        );
+        assert_ne!(
+            h_none, h_size,
+            "control: attach size must affect content_hash"
+        );
+    }
+
     #[test]
     fn degraded_sole_member_may_win() {
         let a = item(
@@ -3662,6 +3776,7 @@ mod tests {
                                 is_cloud_link: false,
                                 cloud_provider: None,
                                 cloud_url: None,
+                                cloud_permission_type: None,
                                 embedded_message: None,
                                 embedded_extract_limit: false,
                             })
@@ -3868,6 +3983,7 @@ mod tests {
                             is_cloud_link: false,
                             cloud_provider: None,
                             cloud_url: None,
+                            cloud_permission_type: None,
                             embedded_message: None,
                             embedded_extract_limit: false,
                         }],
@@ -3942,6 +4058,7 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         };
@@ -3957,6 +4074,7 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         };
@@ -3971,6 +4089,7 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         };
@@ -4050,6 +4169,7 @@ mod tests {
             is_cloud_link: true,
             cloud_provider: Some("OneDrivePro".into()),
             cloud_url: Some("https://1drv.ms/x/s!abc".into()),
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         };
@@ -4100,6 +4220,7 @@ mod tests {
                         is_cloud_link: true,
                         cloud_provider: Some(provider.clone()),
                         cloud_url: Some(url.clone()),
+                        cloud_permission_type: None,
                         embedded_message: None,
                         embedded_extract_limit: false,
                     }],
@@ -4140,6 +4261,7 @@ mod tests {
                         is_cloud_link: false,
                         cloud_provider: None,
                         cloud_url: None,
+                        cloud_permission_type: None,
                         embedded_message: None,
                         embedded_extract_limit: false,
                     }],
@@ -4466,6 +4588,7 @@ mod tests {
                                 is_cloud_link: false,
                                 cloud_provider: None,
                                 cloud_url: None,
+                                cloud_permission_type: None,
                                 embedded_message: None,
                                 embedded_extract_limit: false,
                             });
@@ -4482,6 +4605,7 @@ mod tests {
                                     is_cloud_link: false,
                                     cloud_provider: None,
                                     cloud_url: None,
+                                    cloud_permission_type: None,
                                     embedded_message: None,
                                     embedded_extract_limit: false,
                                 });

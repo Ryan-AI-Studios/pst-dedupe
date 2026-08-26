@@ -50,6 +50,14 @@ pub const PSETID_ATTACHMENT: [u8; 16] = [
 /// Public string name for `PidNameAttachmentProviderType` (not a numeric LID).
 pub const NAME_ATTACHMENT_PROVIDER_TYPE: &str = "AttachmentProviderType";
 
+/// Public string name for `PidNameAttachmentPermissionType` (MS-OXCMSG §2.2.2.28).
+pub const NAME_ATTACHMENT_PERMISSION_TYPE: &str = "AttachmentPermissionType";
+
+/// Documented MS-OXCMSG PermissionType values (fixtures only — not a reject list).
+pub const PERMISSION_NONE: i32 = 0;
+pub const PERMISSION_VIEW: i32 = 1;
+pub const PERMISSION_EDIT: i32 = 2;
+
 /// Identifier half of a named property key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NamedPropId {
@@ -134,6 +142,11 @@ impl NameIdMap {
     /// Resolve `PidNameAttachmentProviderType` (PSETID_Attachment + name).
     pub fn attachment_provider_type_npid(&self) -> Option<u16> {
         self.resolve_name(&PSETID_ATTACHMENT, NAME_ATTACHMENT_PROVIDER_TYPE)
+    }
+
+    /// Resolve `PidNameAttachmentPermissionType` (PSETID_Attachment + name).
+    pub fn attachment_permission_type_npid(&self) -> Option<u16> {
+        self.resolve_name(&PSETID_ATTACHMENT, NAME_ATTACHMENT_PERMISSION_TYPE)
     }
 
     /// Parse from the three NPMAP streams (unit-test and production entry point).
@@ -320,6 +333,11 @@ impl PstFile {
         self.name_id_map().attachment_provider_type_npid()
     }
 
+    /// Convenience: resolve allowlisted AttachmentPermissionType NPID when map present.
+    pub fn attachment_permission_type_npid(&mut self) -> Option<u16> {
+        self.name_id_map().attachment_permission_type_npid()
+    }
+
     fn load_name_id_map_uncached(&mut self) -> NameIdMap {
         let crypt = self.header.crypt_method;
         match pc::load_pc(
@@ -378,6 +396,42 @@ mod tests {
         assert_eq!(
             rev.kind,
             NamedPropId::Name(NAME_ATTACHMENT_PROVIDER_TYPE.to_string())
+        );
+    }
+
+    #[test]
+    fn string_named_attachment_permission_type_hit() {
+        let guid_stream = PSETID_ATTACHMENT.to_vec();
+        let string_stream = encode_string_stream_entry(NAME_ATTACHMENT_PERMISSION_TYPE);
+        let entry = encode_nameid_entry(0, true, 3, 0);
+        let m = NameIdMap::from_streams(&guid_stream, &entry, &string_stream);
+        let npid = m
+            .attachment_permission_type_npid()
+            .expect("AttachmentPermissionType must resolve");
+        assert_eq!(npid, 0x8000);
+        let rev = m.reverse(npid).expect("reverse");
+        assert_eq!(rev.guid, PSETID_ATTACHMENT);
+        assert_eq!(
+            rev.kind,
+            NamedPropId::Name(NAME_ATTACHMENT_PERMISSION_TYPE.to_string())
+        );
+    }
+
+    #[test]
+    fn name_attachment_permission_type_bytes_and_psetid() {
+        assert_eq!(
+            NAME_ATTACHMENT_PERMISSION_TYPE.as_bytes(),
+            b"AttachmentPermissionType"
+        );
+        assert_eq!(PERMISSION_NONE, 0);
+        assert_eq!(PERMISSION_VIEW, 1);
+        assert_eq!(PERMISSION_EDIT, 2);
+        // Same PSETID as ProviderType (mixed-endian {96357F7F-59E1-47D0-99A7-46515C183B54}).
+        assert_eq!(PSETID_ATTACHMENT[0], 0x7F);
+        assert_eq!(PSETID_ATTACHMENT[3], 0x96);
+        assert_eq!(
+            &PSETID_ATTACHMENT[8..],
+            &[0x99, 0xA7, 0x46, 0x51, 0x5C, 0x18, 0x3B, 0x54]
         );
     }
 

@@ -13,7 +13,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::export_oracle::{
-    hex_sha256, message_content_detail, structural_digest_pst, MessageContentDetail,
+    hex_sha256, message_content_detail, structural_digest_pst, AttachDetail, MessageContentDetail,
     VolumeStructuralDigest,
 };
 use crate::fidelity_contract::{FidelityContract, FindingClass, FIDELITY_CONTRACT_VERSION};
@@ -27,6 +27,12 @@ use crate::unique_export_report::{ExportMessageRow, VolumeReportRow};
 
 /// Default risk-weighted sample cap (§3.3).
 pub const DEFAULT_QC_SAMPLE_MAX: usize = 64;
+
+/// 0096 lock 6 / §2.6: PermissionType QC only when the source row is a cloud
+/// pointer **and** had a PermissionType value. Classic extract→drop is not a defect.
+fn should_compare_permission_type(src_is_cloud_link: bool, src_perm: Option<i32>) -> bool {
+    src_is_cloud_link && src_perm.is_some()
+}
 
 /// QC depth on `unique-pst` / `qc-pst`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1589,15 +1595,16 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                     attaches: m
                         .attaches
                         .iter()
-                        .map(|a| {
-                            (
-                                a.filename.clone(),
-                                a.size,
-                                String::new(),
-                                a.payload_sha256.clone(),
-                                String::new(), // content-digest path has no provider
-                                a.attach_method,
-                            )
+                        .map(|a| AttachDetail {
+                            filename: a.filename.clone(),
+                            size: a.size,
+                            mime: String::new(),
+                            payload_sha256_hex: a.payload_sha256.clone(),
+                            // content-digest path has no provider/permission/cloud flag
+                            cloud_provider: String::new(),
+                            attach_method: a.attach_method,
+                            is_cloud_link: false,
+                            cloud_permission_type: None,
                         })
                         .collect(),
                     attach_list_error: None,
@@ -1643,11 +1650,11 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
         attaches: src
             .attaches
             .iter()
-            .map(|(f, s, _, h, _, method)| AttachDigestEntry {
-                filename: f.clone(),
-                size: *s,
-                payload_sha256: h.clone(),
-                attach_method: *method,
+            .map(|a| AttachDigestEntry {
+                filename: a.filename.clone(),
+                size: a.size,
+                payload_sha256: a.payload_sha256_hex.clone(),
+                attach_method: a.attach_method,
             })
             .collect(),
         // Export path always empty; production extras only via crafted digests / tests.
@@ -1821,28 +1828,45 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
         // Multiset of output attaches keyed by lowercase filename. Duplicate names
         // must not collapse: each source attach consumes exactly one output slot
         // (prefer filename+size+hash, then filename+hash, then filename+size).
-        // Slot: (size, hash, provider, method, used).
-        type OutAttachSlot = (u64, String, String, Option<i32>, bool);
-        let mut out_attach_pool: BTreeMap<String, Vec<OutAttachSlot>> = BTreeMap::new();
-        for (f, sz, _, h, prov, method) in &out.attaches {
-            out_attach_pool
-                .entry(f.to_ascii_lowercase())
-                .or_default()
-                .push((*sz, h.clone(), prov.clone(), *method, false));
+        struct OutAttachSlot {
+            size: u64,
+            hash: String,
+            provider: String,
+            method: Option<i32>,
+            permission: Option<i32>,
+            used: bool,
         }
-        for (fnm, sz, _, ph, src_prov, src_method) in &src.attaches {
+        let mut out_attach_pool: BTreeMap<String, Vec<OutAttachSlot>> = BTreeMap::new();
+        for a in &out.attaches {
+            out_attach_pool
+                .entry(a.filename.to_ascii_lowercase())
+                .or_default()
+                .push(OutAttachSlot {
+                    size: a.size,
+                    hash: a.payload_sha256_hex.clone(),
+                    provider: a.cloud_provider.clone(),
+                    method: a.attach_method,
+                    permission: a.cloud_permission_type,
+                    used: false,
+                });
+        }
+        for src_att in &src.attaches {
+            let fnm = &src_att.filename;
+            let sz = src_att.size;
+            let ph = &src_att.payload_sha256_hex;
+            let src_prov = &src_att.cloud_provider;
+            let src_method = src_att.attach_method;
+            let src_is_cloud = src_att.is_cloud_link;
+            let src_perm = src_att.cloud_permission_type;
             attachments_compared = attachments_compared.saturating_add(1);
             let fnm_key = fnm.to_ascii_lowercase();
-            let mut src_is_embed = *src_method == Some(5) || ph == "__embedded_msg__";
+            let mut src_is_embed = src_method == Some(5) || ph == "__embedded_msg__";
             // Legacy content_digests_v1 rows omit attach_method: if payload hash is
             // empty and an unused output method-5 slot shares the filename, treat as
             // embed (0094 clean-room compatibility).
             if !src_is_embed && ph.is_empty() {
                 if let Some(slots) = out_attach_pool.get(&fnm_key) {
-                    if slots
-                        .iter()
-                        .any(|(_, _, _, om, used)| !*used && *om == Some(5))
-                    {
+                    if slots.iter().any(|s| !s.used && s.method == Some(5)) {
                         src_is_embed = true;
                     }
                 }
@@ -1850,20 +1874,25 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             // Method-5 nests intentionally have empty payload hash (v1 digest stable);
             // match via method, do not classify as stream soft-fail.
             if ph.is_empty() && !src_is_embed {
-                // 0092: still match/consume an output slot for ProviderType on
-                // payload-less cloud pointers (multiset-safe).
+                // 0092/0096: still match/consume an output slot for ProviderType /
+                // PermissionType on payload-less cloud pointers (multiset-safe).
                 let src_p = src_prov.trim();
-                let out_prov = out_attach_pool.get_mut(&fnm_key).and_then(|slots| {
+                let consumed_meta = out_attach_pool.get_mut(&fnm_key).and_then(|slots| {
                     let i = slots
                         .iter()
-                        .position(|(osz, _, _, _, used)| !*used && (*osz == *sz || *sz == 0))
-                        .or_else(|| slots.iter().position(|(_, _, _, _, used)| !*used))?;
-                    let prov = slots[i].2.clone();
-                    slots[i].4 = true;
-                    Some(prov)
+                        .position(|s| !s.used && (s.size == sz || sz == 0))
+                        .or_else(|| slots.iter().position(|s| !s.used))?;
+                    let prov = slots[i].provider.clone();
+                    let perm = slots[i].permission;
+                    slots[i].used = true;
+                    Some((prov, perm))
                 });
                 if !src_p.is_empty() {
-                    let out_p = out_prov.as_deref().unwrap_or("").trim();
+                    let out_p = consumed_meta
+                        .as_ref()
+                        .map(|(p, _)| p.as_str())
+                        .unwrap_or("")
+                        .trim();
                     let preserved = out_p == src_p;
                     let (class, _) = contract.classify("PidNameAttachmentProviderType", preserved);
                     if !preserved {
@@ -1878,6 +1907,29 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                                 "attach {fnm} ProviderType src={src_p:?} out={out_p:?}"
                             ),
                         });
+                    }
+                }
+                // 0096: PermissionType is Preserved only on cloud-pointer rows.
+                // Classic/non-cloud extract→drop at write is expected, not a defect.
+                if should_compare_permission_type(src_is_cloud, src_perm) {
+                    if let Some(src_perm_v) = src_perm {
+                        let out_perm = consumed_meta.as_ref().and_then(|(_, p)| *p);
+                        let preserved = out_perm == Some(src_perm_v);
+                        let (class, _) =
+                            contract.classify("PidNameAttachmentPermissionType", preserved);
+                        if !preserved {
+                            findings.push(QcFinding {
+                                class,
+                                property: "PidNameAttachmentPermissionType".into(),
+                                volume_index: cand.volume_index,
+                                source_path: cand.source_path.clone(),
+                                source_nid: cand.source_nid,
+                                message_id_norm: cand.message_id_norm.clone(),
+                                detail: format!(
+                                    "attach {fnm} PermissionType src={src_perm_v:?} out={out_perm:?}"
+                                ),
+                            });
+                        }
                     }
                 }
                 // Empty source hash: only filename-specific ledger fail explains.
@@ -1902,50 +1954,53 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             let consumed = pool.and_then(|slots| {
                 // 0094: method-5 embeds — match peer embed slot (ignore by-value SHA/size).
                 if src_is_embed {
-                    let i = slots.iter().position(|(_, oh, _, om, used)| {
-                        !*used && (*om == Some(5) || oh.as_str() == "__embedded_msg__")
+                    let i = slots.iter().position(|s| {
+                        !s.used && (s.method == Some(5) || s.hash.as_str() == "__embedded_msg__")
                     })?;
-                    let out_prov = slots[i].2.clone();
-                    slots[i].4 = true;
-                    return Some((MatchKind::Exact, out_prov));
+                    let out_prov = slots[i].provider.clone();
+                    let out_perm = slots[i].permission;
+                    slots[i].used = true;
+                    return Some((MatchKind::Exact, out_prov, out_perm));
                 }
                 // Prefer exact size+hash, then hash-only, then size-only (hash mismatch).
-                let exact = slots.iter().position(|(osz, oh, _, _, used)| {
-                    !*used && *osz == *sz && oh.as_str() == ph.as_str()
-                });
+                let exact = slots
+                    .iter()
+                    .position(|s| !s.used && s.size == sz && s.hash.as_str() == ph.as_str());
                 if let Some(i) = exact {
-                    let out_prov = slots[i].2.clone();
-                    slots[i].4 = true;
-                    return Some((MatchKind::Exact, out_prov));
+                    let out_prov = slots[i].provider.clone();
+                    let out_perm = slots[i].permission;
+                    slots[i].used = true;
+                    return Some((MatchKind::Exact, out_prov, out_perm));
                 }
                 let hash_only = slots
                     .iter()
-                    .position(|(_, oh, _, _, used)| !*used && oh.as_str() == ph.as_str());
+                    .position(|s| !s.used && s.hash.as_str() == ph.as_str());
                 if let Some(i) = hash_only {
-                    let out_prov = slots[i].2.clone();
-                    slots[i].4 = true;
-                    return Some((MatchKind::HashOnly, out_prov));
+                    let out_prov = slots[i].provider.clone();
+                    let out_perm = slots[i].permission;
+                    slots[i].used = true;
+                    return Some((MatchKind::HashOnly, out_prov, out_perm));
                 }
-                let size_only = slots
-                    .iter()
-                    .position(|(osz, _, _, _, used)| !*used && *osz == *sz);
+                let size_only = slots.iter().position(|s| !s.used && s.size == sz);
                 if let Some(i) = size_only {
-                    let out_ph = slots[i].1.clone();
-                    let out_prov = slots[i].2.clone();
-                    slots[i].4 = true;
-                    return Some((MatchKind::HashMismatch(out_ph), out_prov));
+                    let out_ph = slots[i].hash.clone();
+                    let out_prov = slots[i].provider.clone();
+                    let out_perm = slots[i].permission;
+                    slots[i].used = true;
+                    return Some((MatchKind::HashMismatch(out_ph), out_prov, out_perm));
                 }
-                let any = slots.iter().position(|(_, _, _, _, used)| !*used);
+                let any = slots.iter().position(|s| !s.used);
                 if let Some(i) = any {
-                    let out_ph = slots[i].1.clone();
-                    let out_prov = slots[i].2.clone();
-                    slots[i].4 = true;
-                    return Some((MatchKind::HashMismatch(out_ph), out_prov));
+                    let out_ph = slots[i].hash.clone();
+                    let out_prov = slots[i].provider.clone();
+                    let out_perm = slots[i].permission;
+                    slots[i].used = true;
+                    return Some((MatchKind::HashMismatch(out_ph), out_prov, out_perm));
                 }
                 None
             });
-            // 0092: when source had ProviderType, require output preserve it.
-            if let Some((_, ref out_prov)) = consumed {
+            // 0092/0096: when source had ProviderType / PermissionType, require preserve.
+            if let Some((_, ref out_prov, out_perm)) = consumed {
                 let src_p = src_prov.trim();
                 if !src_p.is_empty() {
                     let preserved = out_prov.trim() == src_p;
@@ -1965,8 +2020,29 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                         });
                     }
                 }
+                // 0096: PermissionType compare only for source cloud-pointer rows.
+                if should_compare_permission_type(src_is_cloud, src_perm) {
+                    if let Some(src_perm_v) = src_perm {
+                        let preserved = out_perm == Some(src_perm_v);
+                        let (class, _) =
+                            contract.classify("PidNameAttachmentPermissionType", preserved);
+                        if !preserved {
+                            findings.push(QcFinding {
+                                class,
+                                property: "PidNameAttachmentPermissionType".into(),
+                                volume_index: cand.volume_index,
+                                source_path: cand.source_path.clone(),
+                                source_nid: cand.source_nid,
+                                message_id_norm: cand.message_id_norm.clone(),
+                                detail: format!(
+                                    "attach {fnm} PermissionType src={src_perm_v:?} out={out_perm:?}"
+                                ),
+                            });
+                        }
+                    }
+                }
             }
-            match consumed.map(|(k, _)| k) {
+            match consumed.map(|(k, _, _)| k) {
                 Some(MatchKind::Exact | MatchKind::HashOnly) => {
                     if src_is_embed {
                         let (class, _) = contract.classify("attachment_embedded", true);
@@ -2056,26 +2132,31 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             }
         }
         // Unexpected / unconsumed output attaches (extra multiset entries).
-        for (f, sz, _, h, _, method) in &out.attaches {
+        for a in &out.attaches {
+            let f = &a.filename;
+            let sz = a.size;
+            let h = &a.payload_sha256_hex;
+            let method = a.attach_method;
             let key = f.to_ascii_lowercase();
             let still_free = out_attach_pool
                 .get(&key)
                 .map(|slots| {
-                    slots.iter().any(|(osz, oh, _, _, used)| {
-                        !*used && *osz == *sz && oh.as_str() == h.as_str()
-                    })
+                    slots
+                        .iter()
+                        .any(|s| !s.used && s.size == sz && s.hash.as_str() == h.as_str())
                 })
                 .unwrap_or(false);
             if still_free {
                 // Mark one free slot consumed for reporting so we don't double-count.
                 if let Some(slots) = out_attach_pool.get_mut(&key) {
-                    if let Some(slot) = slots.iter_mut().find(|(osz, oh, _, _, used)| {
-                        !*used && *osz == *sz && oh.as_str() == h.as_str()
-                    }) {
-                        slot.4 = true;
+                    if let Some(slot) = slots
+                        .iter_mut()
+                        .find(|s| !s.used && s.size == sz && s.hash.as_str() == h.as_str())
+                    {
+                        slot.used = true;
                     }
                 }
-                if *method == Some(5) || h == "__embedded_msg__" {
+                if method == Some(5) || h == "__embedded_msg__" {
                     let (class, _) = contract.classify("attachment_embedded", true);
                     findings.push(QcFinding {
                         class,
@@ -3186,6 +3267,18 @@ pub fn record_classified_finding(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_type_qc_gated_on_cloud_pointer() {
+        assert!(should_compare_permission_type(true, Some(1)));
+        assert!(should_compare_permission_type(true, Some(0)));
+        assert!(!should_compare_permission_type(true, None));
+        assert!(
+            !should_compare_permission_type(false, Some(1)),
+            "classic/non-cloud PermissionType drop must not enter QC compare"
+        );
+        assert!(!should_compare_permission_type(false, None));
+    }
 
     fn cand(i: u64, body: usize, att: usize, subj: &str) -> QcSampleCandidate {
         QcSampleCandidate {

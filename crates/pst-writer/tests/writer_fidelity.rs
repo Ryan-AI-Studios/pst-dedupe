@@ -1783,6 +1783,7 @@ fn from_canonical_maps_nested_embedded_message() {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: Some(Box::new(nested)),
             embedded_extract_limit: false,
         }],
@@ -1845,6 +1846,102 @@ fn embedded_unparsed_method_5_without_nested() {
 
 // ── 0073: reason taxonomy + locus events ─────────────────────────────────────
 
+/// 0096: canonical → from_canonical_message → write → reader must preserve PermissionType.
+#[test]
+fn from_canonical_cloud_permission_type_round_trips() {
+    use dedup_engine::integrity::RecoverableIntegrity;
+    use dedup_engine::keepset::{CanonicalAttachment, CanonicalMessage, MessageLocus};
+    use pst_writer::{from_canonical_message, AllowlistedNamedProp, NamedPropWritePlan};
+
+    let path = scratch_path("from_canonical_perm");
+    cleanup(&path);
+
+    let canonical = CanonicalMessage {
+        locus: MessageLocus {
+            source_path: r"C:\src\cloud.pst".into(),
+            source_pst: "cloud.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 0x100,
+            is_orphaned: false,
+        },
+        message_id: Some("<cloudpermcanon@ex.com>".into()),
+        subject: Some("CloudPermCanon".into()),
+        sender: Some("alice@ex.com".into()),
+        display_to: None,
+        display_cc: None,
+        display_bcc: None,
+        recipients: Vec::new(),
+        message_flags: None,
+        submit_time: None,
+        size: None,
+        message_class: None,
+        body_plain: Some("body".into()),
+        body_html: None,
+        attachments: vec![CanonicalAttachment {
+            filename: "report.xlsx".into(),
+            size: 0,
+            mime: None,
+            data: None,
+            stream_available: false,
+            attach_nid: Some(0x200),
+            attach_method: Some(7),
+            is_cloud_link: true,
+            cloud_provider: Some("OneDrivePro".into()),
+            cloud_url: Some("https://contoso.sharepoint.com/sites/x/report.xlsx".into()),
+            cloud_permission_type: Some(1),
+            embedded_message: None,
+            embedded_extract_limit: false,
+        }],
+        fidelity: RecoverableIntegrity::clean(),
+        message_id_norm: Some("cloudpermcanon@ex.com".into()),
+        content_hash: [0u8; 32],
+        edrm_mih_hex: None,
+        body_incomplete: false,
+        body_unavailable: false,
+    };
+
+    let (write_msg, _) = from_canonical_message(&canonical);
+    assert_eq!(
+        write_msg.attachments[0].cloud_permission_type,
+        Some(1),
+        "from_canonical must copy PermissionType"
+    );
+    let plan = NamedPropWritePlan::scan_messages(std::slice::from_ref(&write_msg));
+    assert!(
+        plan.contains(AllowlistedNamedProp::AttachmentPermissionType),
+        "canonical permission must plan NPMAP PermissionType"
+    );
+    let opts = WritePstOpts {
+        named_prop_plan: plan,
+        ..WritePstOpts::default()
+    };
+    write_unicode_pst(&path, vec![write_msg], &[], &opts).expect("write");
+
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    assert!(
+        pst.name_id_map()
+            .attachment_permission_type_npid()
+            .is_some(),
+        "NPMAP must resolve AttachmentPermissionType"
+    );
+    let folders = pst.folders().expect("folders");
+    let nid = folders
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("msg nid");
+    let attaches = pst.list_attachments(nid).expect("list");
+    assert_eq!(attaches.len(), 1);
+    assert_eq!(
+        attaches[0].cloud_permission_type,
+        Some(1),
+        "reader must extract PermissionType after from_canonical write: {:?}",
+        attaches[0]
+    );
+
+    cleanup(&path);
+}
+
 #[test]
 fn cloud_link_writes_pointer_row_and_ledger() {
     let path = scratch_path("cloud_link_ptr");
@@ -1864,6 +1961,7 @@ fn cloud_link_writes_pointer_row_and_ledger() {
         is_cloud_link: true,
         cloud_provider: Some("OneDrivePro".into()),
         cloud_url: Some("https://contoso.sharepoint.com/sites/x/report.xlsx".into()),
+        cloud_permission_type: Some(1), // View (0096)
         ..Default::default()
     });
 
@@ -1894,10 +1992,17 @@ fn cloud_link_writes_pointer_row_and_ledger() {
 
     // Reader sees attachment-table row (not silent omit).
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
-    // 0092: allowlisted NPMAP must resolve ProviderType.
-    assert_eq!(
-        pst.name_id_map().attachment_provider_type_npid(),
-        Some(0x8000),
+    // 0092/0096: allowlisted NPMAP must resolve ProviderType + PermissionType.
+    // Sorted name order: Permission < Provider → Permission=0x8000, Provider=0x8001
+    // (Url also present → 0x8002).
+    assert!(
+        pst.name_id_map()
+            .attachment_permission_type_npid()
+            .is_some(),
+        "0096 NPMAP must map AttachmentPermissionType"
+    );
+    assert!(
+        pst.name_id_map().attachment_provider_type_npid().is_some(),
         "0092 NPMAP must map AttachmentProviderType"
     );
     let folders = pst.folders().expect("folders");
@@ -1924,6 +2029,20 @@ fn cloud_link_writes_pointer_row_and_ledger() {
         Some("OneDrivePro"),
         "0092 ProviderType must round-trip on attach PC: {:?}",
         attaches[0]
+    );
+    assert_eq!(
+        attaches[0].cloud_permission_type,
+        Some(1),
+        "0096 PermissionType View (PcValue::I32) must round-trip: {:?}",
+        attaches[0]
+    );
+    let perm_npid = pst
+        .name_id_map()
+        .attachment_permission_type_npid()
+        .expect("permission npid");
+    assert!(
+        perm_npid >= 0x8000,
+        "PermissionType NPID must be named-prop range, got {perm_npid:#x}"
     );
 
     cleanup(&path);
@@ -1988,6 +2107,12 @@ fn cloud_free_export_keeps_empty_npmapping() {
     assert!(
         pst.name_id_map().attachment_provider_type_npid().is_none(),
         "cloud-free unique-PST must not emit AttachmentProviderType"
+    );
+    assert!(
+        pst.name_id_map()
+            .attachment_permission_type_npid()
+            .is_none(),
+        "cloud-free unique-PST must not emit AttachmentPermissionType"
     );
     cleanup(&path);
 }

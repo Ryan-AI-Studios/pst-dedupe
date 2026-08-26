@@ -617,6 +617,7 @@ impl MessageMaterializer for PstMaterializer {
                         is_cloud_link: att.is_cloud_link,
                         cloud_provider: att.cloud_provider,
                         cloud_url: att.cloud_url,
+                        cloud_permission_type: att.cloud_permission_type,
                         embedded_message: None,
                         embedded_extract_limit: false,
                     });
@@ -925,6 +926,7 @@ fn map_export_attach(a: &EmbeddedExportAttach) -> CanonicalAttachment {
         is_cloud_link: a.is_cloud_link,
         cloud_provider: None,
         cloud_url: None,
+        cloud_permission_type: None,
         embedded_message: a
             .embedded
             .as_ref()
@@ -1002,6 +1004,7 @@ mod handle_cache_tests {
                 is_cloud_link: false,
                 cloud_provider: None,
                 cloud_url: None,
+                cloud_permission_type: None,
                 embedded_message: None,
                 embedded_extract_limit: false,
             }],
@@ -1083,6 +1086,7 @@ mod handle_cache_tests {
                 is_cloud_link: false,
                 cloud_provider: None,
                 cloud_url: None,
+                cloud_permission_type: None,
                 embedded_message: None,
                 embedded_extract_limit: false,
             }],

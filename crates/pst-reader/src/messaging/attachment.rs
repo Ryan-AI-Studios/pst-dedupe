@@ -71,6 +71,9 @@ pub struct AttachmentInfo {
     pub cloud_provider: Option<String>,
     /// Best-effort cloud URL/path from classic pathname/filename tags.
     pub cloud_url: Option<String>,
+    /// `PidNameAttachmentPermissionType` (PtypInteger32) when present on the attach PC.
+    /// Extracted for Classic and CloudLink; writer emits only on cloud-pointer rows.
+    pub cloud_permission_type: Option<i32>,
 }
 
 /// True when `s` looks like an absolute URL (conservative cloud-path heuristic).
@@ -460,9 +463,10 @@ impl PstFile {
         let sub_entries =
             block::list_subnode_entries(&mut self.reader, &self.bbt, nbt_entry.bid_sub)?;
 
-        // Resolve allowlisted cloud named-prop once per list (cached NPMAP).
+        // Resolve allowlisted cloud named-props once per list (cached NPMAP).
         // Degraded/missing map → None; classic method/URL signals still run.
         let provider_npid = self.attachment_provider_type_npid();
+        let permission_npid = self.attachment_permission_type_npid();
 
         let crypt = self.header.crypt_method;
         let mut attachments = Vec::new();
@@ -554,6 +558,9 @@ impl PstFile {
                 AttachKind::CloudLink { provider, url } => (true, provider, url),
                 AttachKind::Classic => (false, None, None),
             };
+            // 0096: extract PermissionType whenever present (even Classic; writer drops non-cloud).
+            let cloud_permission_type =
+                permission_npid.and_then(|npid| pc.get_i32(npid).ok().flatten());
 
             attachments.push(AttachmentInfo {
                 nid: entry.nid,
@@ -565,6 +572,7 @@ impl PstFile {
                 is_cloud_link,
                 cloud_provider,
                 cloud_url,
+                cloud_permission_type,
             });
         }
 
