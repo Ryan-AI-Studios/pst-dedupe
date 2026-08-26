@@ -2512,6 +2512,245 @@ fn duplicate_export_message_index_is_defect() {
     );
 }
 
+/// 0095 DoD-1: writer→QC end-to-end preserve matrix (matcher + counts).
+#[test]
+fn folder_tree_0095_preserve_matrix_writer_to_qc() {
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("out.pst");
+
+    let mut dual_a = base_msg("<d1@ex.com>", "DualA", "body a");
+    dual_a.source_path = Some(r"C:\data\alice.pst".into());
+    dual_a.source_folder_path = Some("Root/Top of Personal Folders/Inbox".into());
+
+    let mut dual_b = base_msg("<d2@ex.com>", "DualB", "body b");
+    dual_b.source_path = Some(r"C:\data\bob.pst".into());
+    dual_b.source_folder_path = Some("Root/Top of Personal Folders/Inbox".into());
+
+    let mut deleted = base_msg("<di@ex.com>", "Deleted", "body di");
+    deleted.source_path = Some(r"C:\data\alice.pst".into());
+    deleted.source_folder_path =
+        Some("Root/Top of Personal Folders/Top of Information Store/Deleted Items".into());
+
+    let mut recoverable = base_msg("<ri@ex.com>", "Recoverable", "body ri");
+    recoverable.source_path = Some(r"C:\data\bob.pst".into());
+    recoverable.source_folder_path =
+        Some("Root/Top of Personal Folders/Mailbox/Recoverable Items/Purges".into());
+
+    let mut mailbox = base_msg("<mb@ex.com>", "MailboxRoot", "body mb");
+    mailbox.source_path = Some(r"C:\data\alice.pst".into());
+    mailbox.source_folder_path = Some("Mailbox - Doe, John/Inbox".into());
+
+    let mut residual_none = base_msg("<res@ex.com>", "ResidualNone", "body res");
+    residual_none.source_path = Some(r"C:\data\alice.pst".into());
+    residual_none.source_folder_path = None;
+
+    let mut residual_empty = base_msg("<rese@ex.com>", "ResidualEmpty", "body rese");
+    residual_empty.source_path = Some(r"C:\data\alice.pst".into());
+    residual_empty.source_folder_path = Some(String::new());
+
+    let mut residual_alias = base_msg("<resa@ex.com>", "ResidualAlias", "body resa");
+    residual_alias.source_path = Some(r"C:\data\alice.pst".into());
+    residual_alias.source_folder_path = Some("Root/Top of Personal Folders".into());
+
+    let mut residual_dotdot = base_msg("<resd@ex.com>", "ResidualDotDot", "body resd");
+    residual_dotdot.source_path = Some(r"C:\data\alice.pst".into());
+    residual_dotdot.source_folder_path = Some("Inbox/../Sent".into());
+
+    let over_depth = (0..40)
+        .map(|i| format!("s{i}"))
+        .collect::<Vec<_>>()
+        .join("/");
+    let mut residual_depth = base_msg("<reso@ex.com>", "ResidualOverDepth", "body reso");
+    residual_depth.source_path = Some(r"C:\data\alice.pst".into());
+    residual_depth.source_folder_path = Some(over_depth.clone());
+
+    let opts = WritePstOpts {
+        folder_layout: FolderLayoutPolicy::PreservePaths {
+            multi_source_prefix: true,
+        },
+        known_source_paths: vec![r"C:\data\alice.pst".into(), r"C:\data\bob.pst".into()],
+        ..WritePstOpts::default()
+    };
+    write_unicode_pst(
+        &path,
+        vec![
+            dual_a,
+            dual_b,
+            deleted,
+            recoverable,
+            mailbox,
+            residual_none,
+            residual_empty,
+            residual_alias,
+            residual_dotdot,
+            residual_depth,
+        ],
+        &[],
+        &opts,
+    )
+    .expect("write");
+
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let folders = pst.folders().expect("folders");
+    assert!(
+        !folders.iter().any(|f| f
+            .path
+            .contains("Top of Personal Folders/Top of Personal Folders")),
+        "must not nest duplicate ToPF alias; folders={folders:?}"
+    );
+    assert!(
+        folders.iter().any(|f| f.name == "alice" || f.name == "bob"),
+        "pre-seeded source prefixes required; folders={folders:?}"
+    );
+    let unique = folders
+        .iter()
+        .find(|f| f.name == "Unique Mail")
+        .expect("residual variants must allocate Unique Mail");
+    assert_eq!(
+        unique.message_nids.len(),
+        5,
+        "None/empty/alias-only/../over-depth must all land in Unique Mail; got {}",
+        unique.message_nids.len()
+    );
+    // Provenance: non-sentinel mailbox segment preserved.
+    assert!(
+        folders
+            .iter()
+            .any(|f| f.path.to_ascii_lowercase().contains("mailbox - doe, john")),
+        "non-sentinel mailbox root must be preserved; folders={folders:?}"
+    );
+
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&path, 10)];
+    let export_rows = vec![
+        ExportMessageRow {
+            source_path: r"C:\data\alice.pst".into(),
+            folder_path: "Root/Top of Personal Folders/Inbox".into(),
+            nid: 1,
+            message_id_norm: "d1@ex.com".into(),
+            export_message_index: 1,
+            ..export_row_folder("d1@ex.com", 1, 1, "Inbox")
+        },
+        ExportMessageRow {
+            source_path: r"C:\data\bob.pst".into(),
+            folder_path: "Root/Top of Personal Folders/Inbox".into(),
+            nid: 2,
+            message_id_norm: "d2@ex.com".into(),
+            export_message_index: 2,
+            ..export_row_folder("d2@ex.com", 2, 2, "Inbox")
+        },
+        ExportMessageRow {
+            source_path: r"C:\data\alice.pst".into(),
+            folder_path: "Root/Top of Personal Folders/Top of Information Store/Deleted Items"
+                .into(),
+            nid: 3,
+            message_id_norm: "di@ex.com".into(),
+            export_message_index: 3,
+            ..export_row_folder("di@ex.com", 3, 3, "Deleted Items")
+        },
+        ExportMessageRow {
+            source_path: r"C:\data\bob.pst".into(),
+            folder_path: "Root/Top of Personal Folders/Mailbox/Recoverable Items/Purges".into(),
+            nid: 4,
+            message_id_norm: "ri@ex.com".into(),
+            export_message_index: 4,
+            ..export_row_folder("ri@ex.com", 4, 4, "Recoverable Items/Purges")
+        },
+        ExportMessageRow {
+            source_path: r"C:\data\alice.pst".into(),
+            folder_path: "Mailbox - Doe, John/Inbox".into(),
+            nid: 5,
+            message_id_norm: "mb@ex.com".into(),
+            export_message_index: 5,
+            ..export_row_folder("mb@ex.com", 5, 5, "Mailbox - Doe, John/Inbox")
+        },
+        ExportMessageRow {
+            source_path: r"C:\data\alice.pst".into(),
+            folder_path: String::new(),
+            nid: 6,
+            message_id_norm: "res@ex.com".into(),
+            export_message_index: 6,
+            ..export_row_folder("res@ex.com", 6, 6, "")
+        },
+        ExportMessageRow {
+            source_path: r"C:\data\alice.pst".into(),
+            folder_path: String::new(),
+            nid: 7,
+            message_id_norm: "rese@ex.com".into(),
+            export_message_index: 7,
+            ..export_row_folder("rese@ex.com", 7, 7, "")
+        },
+        ExportMessageRow {
+            source_path: r"C:\data\alice.pst".into(),
+            folder_path: "Root/Top of Personal Folders".into(),
+            nid: 8,
+            message_id_norm: "resa@ex.com".into(),
+            export_message_index: 8,
+            ..export_row_folder("resa@ex.com", 8, 8, "Root/Top of Personal Folders")
+        },
+        ExportMessageRow {
+            source_path: r"C:\data\alice.pst".into(),
+            folder_path: "Inbox/../Sent".into(),
+            nid: 9,
+            message_id_norm: "resd@ex.com".into(),
+            export_message_index: 9,
+            ..export_row_folder("resd@ex.com", 9, 9, "Inbox/../Sent")
+        },
+        ExportMessageRow {
+            source_path: r"C:\data\alice.pst".into(),
+            folder_path: over_depth,
+            nid: 10,
+            message_id_norm: "reso@ex.com".into(),
+            export_message_index: 10,
+            ..export_row_folder("reso@ex.com", 10, 10, "over-depth")
+        },
+    ];
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Structure,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[],
+        false,
+        false,
+    ));
+    assert!(
+        report.volumes[0].folder_tree_match,
+        "0095 preserve matrix must pass folder_tree_match; findings={:?} hard_fail={}",
+        report.findings, report.hard_fail
+    );
+    assert_eq!(
+        report.findings.defect, 0,
+        "no defects expected for 0095 matrix; findings={:?}",
+        report.findings
+    );
+
+    // Fully preserved tree (no residual): Unique Mail must be absent.
+    let path2 = dir.path().join("out_preserved.pst");
+    let mut only = base_msg("<only@ex.com>", "Only", "body");
+    only.source_folder_path = Some("Inbox".into());
+    write_unicode_pst(
+        &path2,
+        vec![only],
+        &[],
+        &WritePstOpts {
+            folder_layout: FolderLayoutPolicy::PreservePaths {
+                multi_source_prefix: false,
+            },
+            ..WritePstOpts::default()
+        },
+    )
+    .expect("write preserved");
+    let mut pst2 = pst_reader::PstFile::open(&path2).expect("open");
+    let folders2 = pst2.folders().expect("folders");
+    assert!(
+        !folders2.iter().any(|f| f.name == "Unique Mail"),
+        "fully preserved tree must not allocate empty Unique Mail"
+    );
+}
+
 /// Unclaimed output folder with messages ⇒ folder_tree mismatch / defect.
 #[test]
 fn unclaimed_output_folder_with_messages_is_defect() {

@@ -761,10 +761,11 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
             .collect();
         let expected_count = vol.messages_written;
 
-        // Expected per-folder message counts (normalized path → count).
+        // Expected per-folder message counts (writer routing-aligned key → count).
+        // Residuals (empty/`..`/alias-only/over-depth) map to "unique mail".
         let mut expected_folder_counts: BTreeMap<String, u64> = BTreeMap::new();
         for r in &expected_rows {
-            let key = normalize_folder_key(&r.folder_path);
+            let key = pst_writer::folder_path_qc_expected_key(&r.folder_path);
             if key.is_empty() {
                 continue;
             }
@@ -1013,7 +1014,7 @@ pub fn run_unique_pst_qc(input: QcRunInput<'_>) -> QcReportV1 {
                     .export_rows
                     .iter()
                     .filter(|row| row.volume_index == vol.volume_index)
-                    .map(|row| normalize_folder_key(&row.folder_path))
+                    .map(|row| pst_writer::folder_path_qc_expected_key(&row.folder_path))
                     .filter(|k| !k.is_empty())
                     .collect::<BTreeSet<_>>()
                     .len() as u64;
@@ -2422,7 +2423,7 @@ fn folder_tree_matches(
                     .chain(std::iter::repeat(0)),
             )
             .any(|(p, c)| {
-                let n = normalize_folder_key(p);
+                let n = pst_writer::normalize_folder_path_key(p);
                 c > 0 && !n.is_empty() && !is_system_folder_path(&n)
             });
         return !any_mail_folder;
@@ -2431,6 +2432,7 @@ fn folder_tree_matches(
     // Available output folders with message counts.
     // Multi-source prefixes may split one logical leaf across several out paths;
     // sum counts across all path-segment suffix matches (exclusive claim).
+    // Use writer-aligned keys so Root/ToPF aliases and sanitize match expected.
     let mut out_slots: Vec<(String, u64)> = digest
         .folder_paths
         .iter()
@@ -2441,7 +2443,7 @@ fn folder_tree_matches(
                 .copied()
                 .chain(std::iter::repeat(0)),
         )
-        .map(|(p, c)| (normalize_folder_key(p), c))
+        .map(|(p, c)| (pst_writer::normalize_folder_path_key(p), c))
         .filter(|(p, c)| !p.is_empty() && *c > 0 && !is_system_folder_path(p))
         .collect();
 
@@ -2479,18 +2481,15 @@ fn folder_tree_matches(
 }
 
 /// System / non-content folders that may appear with zero user expectation.
+///
+/// Message-bearing Deleted Items is **not** system — keep-set / winners may
+/// land there and must remain claimable in folder_tree matching (0095).
 fn is_system_folder_path(normalized: &str) -> bool {
     let n = normalized.trim_matches('/');
     matches!(
         n,
-        "" | "ipm_subtree"
-            | "top of personal folders"
-            | "to-do search"
-            | "search root"
-            | "deleted items"
-            | "finder"
-    ) || n.ends_with("/deleted items")
-        || n.ends_with("/search root")
+        "" | "ipm_subtree" | "top of personal folders" | "to-do search" | "search root" | "finder"
+    ) || n.ends_with("/search root")
 }
 
 /// Source-origin digests only enable content_digest_backed (DoD-21).
@@ -3315,6 +3314,57 @@ mod tests {
     }
 
     #[test]
+    fn folder_tree_export_residual_paths_expect_unique_mail() {
+        let residual = VolumeStructuralDigest {
+            message_count: 3,
+            folder_paths: vec!["Unique Mail".into()],
+            folder_message_counts: vec![3],
+            message_digests: vec!["a".into(), "b".into(), "c".into()],
+        };
+        let mut expected = BTreeMap::new();
+        // Empty / whitespace → Unique Mail routing.
+        *expected
+            .entry(pst_writer::folder_path_qc_expected_key(""))
+            .or_insert(0) += 1;
+        // `..` residual → Unique Mail.
+        *expected
+            .entry(pst_writer::folder_path_qc_expected_key("Inbox/../Sent"))
+            .or_insert(0) += 1;
+        // Over-depth residual → Unique Mail.
+        let over_depth: String = (0..=32)
+            .map(|i| format!("seg{i}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        *expected
+            .entry(pst_writer::folder_path_qc_expected_key(&over_depth))
+            .or_insert(0) += 1;
+        assert_eq!(expected.len(), 1);
+        assert_eq!(expected.get("unique mail"), Some(&3));
+        assert!(
+            folder_tree_matches(&residual, &expected, 3),
+            "export residual keys must match digest Unique Mail"
+        );
+
+        // Normal Inbox path unchanged (not residual).
+        assert_eq!(
+            pst_writer::folder_path_qc_expected_key("Root/Top of Personal Folders/Inbox"),
+            "inbox"
+        );
+        let inbox = VolumeStructuralDigest {
+            message_count: 1,
+            folder_paths: vec!["Unique Mail".into(), "IPM_SUBTREE/Inbox".into()],
+            folder_message_counts: vec![0, 1],
+            message_digests: vec!["a".into()],
+        };
+        let mut expected_inbox = BTreeMap::new();
+        expected_inbox.insert(
+            pst_writer::folder_path_qc_expected_key("Root/Top of Personal Folders/Inbox"),
+            1,
+        );
+        assert!(folder_tree_matches(&inbox, &expected_inbox, 1));
+    }
+
+    #[test]
     fn folder_tree_rejects_same_leaves_different_counts() {
         // Both Inbox and Sent exist with total 3, but counts redistributed.
         let digest = VolumeStructuralDigest {
@@ -3349,6 +3399,100 @@ mod tests {
             !folder_tree_matches(&digest, &expected, 2),
             "unclaimed Archive with messages must fail folder_tree_matches"
         );
+    }
+
+    #[test]
+    fn folder_tree_deleted_items_winner_is_claimable() {
+        let digest = VolumeStructuralDigest {
+            message_count: 1,
+            folder_paths: vec!["Root/Top of Personal Folders/Deleted Items".into()],
+            folder_message_counts: vec![1],
+            message_digests: vec!["a".into()],
+        };
+        let mut expected = BTreeMap::new();
+        expected.insert(
+            pst_writer::normalize_folder_path_key("Root/Top of Personal Folders/Deleted Items"),
+            1,
+        );
+        assert!(
+            folder_tree_matches(&digest, &expected, 1),
+            "message-bearing Deleted Items must match, not be filtered as system"
+        );
+    }
+
+    #[test]
+    fn folder_tree_recoverable_items_winner_matches() {
+        let digest = VolumeStructuralDigest {
+            message_count: 1,
+            folder_paths: vec!["Root/Top of Personal Folders/mbx/Recoverable Items/Purges".into()],
+            folder_message_counts: vec![1],
+            message_digests: vec!["a".into()],
+        };
+        let mut expected = BTreeMap::new();
+        expected.insert(
+            pst_writer::normalize_folder_path_key(
+                "Top of Personal Folders/mbx/Recoverable Items/Purges",
+            ),
+            1,
+        );
+        assert!(folder_tree_matches(&digest, &expected, 1));
+    }
+
+    #[test]
+    fn folder_tree_alias_stripped_paths_match() {
+        let digest = VolumeStructuralDigest {
+            message_count: 1,
+            folder_paths: vec!["Root/Top of Personal Folders/Mailbox - Doe/Inbox".into()],
+            folder_message_counts: vec![1],
+            message_digests: vec!["a".into()],
+        };
+        let mut expected = BTreeMap::new();
+        // Export row still has full reader path; key strips Root/ToPF.
+        expected.insert(
+            pst_writer::normalize_folder_path_key(
+                "Root/Top of Personal Folders/Mailbox - Doe/Inbox",
+            ),
+            1,
+        );
+        assert!(folder_tree_matches(&digest, &expected, 1));
+    }
+
+    #[test]
+    fn folder_tree_sanitized_folder_chars_match() {
+        // Writer sanitizes `"tony"` → `_tony_`; QC keys must agree.
+        let digest = VolumeStructuralDigest {
+            message_count: 1,
+            folder_paths: vec!["Root/Top of Personal Folders/_tony_/Inbox".into()],
+            folder_message_counts: vec![1],
+            message_digests: vec!["a".into()],
+        };
+        let mut expected = BTreeMap::new();
+        expected.insert(
+            pst_writer::normalize_folder_path_key(r#"Root/Top of Personal Folders/"tony"/Inbox"#),
+            1,
+        );
+        assert_eq!(
+            expected.keys().next().map(String::as_str),
+            Some("_tony_/inbox")
+        );
+        assert!(folder_tree_matches(&digest, &expected, 1));
+    }
+
+    #[test]
+    fn folder_tree_dual_source_prefixed_inboxes_match() {
+        let digest = VolumeStructuralDigest {
+            message_count: 2,
+            folder_paths: vec![
+                "Root/Top of Personal Folders/one/Inbox".into(),
+                "Root/Top of Personal Folders/two/Inbox".into(),
+            ],
+            folder_message_counts: vec![1, 1],
+            message_digests: vec!["a".into(), "b".into()],
+        };
+        let mut expected = BTreeMap::new();
+        expected.insert(pst_writer::normalize_folder_path_key("one/Inbox"), 1);
+        expected.insert(pst_writer::normalize_folder_path_key("two/Inbox"), 1);
+        assert!(folder_tree_matches(&digest, &expected, 2));
     }
 
     #[test]

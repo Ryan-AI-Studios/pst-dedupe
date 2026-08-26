@@ -28,8 +28,9 @@ pub use named_prop_map::{
 };
 pub use production::{
     build_bth_checked, build_pc_v2, build_tc_inline_checked, derive_store_record_key,
-    from_canonical_message, from_canonical_message_owned, job_store_key_material_from_loci,
-    resolve_content_fingerprint, temp_sibling_path, volume_local_fingerprint_from_messages,
+    folder_path_qc_expected_key, from_canonical_message, from_canonical_message_owned,
+    job_store_key_material_from_loci, normalize_folder_path_key, resolve_content_fingerprint,
+    sanitize_folder_segment, temp_sibling_path, volume_local_fingerprint_from_messages,
     write_message_from_nested, write_unicode_pst, write_unicode_pst_streaming,
     write_unicode_pst_with_streams, AttachEventSeverity, AttachEventSink, AttachRead,
     AttachStreamSource, AttachmentFidelityEvent, AttachmentFidelityKind, FolderLayoutPolicy,

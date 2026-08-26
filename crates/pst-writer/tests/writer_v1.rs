@@ -7,7 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
-use pst_writer::{temp_sibling_path, write_unicode_pst, WriteMessage, WritePstOpts, WriterError};
+use pst_writer::{
+    temp_sibling_path, write_unicode_pst, FolderLayoutPolicy, WriteMessage, WritePstOpts,
+    WriterError,
+};
 
 /// Unique scratch path per test so parallel `cargo test` runs never collide.
 fn scratch_path(name: &str) -> PathBuf {
@@ -340,13 +343,14 @@ fn message_size_is_computed_not_copied_from_inflated_source() {
     cleanup(&path);
 }
 
-// ── Test 8: hierarchy — IPM_SUBTREE present, Unique Mail is its child ───────
+// ── Test 8: hierarchy — IPM_SUBTREE present; empty preserve has no Unique Mail ─
 
 #[test]
 fn hierarchy_places_unique_mail_under_ipm_subtree_with_store_entryid() {
     let path = scratch_path("hierarchy");
     cleanup(&path);
 
+    // Empty preserve: no residual Unique Mail ghost (0095). Deleted Items remains.
     write_unicode_pst(&path, Vec::new(), &[], &WritePstOpts::default()).expect("write");
 
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
@@ -369,18 +373,12 @@ fn hierarchy_places_unique_mail_under_ipm_subtree_with_store_entryid() {
     assert_eq!(ipm_subtree.path, "Root/Top of Personal Folders");
     assert_eq!(
         ipm_subtree.child_folder_nids.len(),
-        2,
-        "IPM_SUBTREE's children must be Unique Mail and Deleted Items"
+        1,
+        "empty preserve: IPM_SUBTREE child must be Deleted Items only (no Unique Mail)"
     );
-
-    let unique = folders
-        .iter()
-        .find(|f| f.name == "Unique Mail")
-        .expect("Unique Mail folder present");
-    assert_eq!(unique.path, "Root/Top of Personal Folders/Unique Mail");
     assert!(
-        ipm_subtree.child_folder_nids.contains(&unique.nid),
-        "Unique Mail must be a child of IPM_SUBTREE"
+        !folders.iter().any(|f| f.name == "Unique Mail"),
+        "empty preserve must not emit ghost Unique Mail"
     );
 
     // Store PidTagIpmSubtreeEntryId (0x35E0): 24 bytes, embeds IPM_SUBTREE's NID.
@@ -399,14 +397,20 @@ fn hierarchy_places_unique_mail_under_ipm_subtree_with_store_entryid() {
     cleanup(&path);
 }
 
-// ── Test 8b: Unique Mail folder carries PidTagContainerClass = IPF.Note ─────
-
+/// Residual-routed message allocates Unique Mail lazily and sets IPF.Note.
 #[test]
 fn unique_mail_folder_has_ipf_note_container_class() {
     let path = scratch_path("container_class");
     cleanup(&path);
 
-    write_unicode_pst(&path, Vec::new(), &[], &WritePstOpts::default()).expect("write");
+    // Force residual routing so Unique Mail is created (0095 lazy preserve).
+    let msg = WriteMessage {
+        message_id: Some("<container-class@ex.com>".into()),
+        subject: "Residual for container class".into(),
+        source_folder_path: None,
+        ..WriteMessage::default()
+    };
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
 
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
     let folders = pst.folders().expect("folders");
@@ -414,16 +418,9 @@ fn unique_mail_folder_has_ipf_note_container_class() {
     let unique = folders
         .iter()
         .find(|f| f.name == "Unique Mail")
-        .expect("Unique Mail folder present");
+        .expect("Unique Mail folder present after residual");
 
-    // PidTagContainerClass (0x3613): spec.md §3.2's LOCKED hierarchy table
-    // requires "standard display name / container class for IPM subtree per
-    // MS-PST messaging conventions". Real-world Unicode PSTs leave the
-    // IPM_SUBTREE node's own container class absent and instead set
-    // `PidTagContainerClass = "IPF.Note"` on the actual mail-containing
-    // folder beneath it — see the comments above the IPM_SUBTREE and
-    // "Unique Mail" PC builds in `production.rs` and
-    // `docs/pst-writer-fidelity-v1.md` for the full reasoning.
+    // PidTagContainerClass (0x3613) on the mail-containing folder.
     let raw = pst
         .read_node_data(unique.nid)
         .expect("Unique Mail raw node data");
@@ -434,8 +431,6 @@ fn unique_mail_folder_has_ipf_note_container_class() {
         .expect("PidTagContainerClass present on Unique Mail");
     assert_eq!(container_class, "IPF.Note");
 
-    // And confirm IPM_SUBTREE itself does NOT carry a container class value —
-    // the decision documented above is that only the leaf mail folder does.
     let ipm_subtree = folders
         .iter()
         .find(|f| f.name == "Top of Personal Folders")
@@ -520,6 +515,7 @@ fn ipm_subtree_hierarchy_resolves_unique_mail_and_deleted_items_by_name() {
     let path = scratch_path("ipm_subtree_children_by_name");
     cleanup(&path);
 
+    // Empty preserve: Deleted Items only (0095 — no ghost Unique Mail).
     write_unicode_pst(&path, Vec::new(), &[], &WritePstOpts::default()).expect("write");
 
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
@@ -539,9 +535,8 @@ fn ipm_subtree_hierarchy_resolves_unique_mail_and_deleted_items_by_name() {
 
     assert_eq!(
         child_names,
-        std::collections::HashSet::from(["Unique Mail", "Deleted Items"]),
-        "IPM_SUBTREE's hierarchy table must resolve to exactly \"Unique Mail\" \
-         and \"Deleted Items\" by name, got: {child_names:?}"
+        std::collections::HashSet::from(["Deleted Items"]),
+        "empty preserve: IPM_SUBTREE hierarchy must be Deleted Items only, got: {child_names:?}"
     );
 
     // Deleted Items itself must be empty (v1 never invents deleted-items
@@ -695,7 +690,14 @@ fn all_three_folders_have_readable_empty_associated_contents_table() {
     let path = scratch_path("assoc_contents");
     cleanup(&path);
 
-    write_unicode_pst(&path, Vec::new(), &[], &WritePstOpts::default()).expect("write");
+    // Flat layout eagerly creates the display-name folder (0095 preserve is lazy).
+    let opts = WritePstOpts {
+        folder_layout: FolderLayoutPolicy::Flat {
+            folder_display_name: "Unique Mail".into(),
+        },
+        ..WritePstOpts::default()
+    };
+    write_unicode_pst(&path, Vec::new(), &[], &opts).expect("write");
 
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
     let folders = pst.folders().expect("folders");
@@ -1215,8 +1217,12 @@ fn custom_folder_display_name_is_honored() {
     let path = scratch_path("custom_folder_name");
     cleanup(&path);
 
+    // Flat layout uses folder_display_name as the eager destination folder.
     let opts = WritePstOpts {
         folder_display_name: "My Export".to_string(),
+        folder_layout: FolderLayoutPolicy::Flat {
+            folder_display_name: "My Export".into(),
+        },
         ..WritePstOpts::default()
     };
     write_unicode_pst(&path, Vec::new(), &[], &opts).expect("write");

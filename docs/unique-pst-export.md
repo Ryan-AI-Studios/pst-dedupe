@@ -27,6 +27,20 @@ Headless operator path (Series K / track **0071**): multi-input PSTs → keep-se
 
 Source PSTs are **read-only**. The writer never mutates inputs.
 
+## Folder tree contract (0095)
+
+Preserve-layout unique-PST trees are counsel-useful and QC-honest:
+
+| Rule | Behavior |
+|---|---|
+| **Leading IPM/root aliases** | Strip a **consecutive leading** run of case-folded sentinels only: `root`, `top of personal folders`, `top of information store`, `top of outlook data file`, `ipm_subtree`. Stop at the first non-alias segment. Never strip a later user folder that happens to match (e.g. `Inbox/Top of Personal Folders` stays). |
+| **Multi-source prefix** | With `--folder-layout preserve` (default), file-stem prefixes are applied when ≥2 distinct winner sources are known. unique-pst **pre-seeds** the full winner `source_path` set so prefixes are stable from message 1 (closes D-0070). |
+| **Unique Mail (residual)** | In preserve mode, `Unique Mail` is allocated **lazily** on the first residual / unparseable path. Fully preserved trees have **no** empty Unique Mail ghost. Flat layout still creates the display-name folder up front. |
+| **Flat isolation** | `--folder-layout flat` routes all mail under `Top of Personal Folders/<display-name>` and is unchanged by alias strip / prefix pre-seed. |
+| **QC keys** | `folder_tree_structure` expected and output keys use the same alias strip + segment sanitize as the writer (quotes/`*`/trailing dots). Message-bearing **Deleted Items** is claimable (not treated as a system slot). |
+
+**Migration:** scripts that assumed a doubled `Top of Personal Folders` under IPM, or an always-present empty `Unique Mail` folder on preserve exports, must update path expectations.
+
 ## Flags
 
 | Flag | Notes |
@@ -46,7 +60,7 @@ Source PSTs are **read-only**. The writer never mutates inputs.
 | `--source-rank <SUBSTRING>` | Ordered source preference (repeatable, best-first; unmatched worst) |
 | `--rank-folder-class-first` | Swap source_rank ↔ folder_class rungs |
 | `--fidelity-rank binary\|graded` | Binary (default, pre-0075) or multi-tier graded fidelity |
-| `--folder-layout` | `preserve` (default) or `flat` |
+| `--folder-layout` | `preserve` (default) or `flat` — see [Folder tree contract](#folder-tree-contract-0095) |
 | `--max-volume-bytes` | Soft physical-size ceiling; **off** = single volume |
 | `--overwrite` | Required to replace existing `--out` / non-empty report-dir |
 | `--verify-hash` | Full-file rehash vs report digests (default **off** for multi-GB comfort) |
