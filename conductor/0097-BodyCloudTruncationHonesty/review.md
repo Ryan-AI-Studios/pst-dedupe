@@ -1,6 +1,6 @@
 # Track Completion Review — 0097-BodyCloudTruncationHonesty
 
-## Verdict: PASS (implementer gates; Codex r1+r2 P2s fixed)
+## Verdict: PASS (Codex r3, 0 findings — ship clear)
 
 ## Scope
 
@@ -24,6 +24,7 @@ Branch: `track/0097-BodyCloudTruncationHonesty` (from `483fecd`).
 | Internal | Implementer gates | `cargo fmt --all --check`; clippy workspace `-D warnings`; `cargo test -p dedup-engine` (234); `cargo test -p pst-dedup-cli --test unique_pst` (34); `cargo test --workspace` (exit 0). `ledgerful verify` fmt+clippy ok; test step exceeds the 300s configured timeout (workspace tests passed independently). |
 | Codex r1 | gpt-5.6-luna (read-only audit) | **FAIL** — two P2s (`review.codex.r1.md`): probe discarded over-length prefix on tail/post-cap; window-edge ignored `seen` and marked duplicates dropped. **Fixed** in follow-up: probe returns over-length metadata; edge handler suppresses drop for already-seen URLs. |
 | Codex r2 | gpt-5.6-luna (read-only audit) | **FAIL** — P2 (`review.codex.r2.md`): 50-hit early return ran the remainder probe before window-edge, classifying a cut `.xls` prefix as a new max-links drop. **Fixed:** collectors keep walking remaining matches so `handle_window_edge_bare` still runs. |
+| Codex r3 | gpt-5.6-luna (read-only audit) | **PASS** — 0 findings (`review.codex.r3.md`). r1/r2 P2s verified fixed; DoD-1–5 met; ship clear. |
 
 ## DoD matrix
 
@@ -66,6 +67,12 @@ Branch: `track/0097-BodyCloudTruncationHonesty` (from `483fecd`).
 | Finding | Disposition |
 |---|---|
 | P2 50-hit early return bypassed window-edge duplicate guard | **Fixed.** Collectors no longer `note_unseen_in`+return after the 50th hit; remaining in-window matches go through `try_keep_candidate` / `handle_window_edge_bare`. Over-length uniques past 50 still set max-links + prefix. Tests: `max_links_duplicate_cut_url_not_truncated`, `max_links_new_unique_cut_url_still_truncated`, CLI `body_cloud_max_links_duplicate_cut_no_false_marker`. |
+
+## Codex r3 dispositions
+
+| Finding | Disposition |
+|---|---|
+| None | **PASS.** 0 findings. Ship clear. |
 
 ## Operator note
 
