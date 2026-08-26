@@ -280,10 +280,6 @@ fn collect_from_html(text: &str, original: Option<&str>, windowed: bool, acc: &m
             // Href values are exact attribute text — do not strip trailing punctuation
             // (query fidelity). Only HTML-unescape + trim.
             try_keep_candidate(m.as_str(), BodyCloudUrlSource::HtmlHref, false, acc);
-            if acc.hits.len() >= MAX_LINKS_PER_MESSAGE {
-                acc.note_unseen_in(text, false);
-                return;
-            }
         }
     }
 
@@ -302,10 +298,6 @@ fn collect_from_html(text: &str, original: Option<&str>, windowed: bool, acc: &m
                 }
             }
             try_keep_candidate(m.as_str(), BodyCloudUrlSource::HtmlBare, true, acc);
-            if acc.hits.len() >= MAX_LINKS_PER_MESSAGE {
-                acc.note_unseen_in(text, false);
-                return;
-            }
         }
     }
 }
@@ -329,10 +321,6 @@ fn collect_bare(
             }
         }
         try_keep_candidate(m.as_str(), source, true, acc);
-        if acc.hits.len() >= MAX_LINKS_PER_MESSAGE {
-            acc.note_unseen_in(text, false);
-            return;
-        }
     }
 }
 
@@ -400,6 +388,10 @@ fn try_keep_candidate(
     };
     if overlength {
         acc.note_overlength(&final_url);
+        // Past the keep-cap, an extra over-length unique is also a max-links drop.
+        if acc.hits.len() >= MAX_LINKS_PER_MESSAGE && !acc.seen.contains(&final_url) {
+            acc.note_max_links();
+        }
         return;
     }
     if acc.seen.contains(&final_url) {
@@ -1093,6 +1085,73 @@ mod tests {
             scan
         );
         assert!(!scan.window_dropped);
+    }
+
+    fn fifty_plain_urls_then_cut(first: &str, head: &str, tail: &str) -> String {
+        let mut prefix = String::new();
+        for i in 0..MAX_LINKS_PER_MESSAGE {
+            if i > 0 {
+                prefix.push(' ');
+            }
+            if i == 0 {
+                prefix.push_str(first);
+            } else {
+                prefix.push_str(&format!(
+                    "https://contoso.sharepoint.com/:x:/s/L/f{i}.xlsx?d={i}"
+                ));
+            }
+        }
+        let pad_len = MAX_BODY_SCAN_CHARS
+            .checked_sub(prefix.chars().count())
+            .and_then(|n| n.checked_sub(1))
+            .and_then(|n| n.checked_sub(head.chars().count()))
+            .expect("50 URLs plus cut head must fit in the window");
+        let mut body = prefix;
+        body.push(' ');
+        body.push_str(&" ".repeat(pad_len));
+        body.push_str(head);
+        body.push_str(tail);
+        body
+    }
+
+    #[test]
+    fn max_links_duplicate_cut_url_not_truncated() {
+        let url = "https://contoso.sharepoint.com/:x:/s/L/book.xlsx?d=1";
+        let head = "https://contoso.sharepoint.com/:x:/s/L/book.xls";
+        let tail = "x?d=1";
+        assert_eq!(format!("{head}{tail}"), url);
+        let body = fifty_plain_urls_then_cut(url, head, tail);
+        let scan = scan_body_cloud_links(None, Some(&body));
+        assert_eq!(scan.hits.len(), MAX_LINKS_PER_MESSAGE);
+        assert!(scan.window_capped);
+        assert!(
+            !scan.truncated,
+            "cut duplicate of a kept URL must not set truncated: {:?}",
+            scan
+        );
+        assert!(!scan.max_links_exceeded);
+        assert!(!scan.window_dropped);
+    }
+
+    #[test]
+    fn max_links_new_unique_cut_url_still_truncated() {
+        let first = "https://contoso.sharepoint.com/:x:/s/L/book.xlsx?d=1";
+        let head = "https://contoso.sharepoint.com/:x:/s/L/other.xls";
+        let tail = "x?d=new";
+        let body = fifty_plain_urls_then_cut(first, head, tail);
+        let scan = scan_body_cloud_links(None, Some(&body));
+        assert_eq!(scan.hits.len(), MAX_LINKS_PER_MESSAGE);
+        assert!(scan.window_capped);
+        assert!(
+            scan.truncated,
+            "new unique cut URL is a dropped candidate: {:?}",
+            scan
+        );
+        assert!(scan.window_dropped);
+        assert!(
+            scan.hits.iter().all(|h| h.url != format!("{head}{tail}")),
+            "cut prefix must not be a kept hit"
+        );
     }
 
     #[test]

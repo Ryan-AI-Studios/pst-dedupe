@@ -1,6 +1,6 @@
 # Track Completion Review — 0097-BodyCloudTruncationHonesty
 
-## Verdict: PASS (implementer gates; Codex r1 P2s fixed)
+## Verdict: PASS (implementer gates; Codex r1+r2 P2s fixed)
 
 ## Scope
 
@@ -23,6 +23,7 @@ Branch: `track/0097-BodyCloudTruncationHonesty` (from `483fecd`).
 | Spec | Dual-AI Ready (`opencode-review.md` + `agy-review.md`) | Folded into spec §2.8 before implementation |
 | Internal | Implementer gates | `cargo fmt --all --check`; clippy workspace `-D warnings`; `cargo test -p dedup-engine` (234); `cargo test -p pst-dedup-cli --test unique_pst` (34); `cargo test --workspace` (exit 0). `ledgerful verify` fmt+clippy ok; test step exceeds the 300s configured timeout (workspace tests passed independently). |
 | Codex r1 | gpt-5.6-luna (read-only audit) | **FAIL** — two P2s (`review.codex.r1.md`): probe discarded over-length prefix on tail/post-cap; window-edge ignored `seen` and marked duplicates dropped. **Fixed** in follow-up: probe returns over-length metadata; edge handler suppresses drop for already-seen URLs. |
+| Codex r2 | gpt-5.6-luna (read-only audit) | **FAIL** — P2 (`review.codex.r2.md`): 50-hit early return ran the remainder probe before window-edge, classifying a cut `.xls` prefix as a new max-links drop. **Fixed:** collectors keep walking remaining matches so `handle_window_edge_bare` still runs. |
 
 ## DoD matrix
 
@@ -59,6 +60,12 @@ Branch: `track/0097-BodyCloudTruncationHonesty` (from `483fecd`).
 |---|---|
 | P2 tail/post-cap probe discarded over-length metadata | **Fixed.** `probe_unseen_document_candidates` returns `found` + first over-length URL; callers set `url_truncated` + prefix. Tests: `body_window_tail_overlength_sets_url_truncated_and_prefix`, `max_links_plus_overlength_sets_both_flags_and_prefix`, CLI `body_cloud_window_tail_overlength_marker_prefix`, `body_cloud_max_links_plus_overlength_marker_prefix`. |
 | P2 window-edge guard marked deduplicated URLs as dropped | **Fixed.** `handle_window_edge_bare` skips the drop flag when `acc.seen` already has the classified URL; cut prefix is still rejected as a real hit. Test: `body_window_duplicate_cut_url_not_dropped`. |
+
+## Codex r2 dispositions
+
+| Finding | Disposition |
+|---|---|
+| P2 50-hit early return bypassed window-edge duplicate guard | **Fixed.** Collectors no longer `note_unseen_in`+return after the 50th hit; remaining in-window matches go through `try_keep_candidate` / `handle_window_edge_bare`. Over-length uniques past 50 still set max-links + prefix. Tests: `max_links_duplicate_cut_url_not_truncated`, `max_links_new_unique_cut_url_still_truncated`, CLI `body_cloud_max_links_duplicate_cut_no_false_marker`. |
 
 ## Operator note
 

@@ -2951,6 +2951,99 @@ fn body_cloud_max_links_plus_overlength_marker_prefix() {
     assert!(!body_csv.contains("BODY_CLOUD_LINK_TRUNCATED"));
 }
 
+/// 50 kept hits plus a duplicate URL cut at the 100k window → no false max-links marker.
+#[test]
+fn body_cloud_max_links_duplicate_cut_no_false_marker() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src_max_cut_dup.pst");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+
+    let url = "https://contoso.sharepoint.com/:x:/s/L/book.xlsx?d=1";
+    let head = "https://contoso.sharepoint.com/:x:/s/L/book.xls";
+    let tail = "x?d=1";
+    let mut prefix = String::new();
+    for i in 0..dedup_engine::MAX_LINKS_PER_MESSAGE {
+        if i > 0 {
+            prefix.push(' ');
+        }
+        if i == 0 {
+            prefix.push_str(url);
+        } else {
+            prefix.push_str(&format!(
+                "https://contoso.sharepoint.com/:x:/s/L/f{i}.xlsx?d={i}"
+            ));
+        }
+    }
+    let pad_len =
+        dedup_engine::MAX_BODY_SCAN_CHARS - prefix.chars().count() - 1 - head.chars().count();
+    let mut plain = prefix;
+    plain.push(' ');
+    plain.push_str(&" ".repeat(pad_len));
+    plain.push_str(head);
+    plain.push_str(tail);
+    let msg = WriteMessage {
+        message_id: Some("<body-cloud-max-cut-dup@ex.com>".into()),
+        subject: "Max links cut duplicate".into(),
+        sender: Some("alice@example.com".into()),
+        display_to: Some("bob@example.com".into()),
+        body_plain: Some(plain),
+        body_html: None,
+        source_folder_path: Some("Inbox".into()),
+        ..WriteMessage::default()
+    };
+    write_unicode_pst(&src, vec![msg], &[], &WritePstOpts::default()).expect("write src");
+
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            src.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--json",
+            "--no-attachments",
+            "--qc-level",
+            "off",
+        ])
+        .output()
+        .expect("run unique-pst");
+    assert!(
+        result.status.success(),
+        "exit={} stderr={}",
+        result.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("json");
+    assert_eq!(v["ok"], true);
+    assert_eq!(
+        v["body_cloud_links_total"].as_u64().unwrap_or(0),
+        50,
+        "stdout={}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert_eq!(
+        v["body_cloud_link_truncated_messages"]
+            .as_u64()
+            .unwrap_or(999),
+        0
+    );
+    assert_eq!(
+        v["body_scan_window_capped_messages"].as_u64().unwrap_or(0),
+        1
+    );
+
+    let body_csv =
+        fs::read_to_string(report.join("export_body_cloud_links.csv")).expect("body csv");
+    let data_rows: Vec<_> = body_csv.lines().skip(1).filter(|l| !l.is_empty()).collect();
+    assert_eq!(data_rows.len(), 50, "no honesty marker: {body_csv}");
+    assert!(!body_csv.contains("BODY_CLOUD_LINK_MAX_LINKS_EXCEEDED"));
+    assert!(!body_csv.contains("BODY_CLOUD_LINK_WINDOW"));
+    assert!(!body_csv.contains("BODY_CLOUD_LINK_TRUNCATED"));
+}
+
 /// Body-only document-shaped cloud URL must not set attach-incomplete / Mode A promote.
 #[test]
 fn body_cloud_only_not_attach_incomplete_mode_a() {
