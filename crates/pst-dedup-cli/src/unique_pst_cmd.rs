@@ -40,8 +40,10 @@ use crate::paths::{
     is_same_or_under, is_same_or_under_resolved, paths_equal, paths_equal_resolved,
     resolve_cli_path_maybe_missing,
 };
-use crate::pst_materializer::{PstAttachStreamSource, PstMaterializer};
-use crate::pst_materializer::{PstHandleCache, DEFAULT_MAX_OPEN_PSTS};
+use crate::pst_materializer::{
+    materialize_nested_for_winner, PstAttachStreamSource, PstHandleCache, PstMaterializer,
+    DEFAULT_MAX_OPEN_PSTS,
+};
 use crate::scan::{
     apply_strict_probe_skips_to_file_stats, evaluate_exit_policy, rebuild_dedup_results_with_ctx,
     recompute_file_status_counts, recompute_per_file_degraded_from_candidates,
@@ -1956,8 +1958,19 @@ pub fn run_unique_pst_with_options(
     let mat_opts = MaterializeFinalizeOpts {
         promote_on_attach_fail: args.promote_on_attach_fail,
     };
+    // 0094: winner-only nested extract uses writer depth budget (default 3).
+    let nested_extract_depth = 3u32;
     let materialized_count =
-        finalize_with_materialize_opts(&mut resolved, &mut mat, &mat_opts, &mut |msg| {
+        finalize_with_materialize_opts(&mut resolved, &mut mat, &mat_opts, &mut |mut msg| {
+            if let Err(e) =
+                materialize_nested_for_winner(&mut attach_src, &mut msg, nested_extract_depth)
+            {
+                emit_log(
+                    stderr,
+                    &on_log,
+                    &format!("warning: nested extract nid={:#x}: {e}", msg.locus.nid),
+                );
+            }
             let key = (msg.locus.source_path.clone(), msg.locus.nid);
             match prepared_winner_from_canonical(msg) {
                 Ok(p) => {
@@ -2061,7 +2074,7 @@ pub fn run_unique_pst_with_options(
         folder_display_name: "Unique Mail".to_string(),
         folder_layout,
         overwrite: args.overwrite,
-        max_embedded_depth: 3,
+        max_embedded_depth: nested_extract_depth,
         parents_only,
         // 0082: default OFF (BCC omit / over-disclosure policy).
         include_bcc_recipients: args.include_bcc_recipients,

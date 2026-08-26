@@ -104,8 +104,11 @@ const PID_TAG_CONTENT_UNREAD_COUNT: u16 = 0x3603;
 /// PidTagSubfolders — same source as above.
 const PID_TAG_SUBFOLDERS: u16 = 0x360A;
 const PTYP_BINARY: u16 = 0x0102;
+/// PtypObject — MS-PST §2.3.3.5 (`{Nid, ulSize}` heap allocation).
+const PTYP_OBJECT: u16 = 0x000D;
 
-// Attachment property tags (MS-PST / MS-OXPROPS) — track 0069 / 0084.
+// Attachment property tags (MS-PST / MS-OXPROPS) — track 0069 / 0084 / 0094.
+/// Same property id as PidTagAttachDataObject; type discriminates Binary vs Object.
 const PID_TAG_ATTACH_DATA_BINARY: u16 = 0x3701;
 const PID_TAG_ATTACH_METHOD: u16 = 0x3705;
 const PID_TAG_ATTACH_MIME_TAG: u16 = 0x370E;
@@ -245,6 +248,9 @@ pub struct WriteAttachment {
     pub parent_nid: Option<u64>,
     /// Nested message for `ATTACH_EMBEDDED_MSG` when extractable.
     pub embedded_message: Option<Box<WriteMessage>>,
+    /// Materialize hit export depth/byte budget (0094) — emit `ATTACH_DEPTH_LIMIT`
+    /// even when [`Self::embedded_message`] is `None` (avoids miscount as unparsed).
+    pub embedded_depth_limited: bool,
     /// Cloud/modern web-reference attach (0084): write metadata/pointer row only
     /// — never invent binary payload bytes.
     pub is_cloud_link: bool,
@@ -488,8 +494,15 @@ pub struct WriteMessage {
     pub body_plain: Option<String>,
     pub body_html: Option<Vec<u8>>,
     pub message_class: Option<String>,
+    /// Source `PidTagMessageFlags` when readable (0094 BestEffort). `None` keeps
+    /// legacy synthesis (`MSGFLAG_READ`); `Some` preserves those bits (HASATTACH
+    /// is still OR'd when attaches are written).
+    pub message_flags: Option<u32>,
     /// Fidelity flag for reporting only — never written as a MAPI property.
     pub body_incomplete: bool,
+    /// Soft-skipped / unreadable child attach rows (0094 nested extract). Emits
+    /// `ATTACH_META_FAILED` at write without inventing placeholder attaches.
+    pub attachments_incomplete: bool,
     /// Fidelity flag for reporting only — when true, no body is written at all
     /// (never invented) regardless of `body_plain`/`body_html` contents.
     pub body_unavailable: bool,
@@ -1015,21 +1028,8 @@ pub fn from_canonical_message(
     let attachments: Vec<WriteAttachment> = msg
         .attachments
         .iter()
-        .map(|a| WriteAttachment {
-            filename: a.filename.clone(),
-            mime: a.mime.clone(),
-            size: a.size,
-            attach_method: a.attach_method,
-            data: a.data.clone(),
-            stream_available: a.stream_available,
-            attach_nid: a.attach_nid,
-            source_path: Some(msg.locus.source_path.clone()),
-            parent_nid: Some(msg.locus.nid),
-            embedded_message: None,
-            is_cloud_link: a.is_cloud_link,
-            cloud_provider: a.cloud_provider.clone(),
-            cloud_url: a.cloud_url.clone(),
-            cloud_permission_type: None,
+        .map(|a| {
+            write_attachment_from_canonical(a, Some(&msg.locus.source_path), Some(msg.locus.nid))
         })
         .collect();
     // Only true list_attachments failure: AttachMetaFailed with an empty list.
@@ -1070,7 +1070,9 @@ pub fn from_canonical_message(
         body_plain: msg.body_plain.clone(),
         body_html: msg.body_html.clone(),
         message_class: msg.message_class.clone(),
+        message_flags: msg.message_flags,
         body_incomplete: msg.body_incomplete,
+        attachments_incomplete: false,
         body_unavailable: msg.body_unavailable,
         attachments,
         source_folder_path: Some(msg.locus.folder_path.clone()),
@@ -1114,21 +1116,8 @@ pub fn from_canonical_message_owned(
     let attachments: Vec<WriteAttachment> = msg
         .attachments
         .into_iter()
-        .map(|a| WriteAttachment {
-            filename: a.filename,
-            mime: a.mime,
-            size: a.size,
-            attach_method: a.attach_method,
-            data: a.data,
-            stream_available: a.stream_available,
-            attach_nid: a.attach_nid,
-            source_path: Some(source_path.clone()),
-            parent_nid: Some(parent_nid),
-            embedded_message: None,
-            is_cloud_link: a.is_cloud_link,
-            cloud_provider: a.cloud_provider,
-            cloud_url: a.cloud_url,
-            cloud_permission_type: None,
+        .map(|a| {
+            write_attachment_from_canonical_owned(a, Some(source_path.clone()), Some(parent_nid))
         })
         .collect();
     let write_msg = WriteMessage {
@@ -1143,7 +1132,9 @@ pub fn from_canonical_message_owned(
         body_plain: msg.body_plain,
         body_html: msg.body_html,
         message_class: msg.message_class,
+        message_flags: msg.message_flags,
         body_incomplete: msg.body_incomplete,
+        attachments_incomplete: false,
         body_unavailable: msg.body_unavailable,
         attachments,
         source_folder_path: Some(folder_path),
@@ -1152,6 +1143,102 @@ pub fn from_canonical_message_owned(
         attach_list_failed,
     };
     (write_msg, dropped)
+}
+
+/// Map a nested export DTO into a [`WriteMessage`] (0094). Nests have no folder locus.
+pub fn write_message_from_nested(
+    n: &dedup_engine::keepset::NestedCanonicalMessage,
+    source_path: Option<&str>,
+) -> WriteMessage {
+    let nested_nid = n.source_msg_nid;
+    let attachments: Vec<WriteAttachment> = n
+        .attachments
+        .iter()
+        .map(|a| write_attachment_from_canonical(a, source_path, nested_nid))
+        .collect();
+    WriteMessage {
+        message_id: n.message_id.clone(),
+        subject: n.subject.clone().unwrap_or_default(),
+        sender: n.sender.clone(),
+        display_to: n.display_to.clone(),
+        display_cc: n.display_cc.clone(),
+        display_bcc: n.display_bcc.clone(),
+        recipients: n
+            .recipients
+            .iter()
+            .map(write_recipient_from_canonical)
+            .collect(),
+        submit_time: n.submit_time,
+        body_plain: n.body_plain.clone(),
+        body_html: n.body_html.clone(),
+        message_class: n.message_class.clone(),
+        message_flags: n.message_flags,
+        body_incomplete: n.body_incomplete,
+        attachments_incomplete: n.attachments_incomplete,
+        body_unavailable: n.body_unavailable,
+        attachments,
+        source_folder_path: None,
+        source_path: source_path.map(str::to_string),
+        source_msg_nid: nested_nid,
+        attach_list_failed: false,
+    }
+}
+
+fn write_attachment_from_canonical(
+    a: &dedup_engine::keepset::CanonicalAttachment,
+    source_path: Option<&str>,
+    parent_nid: Option<u64>,
+) -> WriteAttachment {
+    let embedded_message = a
+        .embedded_message
+        .as_ref()
+        .map(|n| Box::new(write_message_from_nested(n, source_path)));
+    WriteAttachment {
+        filename: a.filename.clone(),
+        mime: a.mime.clone(),
+        size: a.size,
+        attach_method: a.attach_method,
+        data: a.data.clone(),
+        stream_available: a.stream_available,
+        attach_nid: a.attach_nid,
+        source_path: source_path.map(str::to_string),
+        parent_nid,
+        embedded_message,
+        embedded_depth_limited: a.embedded_extract_limit,
+        is_cloud_link: a.is_cloud_link,
+        cloud_provider: a.cloud_provider.clone(),
+        cloud_url: a.cloud_url.clone(),
+        cloud_permission_type: None,
+    }
+}
+
+fn write_attachment_from_canonical_owned(
+    a: dedup_engine::keepset::CanonicalAttachment,
+    source_path: Option<String>,
+    parent_nid: Option<u64>,
+) -> WriteAttachment {
+    let src = source_path.as_deref();
+    let embedded_message = a
+        .embedded_message
+        .as_ref()
+        .map(|n| Box::new(write_message_from_nested(n, src)));
+    WriteAttachment {
+        filename: a.filename,
+        mime: a.mime,
+        size: a.size,
+        attach_method: a.attach_method,
+        data: a.data,
+        stream_available: a.stream_available,
+        attach_nid: a.attach_nid,
+        source_path,
+        parent_nid,
+        embedded_message,
+        embedded_depth_limited: a.embedded_extract_limit,
+        is_cloud_link: a.is_cloud_link,
+        cloud_provider: a.cloud_provider,
+        cloud_url: a.cloud_url,
+        cloud_permission_type: None,
+    }
 }
 
 /// Write a production-scope Unicode, unencrypted PST containing `messages`.
@@ -3140,7 +3227,7 @@ fn write_one_attachment(
     }
 
     if method == ATTACH_EMBEDDED_MSG {
-        if depth >= max_depth {
+        if depth >= max_depth || attach.embedded_depth_limited {
             counters.embedded_depth_limit_hits += 1;
             record_attach_event(
                 counters,
@@ -3174,10 +3261,8 @@ fn write_one_attachment(
 
         let attach_nid = next_attach_nid(attach_nid_counter);
         // Build nested message as a subnode object under the attach (not NBT).
-        // Reader-honest: method=5, size reflects nested PC; no by-value binary
-        // is written (`open_attachment_data` binary path does not apply).
-        // Nested object is linked via the attach's subnode leaf (not
-        // PidTagAttachDataObject / PtypObject — residual; see fidelity doc).
+        // Spec discovery: PidTagAttachDataObject as PtypObject 0x3701 / 0x000D
+        // (MS-PST §2.4.6.2.2 + §2.3.3.5). Also keep subnode leaf link.
         let (nested_nid, nested_bid, nested_sub, nested_size) = build_embedded_message_object(
             layout,
             embedded,
@@ -3193,24 +3278,33 @@ fn write_one_attachment(
         let attach_sub_entries = vec![(nested_nid, nested_bid, nested_sub)];
         let attach_sub_bid = layout.add_subnode_leaf(&attach_sub_entries)?;
 
-        let filename = if attach.filename.is_empty() {
-            "Embedded Message".to_string()
-        } else {
-            attach.filename.clone()
-        };
+        // Preserve source filename (including empty) — do not invent "Embedded Message"
+        // (QC attachment multiset / 0094 honesty).
+        let filename = attach.filename.clone();
         let short = short_attach_filename(&filename);
         let size_i32 = i32::try_from(nested_size.min(i32::MAX as u64)).unwrap_or(i32::MAX);
         let attach_size = size_i32 as u32;
+        let object_size = u32::try_from(nested_size.min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
 
         let mut props = vec![
-            (
-                PID_TAG_ATTACH_LONG_FILENAME,
-                PcValue::String(filename.clone()),
-            ),
-            (PID_TAG_ATTACH_FILENAME, PcValue::String(short)),
             (PID_TAG_ATTACH_METHOD, PcValue::I32(ATTACH_EMBEDDED_MSG)),
             (PID_TAG_ATTACH_SIZE, PcValue::I32(size_i32)),
+            // PidTagAttachDataObject (same id as binary; PtypObject not PtypBinary).
+            (
+                PID_TAG_ATTACH_DATA_BINARY,
+                PcValue::Object {
+                    nid: nested_nid,
+                    size: object_size,
+                },
+            ),
         ];
+        if !filename.is_empty() {
+            props.push((
+                PID_TAG_ATTACH_LONG_FILENAME,
+                PcValue::String(filename.clone()),
+            ));
+            props.push((PID_TAG_ATTACH_FILENAME, PcValue::String(short)));
+        }
         if let Some(mime) = &attach.mime {
             props.push((PID_TAG_ATTACH_MIME_TAG, PcValue::String(mime.clone())));
         }
@@ -3548,7 +3642,8 @@ fn build_message_payload(
     }
 
     let has_attaches = !written_attaches.is_empty();
-    let mut flags = MSGFLAG_READ;
+    // Preserve readable source flags when present (0094); default MSGFLAG_READ.
+    let mut flags = msg.message_flags.map(|f| f as i32).unwrap_or(MSGFLAG_READ);
     if has_attaches {
         flags |= MSGFLAG_HASATTACH;
         // Attachment table TC at fixed NID 0x671 — full MS-PST column schema
@@ -3695,6 +3790,27 @@ fn build_message_node(
             source_path: msg.source_path.clone(),
             parent_nid: msg.source_msg_nid,
             attach_method: None,
+            ..WriteAttachment::default()
+        };
+        record_attach_event(
+            counters,
+            make_attach_event(
+                msg,
+                &synthetic,
+                0,
+                AttachmentFidelityKind::MetaFailed,
+                AttachEventSeverity::Fail,
+            ),
+            attach_event_sink,
+        );
+    }
+    // 0094: nested extract soft-skipped child attach rows — honesty without ghost attaches.
+    if msg.attachments_incomplete {
+        let synthetic = WriteAttachment {
+            source_path: msg.source_path.clone(),
+            parent_nid: msg.source_msg_nid,
+            attach_method: None,
+            filename: "(nested attach list incomplete)".into(),
             ..WriteAttachment::default()
         };
         record_attach_event(
@@ -3952,7 +4068,7 @@ fn generate_ephemeral_store_record_key(message_count: u64) -> [u8; 16] {
 // ── PC value encoding (Result-based; no unwrap/expect/assert) ───────────────
 
 /// Property value for the production PC builder. Distinct from `crate::PropertyValue`
-/// (used by the fixture path only) — adds `Binary` and subnode-reference variants.
+/// (used by the fixture path only) — adds `Binary`, `Object`, and subnode-reference variants.
 #[derive(Debug, Clone)]
 pub enum PcValue {
     I32(i32),
@@ -3960,6 +4076,11 @@ pub enum PcValue {
     Time(i64),
     String(String),
     Binary(Vec<u8>),
+    /// PtypObject (`0x000D`): 8-byte heap `{Nid:u32 LE, ulSize:u32 LE}` (MS-PST §2.3.3.5).
+    Object {
+        nid: u64,
+        size: u32,
+    },
     /// Value already stored in a subnode (see module docs); stores the raw NID
     /// as `dwValueHnid` with `PtypString`.
     SubnodeString(u64),
@@ -3992,6 +4113,14 @@ fn encode_pc_value(heap: &mut HeapBuilder, value: &PcValue) -> Result<Vec<u8>> {
         PcValue::Binary(b) => {
             r.extend_from_slice(&PTYP_BINARY.to_le_bytes());
             let hid = heap.try_alloc(b)?;
+            r.extend_from_slice(&hid.to_le_bytes());
+        }
+        PcValue::Object { nid, size } => {
+            r.extend_from_slice(&PTYP_OBJECT.to_le_bytes());
+            let mut heap_val = [0u8; 8];
+            heap_val[0..4].copy_from_slice(&(*nid as u32).to_le_bytes());
+            heap_val[4..8].copy_from_slice(&size.to_le_bytes());
+            let hid = heap.try_alloc(&heap_val)?;
             r.extend_from_slice(&hid.to_le_bytes());
         }
         PcValue::SubnodeString(nid) => {

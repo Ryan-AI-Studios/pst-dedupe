@@ -503,6 +503,7 @@ fn attach_payload_mismatch_is_defect() {
         source_path: None,
         parent_nid: None,
         embedded_message: None,
+        embedded_depth_limited: false,
         is_cloud_link: false,
         cloud_provider: None,
         cloud_url: None,
@@ -522,6 +523,7 @@ fn attach_payload_mismatch_is_defect() {
         source_path: None,
         parent_nid: None,
         embedded_message: None,
+        embedded_depth_limited: false,
         is_cloud_link: false,
         cloud_provider: None,
         cloud_url: None,
@@ -1020,10 +1022,11 @@ fn clean_room_parents_only_with_source_digests_is_green() {
                 attaches: detail
                     .attaches
                     .iter()
-                    .map(|(f, s, _, h, _)| AttachDigestEntry {
+                    .map(|(f, s, _, h, _, method)| AttachDigestEntry {
                         filename: f.clone(),
                         size: *s,
                         payload_sha256: h.clone(),
+                        attach_method: *method,
                     })
                     .collect(),
                 extra_source_props: vec![],
@@ -3034,10 +3037,11 @@ fn clean_room_digest_ledger_fail_explains_missing_attach() {
                 attaches: detail
                     .attaches
                     .iter()
-                    .map(|(f, s, _, h, _)| AttachDigestEntry {
+                    .map(|(f, s, _, h, _, method)| AttachDigestEntry {
                         filename: f.clone(),
                         size: *s,
                         payload_sha256: h.clone(),
+                        attach_method: *method,
                     })
                     .collect(),
                 extra_source_props: vec![],

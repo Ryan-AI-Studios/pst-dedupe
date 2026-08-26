@@ -552,7 +552,15 @@ fn embedded_msg_method_5_not_silent_file() {
     let path = scratch_path("embedded_shallow");
     cleanup(&path);
 
-    let nested = base_msg("<emb@ex.com>", "Nested subject");
+    let mut nested = base_msg("<emb@ex.com>", "Nested subject");
+    nested.body_plain = Some("nested body plain".into());
+    nested.recipients = vec![WriteRecipient {
+        recipient_type: WriteRecipientType::To,
+        display_name: Some("Bob".into()),
+        address_type: Some("SMTP".into()),
+        email_address: Some("bob@example.com".into()),
+        smtp_address: Some("bob@example.com".into()),
+    }];
     let mut msg = base_msg("<f12@ex.com>", "Parent");
     msg.attachments.push(WriteAttachment {
         filename: "message.msg".into(),
@@ -566,6 +574,7 @@ fn embedded_msg_method_5_not_silent_file() {
     let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
     assert_eq!(report.embedded_messages_written, 1);
     assert_eq!(report.attachments_written, 1);
+    assert_eq!(report.embedded_unparsed, 0);
 
     let nid = first_message_nid(&path, "Unique Mail");
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
@@ -581,10 +590,7 @@ fn embedded_msg_method_5_not_silent_file() {
         attaches[0].size
     );
 
-    // Attach PC must not carry PidTagAttachDataBinary (by-value file path).
-    // Nested content lives under the attach subnode leaf; reader
-    // `open_attachment_data` may best-effort stream that subnode as bytes, but
-    // that is not a by-value binary property we wrote.
+    // Attach PC: forbid non-empty PtypBinary 0x3701; require PtypObject 0x3701.
     let att_raw = pst
         .read_subnode_data(nid, attaches[0].nid)
         .expect("attach PC via message subnode");
@@ -597,9 +603,39 @@ fn embedded_msg_method_5_not_silent_file() {
         binary.is_none(),
         "embed must not write non-empty PidTagAttachDataBinary as a file payload"
     );
-    // Nested message object exists under the attach (subnode tree non-empty).
-    // Method + size + subnode presence is the reader-honest surface for 0069;
-    // PidTagAttachDataObject (PtypObject) remains residual.
+    let obj = att_pc
+        .get_object(0x3701)
+        .expect("get_object")
+        .expect("PidTagAttachDataObject PtypObject required");
+    assert!(obj.0 != 0, "object nid must be non-zero");
+
+    // Resolve via property-primary path; nested subject/body/recipients must match.
+    // DoD-1: resolved nid must equal 0x3701 object nid (not silent scan fallback).
+    // Legacy files without PtypObject may still use NormalMessage scan elsewhere.
+    let parent = pst.message_node_from_nbt(nid).expect("parent node");
+    let nested_root = pst
+        .resolve_embedded_root(&parent, attaches[0].nid)
+        .expect("resolve via 0x3701 / fallback");
+    assert_eq!(
+        nested_root.nid.0,
+        u64::from(obj.0),
+        "property-primary resolve must use PidTagAttachDataObject nid"
+    );
+    let export = pst
+        .read_export_from_message_node(&nested_root, 2, pst_reader::MAX_NESTED_EXPORT_PAYLOAD_BYTES)
+        .expect("export nested");
+    assert_eq!(export.subject.as_deref(), Some("Nested subject"));
+    assert_eq!(export.sender.as_deref(), Some("alice@example.com"));
+    assert_eq!(export.body_plain.as_deref(), Some("nested body plain"));
+    assert!(
+        !export.recipients.is_empty(),
+        "nested recipients must round-trip non-empty"
+    );
+    assert_eq!(export.recipients[0].display_name.as_deref(), Some("Bob"));
+    assert_eq!(
+        export.recipients[0].email_address.as_deref(),
+        Some("bob@example.com")
+    );
 
     cleanup(&path);
 }
@@ -1486,6 +1522,276 @@ fn zero_byte_by_value_attach_is_written() {
     assert!(buf.is_empty());
 
     cleanup(&path);
+}
+
+// ── 0094: nest with by-value child attach streams via message node ───────────
+
+/// Stream source that opens nested child attaches via message-node API only.
+struct NestedChildStreamSource {
+    pst: pst_reader::PstFile,
+    nodes: std::collections::HashMap<u64, pst_reader::MessageNodeRef>,
+    opened_via_message_node: bool,
+}
+
+impl AttachStreamSource for NestedChildStreamSource {
+    fn open_attach(
+        &mut self,
+        source_path: Option<&str>,
+        parent_nid: Option<u64>,
+        attach_nid: Option<u64>,
+        filename: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        match self.open_attach_stream(source_path, parent_nid, attach_nid, filename)? {
+            Some(mut reader) => {
+                let mut buf = Vec::new();
+                reader
+                    .read_to_end(&mut buf)
+                    .map_err(|e| format!("read nested child: {e}"))?;
+                Ok(Some(buf))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn open_attach_stream(
+        &mut self,
+        _source_path: Option<&str>,
+        parent_nid: Option<u64>,
+        attach_nid: Option<u64>,
+        _filename: &str,
+    ) -> Result<Option<AttachRead>, String> {
+        let parent = parent_nid.ok_or_else(|| "missing parent_nid".to_string())?;
+        let attach = attach_nid.ok_or_else(|| "missing attach_nid".to_string())?;
+        let root = self
+            .nodes
+            .get(&parent)
+            .copied()
+            .ok_or_else(|| format!("no MessageNodeRef for parent {parent:#x}"))?;
+        // Must use message-node path — NBT open_attachment_data would NodeNotFound.
+        let reader = self
+            .pst
+            .open_attach_data_from_message_node(&root, pst_reader::NodeId(attach))
+            .map_err(|e| format!("open_attach_data_from_message_node: {e}"))?;
+        self.opened_via_message_node = true;
+        Ok(Some(AttachRead::from_reader(Box::new(reader))))
+    }
+}
+
+#[test]
+fn embedded_nest_with_by_value_child_streams() {
+    // 1) Write a source PST with nest+child using buffered data (fixture on disk).
+    let src_path = scratch_path("embed_child_bin_src");
+    let dst_path = scratch_path("embed_child_bin_dst");
+    cleanup(&src_path);
+    cleanup(&dst_path);
+
+    let mut nested = base_msg("<emb-child@ex.com>", "Nested with file");
+    nested.body_plain = Some("nested body".into());
+    nested.attachments.push(WriteAttachment {
+        filename: "child.bin".into(),
+        mime: Some("application/octet-stream".into()),
+        size: 4,
+        attach_method: Some(1),
+        data: Some(b"ABCD".to_vec()),
+        stream_available: true,
+        ..Default::default()
+    });
+    let mut msg = base_msg("<parent-child@ex.com>", "Parent");
+    msg.attachments.push(WriteAttachment {
+        filename: "message.msg".into(),
+        attach_method: Some(5),
+        embedded_message: Some(Box::new(nested)),
+        ..Default::default()
+    });
+
+    let report =
+        write_unicode_pst(&src_path, vec![msg], &[], &WritePstOpts::default()).expect("write src");
+    assert_eq!(report.embedded_messages_written, 1);
+    assert_eq!(report.embedded_unparsed, 0);
+    assert!(report.attachments_written >= 2);
+
+    // 2) Reopen source; register nested MessageNodeRef; write dest with data:None stream.
+    let nid = first_message_nid(&src_path, "Unique Mail");
+    let mut src_pst = pst_reader::PstFile::open(&src_path).expect("open src");
+    let attaches = src_pst.list_attachments(nid).expect("list");
+    assert_eq!(attaches.len(), 1);
+    let parent = src_pst.message_node_from_nbt(nid).expect("parent");
+    let nested_root = src_pst
+        .resolve_embedded_root(&parent, attaches[0].nid)
+        .expect("resolve nest");
+    let (children, soft_skipped) = src_pst
+        .list_attachments_from_message_node(&nested_root, true)
+        .expect("list nested attaches");
+    assert_eq!(soft_skipped, 0);
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].filename, "child.bin");
+    let child_attach_nid = children[0].nid.0;
+
+    let mut stream_src = NestedChildStreamSource {
+        pst: src_pst,
+        nodes: std::collections::HashMap::from([(nested_root.nid.0, nested_root)]),
+        opened_via_message_node: false,
+    };
+
+    let mut nested_stream = base_msg("<emb-child@ex.com>", "Nested with file");
+    nested_stream.body_plain = Some("nested body".into());
+    nested_stream.source_msg_nid = Some(nested_root.nid.0);
+    nested_stream.attachments.push(WriteAttachment {
+        filename: "child.bin".into(),
+        mime: Some("application/octet-stream".into()),
+        size: 4,
+        attach_method: Some(1),
+        data: None,
+        stream_available: true,
+        attach_nid: Some(child_attach_nid),
+        parent_nid: Some(nested_root.nid.0),
+        source_path: Some(src_path.to_string_lossy().into_owned()),
+        ..Default::default()
+    });
+    let mut parent_msg = base_msg("<parent-child@ex.com>", "Parent");
+    parent_msg.attachments.push(WriteAttachment {
+        filename: "message.msg".into(),
+        attach_method: Some(5),
+        embedded_message: Some(Box::new(nested_stream)),
+        ..Default::default()
+    });
+
+    let dst_report = write_unicode_pst_with_streams(
+        &dst_path,
+        vec![parent_msg],
+        &[],
+        &WritePstOpts::default(),
+        Some(&mut stream_src),
+    )
+    .expect("write dst via stream");
+    assert!(
+        stream_src.opened_via_message_node,
+        "WRITE path must open nested child via open_attach_data_from_message_node"
+    );
+    assert_eq!(dst_report.embedded_messages_written, 1);
+    assert_eq!(dst_report.embedded_unparsed, 0);
+    assert!(dst_report.attachments_written >= 2);
+
+    // 3) Verify dest child bytes.
+    let dst_nid = first_message_nid(&dst_path, "Unique Mail");
+    let mut dst = pst_reader::PstFile::open(&dst_path).expect("open dst");
+    let dst_att = dst.list_attachments(dst_nid).expect("list dst");
+    let dst_parent = dst.message_node_from_nbt(dst_nid).expect("dst parent");
+    let dst_nested = dst
+        .resolve_embedded_root(&dst_parent, dst_att[0].nid)
+        .expect("dst nest");
+    let (dst_children, _) = dst
+        .list_attachments_from_message_node(&dst_nested, true)
+        .expect("dst children");
+    assert_eq!(dst_children.len(), 1);
+    let mut reader = dst
+        .open_attach_data_from_message_node(&dst_nested, dst_children[0].nid)
+        .expect("stream dest child");
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).expect("read dest child");
+    assert_eq!(buf, b"ABCD");
+
+    cleanup(&src_path);
+    cleanup(&dst_path);
+}
+
+// ── 0094: extract-side depth limit flag → ATTACH_DEPTH_LIMIT ─────────────────
+
+#[test]
+fn embedded_depth_limited_flag_maps_to_depth_limit() {
+    let path = scratch_path("emb_depth_flag");
+    cleanup(&path);
+
+    let mut msg = base_msg("<dl@ex.com>", "Depth flag");
+    msg.attachments.push(WriteAttachment {
+        filename: "deep.msg".into(),
+        attach_method: Some(5),
+        embedded_message: None,
+        embedded_depth_limited: true,
+        ..Default::default()
+    });
+
+    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    assert!(report.embedded_depth_limit_hits >= 1);
+    assert_eq!(report.embedded_unparsed, 0);
+    assert!(report
+        .attachment_fidelity_events
+        .iter()
+        .any(|e| e.kind == AttachmentFidelityKind::DepthLimit));
+
+    cleanup(&path);
+}
+
+// ── 0094: NestedCanonicalMessage maps through from_canonical_message ─────────
+
+#[test]
+fn from_canonical_maps_nested_embedded_message() {
+    use dedup_engine::integrity::RecoverableIntegrity;
+    use dedup_engine::keepset::{
+        CanonicalAttachment, CanonicalMessage, MessageLocus, NestedCanonicalMessage,
+    };
+    use pst_writer::from_canonical_message;
+
+    let nested = NestedCanonicalMessage {
+        subject: Some("Nest".into()),
+        sender: Some("n@ex.com".into()),
+        body_plain: Some("nb".into()),
+        message_class: Some("IPM.Note".into()),
+        message_flags: Some(0x0000_0009), // READ | UNSENT sample bits
+        source_msg_nid: Some(0x2004),
+        ..Default::default()
+    };
+    let canonical = CanonicalMessage {
+        locus: MessageLocus {
+            source_path: "C:/fake/source.pst".into(),
+            source_pst: "source.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 1,
+            is_orphaned: false,
+        },
+        message_id: Some("<p@ex.com>".into()),
+        subject: Some("Parent".into()),
+        sender: Some("a@ex.com".into()),
+        display_to: None,
+        display_cc: None,
+        display_bcc: None,
+        recipients: Vec::new(),
+        message_flags: None,
+        submit_time: None,
+        size: None,
+        message_class: None,
+        body_plain: Some("pb".into()),
+        body_html: None,
+        attachments: vec![CanonicalAttachment {
+            filename: "e.msg".into(),
+            size: 0,
+            mime: None,
+            data: None,
+            stream_available: false,
+            attach_nid: Some(0x25),
+            attach_method: Some(5),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
+            embedded_message: Some(Box::new(nested)),
+            embedded_extract_limit: false,
+        }],
+        fidelity: RecoverableIntegrity::clean(),
+        message_id_norm: None,
+        content_hash: [0u8; 32],
+        edrm_mih_hex: None,
+        body_incomplete: false,
+        body_unavailable: false,
+    };
+    let (write_msg, _) = from_canonical_message(&canonical);
+    let emb = write_msg.attachments[0]
+        .embedded_message
+        .as_ref()
+        .expect("nested mapped");
+    assert_eq!(emb.subject, "Nest");
+    assert_eq!(emb.sender.as_deref(), Some("n@ex.com"));
+    assert_eq!(emb.message_flags, Some(0x0000_0009));
+    assert!(!write_msg.attachments[0].embedded_depth_limited);
 }
 
 // ── embedded_unparsed when method 5 without nested ───────────────────────────

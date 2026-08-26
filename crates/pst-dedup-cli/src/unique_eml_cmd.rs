@@ -1103,6 +1103,8 @@ mod tests {
                 is_cloud_link: false,
                 cloud_provider: None,
                 cloud_url: None,
+                embedded_message: None,
+                embedded_extract_limit: false,
             }],
             fidelity: RecoverableIntegrity::clean(),
             message_id_norm: Some("0089@test".into()),

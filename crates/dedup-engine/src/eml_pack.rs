@@ -1458,6 +1458,8 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
         });
         let mut src = NullAttachStreamSource;
         let mut buf = Vec::new();
@@ -1485,6 +1487,8 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
         });
         let mut src = NullAttachStreamSource;
         let mut buf = Vec::new();
@@ -1549,6 +1553,8 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
         });
         let mut src = NullAttachStreamSource; // open will fail
         let mut buf = Vec::new();
@@ -1593,6 +1599,8 @@ mod tests {
             is_cloud_link: true,
             cloud_provider: Some("OneDriveForBusiness".into()),
             cloud_url: Some("https://contoso.sharepoint.com/x".into()),
+            embedded_message: None,
+            embedded_extract_limit: false,
         });
         let mut src = NullAttachStreamSource;
         let mut buf = Vec::new();
@@ -1621,6 +1629,8 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
         });
         msg.attachments.push(CanonicalAttachment {
             filename: "bad.bin".into(),
@@ -1633,6 +1643,8 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
         });
         let mut src = NullAttachStreamSource;
         let mut buf = Vec::new();
@@ -1724,6 +1736,8 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
         });
         let mut src = NullAttachStreamSource;
         let opts = EmlWriteOpts {
@@ -1904,6 +1918,8 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
         });
         let mut src = MapAttachSource {
             map: [(42, b"Hello".to_vec())].into_iter().collect(),
@@ -1940,6 +1956,8 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
         });
         let mut src = NullAttachStreamSource;
         let mut buf = Vec::new();

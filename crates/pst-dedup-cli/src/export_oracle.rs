@@ -550,9 +550,10 @@ pub struct MessageContentDetail {
     pub display_cc: String,
     pub body_plain_len: usize,
     pub body_html_len: usize,
-    /// (filename, size, mime, payload_sha256_hex, cloud_provider)
+    /// (filename, size, mime, payload_sha256_hex, cloud_provider, attach_method)
     /// `cloud_provider` is empty when absent (0092 ProviderType QC).
-    pub attaches: Vec<(String, u64, String, String, String)>,
+    /// `attach_method` is `None` when unknown; method 5 = embedded message (0094).
+    pub attaches: Vec<(String, u64, String, String, String, Option<i32>)>,
     /// When set, attachment enumeration failed (must not be treated as empty attaches).
     pub attach_list_error: Option<String>,
     /// Structured recipient TC rows when present (0082). Empty when table missing.
@@ -590,7 +591,7 @@ pub fn message_content_detail(
         })
         .collect();
 
-    let mut attaches: Vec<(String, u64, String, String, String)> = Vec::new();
+    let mut attaches: Vec<(String, u64, String, String, String, Option<i32>)> = Vec::new();
     let mut attach_list_error: Option<String> = None;
     match pst.list_attachments(NodeId(nid)) {
         Ok(list) => {
@@ -599,14 +600,20 @@ pub fn message_content_detail(
                 let size = u64::from(meta.size);
                 let mime = meta.mime_tag.clone().unwrap_or_default();
                 let cloud_provider = meta.cloud_provider.clone().unwrap_or_default();
+                let method = meta.attach_method;
+                // Method-5 nested objects are not by-value payloads — do not open
+                // binary (unstable / NBT-miss). Leave payload_hash empty; QC matches
+                // embeds via attach_method (kept outside content_digests_v1 preimage).
                 let mut payload_hash = String::new();
-                if let Ok(mut reader) = pst.open_attachment_data(NodeId(nid), meta.nid) {
-                    let mut buf = Vec::new();
-                    if reader.read_to_end(&mut buf).is_ok() {
-                        payload_hash = hex_sha256(&buf);
+                if method != Some(5) {
+                    if let Ok(mut reader) = pst.open_attachment_data(NodeId(nid), meta.nid) {
+                        let mut buf = Vec::new();
+                        if reader.read_to_end(&mut buf).is_ok() {
+                            payload_hash = hex_sha256(&buf);
+                        }
                     }
                 }
-                attaches.push((filename, size, mime, payload_hash, cloud_provider));
+                attaches.push((filename, size, mime, payload_hash, cloud_provider, method));
             }
         }
         Err(e) => {
@@ -630,7 +637,9 @@ pub fn message_content_detail(
     h.update([0]);
     h.update(body_html);
     h.update([0]);
-    for (fnm, sz, mime, ph, _prov) in &attaches {
+    // content_digests_v1 preimage: filename/size/mime/payload_hash only (no method).
+    // Method-aware embed matching is separate in unique_pst_qc (0094).
+    for (fnm, sz, mime, ph, _prov, _method) in &attaches {
         h.update(fnm.as_bytes());
         h.update([0]);
         h.update(sz.to_le_bytes());
