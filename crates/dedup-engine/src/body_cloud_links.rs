@@ -11,7 +11,8 @@ use regex::Regex;
 
 /// Max Unicode scalar values considered per body surface (Purview-aligned default).
 pub const MAX_BODY_SCAN_CHARS: usize = 100_000;
-/// Max kept URL length (characters); longer candidates are skipped.
+/// Max kept URL length (characters). Longer document-shaped candidates are not
+/// kept hits; they set `truncated` and stash a 2048-char prefix for the honesty marker.
 pub const MAX_URL_LEN: usize = 2_048;
 /// Max document-shaped cloud links kept per message (after exact-string dedupe).
 pub const MAX_LINKS_PER_MESSAGE: usize = 50;
@@ -53,10 +54,101 @@ pub struct BodyCloudLinkHit {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BodyCloudScan {
     pub hits: Vec<BodyCloudLinkHit>,
-    /// True when caps dropped additional document-shaped candidates (window / max-N).
+    /// True when document-shaped candidates were actually dropped
+    /// (window tail / max-links / url-len). Independent of [`Self::window_capped`].
     pub truncated: bool,
+    /// True when HTML or plain exceeded the 100k scan window.
+    pub window_capped: bool,
+    /// Document-shaped candidate(s) existed in the un-windowed tail.
+    pub window_dropped: bool,
+    /// Additional in-window document-shaped candidates past the 50-link cap.
+    pub max_links_exceeded: bool,
+    /// A document-shaped URL (or SafeLinks nested target) exceeded 2048 chars.
+    pub url_truncated: bool,
+    /// First 2048-char prefix of the first over-length document-shaped candidate.
+    /// Marker payload only — not a kept hit.
+    pub overlength_prefix: Option<String>,
     pub scanned_html: bool,
     pub scanned_plain: bool,
+}
+
+struct ScanAccum {
+    hits: Vec<BodyCloudLinkHit>,
+    seen: HashSet<String>,
+    truncated: bool,
+    window_capped: bool,
+    window_dropped: bool,
+    max_links_exceeded: bool,
+    url_truncated: bool,
+    overlength_prefix: Option<String>,
+    scanned_html: bool,
+    scanned_plain: bool,
+}
+
+impl ScanAccum {
+    fn new() -> Self {
+        Self {
+            hits: Vec::new(),
+            seen: HashSet::new(),
+            truncated: false,
+            window_capped: false,
+            window_dropped: false,
+            max_links_exceeded: false,
+            url_truncated: false,
+            overlength_prefix: None,
+            scanned_html: false,
+            scanned_plain: false,
+        }
+    }
+
+    fn note_overlength(&mut self, url: &str) {
+        self.url_truncated = true;
+        self.truncated = true;
+        if self.overlength_prefix.is_none() {
+            self.overlength_prefix = Some(url.chars().take(MAX_URL_LEN).collect());
+        }
+    }
+
+    fn note_max_links(&mut self) {
+        self.max_links_exceeded = true;
+        self.truncated = true;
+    }
+
+    fn note_window_drop(&mut self) {
+        self.window_dropped = true;
+        self.truncated = true;
+    }
+
+    fn note_unseen_in(&mut self, text: &str, as_window_tail: bool) {
+        let probe = probe_unseen_document_candidates(text, &self.seen);
+        if !probe.found {
+            return;
+        }
+        if as_window_tail {
+            self.note_window_drop();
+        } else {
+            self.note_max_links();
+        }
+        if let Some(url) = probe.overlength_url.as_deref() {
+            self.note_overlength(url);
+        }
+    }
+
+    fn into_scan(self) -> BodyCloudScan {
+        let truncated =
+            self.truncated || self.window_dropped || self.max_links_exceeded || self.url_truncated;
+        BodyCloudScan {
+            hits: self.hits,
+            truncated,
+            window_capped: self.window_capped,
+            window_dropped: self.window_dropped,
+            max_links_exceeded: self.max_links_exceeded,
+            url_truncated: self.url_truncated,
+            overlength_prefix: self.overlength_prefix,
+            scanned_html: self.scanned_html,
+            scanned_plain: self.scanned_plain,
+        }
+    }
 }
 
 /// Fixed-pattern regex (never body-derived). Returns `None` only if the constant
@@ -79,49 +171,43 @@ fn bare_url_re() -> Option<&'static Regex> {
 /// Order: HTML first (href then bare), then plain bare when plain is provided.
 /// Full-body scan (no quote/blockquote skip). Exact-string dedupe preserves query.
 pub fn scan_body_cloud_links(html: Option<&[u8]>, plain: Option<&str>) -> BodyCloudScan {
-    let mut hits: Vec<BodyCloudLinkHit> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut truncated = false;
-    let mut scanned_html = false;
-    let mut scanned_plain = false;
+    let mut acc = ScanAccum::new();
 
     if let Some(raw) = html {
-        scanned_html = true;
-        let (text, windowed) = body_window_from_bytes(raw);
+        acc.scanned_html = true;
+        let s = String::from_utf8_lossy(raw);
+        let (text, windowed) = body_window_str(&s);
         if windowed {
-            truncated = true;
+            acc.window_capped = true;
         }
-        collect_from_html(&text, &mut hits, &mut seen, &mut truncated);
+        collect_from_html(&text, windowed.then_some(s.as_ref()), windowed, &mut acc);
+        if windowed {
+            let tail = char_tail(s.as_ref(), MAX_BODY_SCAN_CHARS);
+            acc.note_unseen_in(tail, true);
+        }
     }
 
     if let Some(p) = plain {
         // Plain pass when present so plain-only URLs are found even with HTML.
-        scanned_plain = true;
+        acc.scanned_plain = true;
         let (text, windowed) = body_window_str(p);
         if windowed {
-            truncated = true;
+            acc.window_capped = true;
         }
         collect_bare(
             &text,
             BodyCloudUrlSource::PlainBare,
-            &mut hits,
-            &mut seen,
-            &mut truncated,
+            windowed.then_some(p),
+            windowed,
+            &mut acc,
         );
+        if windowed {
+            let tail = char_tail(p, MAX_BODY_SCAN_CHARS);
+            acc.note_unseen_in(tail, true);
+        }
     }
 
-    BodyCloudScan {
-        hits,
-        truncated,
-        scanned_html,
-        scanned_plain,
-    }
-}
-
-fn body_window_from_bytes(raw: &[u8]) -> (String, bool) {
-    // Prefer UTF-8; lossy keeps scan offline and linear.
-    let s = String::from_utf8_lossy(raw);
-    body_window_str(&s)
+    acc.into_scan()
 }
 
 fn body_window_str(s: &str) -> (String, bool) {
@@ -133,12 +219,56 @@ fn body_window_str(s: &str) -> (String, bool) {
     }
 }
 
-fn collect_from_html(
-    text: &str,
-    hits: &mut Vec<BodyCloudLinkHit>,
-    seen: &mut HashSet<String>,
-    truncated: &mut bool,
-) {
+fn char_tail(s: &str, skip_chars: usize) -> &str {
+    match s.char_indices().nth(skip_chars) {
+        Some((i, _)) => &s[i..],
+        None => "",
+    }
+}
+
+/// Inverse of the bare-URL character class `[^\s<>"'\)\]\}]`.
+fn is_url_continue_char(c: char) -> bool {
+    if c.is_whitespace() {
+        return false;
+    }
+    !matches!(c, '<' | '>' | '"' | '\'' | ')' | ']' | '}')
+}
+
+fn full_bare_url_from(original: &str, start: usize) -> Option<&str> {
+    let rest = original.get(start..)?;
+    let re = bare_url_re()?;
+    let m = re.find(rest)?;
+    if m.start() != 0 {
+        return None;
+    }
+    Some(m.as_str())
+}
+
+/// Reject a bare match cut by the 100k window; if the full original URL is
+/// document-shaped, record a window drop (not a kept hit).
+fn handle_window_edge_bare(m_start: usize, original: &str, acc: &mut ScanAccum) -> bool {
+    let Some(next) = original.chars().nth(MAX_BODY_SCAN_CHARS) else {
+        return false;
+    };
+    if !is_url_continue_char(next) {
+        return false;
+    }
+    if let Some(full) = full_bare_url_from(original, m_start) {
+        if let Some((final_url, _, overlength)) = classify_url(full) {
+            // Cut prefix is never a kept hit; only unique unseen URLs count as drops.
+            if acc.seen.contains(&final_url) {
+                return true;
+            }
+            acc.note_window_drop();
+            if overlength {
+                acc.note_overlength(&final_url);
+            }
+        }
+    }
+    true
+}
+
+fn collect_from_html(text: &str, original: Option<&str>, windowed: bool, acc: &mut ScanAccum) {
     // Track href spans so bare-pass can skip overlapping text (avoid double-count same href).
     let mut href_ranges: Vec<(usize, usize)> = Vec::new();
 
@@ -149,20 +279,7 @@ fn collect_from_html(
             href_ranges.push((m.start(), m.end()));
             // Href values are exact attribute text — do not strip trailing punctuation
             // (query fidelity). Only HTML-unescape + trim.
-            try_keep_candidate(
-                m.as_str(),
-                BodyCloudUrlSource::HtmlHref,
-                hits,
-                seen,
-                truncated,
-                false,
-            );
-            if hits.len() >= MAX_LINKS_PER_MESSAGE {
-                if more_document_candidates_beyond(text, seen) {
-                    *truncated = true;
-                }
-                return;
-            }
+            try_keep_candidate(m.as_str(), BodyCloudUrlSource::HtmlHref, false, acc);
         }
     }
 
@@ -173,21 +290,14 @@ fn collect_from_html(
             if href_ranges.iter().any(|&(hs, he)| start >= hs && end <= he) {
                 continue;
             }
-            // Bare tokens may include trailing sentence punctuation outside the URL.
-            try_keep_candidate(
-                m.as_str(),
-                BodyCloudUrlSource::HtmlBare,
-                hits,
-                seen,
-                truncated,
-                true,
-            );
-            if hits.len() >= MAX_LINKS_PER_MESSAGE {
-                if more_document_candidates_beyond(text, seen) {
-                    *truncated = true;
+            if windowed && end == text.len() {
+                if let Some(orig) = original {
+                    if handle_window_edge_bare(start, orig, acc) {
+                        continue;
+                    }
                 }
-                return;
             }
+            try_keep_candidate(m.as_str(), BodyCloudUrlSource::HtmlBare, true, acc);
         }
     }
 }
@@ -195,115 +305,107 @@ fn collect_from_html(
 fn collect_bare(
     text: &str,
     source: BodyCloudUrlSource,
-    hits: &mut Vec<BodyCloudLinkHit>,
-    seen: &mut HashSet<String>,
-    truncated: &mut bool,
+    original: Option<&str>,
+    windowed: bool,
+    acc: &mut ScanAccum,
 ) {
     let Some(re) = bare_url_re() else {
         return;
     };
     for m in re.find_iter(text) {
-        try_keep_candidate(m.as_str(), source, hits, seen, truncated, true);
-        if hits.len() >= MAX_LINKS_PER_MESSAGE {
-            let rest = &text[m.end()..];
-            for m2 in re.find_iter(rest) {
-                let cand = normalize_candidate(m2.as_str(), true);
-                if cand.chars().count() > MAX_URL_LEN || cand.is_empty() {
+        if windowed && m.end() == text.len() {
+            if let Some(orig) = original {
+                if handle_window_edge_bare(m.start(), orig, acc) {
                     continue;
-                }
-                if seen.contains(&cand) {
-                    continue;
-                }
-                if classify_url(&cand).is_some() {
-                    *truncated = true;
-                    break;
                 }
             }
-            return;
         }
+        try_keep_candidate(m.as_str(), source, true, acc);
     }
 }
 
-/// Cheap remaining-candidate probe after cap (HTML path).
-fn more_document_candidates_beyond(text: &str, seen: &HashSet<String>) -> bool {
+struct UnseenProbe {
+    found: bool,
+    /// First unseen over-length classified URL (full); prefix is taken by `note_overlength`.
+    overlength_url: Option<String>,
+}
+
+/// Remaining-candidate probe (window tail or past the 50-link cap).
+/// Over-length document-shaped URLs count as candidates and surface prefix metadata.
+fn probe_unseen_document_candidates(text: &str, seen: &HashSet<String>) -> UnseenProbe {
+    let mut probe = UnseenProbe {
+        found: false,
+        overlength_url: None,
+    };
+    let mut consider = |cand: String| {
+        if cand.is_empty() || seen.contains(&cand) {
+            return;
+        }
+        let Some((final_url, _, overlength)) = classify_url(&cand) else {
+            return;
+        };
+        if seen.contains(&final_url) {
+            return;
+        }
+        probe.found = true;
+        if overlength && probe.overlength_url.is_none() {
+            probe.overlength_url = Some(final_url);
+        }
+    };
     if let Some(re) = bare_url_re() {
         for m in re.find_iter(text) {
-            let cand = normalize_candidate(m.as_str(), true);
-            if cand.chars().count() > MAX_URL_LEN || cand.is_empty() {
-                continue;
-            }
-            if seen.contains(&cand) {
-                continue;
-            }
-            if classify_url(&cand).is_some() {
-                return true;
-            }
+            consider(normalize_candidate(m.as_str(), true));
         }
     }
     if let Some(re) = href_re() {
         for cap in re.captures_iter(text) {
             let m = cap.get(1).or_else(|| cap.get(2));
             let Some(m) = m else { continue };
-            let cand = normalize_candidate(m.as_str(), false);
-            if cand.chars().count() > MAX_URL_LEN || cand.is_empty() {
-                continue;
-            }
-            if seen.contains(&cand) {
-                continue;
-            }
-            if classify_url(&cand).is_some() {
-                return true;
-            }
+            consider(normalize_candidate(m.as_str(), false));
         }
     }
-    false
+    probe
 }
 
 fn try_keep_candidate(
     raw: &str,
     source: BodyCloudUrlSource,
-    hits: &mut Vec<BodyCloudLinkHit>,
-    seen: &mut HashSet<String>,
-    truncated: &mut bool,
     strip_trailing_punct: bool,
+    acc: &mut ScanAccum,
 ) {
-    if hits.len() >= MAX_LINKS_PER_MESSAGE {
-        let cand = normalize_candidate(raw, strip_trailing_punct);
-        if !cand.is_empty()
-            && cand.chars().count() <= MAX_URL_LEN
-            && !seen.contains(&cand)
-            && classify_url(&cand).is_some()
-        {
-            *truncated = true;
-        }
-        return;
-    }
-
     let cand = normalize_candidate(raw, strip_trailing_punct);
-    if cand.is_empty() || cand.chars().count() > MAX_URL_LEN {
+    if cand.is_empty() {
         return;
     }
-    if seen.contains(&cand) {
+    let Some((final_url, final_source, overlength)) = classify_url(&cand) else {
         return;
-    }
-
-    if let Some((final_url, final_source)) = classify_url(&cand) {
-        // Prefer unwrap source when SafeLinks produced the kept URL.
-        let src = if final_source == BodyCloudUrlSource::SafeLinksUnwrap {
-            BodyCloudUrlSource::SafeLinksUnwrap
-        } else {
-            source
-        };
-        if seen.insert(final_url.clone()) {
-            if hits.len() >= MAX_LINKS_PER_MESSAGE {
-                *truncated = true;
-                return;
-            }
-            hits.push(BodyCloudLinkHit {
-                url: final_url,
-                source: src,
-            });
+    };
+    // Prefer unwrap source when SafeLinks produced the kept URL.
+    let src = if final_source == BodyCloudUrlSource::SafeLinksUnwrap {
+        BodyCloudUrlSource::SafeLinksUnwrap
+    } else {
+        source
+    };
+    if overlength {
+        acc.note_overlength(&final_url);
+        // Past the keep-cap, an extra over-length unique is also a max-links drop.
+        if acc.hits.len() >= MAX_LINKS_PER_MESSAGE && !acc.seen.contains(&final_url) {
+            acc.note_max_links();
         }
+        return;
+    }
+    if acc.seen.contains(&final_url) {
+        return;
+    }
+    if acc.hits.len() >= MAX_LINKS_PER_MESSAGE {
+        acc.note_max_links();
+        return;
+    }
+    if acc.seen.insert(final_url.clone()) {
+        acc.hits.push(BodyCloudLinkHit {
+            url: final_url,
+            source: src,
+        });
     }
 }
 
@@ -356,8 +458,10 @@ fn html_unescape(s: &str) -> String {
     out
 }
 
-/// Classify a normalized absolute URL. Returns (ledger_url, source_hint).
-fn classify_url(url: &str) -> Option<(String, BodyCloudUrlSource)> {
+/// Classify a normalized absolute URL.
+/// Returns (ledger_url, source_hint, overlength). Over-length document-shaped
+/// URLs are still classified so callers can set `truncated` instead of dropping silently.
+fn classify_url(url: &str) -> Option<(String, BodyCloudUrlSource, bool)> {
     let lower = url.to_ascii_lowercase();
     if !lower.starts_with("http://") && !lower.starts_with("https://") {
         return None;
@@ -368,7 +472,7 @@ fn classify_url(url: &str) -> Option<(String, BodyCloudUrlSource)> {
         let target = unwrap_safelinks_url(url)?;
         // SafeLinks nested target is a full URL value — never strip punctuation.
         let target_norm = normalize_candidate(&target, false);
-        if target_norm.is_empty() || target_norm.chars().count() > MAX_URL_LEN {
+        if target_norm.is_empty() {
             return None;
         }
         // Re-test nested target against document-shaped allowlist (not SafeLinks again).
@@ -378,13 +482,15 @@ fn classify_url(url: &str) -> Option<(String, BodyCloudUrlSource)> {
             return None;
         }
         if is_document_shaped_cloud(&target_lower, thost) {
-            return Some((target_norm, BodyCloudUrlSource::SafeLinksUnwrap));
+            let overlength = target_norm.chars().count() > MAX_URL_LEN;
+            return Some((target_norm, BodyCloudUrlSource::SafeLinksUnwrap, overlength));
         }
         return None;
     }
 
     if is_document_shaped_cloud(&lower, host) {
-        Some((url.to_string(), BodyCloudUrlSource::HtmlHref))
+        let overlength = url.chars().count() > MAX_URL_LEN;
+        Some((url.to_string(), BodyCloudUrlSource::HtmlHref, overlength))
     } else {
         None
     }
@@ -729,11 +835,14 @@ mod tests {
         assert!(!scan.scanned_html);
         assert!(!scan.scanned_plain);
         assert!(!scan.truncated);
+        assert!(!scan.window_capped);
 
         let scan2 = scan_body_cloud_links(Some(b""), Some(""));
         assert!(scan2.hits.is_empty());
         assert!(scan2.scanned_html);
         assert!(scan2.scanned_plain);
+        assert!(!scan2.truncated);
+        assert!(!scan2.window_capped);
     }
 
     #[test]
@@ -766,15 +875,43 @@ mod tests {
         let scan = scan_body_cloud_links(Some(html.as_bytes()), None);
         assert_eq!(scan.hits.len(), MAX_LINKS_PER_MESSAGE);
         assert!(scan.truncated, "must flag truncation past 50");
+        assert!(scan.max_links_exceeded);
+        assert!(!scan.window_capped);
     }
 
     #[test]
-    fn url_longer_than_2048_skipped() {
+    fn url_longer_than_2048_truncated_not_kept() {
         let long_q = "a".repeat(3000);
         let url = format!("https://contoso.sharepoint.com/:x:/s/L/f.xlsx?d={long_q}");
         assert!(url.chars().count() > MAX_URL_LEN);
         let scan = scan_body_cloud_links(Some(&html_with(&url)), None);
+        assert!(
+            scan.hits.is_empty(),
+            "over-length URL must not be a kept hit"
+        );
+        assert!(scan.truncated);
+        assert!(scan.url_truncated);
+        assert!(!scan.window_capped);
+        let prefix = scan.overlength_prefix.expect("prefix for marker");
+        assert_eq!(prefix.chars().count(), MAX_URL_LEN);
+        assert!(prefix.starts_with("https://contoso.sharepoint.com/:x:/s/L/f.xlsx?d="));
+    }
+
+    #[test]
+    fn safelinks_nested_overlength_truncated_not_kept() {
+        let long_q = "a".repeat(3000);
+        let target = format!("https://contoso.sharepoint.com/:x:/s/L/f.xlsx?d={long_q}");
+        assert!(target.chars().count() > MAX_URL_LEN);
+        let encoded = percent_encode_for_test(&target);
+        let wrapper =
+            format!("https://nam06.safelinks.protection.outlook.com/?url={encoded}&data=foo");
+        let scan = scan_body_cloud_links(Some(&html_with(&wrapper)), None);
         assert!(scan.hits.is_empty());
+        assert!(scan.truncated);
+        assert!(scan.url_truncated);
+        let prefix = scan.overlength_prefix.expect("nested-target prefix");
+        assert_eq!(prefix.chars().count(), MAX_URL_LEN);
+        assert!(prefix.starts_with("https://contoso.sharepoint.com/:x:/s/L/f.xlsx?d="));
     }
 
     #[test]
@@ -809,6 +946,19 @@ mod tests {
     }
 
     #[test]
+    fn body_window_150k_zero_candidates_not_truncated() {
+        let body = "x".repeat(150_000);
+        let scan = scan_body_cloud_links(Some(body.as_bytes()), None);
+        assert!(scan.hits.is_empty());
+        assert!(scan.window_capped);
+        assert!(
+            !scan.truncated,
+            "window-only zero-candidate must not set truncated"
+        );
+        assert!(!scan.window_dropped);
+    }
+
+    #[test]
     fn body_window_100k_truncates_and_misses_past_window_url() {
         // Prefix fills the scan window; document-shaped URL sits past the window.
         let mut body = "x".repeat(MAX_BODY_SCAN_CHARS);
@@ -818,8 +968,10 @@ mod tests {
         let scan = scan_body_cloud_links(Some(body.as_bytes()), None);
         assert!(
             scan.truncated,
-            "window overflow must set truncated even when no hit kept"
+            "tail document-shaped candidate must set truncated"
         );
+        assert!(scan.window_capped);
+        assert!(scan.window_dropped);
         assert!(
             scan.hits.is_empty(),
             "URL past 100k window must not be collected"
@@ -830,11 +982,176 @@ mod tests {
     fn body_window_url_inside_window_still_hits() {
         let url = "https://contoso.sharepoint.com/:x:/s/Legal/early.xlsx?d=in";
         let mut body = format!(r#"<a href="{url}">early</a>"#);
-        body.push_str(&"y".repeat(MAX_BODY_SCAN_CHARS)); // padding after URL still truncates flag
+        body.push_str(&"y".repeat(MAX_BODY_SCAN_CHARS)); // padding after URL; no further candidates
         let scan = scan_body_cloud_links(Some(body.as_bytes()), None);
         assert_eq!(scan.hits.len(), 1);
         assert_eq!(scan.hits[0].url, url);
-        assert!(scan.truncated, "body longer than window sets truncated");
+        assert!(scan.window_capped);
+        assert!(
+            !scan.truncated,
+            "padding past window with no further candidates must not set truncated"
+        );
+    }
+
+    #[test]
+    fn body_window_bare_url_cut_at_boundary_not_kept() {
+        // Window ends mid-URL: `…/book.xls` cut from `…/book.xlsx?d=…`.
+        let head = "https://contoso.sharepoint.com/:x:/s/L/book.xls";
+        let tail = "x?d=pastwindow";
+        let pad_len = MAX_BODY_SCAN_CHARS - head.chars().count();
+        let mut body = " ".repeat(pad_len);
+        body.push_str(head);
+        body.push_str(tail);
+        let scan = scan_body_cloud_links(None, Some(&body));
+        assert!(scan.window_capped);
+        assert!(
+            scan.hits.is_empty(),
+            "cut .xls prefix must not be a kept hit: {:?}",
+            scan.hits
+        );
+        assert!(scan.truncated, "full straddling URL is document-shaped");
+        assert!(scan.window_dropped);
+    }
+
+    #[test]
+    fn body_window_tail_overlength_sets_url_truncated_and_prefix() {
+        let long_q = "a".repeat(3000);
+        let url = format!("https://contoso.sharepoint.com/:x:/s/L/late.xlsx?d={long_q}");
+        assert!(url.chars().count() > MAX_URL_LEN);
+        let mut body = "x".repeat(MAX_BODY_SCAN_CHARS);
+        body.push_str(&format!(r#" <a href="{url}">late</a>"#));
+        let scan = scan_body_cloud_links(Some(body.as_bytes()), None);
+        assert!(
+            scan.hits.is_empty(),
+            "over-length tail must not be a kept hit"
+        );
+        assert!(scan.window_capped);
+        assert!(scan.window_dropped);
+        assert!(scan.url_truncated);
+        assert!(scan.truncated);
+        let prefix = scan.overlength_prefix.expect("prefix from tail probe");
+        assert_eq!(prefix.chars().count(), MAX_URL_LEN);
+        assert!(prefix.starts_with("https://contoso.sharepoint.com/:x:/s/L/late.xlsx?d="));
+    }
+
+    #[test]
+    fn max_links_plus_overlength_sets_both_flags_and_prefix() {
+        let mut html = String::from("<html><body>");
+        for i in 0..MAX_LINKS_PER_MESSAGE {
+            html.push_str(&format!(
+                r#"<a href="https://contoso.sharepoint.com/:x:/s/L/f{i}.xlsx?d={i}">x</a>"#
+            ));
+        }
+        let long_q = "a".repeat(3000);
+        let long_url = format!("https://contoso.sharepoint.com/:x:/s/L/over.xlsx?d={long_q}");
+        html.push_str(&format!(r#"<a href="{long_url}">x</a>"#));
+        html.push_str("</body></html>");
+        let scan = scan_body_cloud_links(Some(html.as_bytes()), None);
+        assert_eq!(scan.hits.len(), MAX_LINKS_PER_MESSAGE);
+        assert!(scan.max_links_exceeded);
+        assert!(scan.url_truncated);
+        assert!(scan.truncated);
+        assert!(!scan.window_capped);
+        let prefix = scan.overlength_prefix.expect("prefix from post-cap probe");
+        assert_eq!(prefix.chars().count(), MAX_URL_LEN);
+        assert!(prefix.starts_with("https://contoso.sharepoint.com/:x:/s/L/over.xlsx?d="));
+        assert!(
+            scan.hits
+                .iter()
+                .all(|h| h.url.chars().count() <= MAX_URL_LEN),
+            "over-length URL must not occupy a kept-hit slot"
+        );
+    }
+
+    #[test]
+    fn body_window_duplicate_cut_url_not_dropped() {
+        let url = "https://contoso.sharepoint.com/:x:/s/L/book.xlsx?d=1";
+        let head = "https://contoso.sharepoint.com/:x:/s/L/book.xls";
+        let tail = "x?d=1";
+        assert_eq!(format!("{head}{tail}"), url);
+        let lead = format!("{url} ");
+        let pad_len = MAX_BODY_SCAN_CHARS - lead.chars().count() - head.chars().count();
+        let mut body = lead;
+        body.push_str(&" ".repeat(pad_len));
+        body.push_str(head);
+        body.push_str(tail);
+        let scan = scan_body_cloud_links(None, Some(&body));
+        assert_eq!(scan.hits.len(), 1);
+        assert_eq!(scan.hits[0].url, url);
+        assert!(scan.window_capped);
+        assert!(
+            !scan.truncated,
+            "duplicate cut URL must not set truncated: {:?}",
+            scan
+        );
+        assert!(!scan.window_dropped);
+    }
+
+    fn fifty_plain_urls_then_cut(first: &str, head: &str, tail: &str) -> String {
+        let mut prefix = String::new();
+        for i in 0..MAX_LINKS_PER_MESSAGE {
+            if i > 0 {
+                prefix.push(' ');
+            }
+            if i == 0 {
+                prefix.push_str(first);
+            } else {
+                prefix.push_str(&format!(
+                    "https://contoso.sharepoint.com/:x:/s/L/f{i}.xlsx?d={i}"
+                ));
+            }
+        }
+        let pad_len = MAX_BODY_SCAN_CHARS
+            .checked_sub(prefix.chars().count())
+            .and_then(|n| n.checked_sub(1))
+            .and_then(|n| n.checked_sub(head.chars().count()))
+            .expect("50 URLs plus cut head must fit in the window");
+        let mut body = prefix;
+        body.push(' ');
+        body.push_str(&" ".repeat(pad_len));
+        body.push_str(head);
+        body.push_str(tail);
+        body
+    }
+
+    #[test]
+    fn max_links_duplicate_cut_url_not_truncated() {
+        let url = "https://contoso.sharepoint.com/:x:/s/L/book.xlsx?d=1";
+        let head = "https://contoso.sharepoint.com/:x:/s/L/book.xls";
+        let tail = "x?d=1";
+        assert_eq!(format!("{head}{tail}"), url);
+        let body = fifty_plain_urls_then_cut(url, head, tail);
+        let scan = scan_body_cloud_links(None, Some(&body));
+        assert_eq!(scan.hits.len(), MAX_LINKS_PER_MESSAGE);
+        assert!(scan.window_capped);
+        assert!(
+            !scan.truncated,
+            "cut duplicate of a kept URL must not set truncated: {:?}",
+            scan
+        );
+        assert!(!scan.max_links_exceeded);
+        assert!(!scan.window_dropped);
+    }
+
+    #[test]
+    fn max_links_new_unique_cut_url_still_truncated() {
+        let first = "https://contoso.sharepoint.com/:x:/s/L/book.xlsx?d=1";
+        let head = "https://contoso.sharepoint.com/:x:/s/L/other.xls";
+        let tail = "x?d=new";
+        let body = fifty_plain_urls_then_cut(first, head, tail);
+        let scan = scan_body_cloud_links(None, Some(&body));
+        assert_eq!(scan.hits.len(), MAX_LINKS_PER_MESSAGE);
+        assert!(scan.window_capped);
+        assert!(
+            scan.truncated,
+            "new unique cut URL is a dropped candidate: {:?}",
+            scan
+        );
+        assert!(scan.window_dropped);
+        assert!(
+            scan.hits.iter().all(|h| h.url != format!("{head}{tail}")),
+            "cut prefix must not be a kept hit"
+        );
     }
 
     #[test]

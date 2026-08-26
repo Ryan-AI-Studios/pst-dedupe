@@ -225,16 +225,16 @@ Promoted from operator unique-pst smoke on Desktop `INC0102784.pst` + `INC010278
 | [0094-EmbeddedMsgNestedExport](0094-EmbeddedMsgNestedExport/spec.md) | **Completed** | Method-5 nested export + PtypObject `0x3701`; closes **D-0069-embed-object**; narrows **D-0067**; Codex r5 PASS WITH DEFERRED P3 (INC* re-smoke) |
 | [0095-UniquePstFolderTreeNormalize](0095-UniquePstFolderTreeNormalize/spec.md) | **Completed** | Leading alias strip + lazy Unique Mail + **D-0070 closed** via `known_source_paths`; QC key symmetry + Deleted Items claimable; Codex loop through r2 fixes |
 | [0096-PermissionTypeExtract](0096-PermissionTypeExtract/spec.md) | **Completed** | Four-crate PermissionType extract (PtypInteger32 MAY); closes **D-0092-permission-type-extract**; QC live-read / cloud-pointer only; Codex r4 PASS |
-| [0097-BodyCloudTruncationHonesty](0097-BodyCloudTruncationHonesty/spec.md) | **Ready** | Honest body-cloud truncate ledger (eliminate empty-URL `BODY_CLOUD_LINK_TRUNCATED` spam) |
+| [0097-BodyCloudTruncationHonesty](0097-BodyCloudTruncationHonesty/spec.md) | **Completed** | C+A hybrid truncation honesty: `truncated` := dropped document-shaped candidates; ≤1 marker (`WINDOW` / `MAX_LINKS_EXCEEDED` / `URL_TRUNCATED`); split `body_scan_window_capped_messages`; closes **D-0097-body-cloud-truncate-honesty** |
 
-**Suggested order:** **0093** → **0094** (highest attach soft-fail ROI) → **0095** ∥ **0097** → **0096** (0092 residual; low INC* signal).
+**Suggested order:** **0093** → **0094** → **0095** → **0096** → **0097** (all Completed). Series N closed.
 
 ## Notes
 
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0096 Completed**; **0097 Ready** (INC0102784 operator fidelity follow-ups).
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups).
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).

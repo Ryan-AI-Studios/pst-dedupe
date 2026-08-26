@@ -50,12 +50,13 @@ use crate::scan::{
     recompute_per_file_dup_from_results, resolve_pst_paths, run_scan, ScanOptions,
 };
 use crate::unique_export_report::{
-    default_report_dir, volume_path_for, write_body_cloud_links_csv, write_export_messages_csv,
-    write_summary_json, write_volumes_csv, AttachLedgerMode, AttachLedgerSink, BodyCloudLinkRow,
-    ExportMessageRow, ExportSection, LedgerPathMode, PhaseTimings, SummaryError,
-    UniqueExportSummary, VerificationReport, VolumeAttachBuffer, VolumeReportRow,
-    VolumeVerification, DEFAULT_ATTACH_LEDGER_MAX_ROWS, EXPORT_BODY_CLOUD_LINKS_CSV_NAME,
-    PREPARED_BYTES_PEAK_WARN_THRESHOLD, REASON_BODY_CLOUD_LINK, UNIQUE_EXPORT_REPORT_SCHEMA,
+    body_cloud_honesty_reason, default_report_dir, volume_path_for, write_body_cloud_links_csv,
+    write_export_messages_csv, write_summary_json, write_volumes_csv, AttachLedgerMode,
+    AttachLedgerSink, BodyCloudLinkRow, ExportMessageRow, ExportSection, LedgerPathMode,
+    PhaseTimings, SummaryError, UniqueExportSummary, VerificationReport, VolumeAttachBuffer,
+    VolumeReportRow, VolumeVerification, DEFAULT_ATTACH_LEDGER_MAX_ROWS,
+    EXPORT_BODY_CLOUD_LINKS_CSV_NAME, PREPARED_BYTES_PEAK_WARN_THRESHOLD, REASON_BODY_CLOUD_LINK,
+    UNIQUE_EXPORT_REPORT_SCHEMA,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -677,6 +678,10 @@ struct PreparedWinner {
     /// 0085: body-inline document-shaped cloud hits (scanned at prepare; bodies may be moved at write).
     body_cloud_hits: Vec<(String, String)>, // (url, url_source)
     body_cloud_truncated: bool,
+    body_cloud_window_capped: bool,
+    body_cloud_truncate_reason: String,
+    /// 2048-char prefix for URL-over-length honesty marker; empty otherwise.
+    body_cloud_overlength_prefix: String,
 }
 
 /// Adapter: `PstAttachStreamSource` → `pst_writer::AttachStreamSource`.
@@ -1202,6 +1207,7 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
         messages_with_body_cloud_links: 0,
         body_cloud_links_total: 0,
         body_cloud_link_truncated_messages: 0,
+        body_scan_window_capped_messages: 0,
         store_record_key_mode: "deterministic".to_string(),
     };
     if let Err(e) = write_summary_json(ctx.summary_path, &summary) {
@@ -2114,6 +2120,7 @@ pub fn run_unique_pst_with_options(
     let mut messages_with_body_cloud_links: u64 = 0;
     let mut body_cloud_links_total: u64 = 0;
     let mut body_cloud_link_truncated_messages: u64 = 0;
+    let mut body_scan_window_capped_messages: u64 = 0;
     // QC sample meta ordered by prepare/write order (export_message_index assigned later).
     let mut qc_meta_by_prepare_idx: Vec<crate::unique_pst_qc::QcSampleCandidate> = prepared
         .iter()
@@ -2514,15 +2521,21 @@ pub fn run_unique_pst_with_options(
                             });
                         }
                     }
+                    if p.body_cloud_window_capped {
+                        body_scan_window_capped_messages =
+                            body_scan_window_capped_messages.saturating_add(1);
+                    }
                     if p.body_cloud_truncated {
                         body_cloud_link_truncated_messages =
                             body_cloud_link_truncated_messages.saturating_add(1);
-                        body_cloud_link_rows.push(BodyCloudLinkRow::truncated_marker(
+                        body_cloud_link_rows.push(BodyCloudLinkRow::honesty_marker(
                             source_id.clone(),
                             p.source_path.clone(),
                             p.folder_path.clone(),
                             p.nid,
                             p.subject.clone(),
+                            p.body_cloud_truncate_reason.clone(),
+                            p.body_cloud_overlength_prefix.clone(),
                         ));
                     }
                     export_rows.push(ExportMessageRow {
@@ -3156,6 +3169,7 @@ pub fn run_unique_pst_with_options(
         messages_with_body_cloud_links,
         body_cloud_links_total,
         body_cloud_link_truncated_messages,
+        body_scan_window_capped_messages,
         store_record_key_mode: match write_opts_base.store_record_key_mode {
             StoreRecordKeyMode::Deterministic => "deterministic".to_string(),
             StoreRecordKeyMode::Ephemeral => "ephemeral".to_string(),
@@ -3394,10 +3408,17 @@ fn prepared_winner_from_canonical(
         dedup_engine::scan_body_cloud_links(msg.body_html.as_deref(), msg.body_plain.as_deref());
     let body_cloud_hits: Vec<(String, String)> = body_scan
         .hits
-        .into_iter()
-        .map(|h| (h.url, h.source.as_str().to_string()))
+        .iter()
+        .map(|h| (h.url.clone(), h.source.as_str().to_string()))
         .collect();
     let body_cloud_truncated = body_scan.truncated;
+    let body_cloud_window_capped = body_scan.window_capped;
+    let body_cloud_truncate_reason = body_cloud_honesty_reason(
+        body_scan.window_dropped,
+        body_scan.max_links_exceeded,
+        body_scan.url_truncated,
+    );
+    let body_cloud_overlength_prefix = body_scan.overlength_prefix.unwrap_or_default();
     let (write_msg, _adapter_dropped) = from_canonical_message_owned(msg);
     let subject = write_msg.subject.clone();
     Ok(PreparedWinner {
@@ -3414,6 +3435,9 @@ fn prepared_winner_from_canonical(
         sent_message_with_no_recipients,
         body_cloud_hits,
         body_cloud_truncated,
+        body_cloud_window_capped,
+        body_cloud_truncate_reason,
+        body_cloud_overlength_prefix,
     })
 }
 
