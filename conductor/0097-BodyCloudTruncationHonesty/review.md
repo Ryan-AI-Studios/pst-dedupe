@@ -1,6 +1,6 @@
 # Track Completion Review — 0097-BodyCloudTruncationHonesty
 
-## Verdict: PASS (implementer gates; pending independent review)
+## Verdict: PASS (implementer gates; Codex r1 P2s fixed)
 
 ## Scope
 
@@ -22,6 +22,7 @@ Branch: `track/0097-BodyCloudTruncationHonesty` (from `483fecd`).
 |---|---|---|
 | Spec | Dual-AI Ready (`opencode-review.md` + `agy-review.md`) | Folded into spec §2.8 before implementation |
 | Internal | Implementer gates | `cargo fmt --all --check`; clippy workspace `-D warnings`; `cargo test -p dedup-engine` (234); `cargo test -p pst-dedup-cli --test unique_pst` (34); `cargo test --workspace` (exit 0). `ledgerful verify` fmt+clippy ok; test step exceeds the 300s configured timeout (workspace tests passed independently). |
+| Codex r1 | gpt-5.6-luna (read-only audit) | **FAIL** — two P2s (`review.codex.r1.md`): probe discarded over-length prefix on tail/post-cap; window-edge ignored `seen` and marked duplicates dropped. **Fixed** in follow-up: probe returns over-length metadata; edge handler suppresses drop for already-seen URLs. |
 
 ## DoD matrix
 
@@ -51,6 +52,13 @@ Branch: `track/0097-BodyCloudTruncationHonesty` (from `483fecd`).
 - Operator re-smoke INC0102784 unique-pst: expect `body_scan_window_capped_messages` ≈ 62 and `body_cloud_link_truncated_messages` only where a tail/cap actually dropped a document-shaped candidate (not CI).
 - `D-0088-usgovcloud-microsoft-tld` unchanged (no sovereign miss proven here).
 - unique-eml / GUI / attach NPMAP / hasher identity / perf rewrite of remainder probe — out of scope.
+
+## Codex r1 dispositions
+
+| Finding | Disposition |
+|---|---|
+| P2 tail/post-cap probe discarded over-length metadata | **Fixed.** `probe_unseen_document_candidates` returns `found` + first over-length URL; callers set `url_truncated` + prefix. Tests: `body_window_tail_overlength_sets_url_truncated_and_prefix`, `max_links_plus_overlength_sets_both_flags_and_prefix`, CLI `body_cloud_window_tail_overlength_marker_prefix`, `body_cloud_max_links_plus_overlength_marker_prefix`. |
+| P2 window-edge guard marked deduplicated URLs as dropped | **Fixed.** `handle_window_edge_bare` skips the drop flag when `acc.seen` already has the classified URL; cut prefix is still rejected as a real hit. Test: `body_window_duplicate_cut_url_not_dropped`. |
 
 ## Operator note
 

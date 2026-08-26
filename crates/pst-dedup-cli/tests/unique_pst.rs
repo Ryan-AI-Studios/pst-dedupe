@@ -2788,6 +2788,169 @@ fn body_cloud_max_links_real_and_marker_no_index_collision() {
     assert!(!body_csv.contains("BODY_CLOUD_LINK_TRUNCATED"));
 }
 
+/// >100k body with a 2500-char document-shaped URL in the tail → WINDOW|URL_TRUNCATED marker + prefix.
+#[test]
+fn body_cloud_window_tail_overlength_marker_prefix() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src_window_tail_over.pst");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+
+    let long_q = "a".repeat(3000);
+    let url = format!("https://contoso.sharepoint.com/:x:/s/L/late.xlsx?d={long_q}");
+    let mut html = "x".repeat(dedup_engine::MAX_BODY_SCAN_CHARS);
+    html.push_str(&format!(r#" <a href="{url}">late</a>"#));
+    let mut plain = "y".repeat(dedup_engine::MAX_BODY_SCAN_CHARS);
+    plain.push(' ');
+    plain.push_str(&url);
+    let msg = WriteMessage {
+        message_id: Some("<body-cloud-window-tail-over@ex.com>".into()),
+        subject: "Window tail overlength".into(),
+        sender: Some("alice@example.com".into()),
+        display_to: Some("bob@example.com".into()),
+        body_plain: Some(plain),
+        body_html: Some(html.into_bytes()),
+        source_folder_path: Some("Inbox".into()),
+        ..WriteMessage::default()
+    };
+    write_unicode_pst(&src, vec![msg], &[], &WritePstOpts::default()).expect("write src");
+
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            src.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--json",
+            "--no-attachments",
+            "--qc-level",
+            "off",
+        ])
+        .output()
+        .expect("run unique-pst");
+    assert!(
+        result.status.success(),
+        "exit={} stderr={}",
+        result.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("json");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["body_cloud_links_total"].as_u64().unwrap_or(999), 0);
+    assert_eq!(
+        v["body_cloud_link_truncated_messages"]
+            .as_u64()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        v["body_scan_window_capped_messages"].as_u64().unwrap_or(0),
+        1
+    );
+
+    let body_csv =
+        fs::read_to_string(report.join("export_body_cloud_links.csv")).expect("body csv");
+    let data_rows: Vec<_> = body_csv.lines().skip(1).filter(|l| !l.is_empty()).collect();
+    assert_eq!(data_rows.len(), 1, "exactly one honesty marker: {body_csv}");
+    let row = data_rows[0];
+    assert!(
+        row.contains("BODY_CLOUD_LINK_WINDOW") && row.contains("BODY_CLOUD_LINK_URL_TRUNCATED"),
+        "pipe-joined WINDOW|URL_TRUNCATED: {row}"
+    );
+    assert!(
+        row.contains("BODY_CLOUD_LINK_WINDOW|BODY_CLOUD_LINK_URL_TRUNCATED"),
+        "reason order: {row}"
+    );
+    assert!(
+        row.contains(&u32::MAX.to_string()),
+        "link_index=u32::MAX: {row}"
+    );
+    assert!(row.contains("https://contoso.sharepoint.com/:x:/s/L/late.xlsx?d="));
+    assert!(!row.contains("BODY_CLOUD_LINK_TRUNCATED"));
+}
+
+/// 50 kept hits plus an over-length extra candidate → MAX_LINKS|URL_TRUNCATED marker + prefix.
+#[test]
+fn body_cloud_max_links_plus_overlength_marker_prefix() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src_max_links_over.pst");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+
+    let mut html = String::from("<html><body>");
+    for i in 0..50 {
+        html.push_str(&format!(
+            r#"<a href="https://contoso.sharepoint.com/:x:/s/L/f{i}.xlsx?d={i}">x</a>"#
+        ));
+    }
+    let long_q = "a".repeat(3000);
+    let long_url = format!("https://contoso.sharepoint.com/:x:/s/L/over.xlsx?d={long_q}");
+    html.push_str(&format!(r#"<a href="{long_url}">x</a>"#));
+    html.push_str("</body></html>");
+    let first = "https://contoso.sharepoint.com/:x:/s/L/f0.xlsx?d=0";
+    let msg = WriteMessage {
+        message_id: Some("<body-cloud-max-over@ex.com>".into()),
+        subject: "Max links overlength".into(),
+        sender: Some("alice@example.com".into()),
+        display_to: Some("bob@example.com".into()),
+        body_plain: Some(format!("see {first}")),
+        body_html: Some(html.into_bytes()),
+        source_folder_path: Some("Inbox".into()),
+        ..WriteMessage::default()
+    };
+    write_unicode_pst(&src, vec![msg], &[], &WritePstOpts::default()).expect("write src");
+
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            src.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--json",
+            "--no-attachments",
+            "--qc-level",
+            "off",
+        ])
+        .output()
+        .expect("run unique-pst");
+    assert!(
+        result.status.success(),
+        "exit={} stderr={}",
+        result.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("json");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["body_cloud_links_total"].as_u64().unwrap_or(0), 50);
+    assert_eq!(
+        v["body_cloud_link_truncated_messages"]
+            .as_u64()
+            .unwrap_or(0),
+        1
+    );
+
+    let body_csv =
+        fs::read_to_string(report.join("export_body_cloud_links.csv")).expect("body csv");
+    let data_rows: Vec<_> = body_csv.lines().skip(1).filter(|l| !l.is_empty()).collect();
+    assert_eq!(data_rows.len(), 51, "50 real + 1 marker: {body_csv}");
+    let marker = data_rows
+        .iter()
+        .find(|r| r.contains(&u32::MAX.to_string()))
+        .expect("honesty marker");
+    assert!(
+        marker.contains("BODY_CLOUD_LINK_MAX_LINKS_EXCEEDED|BODY_CLOUD_LINK_URL_TRUNCATED"),
+        "reason: {marker}"
+    );
+    assert!(marker.contains("https://contoso.sharepoint.com/:x:/s/L/over.xlsx?d="));
+    assert!(!body_csv.contains("BODY_CLOUD_LINK_TRUNCATED"));
+}
+
 /// Body-only document-shaped cloud URL must not set attach-incomplete / Mode A promote.
 #[test]
 fn body_cloud_only_not_attach_incomplete_mode_a() {
