@@ -5,7 +5,18 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use pst_dedup_cli::scan::{run_scan, ScanOptions};
-use pst_writer::{write_unicode_pst, WriteMessage, WritePstOpts};
+use pst_writer::{write_unicode_pst, FolderLayoutPolicy, WriteMessage, WritePstOpts};
+
+/// Flat layout keeps the display-name folder eager (stable NID/block placement
+/// for CRC trailer fixtures). Preserve residual Unique Mail is lazy (0095).
+fn crc_fixture_opts() -> WritePstOpts {
+    WritePstOpts {
+        folder_layout: FolderLayoutPolicy::Flat {
+            folder_display_name: "Unique Mail".into(),
+        },
+        ..WritePstOpts::default()
+    }
+}
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("pst_dedup_0077_crc");
@@ -135,7 +146,7 @@ fn synthetic_corrupt_pst_increments_specific_crc_counters() {
     let _ = fs::remove_file(&path);
 
     let msg = base_msg("<crc-fixture@ex.com>", "CRC fixture");
-    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write clean");
+    write_unicode_pst(&path, vec![msg], &[], &crc_fixture_opts()).expect("write clean");
     // DoD-10: three-class synthetic — page CRC, block CRC, and block BID mismatch.
     flip_message_block_trailer_bid(&path);
     corrupt_page_and_block_trailers(&path);
@@ -195,7 +206,7 @@ fn sparse_block_flip_taints_message_crc_suspect() {
         base_msg("<sparse-a@ex.com>", "Sparse A"),
         base_msg("<sparse-b@ex.com>", "Sparse B"),
     ];
-    write_unicode_pst(&path, msgs, &[], &WritePstOpts::default()).expect("write");
+    write_unicode_pst(&path, msgs, &[], &crc_fixture_opts()).expect("write");
     flip_one_message_block_trailer_crc(&path);
 
     pst_reader::integrity_telemetry::reset();
@@ -281,7 +292,7 @@ fn scan_reports_crc_fields_and_crc_skip_rate_unchanged() {
     let path = scratch("scan_corrupt");
     let _ = fs::remove_file(&path);
     let msg = base_msg("<scan-crc@ex.com>", "Scan CRC");
-    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    write_unicode_pst(&path, vec![msg], &[], &crc_fixture_opts()).expect("write");
     corrupt_page_and_block_trailers(&path);
 
     let outcome = run_scan(

@@ -195,8 +195,8 @@ const CONTRACT_V1: &[ContractProperty] = &[
     },
     ContractProperty {
         name: "multi_source_prefix",
-        status: ContractStatus::BestEffort,
-        reason: "D-0070-multi-source-stream-prefix: early messages may lack prefix until second source appears",
+        status: ContractStatus::Preserved,
+        reason: "0095: unique-pst pre-seeds known_source_paths so prefixes are stable from message 1 when ≥2 sources (D-0070 closed). Unseeded direct-writer callers may still discover prefixes from stream order",
     },
     ContractProperty {
         name: "recipient_table",

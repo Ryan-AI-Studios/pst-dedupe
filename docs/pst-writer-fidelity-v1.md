@@ -71,19 +71,23 @@ value is reserved for unmappable attaches (0 today).
 
 Default policy: `FolderLayoutPolicy::PreservePaths { multi_source_prefix: true }`.
 
+Operator-facing contract (sentinels, lazy residual, pre-seed): [`unique-pst-export.md`](unique-pst-export.md) § Folder tree contract (0095).
+
 ```text
 IPM_SUBTREE ("Top of Personal Folders")
-  ├── <source_prefix>/?     # only when ≥2 distinct sources and multi_source_prefix
-  │     └── path segments from source_folder_path
-  ├── Unique Mail/          # residual for empty/missing/invalid path (name from folder_display_name)
-  └── Deleted Items/        # still empty special folder (0068)
+  ├── <source_prefix>/?     # when ≥2 distinct sources + multi_source_prefix
+  │     └── path segments after leading IPM/root alias strip
+  ├── Unique Mail/          # residual only when allocated (lazy in preserve)
+  └── Deleted Items/        # special folder (0068); may hold winners
 ```
 
 | Rule | Detail |
 |---|---|
 | Case routing | Case-insensitive segment match; **first-seen display name wins**. |
-| Multi-source prefixes | Sanitized file stem; **case-folded uniqueness** so `Archive.pst`/`archive.pst` never merge under case-insensitive folder routing; collisions → `archive`, `archive (2)`, … with globally reserved suffixes (stable by sorted absolute path). |
+| Leading aliases (0095) | Strip consecutive leading `root` / `top of personal folders` / `top of information store` / `top of outlook data file` / `ipm_subtree` only; stop at first non-alias. |
+| Multi-source prefixes | Sanitized file stem; **case-folded uniqueness** so `Archive.pst`/`archive.pst` never merge; collisions → `archive`, `archive (2)`, …. With `WritePstOpts.known_source_paths` (≥2 sources) prefixes are stable from message 1 (**D-0070 closed** in 0095). Bare writer without pre-seed still discovers from stream order. |
 | Single-source | No source prefix. |
+| Unique Mail | Preserve: allocate on first residual/unparseable path only. Flat: eager display-name folder. |
 | Sanitize | Strip `<>:"/\|?*`, collapse `..`/empty, max 32 segments → residual. Sanitized segments or `..` / over-depth → `folder_paths_degraded++`; residual routing also increments `folder_paths_residual` when path missing/empty/invalid. |
 | Flat policy | `FolderLayoutPolicy::Flat { folder_display_name }` — all messages in one folder (0068 behavior). |
 | Folder object | Every folder still four-part: PC + hierarchy + contents + assoc-contents. |
@@ -148,7 +152,7 @@ report `Vec` for tests. Invariant: fail-severity event count == `attachments_fai
 | Per-folder contents-table RowIndex BTH | not required this track (attach table only) |
 | Eager spill of all leaf block `Vec`s from `Layout` | **Closed in 0070 P1** — `EagerWriteCtx` spills leaves (`on_disk=true`); residual RAM is small internal blocks (XBLOCK/PC heaps) only |
 | Full DTO pre-collect on streaming path | **Closed in 0070** — `IncrementalFolderPlan` one-pass consume; no `Vec<WriteMessage>` materialization by the writer |
-| Multi-source prefix streaming residual | **D-0070-multi-source-stream-prefix** — prefixes from sources seen so far; early messages before a second source may lack a prefix (collect-all fidelity differs). Fat in-memory bodies on caller DTOs remain the caller's responsibility |
+| Multi-source prefix streaming residual | **Closed in 0095** — `WritePstOpts.known_source_paths` pre-seeds prefixes from message 1 (≥2 sources). Bare writer callers that omit pre-seed still discover from stream order. Fat in-memory bodies on caller DTOs remain the caller's responsibility |
 
 ## Scale — multi-GB streaming (Track 0070)
 
@@ -175,7 +179,7 @@ O(N × thin folder plan + message NIDs)   // incremental plan; no full DTO colle
 
 **Forbidden on multi-GB path:** one full multi-GB attach `Vec`; writer pre-collect of all `WriteMessage` DTOs; holding all message bodies after they have been written; retaining all leaf block payloads in `Layout` until finalize.
 
-**Honesty:** if the **caller** already holds a `Vec<WriteMessage>` with fat bodies, that RAM is the caller's. The streaming writer does not force lazy iterators to materialize. Multi-source path prefixes may differ from collect-all when a second source appears mid-stream (D-0070-multi-source-stream-prefix).
+**Honesty:** if the **caller** already holds a `Vec<WriteMessage>` with fat bodies, that RAM is the caller's. The streaming writer does not force lazy iterators to materialize. With `known_source_paths` pre-seed (≥2 sources; unique-pst default), prefixes match collect-all from message 1 (**D-0070 closed**). Unseeded direct-writer callers may still see stream-order prefix discovery.
 
 **`WriteProgress.current_physical_size` during `WritingMessages`:** true cumulative size of the same-dir temp (eager write cursor / file metadata), not a layout estimate before offsets exist.
 

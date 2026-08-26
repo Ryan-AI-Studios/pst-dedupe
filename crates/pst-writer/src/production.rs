@@ -588,6 +588,11 @@ pub struct WritePstOpts {
     /// Allowlisted NPMAP write plan (0092). Empty → empty stub map.
     /// Callers should [`NamedPropWritePlan::scan_messages`] before streaming write.
     pub named_prop_plan: crate::named_prop_map::NamedPropWritePlan,
+    /// Known distinct source PST paths (0095). When `multi_source_prefix` is on
+    /// and this list yields ≥2 distinct sources, file-stem prefixes are stable
+    /// from message 1 (closes D-0070 stream-order race). Empty = discover from
+    /// the message stream only.
+    pub known_source_paths: Vec<String>,
 }
 
 impl Default for WritePstOpts {
@@ -603,6 +608,7 @@ impl Default for WritePstOpts {
             store_key_material: None,
             store_record_key_mode: StoreRecordKeyMode::Deterministic,
             named_prop_plan: crate::named_prop_map::NamedPropWritePlan::empty(),
+            known_source_paths: Vec::new(),
         }
     }
 }
@@ -1332,11 +1338,12 @@ pub fn write_unicode_pst_with_streams(
 /// spill, physical-size progress, cooperative `stop_and_finalize`, inline
 /// final-file hashes.
 ///
-/// **Folder plan:** incremental ([`IncrementalFolderPlan`]) — residual folder at
-/// start; each message ensures folders and allocates NIDs for new folders only.
-/// Multi-source prefixes use sources **seen so far** (when `multi_source_prefix`
-/// and ≥2 distinct sources); messages written before a second source appears
-/// may lack a source prefix (documented residual D-0070-multi-source-stream-prefix).
+/// **Folder plan:** incremental ([`IncrementalFolderPlan`]) — each message
+/// ensures folders and allocates NIDs for new folders only. Preserve residual
+/// `"Unique Mail"` is **lazy** (first residual-routed message). Flat still
+/// eagerly creates the display-name folder. Multi-source prefixes are stable
+/// from message 1 when [`WritePstOpts::known_source_paths`] lists ≥2 distinct
+/// sources (closes D-0070); otherwise prefixes are discovered from the stream.
 /// Callers that already hold a `Vec<WriteMessage>` own that RAM; this path does
 /// not force lazy iterators to materialize.
 ///
@@ -1486,8 +1493,9 @@ pub fn write_unicode_pst_streaming(
     };
     layout.add_node_data((NID_ROOT_FOLDER & !0x1F) | 0x0F, root_assoc_cont_heap, 0, 0)?;
 
-    // Incremental folder plan: residual only at start; NIDs for new folders on
-    // each message. No full DTO collect (DoD-1 / D-0070-dto-collect closed).
+    // Incremental folder plan: preserve residual Unique Mail is lazy (0095);
+    // flat still eager. NIDs for new folders on each message. No full DTO
+    // collect (DoD-1 / D-0070-dto-collect closed).
     let mut folder_plan = IncrementalFolderPlan::start(&mut layout, opts);
 
     // Deleted Items / Search Root (§2/§3/§4 of the round-9 verified MS-PST
@@ -2329,15 +2337,16 @@ struct FolderPlan {
     folder_paths_degraded: u64,
 }
 
-/// One-pass folder planner: residual folder at start; each message ensures path
-/// segments and allocates NIDs only for **new** folders.
+/// One-pass folder planner: each message ensures path segments and allocates
+/// NIDs only for **new** folders.
+///
+/// **Preserve:** residual `"Unique Mail"` is **lazy** (allocated on first
+/// residual-routed message). **Flat:** the display-name folder is eager.
 ///
 /// Multi-source prefixes (`PreservePaths { multi_source_prefix: true }`) use
-/// sources **seen so far**. When a second distinct source appears, prefixes are
-/// assigned via the same case-fold uniqueness rules as [`unique_source_prefixes`].
-/// Messages written before that threshold may lack a source prefix — residual
-/// **D-0070-multi-source-stream-prefix** (collect-all fidelity is
-/// [`plan_folder_tree`] for tests/helpers only).
+/// [`WritePstOpts::known_source_paths`] when ≥2 distinct sources are pre-seeded
+/// (stable from message 1; closes D-0070). Otherwise sources are discovered
+/// from the stream; prefixes appear once a second source is seen.
 #[derive(Debug)]
 struct IncrementalFolderPlan {
     roots: Vec<PlannedFolder>,
@@ -2373,27 +2382,67 @@ impl IncrementalFolderPlan {
             }
         );
 
+        // Flat: eager display-name folder. Preserve: lazy residual (0095).
         let mut roots = Vec::new();
-        let residual_nid = layout.alloc_nid(NID_TYPE_NORMAL_FOLDER);
-        roots.push(PlannedFolder {
-            display_name: residual_name.clone(),
-            key: case_fold_key(&residual_name),
-            children: Vec::new(),
-            message_indices: Vec::new(),
-            nid: residual_nid,
-        });
+        let mut folders_created = 0u64;
+        if matches!(opts.folder_layout, FolderLayoutPolicy::Flat { .. }) {
+            let residual_nid = layout.alloc_nid(NID_TYPE_NORMAL_FOLDER);
+            roots.push(PlannedFolder {
+                display_name: residual_name.clone(),
+                key: case_fold_key(&residual_name),
+                children: Vec::new(),
+                message_indices: Vec::new(),
+                nid: residual_nid,
+            });
+            folders_created = 1;
+        }
+
+        let mut sources_seen = Vec::new();
+        let mut prefix_map = HashMap::new();
+        if multi_source {
+            for p in &opts.known_source_paths {
+                if p.is_empty() {
+                    continue;
+                }
+                if !sources_seen.iter().any(|s| s == p) {
+                    sources_seen.push(p.clone());
+                }
+            }
+            if sources_seen.len() >= 2 {
+                prefix_map = unique_source_prefixes(&sources_seen);
+            }
+        }
 
         Self {
             roots,
             message_folder: Vec::new(),
-            folders_created: 1,
+            folders_created,
             folder_paths_residual: 0,
             folder_paths_degraded: 0,
             residual_name,
             multi_source,
-            sources_seen: Vec::new(),
-            prefix_map: HashMap::new(),
+            sources_seen,
+            prefix_map,
         }
+    }
+
+    /// Ensure residual / flat display folder exists with a real NID.
+    fn ensure_residual<'a>(&'a mut self, layout: &mut Layout) -> &'a mut PlannedFolder {
+        let key = case_fold_key(&self.residual_name);
+        if let Some(idx) = self.roots.iter().position(|c| c.key == key) {
+            return &mut self.roots[idx];
+        }
+        let nid = layout.alloc_nid(NID_TYPE_NORMAL_FOLDER);
+        self.folders_created = self.folders_created.saturating_add(1);
+        self.roots.push(PlannedFolder {
+            display_name: self.residual_name.clone(),
+            key,
+            children: Vec::new(),
+            message_indices: Vec::new(),
+            nid,
+        });
+        let last = self.roots.len() - 1;
+        &mut self.roots[last]
     }
 
     /// Route `msg` into the folder tree; return parent folder NID.
@@ -2419,8 +2468,7 @@ impl IncrementalFolderPlan {
         let parent_nid = match &opts.folder_layout {
             FolderLayoutPolicy::Flat { .. } => {
                 // Intentional single-folder layout — not path residual/degraded.
-                let residual = find_child_mut(&mut self.roots, &self.residual_name);
-                // Residual always exists with a NID from `start`.
+                let residual = self.ensure_residual(layout);
                 residual.message_indices.push(msg_index);
                 residual.nid
             }
@@ -2459,7 +2507,7 @@ impl IncrementalFolderPlan {
                         if degraded {
                             self.folder_paths_degraded += 1;
                         }
-                        let residual = find_child_mut(&mut self.roots, &self.residual_name);
+                        let residual = self.ensure_residual(layout);
                         residual.message_indices.push(msg_index);
                         residual.nid
                     }
@@ -2485,6 +2533,36 @@ impl IncrementalFolderPlan {
 
 fn case_fold_key(s: &str) -> String {
     s.to_uppercase()
+}
+
+/// Well-known IPM / root container aliases (case-folded ASCII).
+///
+/// Strip only a **consecutive leading** run of these from source folder paths
+/// (0095). Never strip a later user folder that happens to match.
+fn is_leading_folder_alias(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "root"
+            | "top of personal folders"
+            | "top of information store"
+            | "top of outlook data file"
+            | "ipm_subtree"
+    )
+}
+
+/// Drop consecutive leading IPM/root aliases; stop at the first non-alias.
+fn strip_leading_folder_aliases(segs: &mut Vec<String>) {
+    while segs.first().is_some_and(|s| is_leading_folder_alias(s)) {
+        segs.remove(0);
+    }
+}
+
+/// Sanitize one folder display-name segment (writer path rules).
+///
+/// Forbidden chars → `_`; trim; collapse empty / `.` / `..`; trim trailing
+/// dots/spaces. Public so QC can apply the same rules when building expected keys.
+pub fn sanitize_folder_segment(s: &str) -> String {
+    sanitize_segment(s)
 }
 
 fn sanitize_segment(s: &str) -> String {
@@ -2513,6 +2591,64 @@ fn sanitize_segment(s: &str) -> String {
     out
 }
 
+/// Normalize a folder path key for QC / comparison (0095).
+///
+/// Trims, unifies slashes, strips consecutive leading IPM/root aliases, applies
+/// writer [`sanitize_folder_segment`] to each remaining segment, joins with `/`,
+/// and ASCII-lowercases. Must stay aligned with [`parse_folder_path`].
+///
+/// Returns `""` for residual inputs (`..`, empty, alias-only, over-depth). For
+/// export-row expected keys that must mirror writer Unique Mail routing, use
+/// [`folder_path_qc_expected_key`] instead.
+pub fn normalize_folder_path_key(path: &str) -> String {
+    let path = path.trim().replace('\\', "/");
+    let path = path.trim_matches('/');
+    if path.is_empty() {
+        return String::new();
+    }
+    let mut raw_segs: Vec<String> = Vec::new();
+    for part in path.split('/') {
+        let part = part.trim();
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            // Same as writer residual routing: no stable key for traversal.
+            return String::new();
+        }
+        raw_segs.push(part.to_string());
+    }
+    strip_leading_folder_aliases(&mut raw_segs);
+    if raw_segs.is_empty() {
+        return String::new();
+    }
+    // Over-depth is residual in the writer; no structural key here.
+    if raw_segs.len() > MAX_FOLDER_DEPTH {
+        return String::new();
+    }
+    raw_segs
+        .iter()
+        .map(|s| sanitize_segment(s).to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// QC expected folder key for an export-row `folder_path`, mirroring writer routing.
+///
+/// Residual outcomes from [`parse_folder_path`] (empty / whitespace-only, `..`,
+/// alias-only after strip, over-depth) map to `"unique mail"` — the same leaf
+/// the writer uses. Preserved paths join sanitized lowercased segments with `/`.
+pub fn folder_path_qc_expected_key(path: &str) -> String {
+    match parse_folder_path(path) {
+        PathParseOutcome::Residual { .. } => "unique mail".to_string(),
+        PathParseOutcome::Segments { segs, .. } => segs
+            .iter()
+            .map(|s| s.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join("/"),
+    }
+}
+
 /// Outcome of parsing a relative folder path for layout routing.
 #[derive(Debug)]
 enum PathParseOutcome {
@@ -2525,13 +2661,15 @@ enum PathParseOutcome {
 }
 
 /// Parse a relative folder path into sanitized segments or residual.
+///
+/// Order: split → drop empty/`.` → reject `..` → strip leading aliases on raw
+/// names → sanitize remaining → depth check.
 fn parse_folder_path(path: &str) -> PathParseOutcome {
     let path = path.trim().trim_start_matches(['/', '\\']);
     if path.is_empty() {
         return PathParseOutcome::Residual { degraded: false };
     }
-    let mut segs = Vec::new();
-    let mut degraded = false;
+    let mut raw_segs = Vec::new();
     for part in path.split(['/', '\\']) {
         let part = part.trim();
         if part.is_empty() || part == "." {
@@ -2540,15 +2678,21 @@ fn parse_folder_path(path: &str) -> PathParseOutcome {
         if part == ".." {
             return PathParseOutcome::Residual { degraded: true };
         }
-        let sanitized = sanitize_segment(part);
+        raw_segs.push(part.to_string());
+    }
+    strip_leading_folder_aliases(&mut raw_segs);
+    if raw_segs.is_empty() {
+        // Non-empty input was only aliases / `.` segments.
+        return PathParseOutcome::Residual { degraded: true };
+    }
+    let mut segs = Vec::new();
+    let mut degraded = false;
+    for part in raw_segs {
+        let sanitized = sanitize_segment(&part);
         if sanitized != part {
             degraded = true;
         }
         segs.push(sanitized);
-    }
-    if segs.is_empty() {
-        // Non-empty input collapsed to nothing (e.g. only `.` segments).
-        return PathParseOutcome::Residual { degraded: true };
     }
     if segs.len() > MAX_FOLDER_DEPTH {
         return PathParseOutcome::Residual { degraded: true };
@@ -2639,6 +2783,7 @@ fn unique_source_prefixes(sources: &[String]) -> HashMap<String, String> {
     map
 }
 
+#[cfg(test)]
 fn find_child_mut<'a>(
     children: &'a mut Vec<PlannedFolder>,
     display: &str,
@@ -2773,11 +2918,14 @@ fn plan_folder_tree(messages: &[WriteMessage], opts: &WritePstOpts) -> FolderPla
         }
     );
 
-    let sources: Vec<String> = messages
-        .iter()
-        .filter_map(|m| m.source_path.clone())
-        .collect();
-    let mut distinct_sources = sources.clone();
+    let mut distinct_sources: Vec<String> = opts.known_source_paths.clone();
+    for m in messages {
+        if let Some(sp) = &m.source_path {
+            if !sp.is_empty() {
+                distinct_sources.push(sp.clone());
+            }
+        }
+    }
     distinct_sources.sort();
     distinct_sources.dedup();
     let prefix_map = if multi_source && distinct_sources.len() >= 2 {
@@ -2791,8 +2939,8 @@ fn plan_folder_tree(messages: &[WriteMessage], opts: &WritePstOpts) -> FolderPla
     let mut folder_paths_residual = 0u64;
     let mut folder_paths_degraded = 0u64;
 
-    // Always ensure residual folder exists (0068 BC: Unique Mail under IPM).
-    {
+    // Flat: eager display-name folder. Preserve: lazy residual (0095).
+    if matches!(opts.folder_layout, FolderLayoutPolicy::Flat { .. }) {
         let _ = find_child_mut(&mut roots, &residual_name);
     }
 
@@ -5836,6 +5984,164 @@ mod tests {
         assert_eq!(plan.roots[0].display_name, "All Mail");
         assert_eq!(nid, plan.roots[0].nid);
         assert_eq!(plan.folders_created, 1);
+    }
+
+    #[test]
+    fn normalize_folder_path_key_strips_leading_aliases_and_sanitizes() {
+        assert_eq!(
+            normalize_folder_path_key("Root/Top of Personal Folders/Inbox"),
+            "inbox"
+        );
+        assert_eq!(
+            normalize_folder_path_key(
+                "Top of Personal Folders/Mailbox - Doe, John/Top of Information Store/Inbox"
+            ),
+            "mailbox - doe, john/top of information store/inbox"
+        );
+        // Later user folder named like a sentinel is preserved.
+        assert_eq!(
+            normalize_folder_path_key("Root/Top of Personal Folders/Inbox/Top of Personal Folders"),
+            "inbox/top of personal folders"
+        );
+        // Sanitize quotes / asterisks / trailing dots (writer parity).
+        assert_eq!(
+            normalize_folder_path_key(r#"Inbox/Anthony "Tony" Randall"#),
+            "inbox/anthony _tony_ randall"
+        );
+        assert_eq!(
+            normalize_folder_path_key("Inbox/1. tony s."),
+            "inbox/1. tony s"
+        );
+        assert_eq!(
+            normalize_folder_path_key("Inbox/** my team"),
+            "inbox/__ my team"
+        );
+        assert_eq!(normalize_folder_path_key(".."), "");
+        assert_eq!(normalize_folder_path_key(""), "");
+        let over_depth: String = (0..=MAX_FOLDER_DEPTH)
+            .map(|i| format!("seg{i}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        assert_eq!(normalize_folder_path_key(&over_depth), "");
+    }
+
+    #[test]
+    fn folder_path_qc_expected_key_mirrors_residual_unique_mail() {
+        assert_eq!(folder_path_qc_expected_key(""), "unique mail");
+        assert_eq!(folder_path_qc_expected_key("   "), "unique mail");
+        assert_eq!(folder_path_qc_expected_key(".."), "unique mail");
+        assert_eq!(folder_path_qc_expected_key("Inbox/../Sent"), "unique mail");
+        assert_eq!(
+            folder_path_qc_expected_key("Root/Top of Personal Folders"),
+            "unique mail"
+        );
+        let over_depth: String = (0..=MAX_FOLDER_DEPTH)
+            .map(|i| format!("seg{i}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        assert_eq!(folder_path_qc_expected_key(&over_depth), "unique mail");
+        assert_eq!(
+            folder_path_qc_expected_key("Root/Top of Personal Folders/Inbox"),
+            "inbox"
+        );
+        assert_eq!(
+            folder_path_qc_expected_key(r#"Inbox/Anthony "Tony" Randall"#),
+            "inbox/anthony _tony_ randall"
+        );
+    }
+
+    #[test]
+    fn parse_folder_path_strips_leading_aliases_only() {
+        match parse_folder_path("Root/Top of Personal Folders/Inbox") {
+            PathParseOutcome::Segments { segs, .. } => {
+                assert_eq!(segs, vec!["Inbox".to_string()]);
+            }
+            other => panic!("expected segments, got {other:?}"),
+        }
+        match parse_folder_path("Root/Top of Personal Folders/Inbox/Top of Personal Folders/Nested")
+        {
+            PathParseOutcome::Segments { segs, .. } => {
+                assert_eq!(
+                    segs,
+                    vec![
+                        "Inbox".to_string(),
+                        "Top of Personal Folders".to_string(),
+                        "Nested".to_string()
+                    ]
+                );
+            }
+            other => panic!("expected segments, got {other:?}"),
+        }
+        // Non-sentinel mailbox root preserved.
+        match parse_folder_path("Mailbox - Doe, John/Inbox") {
+            PathParseOutcome::Segments { segs, .. } => {
+                assert_eq!(
+                    segs,
+                    vec!["Mailbox - Doe, John".to_string(), "Inbox".to_string()]
+                );
+            }
+            other => panic!("expected segments, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preserve_start_has_no_residual_until_needed() {
+        let opts = WritePstOpts {
+            folder_layout: FolderLayoutPolicy::PreservePaths {
+                multi_source_prefix: true,
+            },
+            ..WritePstOpts::default()
+        };
+        let mut layout = Layout::new();
+        let plan = IncrementalFolderPlan::start(&mut layout, &opts);
+        assert!(plan.roots.is_empty());
+        assert_eq!(plan.folders_created, 0);
+    }
+
+    #[test]
+    fn known_source_paths_preseed_prefixes_from_message_one() {
+        let opts = WritePstOpts {
+            folder_layout: FolderLayoutPolicy::PreservePaths {
+                multi_source_prefix: true,
+            },
+            known_source_paths: vec![r"C:\a\one.pst".into(), r"C:\b\two.pst".into()],
+            ..WritePstOpts::default()
+        };
+        let m0 = WriteMessage {
+            source_path: Some(r"C:\a\one.pst".into()),
+            source_folder_path: Some("Root/Top of Personal Folders/Inbox".into()),
+            subject: "first".into(),
+            ..WriteMessage::default()
+        };
+        let mut layout = Layout::new();
+        let mut plan = IncrementalFolderPlan::start(&mut layout, &opts);
+        assert_eq!(plan.prefix_map.len(), 2, "pre-seed must populate prefixes");
+        plan.assign_message(&mut layout, &m0, &opts, 0);
+        let one_prefix = plan.prefix_map.get(r"C:\a\one.pst").cloned().unwrap();
+        fn find_path(nodes: &[PlannedFolder], segs: &[&str]) -> bool {
+            if segs.is_empty() {
+                return true;
+            }
+            nodes
+                .iter()
+                .any(|n| n.display_name == segs[0] && find_path(&n.children, &segs[1..]))
+        }
+        assert!(
+            find_path(&plan.roots, &[&one_prefix, "Inbox"]),
+            "message 1 must already be under source prefix; roots={:?}",
+            plan.roots
+                .iter()
+                .map(|r| r.display_name.as_str())
+                .collect::<Vec<_>>()
+        );
+        // No doubled ToPF under the prefix.
+        assert!(
+            !find_path(
+                &plan.roots,
+                &[&one_prefix, "Top of Personal Folders", "Inbox"]
+            ),
+            "leading ToPF alias must be stripped"
+        );
     }
 
     /// 0079: concurrent SHA-256 + MD5 over shared 1 MiB buffers equals sequential digests.

@@ -2068,6 +2068,16 @@ pub fn run_unique_pst_with_options(
             w.locus.nid,
         )
     }));
+    // 0095: pre-seed distinct winner sources so multi-source prefixes are stable
+    // from message 1 (closes D-0070 stream-order race).
+    let mut known_source_paths: Vec<String> = keep_set
+        .winners
+        .iter()
+        .map(|w| w.locus.source_path.clone())
+        .filter(|p| !p.is_empty())
+        .collect();
+    known_source_paths.sort();
+    known_source_paths.dedup();
     // 0092: named_prop_plan is filled per volume below (emit-only-when-used).
     // parents_only / --no-attachments → empty plan (no attach PCs written).
     let write_opts_base = WritePstOpts {
@@ -2083,6 +2093,7 @@ pub fn run_unique_pst_with_options(
         store_key_material: Some(store_key_material),
         store_record_key_mode: StoreRecordKeyMode::Deterministic,
         named_prop_plan: NamedPropWritePlan::empty(),
+        known_source_paths,
     };
 
     // ── Phase 3: multi-volume streaming write ───────────────────────────────
