@@ -1214,7 +1214,7 @@ fn write_attachment_from_canonical(
         is_cloud_link: a.is_cloud_link,
         cloud_provider: a.cloud_provider.clone(),
         cloud_url: a.cloud_url.clone(),
-        cloud_permission_type: None,
+        cloud_permission_type: a.cloud_permission_type,
     }
 }
 
@@ -1243,7 +1243,7 @@ fn write_attachment_from_canonical_owned(
         is_cloud_link: a.is_cloud_link,
         cloud_provider: a.cloud_provider,
         cloud_url: a.cloud_url,
-        cloud_permission_type: None,
+        cloud_permission_type: a.cloud_permission_type,
     }
 }
 

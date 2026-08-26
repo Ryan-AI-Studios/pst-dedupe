@@ -235,6 +235,11 @@ const CONTRACT_V1: &[ContractProperty] = &[
         reason: "0092: re-emitted on unique-PST cloud pointer attaches when source had a known provider (NPMAP allowlisted write + attach PC); absence on source is not a defect; provider string open (OneDrivePro/OneDriveConsumer/other). Payload never Preserved offline",
     },
     ContractProperty {
+        name: "PidNameAttachmentPermissionType",
+        status: ContractStatus::Preserved,
+        reason: "0096: re-emitted on unique-PST cloud pointer attaches when source had AttachmentPermissionType (PtypInteger32; open-world preserve any i32); absence on source is not a defect. Payload never Preserved offline",
+    },
+    ContractProperty {
         name: "message_content_digest",
         status: ContractStatus::Preserved,
         reason: "Aggregate MID+subject+recipients+body+attach-payload digest must match source when compared",
@@ -331,6 +336,17 @@ mod tests {
             provider.reason.contains("0092") || provider.reason.contains("re-emit"),
             "reason should cite 0092 write-back: {}",
             provider.reason
+        );
+        let permission = c.get("PidNameAttachmentPermissionType").expect("present");
+        assert_eq!(
+            permission.status,
+            ContractStatus::Preserved,
+            "0096 writes PermissionType back when source had it"
+        );
+        assert!(
+            permission.reason.contains("0096") || permission.reason.contains("PermissionType"),
+            "reason should cite 0096 PermissionType: {}",
+            permission.reason
         );
         let named = c.get("named_properties").expect("present");
         assert_eq!(named.status, ContractStatus::BestEffort);

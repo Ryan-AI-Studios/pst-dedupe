@@ -550,14 +550,30 @@ pub struct MessageContentDetail {
     pub display_cc: String,
     pub body_plain_len: usize,
     pub body_html_len: usize,
-    /// (filename, size, mime, payload_sha256_hex, cloud_provider, attach_method)
-    /// `cloud_provider` is empty when absent (0092 ProviderType QC).
-    /// `attach_method` is `None` when unknown; method 5 = embedded message (0094).
-    pub attaches: Vec<(String, u64, String, String, String, Option<i32>)>,
+    /// Per-attach live-read detail (0096: struct replaces positional tuple).
+    pub attaches: Vec<AttachDetail>,
     /// When set, attachment enumeration failed (must not be treated as empty attaches).
     pub attach_list_error: Option<String>,
     /// Structured recipient TC rows when present (0082). Empty when table missing.
     pub recipients: Vec<RecipientFingerprint>,
+}
+
+/// Live-read attach fingerprint for QC (provider/permission are compare-only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachDetail {
+    pub filename: String,
+    pub size: u64,
+    pub mime: String,
+    pub payload_sha256_hex: String,
+    /// Empty when absent (0092 ProviderType QC).
+    pub cloud_provider: String,
+    /// `None` when unknown; method 5 = embedded message (0094).
+    pub attach_method: Option<i32>,
+    /// True when reader classified the row as a cloud/web-ref pointer (0084).
+    /// PermissionType QC is scoped to cloud-pointer rows (0096 lock 6).
+    pub is_cloud_link: bool,
+    /// `None` when absent (0096 PermissionType QC; live-read only).
+    pub cloud_permission_type: Option<i32>,
 }
 
 /// Extract comparable content fields + digest for QC (reuses oracle hashing).
@@ -591,7 +607,7 @@ pub fn message_content_detail(
         })
         .collect();
 
-    let mut attaches: Vec<(String, u64, String, String, String, Option<i32>)> = Vec::new();
+    let mut attaches: Vec<AttachDetail> = Vec::new();
     let mut attach_list_error: Option<String> = None;
     match pst.list_attachments(NodeId(nid)) {
         Ok(list) => {
@@ -601,6 +617,8 @@ pub fn message_content_detail(
                 let mime = meta.mime_tag.clone().unwrap_or_default();
                 let cloud_provider = meta.cloud_provider.clone().unwrap_or_default();
                 let method = meta.attach_method;
+                let is_cloud_link = meta.is_cloud_link;
+                let cloud_permission_type = meta.cloud_permission_type;
                 // Method-5 nested objects are not by-value payloads — do not open
                 // binary (unstable / NBT-miss). Leave payload_hash empty; QC matches
                 // embeds via attach_method (kept outside content_digests_v1 preimage).
@@ -613,7 +631,16 @@ pub fn message_content_detail(
                         }
                     }
                 }
-                attaches.push((filename, size, mime, payload_hash, cloud_provider, method));
+                attaches.push(AttachDetail {
+                    filename,
+                    size,
+                    mime,
+                    payload_sha256_hex: payload_hash,
+                    cloud_provider,
+                    attach_method: method,
+                    is_cloud_link,
+                    cloud_permission_type,
+                });
             }
         }
         Err(e) => {
@@ -637,15 +664,16 @@ pub fn message_content_detail(
     h.update([0]);
     h.update(body_html);
     h.update([0]);
-    // content_digests_v1 preimage: filename/size/mime/payload_hash only (no method).
+    // content_digests_v1 preimage: filename/size/mime/payload_hash only
+    // (no method / provider / permission — digest stability).
     // Method-aware embed matching is separate in unique_pst_qc (0094).
-    for (fnm, sz, mime, ph, _prov, _method) in &attaches {
-        h.update(fnm.as_bytes());
+    for a in &attaches {
+        h.update(a.filename.as_bytes());
         h.update([0]);
-        h.update(sz.to_le_bytes());
-        h.update(mime.as_bytes());
+        h.update(a.size.to_le_bytes());
+        h.update(a.mime.as_bytes());
         h.update([0]);
-        h.update(ph.as_bytes());
+        h.update(a.payload_sha256_hex.as_bytes());
         h.update([0]);
     }
     Ok(MessageContentDetail {

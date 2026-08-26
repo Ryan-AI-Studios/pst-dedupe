@@ -1022,11 +1022,11 @@ fn clean_room_parents_only_with_source_digests_is_green() {
                 attaches: detail
                     .attaches
                     .iter()
-                    .map(|(f, s, _, h, _, method)| AttachDigestEntry {
-                        filename: f.clone(),
-                        size: *s,
-                        payload_sha256: h.clone(),
-                        attach_method: *method,
+                    .map(|a| AttachDigestEntry {
+                        filename: a.filename.clone(),
+                        size: a.size,
+                        payload_sha256: a.payload_sha256_hex.clone(),
+                        attach_method: a.attach_method,
                     })
                     .collect(),
                 extra_source_props: vec![],
@@ -3276,11 +3276,11 @@ fn clean_room_digest_ledger_fail_explains_missing_attach() {
                 attaches: detail
                     .attaches
                     .iter()
-                    .map(|(f, s, _, h, _, method)| AttachDigestEntry {
-                        filename: f.clone(),
-                        size: *s,
-                        payload_sha256: h.clone(),
-                        attach_method: *method,
+                    .map(|a| AttachDigestEntry {
+                        filename: a.filename.clone(),
+                        size: a.size,
+                        payload_sha256: a.payload_sha256_hex.clone(),
+                        attach_method: a.attach_method,
                     })
                     .collect(),
                 extra_source_props: vec![],
@@ -4204,5 +4204,362 @@ fn duplicate_cloud_provider_types_match_independently() {
     assert!(
         !csv.contains("PidNameAttachmentProviderType"),
         "both ProviderTypes must match independently; findings={csv}"
+    );
+}
+
+/// 0096: dropping PermissionType on a cloud pointer must defect when source had it.
+#[test]
+fn cloud_permission_type_missing_on_output_is_defect() {
+    use pst_writer::NamedPropWritePlan;
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let mut src_msg = base_msg("<cloudperm@ex.com>", "CloudPerm", "body");
+    src_msg.attachments = vec![WriteAttachment {
+        filename: "doc.docx".into(),
+        size: 0,
+        attach_method: Some(7),
+        data: None,
+        is_cloud_link: true,
+        cloud_provider: Some("OneDrivePro".into()),
+        cloud_url: Some("https://contoso.sharepoint.com/x".into()),
+        cloud_permission_type: Some(1),
+        ..WriteAttachment::default()
+    }];
+    let plan = NamedPropWritePlan::scan_messages(std::slice::from_ref(&src_msg));
+    write_unicode_pst(
+        &src,
+        vec![src_msg],
+        &[],
+        &WritePstOpts {
+            named_prop_plan: plan,
+            ..WritePstOpts::default()
+        },
+    )
+    .expect("src");
+
+    // Output: same cloud pointer but empty plan → no PermissionType named prop.
+    let mut out_msg = base_msg("<cloudperm@ex.com>", "CloudPerm", "body");
+    out_msg.attachments = vec![WriteAttachment {
+        filename: "doc.docx".into(),
+        size: 0,
+        attach_method: Some(7),
+        data: None,
+        is_cloud_link: true,
+        cloud_provider: Some("OneDrivePro".into()),
+        cloud_url: Some("https://contoso.sharepoint.com/x".into()),
+        cloud_permission_type: Some(1),
+        ..WriteAttachment::default()
+    }];
+    write_unicode_pst(&out, vec![out_msg], &[], &WritePstOpts::default()).expect("out");
+
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "cloudperm@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 1,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        source_id: String::new(),
+        bcc_suppressed: false,
+        body_cloud_link_count: 0,
+        subject: "CloudPerm".into(),
+    }];
+    let mut c = cand(1, 4);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "cloudperm@ex.com".into();
+    c.subject = "CloudPerm".into();
+    c.attach_count = 1;
+
+    let report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        true,
+        false,
+    ));
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    assert!(
+        csv.contains("PidNameAttachmentPermissionType"),
+        "missing PermissionType must name PidNameAttachmentPermissionType; findings={csv} {:?}",
+        report.findings
+    );
+    assert!(
+        report.findings.defect > 0 || report.hard_fail,
+        "missing PermissionType must defect; findings={csv} {:?}",
+        report.findings
+    );
+}
+
+/// 0096: cloud-pointer PermissionType=1 preserved on both sides → no PermissionType finding.
+#[test]
+fn cloud_permission_type_preserved_is_not_defect() {
+    use pst_writer::NamedPropWritePlan;
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let cloud = || WriteAttachment {
+        filename: "doc.docx".into(),
+        size: 0,
+        attach_method: Some(7),
+        data: None,
+        is_cloud_link: true,
+        cloud_provider: Some("OneDrivePro".into()),
+        cloud_url: Some("https://contoso.sharepoint.com/x".into()),
+        cloud_permission_type: Some(1),
+        ..WriteAttachment::default()
+    };
+
+    let mut src_msg = base_msg("<cloudpermok@ex.com>", "CloudPermOk", "body");
+    src_msg.attachments = vec![cloud()];
+    let plan = NamedPropWritePlan::scan_messages(std::slice::from_ref(&src_msg));
+    write_unicode_pst(
+        &src,
+        vec![src_msg],
+        &[],
+        &WritePstOpts {
+            named_prop_plan: plan.clone(),
+            ..WritePstOpts::default()
+        },
+    )
+    .expect("src");
+
+    let mut out_msg = base_msg("<cloudpermok@ex.com>", "CloudPermOk", "body");
+    out_msg.attachments = vec![cloud()];
+    write_unicode_pst(
+        &out,
+        vec![out_msg],
+        &[],
+        &WritePstOpts {
+            named_prop_plan: plan,
+            ..WritePstOpts::default()
+        },
+    )
+    .expect("out");
+
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "cloudpermok@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 1,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        source_id: String::new(),
+        bcc_suppressed: false,
+        body_cloud_link_count: 0,
+        subject: "CloudPermOk".into(),
+    }];
+    let mut c = cand(1, 4);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "cloudpermok@ex.com".into();
+    c.subject = "CloudPermOk".into();
+    c.attach_count = 1;
+
+    let _report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        true,
+        false,
+    ));
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    assert!(
+        !csv.contains("PidNameAttachmentPermissionType"),
+        "preserved PermissionType must not appear in findings; findings={csv}"
+    );
+}
+
+/// 0096: classic (non-cloud) attach must not PermissionType-defect when writer drops it.
+/// Gate is unit-tested in unique_pst_qc; this e2e confirms classic payload rows stay clean.
+#[test]
+fn classic_attach_does_not_emit_permission_type_finding() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let classic = || WriteAttachment {
+        filename: "note.txt".into(),
+        mime: Some("text/plain".into()),
+        size: 5,
+        attach_method: Some(1),
+        data: Some(b"hello".to_vec()),
+        stream_available: true,
+        is_cloud_link: false,
+        // Writer ignores permission on non-cloud; value here must not invent QC noise.
+        cloud_permission_type: Some(1),
+        ..WriteAttachment::default()
+    };
+
+    let mut src_msg = base_msg("<classicperm@ex.com>", "ClassicPerm", "body");
+    src_msg.attachments = vec![classic()];
+    write_simple_pst(&src, vec![src_msg]);
+
+    let mut out_msg = base_msg("<classicperm@ex.com>", "ClassicPerm", "body");
+    out_msg.attachments = vec![classic()];
+    write_simple_pst(&out, vec![out_msg]);
+
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "classicperm@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 0,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        source_id: String::new(),
+        bcc_suppressed: false,
+        body_cloud_link_count: 0,
+        subject: "ClassicPerm".into(),
+    }];
+    let mut c = cand(1, 4);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "classicperm@ex.com".into();
+    c.subject = "ClassicPerm".into();
+    c.attach_count = 1;
+
+    let _report = run_unique_pst_qc(qc_input(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        true,
+        false,
+    ));
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    assert!(
+        !csv.contains("PidNameAttachmentPermissionType"),
+        "classic attach must not PermissionType-defect; findings={csv}"
+    );
+}
+
+/// 0096 DoD-1: reader → PstMaterializer → from_canonical_message_owned → write → live-read.
+#[test]
+fn materializer_owned_writer_preserves_permission_type() {
+    use dedup_engine::{FamilyPolicy, MessageLocus, MessageMaterializer};
+    use pst_dedup_cli::pst_materializer::PstMaterializer;
+    use pst_writer::{from_canonical_message_owned, NamedPropWritePlan};
+
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let mut src_msg = base_msg("<matperm@ex.com>", "MatPerm", "body");
+    src_msg.attachments = vec![WriteAttachment {
+        filename: "doc.docx".into(),
+        size: 0,
+        attach_method: Some(7),
+        data: None,
+        is_cloud_link: true,
+        cloud_provider: Some("OneDrivePro".into()),
+        cloud_url: Some("https://contoso.sharepoint.com/x".into()),
+        cloud_permission_type: Some(1),
+        ..WriteAttachment::default()
+    }];
+    let plan = NamedPropWritePlan::scan_messages(std::slice::from_ref(&src_msg));
+    write_unicode_pst(
+        &src,
+        vec![src_msg],
+        &[],
+        &WritePstOpts {
+            named_prop_plan: plan,
+            ..WritePstOpts::default()
+        },
+    )
+    .expect("src");
+
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let locus = MessageLocus {
+        source_path: src.display().to_string(),
+        source_pst: src
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        is_orphaned: false,
+    };
+
+    let mut mat = PstMaterializer::new(FamilyPolicy::KeepAttachmentsWithParent);
+    let canonical = mat.materialize(&locus).expect("materialize");
+    assert_eq!(
+        canonical.attachments.len(),
+        1,
+        "materializer must list cloud pointer"
+    );
+    assert_eq!(
+        canonical.attachments[0].cloud_permission_type,
+        Some(1),
+        "materializer must map reader PermissionType: {:?}",
+        canonical.attachments[0]
+    );
+
+    let (write_msg, _) = from_canonical_message_owned(canonical);
+    assert_eq!(
+        write_msg.attachments[0].cloud_permission_type,
+        Some(1),
+        "owned adapter must copy PermissionType"
+    );
+    let out_plan = NamedPropWritePlan::scan_messages(std::slice::from_ref(&write_msg));
+    write_unicode_pst(
+        &out,
+        vec![write_msg],
+        &[],
+        &WritePstOpts {
+            named_prop_plan: out_plan,
+            ..WritePstOpts::default()
+        },
+    )
+    .expect("out");
+
+    let out_nid = first_message_nid(&out).expect("out nid");
+    let mut pst = pst_reader::PstFile::open(&out).expect("open out");
+    let attaches = pst
+        .list_attachments(pst_reader::NodeId(out_nid))
+        .expect("list out");
+    assert_eq!(attaches.len(), 1);
+    assert_eq!(
+        attaches[0].cloud_permission_type,
+        Some(1),
+        "owned-writer output must live-read PermissionType: {:?}",
+        attaches[0]
     );
 }

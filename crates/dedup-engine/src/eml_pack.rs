@@ -1458,6 +1458,7 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         });
@@ -1487,6 +1488,7 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         });
@@ -1553,6 +1555,7 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         });
@@ -1599,6 +1602,7 @@ mod tests {
             is_cloud_link: true,
             cloud_provider: Some("OneDriveForBusiness".into()),
             cloud_url: Some("https://contoso.sharepoint.com/x".into()),
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         });
@@ -1629,6 +1633,7 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         });
@@ -1643,6 +1648,7 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         });
@@ -1736,6 +1742,7 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         });
@@ -1918,6 +1925,7 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         });
@@ -1956,6 +1964,7 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            cloud_permission_type: None,
             embedded_message: None,
             embedded_extract_limit: false,
         });

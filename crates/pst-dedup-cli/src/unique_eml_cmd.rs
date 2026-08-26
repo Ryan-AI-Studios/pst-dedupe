@@ -1103,6 +1103,7 @@ mod tests {
                 is_cloud_link: false,
                 cloud_provider: None,
                 cloud_url: None,
+                cloud_permission_type: None,
                 embedded_message: None,
                 embedded_extract_limit: false,
             }],

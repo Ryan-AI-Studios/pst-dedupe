@@ -296,6 +296,25 @@ mod tests {
     }
 
     #[test]
+    fn name_attachment_permission_type_bytes_match_spec() {
+        assert_eq!(
+            NAME_ATTACHMENT_PERMISSION_TYPE.as_bytes(),
+            b"AttachmentPermissionType"
+        );
+        assert_eq!(
+            NAME_ATTACHMENT_PERMISSION_TYPE,
+            pst_reader::NAME_ATTACHMENT_PERMISSION_TYPE
+        );
+        // PSETID_Attachment shared with reader (mixed-endian MS GUID).
+        assert_eq!(PSETID_ATTACHMENT[0], 0x7F);
+        assert_eq!(PSETID_ATTACHMENT[3], 0x96);
+        assert_eq!(
+            &PSETID_ATTACHMENT[8..],
+            &[0x99, 0xA7, 0x46, 0x51, 0x5C, 0x18, 0x3B, 0x54]
+        );
+    }
+
+    #[test]
     fn provider_plan_round_trips_nameid_map() {
         let plan = provider_only_plan();
         let props = build_named_prop_map_pc(&plan);
@@ -382,10 +401,17 @@ mod tests {
         msg.attachments.push(WriteAttachment {
             is_cloud_link: false,
             cloud_provider: Some("OneDrivePro".into()),
+            // 0096: permission on classic must not populate NPMAP either.
+            cloud_permission_type: Some(1),
+            cloud_url: Some("https://contoso.sharepoint.com/x".into()),
             ..Default::default()
         });
         let plan = NamedPropWritePlan::scan_messages(std::slice::from_ref(&msg));
-        assert!(plan.is_empty());
+        assert!(
+            plan.is_empty(),
+            "non-cloud attach with PermissionType must not plan NPMAP entries"
+        );
+        assert!(!plan.contains(AllowlistedNamedProp::AttachmentPermissionType));
     }
 
     #[test]

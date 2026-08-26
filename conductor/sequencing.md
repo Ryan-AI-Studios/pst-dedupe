@@ -109,7 +109,7 @@
 | 51 | P1 N | **0093** WriterHeapRecipientRobustness | ✅ Completed | Strategy B + cumulative heap; closes D-0068-01; residuals D-0093-*; Codex luna r4 PASS |
 | 52 | P1 N | **0094** EmbeddedMsgNestedExport | ✅ Completed | Method-5 nested export + PtypObject; D-0069 closed; D-0067 narrowed; Codex r5 PASS |
 | 53 | P2 N | **0095** UniquePstFolderTreeNormalize | ✅ Completed | Alias strip + lazy Unique Mail + D-0070 pre-seed closed; QC key symmetry + DI claimable |
-| 54 | P3 N | **0096** PermissionTypeExtract | ⬜ Ready | Closes D-0092-permission-type-extract |
+| 54 | P3 N | **0096** PermissionTypeExtract | ⬜ Ready | Review-folded: four-crate extract + PtypInteger32; closes D-0092-permission-type-extract |
 | 55 | P3 N | **0097** BodyCloudTruncationHonesty | ⬜ Ready | Empty BODY_CLOUD_LINK_TRUNCATED ledger honesty |
 
 ## Series K spine (clean unique export)
@@ -180,6 +180,6 @@
 | 2 | **0094** EmbeddedMsgNestedExport | Highest attach soft-fail ROI — nested extract + PtypObject discovery; stop hardcoding `embedded_message: None` |
 | 3 | **0095** UniquePstFolderTreeNormalize | Layout alias strip + lazy Unique Mail; close D-0070 pre-seed; QC fail classified from existing CSV |
 | 3b | **0097** BodyCloudTruncationHonesty | Parallel with 0095 |
-| 4 | **0096** PermissionTypeExtract | 0092 MAY residual; low signal on INC* (0 attach-table cloud) |
+| 4 | **0096** PermissionTypeExtract | 0092 MAY residual; four-crate extract; low signal on INC* (0 attach-table cloud) |
 
 **Suggested:** 0093 → 0094 → 0095 ∥ 0097 → 0096.
