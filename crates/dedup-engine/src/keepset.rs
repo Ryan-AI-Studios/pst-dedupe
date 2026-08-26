@@ -664,6 +664,45 @@ pub struct DecisionRecord {
 
 // ─── Materialization ────────────────────────────────────────────────────────
 
+/// Why method-5 nested extract failed (0094). Distinct from missing/`None`
+/// (unparsed): depth/byte-budget exhaustion must map to `ATTACH_DEPTH_LIMIT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NestedExtractFail {
+    /// Nested object missing or unreadable — writer emits `ATTACH_EMBEDDED_UNPARSED`.
+    Unparsed,
+    /// Export depth or per-nest payload budget exhausted — `ATTACH_DEPTH_LIMIT`.
+    DepthLimit,
+}
+
+/// Nested message payload for unique-pst method-5 export (0094 shape A).
+///
+/// Dedicated type — not [`CanonicalMessage`] (nests have no locus / content_hash /
+/// fidelity / MIH). Mapped to `WriteMessage` by `pst-writer::from_canonical_message*`.
+/// unique-eml ignores this field this track.
+#[derive(Clone, Debug, Default)]
+pub struct NestedCanonicalMessage {
+    pub subject: Option<String>,
+    pub sender: Option<String>,
+    pub display_to: Option<String>,
+    pub display_cc: Option<String>,
+    pub display_bcc: Option<String>,
+    pub recipients: Vec<CanonicalRecipient>,
+    pub message_id: Option<String>,
+    pub message_class: Option<String>,
+    pub message_flags: Option<u32>,
+    pub submit_time: Option<i64>,
+    pub body_plain: Option<String>,
+    pub body_html: Option<Vec<u8>>,
+    /// Child attaches; method-5 children may recurse via [`CanonicalAttachment::embedded_message`].
+    pub attachments: Vec<CanonicalAttachment>,
+    pub body_incomplete: bool,
+    pub body_unavailable: bool,
+    /// Soft-skipped child attach rows during nested extract (0094).
+    pub attachments_incomplete: bool,
+    /// Source nested message NID (`MessageNodeRef.nid`) for child attach stream keys.
+    pub source_msg_nid: Option<u64>,
+}
+
 /// Attachment metadata (and optional small payload) on a canonical message.
 ///
 /// Production keep-set does **not** load multi-GB attach `Vec`s. When
@@ -697,6 +736,13 @@ pub struct CanonicalAttachment {
     /// Best-effort cloud URL/path for ledger actionability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud_url: Option<String>,
+    /// Lazy unique-pst winner nested extract (0094). Skipped in keep-set JSON.
+    #[serde(skip)]
+    pub embedded_message: Option<Box<NestedCanonicalMessage>>,
+    /// Extract hit depth/byte budget (0094). Writer maps to `ATTACH_DEPTH_LIMIT`
+    /// even when [`Self::embedded_message`] is `None`.
+    #[serde(skip)]
+    pub embedded_extract_limit: bool,
 }
 
 // Re-export recipient types for keep-set callers (defined in grouping for hasher use).
@@ -3440,6 +3486,127 @@ mod tests {
         assert!(v["winners"].as_array().expect("w").len() == 1);
     }
 
+    /// 0094: nested DTO is serde(skip) so keep-set JSON / hash preimage stay stable.
+    #[test]
+    fn canonical_attachment_serde_skips_embedded_message() {
+        let att = CanonicalAttachment {
+            filename: "e.msg".into(),
+            size: 1,
+            mime: None,
+            data: None,
+            stream_available: false,
+            attach_nid: Some(1),
+            attach_method: Some(5),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
+            embedded_message: Some(Box::new(NestedCanonicalMessage {
+                subject: Some("secret nest".into()),
+                body_plain: Some("huge".into()),
+                ..Default::default()
+            })),
+            embedded_extract_limit: true,
+        };
+        let json = serde_json::to_value(&att).expect("ser");
+        assert!(json.get("embedded_message").is_none());
+        assert!(json.get("embedded_extract_limit").is_none());
+        let back: CanonicalAttachment = serde_json::from_value(json).expect("de");
+        assert!(back.embedded_message.is_none());
+        assert!(!back.embedded_extract_limit);
+        assert_eq!(back.filename, "e.msg");
+        assert_eq!(back.attach_method, Some(5));
+    }
+
+    /// DoD-1 regression: populating nested DTO fields must not move parent hashes.
+    ///
+    /// Production scan builds [`AttachmentInfo`] from filename+size only; nested
+    /// extract fills `embedded_message` / `embedded_extract_limit` later and those
+    /// fields are not in the v1 (or strong attach-slot) preimage.
+    #[test]
+    fn parent_hash_unchanged_when_embedded_message_populated() {
+        use crate::hasher::{
+            compute_content_hash, compute_dedup_keys_ex, AttachmentInfo, StrongHashInput,
+        };
+
+        let mk =
+            |embedded: Option<Box<NestedCanonicalMessage>>, limit: bool| -> CanonicalAttachment {
+                CanonicalAttachment {
+                    filename: "message.msg".into(),
+                    size: 1234,
+                    mime: Some("message/rfc822".into()),
+                    data: None,
+                    stream_available: false,
+                    attach_nid: Some(0x25),
+                    attach_method: Some(5),
+                    is_cloud_link: false,
+                    cloud_provider: None,
+                    cloud_url: None,
+                    embedded_message: embedded,
+                    embedded_extract_limit: limit,
+                }
+            };
+
+        let extract_off = mk(None, false);
+        let extract_on = mk(
+            Some(Box::new(NestedCanonicalMessage {
+                subject: Some("Nest".into()),
+                body_plain: Some("nested body must not enter parent hash".into()),
+                sender: Some("nest@ex.com".into()),
+                ..Default::default()
+            })),
+            true,
+        );
+        assert!(extract_on.embedded_message.is_some());
+        assert!(extract_on.embedded_extract_limit);
+        assert!(extract_off.embedded_message.is_none());
+
+        // Same mapping scan uses for Tier-2 attach contribution (filename:size).
+        let to_info = |a: &CanonicalAttachment| AttachmentInfo::new(a.filename.clone(), a.size);
+        let atts_off = [to_info(&extract_off)];
+        let atts_on = [to_info(&extract_on)];
+
+        let subject = Some("Parent");
+        let submit = Some(0x01D5B035EDA780_i64);
+        let sender = Some("alice@example.com");
+        let body = Some("parent body");
+
+        let h_off = compute_content_hash(subject, submit, sender, body, &atts_off);
+        let h_on = compute_content_hash(subject, submit, sender, body, &atts_on);
+        assert_eq!(
+            h_off, h_on,
+            "v1 content_hash must ignore embedded_message / embedded_extract_limit"
+        );
+
+        let strong = StrongHashInput {
+            identity: IdentityLevel::BodyRecipAttach,
+            body_sha256: None,
+            body_char_len: Some(11),
+            display_to: Some("bob@example.com"),
+            display_cc: None,
+            display_bcc: None,
+            recipients: None,
+            ignore_inline_attachments: false,
+        };
+        let k_off = compute_dedup_keys_ex(None, subject, submit, sender, body, &atts_off, &strong);
+        let k_on = compute_dedup_keys_ex(None, subject, submit, sender, body, &atts_on, &strong);
+        assert_eq!(k_off.content_hash, k_on.content_hash);
+        assert_eq!(
+            k_off.strong_content_hash, k_on.strong_content_hash,
+            "strong_content_hash must ignore embedded_message / embedded_extract_limit"
+        );
+
+        // Control: hash-relevant attach size still splits when nested DTO is equal.
+        let size_changed = CanonicalAttachment {
+            size: 9999,
+            ..extract_off.clone()
+        };
+        let h_size = compute_content_hash(subject, submit, sender, body, &[to_info(&size_changed)]);
+        assert_ne!(
+            h_off, h_size,
+            "control: filename:size contribution must still affect content_hash"
+        );
+    }
+
     #[test]
     fn degraded_sole_member_may_win() {
         let a = item(
@@ -3495,6 +3662,8 @@ mod tests {
                                 is_cloud_link: false,
                                 cloud_provider: None,
                                 cloud_url: None,
+                                embedded_message: None,
+                                embedded_extract_limit: false,
                             })
                             .collect()
                     };
@@ -3699,6 +3868,8 @@ mod tests {
                             is_cloud_link: false,
                             cloud_provider: None,
                             cloud_url: None,
+                            embedded_message: None,
+                            embedded_extract_limit: false,
                         }],
                         fidelity: if stream_available {
                             RecoverableIntegrity::clean()
@@ -3771,6 +3942,8 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
         };
         // Zero-byte by-value with empty display name (materializer must set stream_available).
         let zero_empty_name = CanonicalAttachment {
@@ -3784,6 +3957,8 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
         };
         let bad_att = CanonicalAttachment {
             filename: "f.bin".into(),
@@ -3796,6 +3971,8 @@ mod tests {
             is_cloud_link: false,
             cloud_provider: None,
             cloud_url: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
         };
 
         // Positives
@@ -3873,6 +4050,8 @@ mod tests {
             is_cloud_link: true,
             cloud_provider: Some("OneDrivePro".into()),
             cloud_url: Some("https://1drv.ms/x/s!abc".into()),
+            embedded_message: None,
+            embedded_extract_limit: false,
         };
         assert!(is_attach_incomplete(&base(
             vec![cloud],
@@ -3921,6 +4100,8 @@ mod tests {
                         is_cloud_link: true,
                         cloud_provider: Some(provider.clone()),
                         cloud_url: Some(url.clone()),
+                        embedded_message: None,
+                        embedded_extract_limit: false,
                     }],
                     fidelity: RecoverableIntegrity::with_degraded(
                         vec![IntegrityReason::AttachCloudLink],
@@ -3959,6 +4140,8 @@ mod tests {
                         is_cloud_link: false,
                         cloud_provider: None,
                         cloud_url: None,
+                        embedded_message: None,
+                        embedded_extract_limit: false,
                     }],
                     fidelity: RecoverableIntegrity::clean(),
                     message_id_norm: None,
@@ -4283,6 +4466,8 @@ mod tests {
                                 is_cloud_link: false,
                                 cloud_provider: None,
                                 cloud_url: None,
+                                embedded_message: None,
+                                embedded_extract_limit: false,
                             });
                         } else {
                             for i in 0..n {
@@ -4297,6 +4482,8 @@ mod tests {
                                     is_cloud_link: false,
                                     cloud_provider: None,
                                     cloud_url: None,
+                                    embedded_message: None,
+                                    embedded_extract_limit: false,
                                 });
                             }
                         }

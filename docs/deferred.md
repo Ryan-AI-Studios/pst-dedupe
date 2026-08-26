@@ -702,7 +702,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0067-gui-keepset | — | **Soft-closed in 0072:** GUI primary unique export is keep-set **unique-pst** wizard; legacy EML retained as secondary (“Export Unique EML (legacy scan path)”) | Full EML co-export residual: **D-0071-also-eml** | **0072** |
-| D-0067-embedded-depth | P1 | Full recursive nested MAPI extract for embedded messages | P0 labels `message/rfc822` + streams raw bytes; `embedded_message_unparsed` honesty flag; max depth 3 residual. **Narrowed by 0080** (not closed): QC samples embedded-attachment messages and cross-checks honesty flags. **INC0102784 (2026-08-25):** 374/374 attach soft-fails = `ATTACH_EMBEDDED_UNPARSED` (method 5; 220 msgs; ~241 MB) — root cause `from_canonical_message*` hardcodes `embedded_message: None` while writer nested builder exists. **Promoted → track 0094** | residual / **0094** |
+| D-0067-embedded-depth | P1 | Full recursive nested MAPI extract for embedded messages | **Narrowed in 0094:** unique-pst method-5 nested `WriteMessage` export + `PidTagAttachDataObject` PtypObject + winner-only extract + child stream via `open_attach_data_from_message_node`. **Residual:** unique-eml nested MIME `message/rfc822` packaging; matter/Relativity child-document extract. | residual (unique-eml MIME / matter children) |
 | D-0067-long-path | — | Windows `\\?\` long-path support when abs root already > budget | P0 truncates subject to keep abs ≤250; extreme deep roots may still fail that file | residual |
 | D-0067-cloud-attaches | — | Resolve hyperlink-only / cloud modern attachments | Not downloaded; no invented file bytes | residual |
 
@@ -723,7 +723,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0069-stream-buffer | — | One-attach full `Vec` buffer via `AttachStreamSource` (no multi-GB zero-hold stream) | **Closed in 0070**: `open_attach_stream` + `Layout::write_data_chain_from_reader` (chunk = `MAX_BLOCK_DATA`) | **closed / 0070** |
-| D-0069-embed-object | P3 | `PidTagAttachDataObject` (PtypObject) on embedded attaches | Nested message linked as attach subnode leaf + method=5; PC builder has no PtypObject | residual polish |
+| D-0069-embed-object | P2 | `PidTagAttachDataObject` (PtypObject) on embedded attaches | **Closed in 0094:** `PcValue::Object` writes PtypObject `0x000D` on `0x3701` (8-byte heap `{Nid, ulSize}`); reader resolves via property first, subnode-scan fallback for 0069-era files. | **closed / 0094** |
 | D-0069-casefold | P3 | Folder/prefix case key uses ASCII `to_uppercase`, not full Unicode casefold | Sufficient for Windows-oriented eDiscovery paths; residual if exotic Unicode folder names appear | residual polish |
 | D-0068-02 | — | scanpst / Outlook structural verification | **Closed in 0080** (see 0068 table) | **closed / 0080** |
 | D-0067-cloud | — | Cloud/ref attach download | Skip + fail count in 0069 | residual |
@@ -873,6 +873,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0097-body-cloud-truncate-honesty | P3 | Body-cloud CSV emits many `BODY_CLOUD_LINK_TRUNCATED` rows with empty `cloud_url` | INC0102784: 62 empty truncated vs 3 real `BODY_CLOUD_LINK` rows; summary `body_cloud_link_truncated_messages=62`. Looks like lost links to counsel. **Promoted → track 0097** | residual / **0097** |
 | D-0093-recipient-tc-multipage | P3 | Recipient TC beyond single-page HN (Strategy B budget cap) | **0093 locked Strategy B** (budget-aware cap + honesty). **Strategy A research (MS-PST, 2026-08-25):** row matrix as subnode (§2.6.2.4.4 / §2.3.4.4.2) + **multi-block HN** (§2.3.1.6; also the principled restore of format 3580 per-value semantics vs 0093's documented 2048 single-page deviation) + RowIndex BTH growth; HID `hidIndex` is 11 bits (max 2047 allocs/heap) — a no-cap design must respect that too. Shared with restoring 3580 per-value HN semantics. Do not implement until a track picks A. | residual / after **0093** (optional) |
 | D-0093-attachment-tc-page | P3 | Attachment-table TC (NID `0x671`) is single-page and uncapped | Same-class overflow as recipient TC: `build_attachment_table_tc` allocates one filename HID + row per attach with no byte budget. ~100+ attaches or long filenames can re-trip `heap page overflow`. **Out of 0093 implementation**; spawned so it is not a silent known-unknown. | residual / after **0093** |
+| D-0094-inc-resmoke | P3 | Operator re-smoke INC0102784 unique-pst after nested export | Expect **large drop** in `ATTACH_EMBEDDED_UNPARSED` (was 374/374), not guaranteed zero (depth/byte/unreadable nests). Optional Outlook open of a nest. Evidence in operator-local `output/`; not a CI gate. | residual / operator |
 
 ## From track 0062-ReleaseHardeningRc
 

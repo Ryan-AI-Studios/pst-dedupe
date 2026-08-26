@@ -625,6 +625,10 @@ pub struct AttachDigestEntry {
     pub filename: String,
     pub size: u64,
     pub payload_sha256: String,
+    /// PidTagAttachMethod when known (0094). `serde(default)` keeps legacy
+    /// `content_digests_v1` rows loadable; method-5 clean-room matching needs this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_method: Option<i32>,
 }
 
 /// Run full QC pipeline and write artifacts under `report_dir`.
@@ -1591,6 +1595,7 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                                 String::new(),
                                 a.payload_sha256.clone(),
                                 String::new(), // content-digest path has no provider
+                                a.attach_method,
                             )
                         })
                         .collect(),
@@ -1637,10 +1642,11 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
         attaches: src
             .attaches
             .iter()
-            .map(|(f, s, _, h, _)| AttachDigestEntry {
+            .map(|(f, s, _, h, _, method)| AttachDigestEntry {
                 filename: f.clone(),
                 size: *s,
                 payload_sha256: h.clone(),
+                attach_method: *method,
             })
             .collect(),
         // Export path always empty; production extras only via crafted digests / tests.
@@ -1814,28 +1820,45 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
         // Multiset of output attaches keyed by lowercase filename. Duplicate names
         // must not collapse: each source attach consumes exactly one output slot
         // (prefer filename+size+hash, then filename+hash, then filename+size).
-        let mut out_attach_pool: BTreeMap<String, Vec<(u64, String, String, bool)>> =
-            BTreeMap::new();
-        for (f, sz, _, h, prov) in &out.attaches {
+        // Slot: (size, hash, provider, method, used).
+        type OutAttachSlot = (u64, String, String, Option<i32>, bool);
+        let mut out_attach_pool: BTreeMap<String, Vec<OutAttachSlot>> = BTreeMap::new();
+        for (f, sz, _, h, prov, method) in &out.attaches {
             out_attach_pool
                 .entry(f.to_ascii_lowercase())
                 .or_default()
-                .push((*sz, h.clone(), prov.clone(), false));
+                .push((*sz, h.clone(), prov.clone(), *method, false));
         }
-        for (fnm, sz, _, ph, src_prov) in &src.attaches {
+        for (fnm, sz, _, ph, src_prov, src_method) in &src.attaches {
             attachments_compared = attachments_compared.saturating_add(1);
             let fnm_key = fnm.to_ascii_lowercase();
-            if ph.is_empty() {
+            let mut src_is_embed = *src_method == Some(5) || ph == "__embedded_msg__";
+            // Legacy content_digests_v1 rows omit attach_method: if payload hash is
+            // empty and an unused output method-5 slot shares the filename, treat as
+            // embed (0094 clean-room compatibility).
+            if !src_is_embed && ph.is_empty() {
+                if let Some(slots) = out_attach_pool.get(&fnm_key) {
+                    if slots
+                        .iter()
+                        .any(|(_, _, _, om, used)| !*used && *om == Some(5))
+                    {
+                        src_is_embed = true;
+                    }
+                }
+            }
+            // Method-5 nests intentionally have empty payload hash (v1 digest stable);
+            // match via method, do not classify as stream soft-fail.
+            if ph.is_empty() && !src_is_embed {
                 // 0092: still match/consume an output slot for ProviderType on
                 // payload-less cloud pointers (multiset-safe).
                 let src_p = src_prov.trim();
                 let out_prov = out_attach_pool.get_mut(&fnm_key).and_then(|slots| {
                     let i = slots
                         .iter()
-                        .position(|(osz, _, _, used)| !*used && (*osz == *sz || *sz == 0))
-                        .or_else(|| slots.iter().position(|(_, _, _, used)| !*used))?;
+                        .position(|(osz, _, _, _, used)| !*used && (*osz == *sz || *sz == 0))
+                        .or_else(|| slots.iter().position(|(_, _, _, _, used)| !*used))?;
                     let prov = slots[i].2.clone();
-                    slots[i].3 = true;
+                    slots[i].4 = true;
                     Some(prov)
                 });
                 if !src_p.is_empty() {
@@ -1876,37 +1899,46 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             }
             let pool = out_attach_pool.get_mut(&fnm_key);
             let consumed = pool.and_then(|slots| {
+                // 0094: method-5 embeds — match peer embed slot (ignore by-value SHA/size).
+                if src_is_embed {
+                    let i = slots.iter().position(|(_, oh, _, om, used)| {
+                        !*used && (*om == Some(5) || oh.as_str() == "__embedded_msg__")
+                    })?;
+                    let out_prov = slots[i].2.clone();
+                    slots[i].4 = true;
+                    return Some((MatchKind::Exact, out_prov));
+                }
                 // Prefer exact size+hash, then hash-only, then size-only (hash mismatch).
-                let exact = slots.iter().position(|(osz, oh, _, used)| {
+                let exact = slots.iter().position(|(osz, oh, _, _, used)| {
                     !*used && *osz == *sz && oh.as_str() == ph.as_str()
                 });
                 if let Some(i) = exact {
                     let out_prov = slots[i].2.clone();
-                    slots[i].3 = true;
+                    slots[i].4 = true;
                     return Some((MatchKind::Exact, out_prov));
                 }
                 let hash_only = slots
                     .iter()
-                    .position(|(_, oh, _, used)| !*used && oh.as_str() == ph.as_str());
+                    .position(|(_, oh, _, _, used)| !*used && oh.as_str() == ph.as_str());
                 if let Some(i) = hash_only {
                     let out_prov = slots[i].2.clone();
-                    slots[i].3 = true;
+                    slots[i].4 = true;
                     return Some((MatchKind::HashOnly, out_prov));
                 }
                 let size_only = slots
                     .iter()
-                    .position(|(osz, _, _, used)| !*used && *osz == *sz);
+                    .position(|(osz, _, _, _, used)| !*used && *osz == *sz);
                 if let Some(i) = size_only {
                     let out_ph = slots[i].1.clone();
                     let out_prov = slots[i].2.clone();
-                    slots[i].3 = true;
+                    slots[i].4 = true;
                     return Some((MatchKind::HashMismatch(out_ph), out_prov));
                 }
-                let any = slots.iter().position(|(_, _, _, used)| !*used);
+                let any = slots.iter().position(|(_, _, _, _, used)| !*used);
                 if let Some(i) = any {
                     let out_ph = slots[i].1.clone();
                     let out_prov = slots[i].2.clone();
-                    slots[i].3 = true;
+                    slots[i].4 = true;
                     return Some((MatchKind::HashMismatch(out_ph), out_prov));
                 }
                 None
@@ -1934,18 +1966,48 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                 }
             }
             match consumed.map(|(k, _)| k) {
-                Some(MatchKind::Exact | MatchKind::HashOnly) => {}
+                Some(MatchKind::Exact | MatchKind::HashOnly) => {
+                    if src_is_embed {
+                        let (class, _) = contract.classify("attachment_embedded", true);
+                        findings.push(QcFinding {
+                            class,
+                            property: "attachment_embedded".into(),
+                            volume_index: cand.volume_index,
+                            source_path: cand.source_path.clone(),
+                            source_nid: cand.source_nid,
+                            message_id_norm: cand.message_id_norm.clone(),
+                            detail: format!(
+                                "attach {fnm} method-5 nested present (payload SHA not compared)"
+                            ),
+                        });
+                    }
+                }
                 Some(MatchKind::HashMismatch(out_ph)) => {
-                    let (class, _) = contract.classify("attachment_payload_sha256", false);
-                    findings.push(QcFinding {
-                        class,
-                        property: "attachment_payload_sha256".into(),
-                        volume_index: cand.volume_index,
-                        source_path: cand.source_path.clone(),
-                        source_nid: cand.source_nid,
-                        message_id_norm: cand.message_id_norm.clone(),
-                        detail: format!("attach {fnm} size={sz} src_sha={ph} out_sha={out_ph}"),
-                    });
+                    if src_is_embed {
+                        let (class, _) = contract.classify("attachment_embedded", true);
+                        findings.push(QcFinding {
+                            class,
+                            property: "attachment_embedded".into(),
+                            volume_index: cand.volume_index,
+                            source_path: cand.source_path.clone(),
+                            source_nid: cand.source_nid,
+                            message_id_norm: cand.message_id_norm.clone(),
+                            detail: format!(
+                                "attach {fnm} method-5 nested written (size/sha differ by design src={ph} out={out_ph})"
+                            ),
+                        });
+                    } else {
+                        let (class, _) = contract.classify("attachment_payload_sha256", false);
+                        findings.push(QcFinding {
+                            class,
+                            property: "attachment_payload_sha256".into(),
+                            volume_index: cand.volume_index,
+                            source_path: cand.source_path.clone(),
+                            source_nid: cand.source_nid,
+                            message_id_norm: cand.message_id_norm.clone(),
+                            detail: format!("attach {fnm} size={sz} src_sha={ph} out_sha={out_ph}"),
+                        });
+                    }
                 }
                 None => {
                     // Missing in output: explain only when **this filename** is in the
@@ -1964,6 +2026,19 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
                                 "attach {fnm} missing in output (ledger soft-fail explained)"
                             ),
                         });
+                    } else if src_is_embed {
+                        let (class, _) = contract.classify("attachment_embedded", false);
+                        findings.push(QcFinding {
+                            class,
+                            property: "attachment_embedded".into(),
+                            volume_index: cand.volume_index,
+                            source_path: cand.source_path.clone(),
+                            source_nid: cand.source_nid,
+                            message_id_norm: cand.message_id_norm.clone(),
+                            detail: format!(
+                                "attach {fnm} method-5 missing in output (unparsed/depth)"
+                            ),
+                        });
                     } else {
                         let (class, _) = contract.classify("attachment_by_value", false);
                         findings.push(QcFinding {
@@ -1980,12 +2055,12 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             }
         }
         // Unexpected / unconsumed output attaches (extra multiset entries).
-        for (f, sz, _, h, _) in &out.attaches {
+        for (f, sz, _, h, _, method) in &out.attaches {
             let key = f.to_ascii_lowercase();
             let still_free = out_attach_pool
                 .get(&key)
                 .map(|slots| {
-                    slots.iter().any(|(osz, oh, _, used)| {
+                    slots.iter().any(|(osz, oh, _, _, used)| {
                         !*used && *osz == *sz && oh.as_str() == h.as_str()
                     })
                 })
@@ -1993,22 +2068,35 @@ fn compare_one_message(args: CompareOneArgs<'_>) -> MsgCompareResult {
             if still_free {
                 // Mark one free slot consumed for reporting so we don't double-count.
                 if let Some(slots) = out_attach_pool.get_mut(&key) {
-                    if let Some(slot) = slots.iter_mut().find(|(osz, oh, _, used)| {
+                    if let Some(slot) = slots.iter_mut().find(|(osz, oh, _, _, used)| {
                         !*used && *osz == *sz && oh.as_str() == h.as_str()
                     }) {
-                        slot.3 = true;
+                        slot.4 = true;
                     }
                 }
-                let (class, _) = contract.classify("attachment_by_value", false);
-                findings.push(QcFinding {
-                    class,
-                    property: "attachment_unexpected_output".into(),
-                    volume_index: cand.volume_index,
-                    source_path: cand.source_path.clone(),
-                    source_nid: cand.source_nid,
-                    message_id_norm: cand.message_id_norm.clone(),
-                    detail: format!("unexpected/unconsumed output attach {f}"),
-                });
+                if *method == Some(5) || h == "__embedded_msg__" {
+                    let (class, _) = contract.classify("attachment_embedded", true);
+                    findings.push(QcFinding {
+                        class,
+                        property: "attachment_embedded".into(),
+                        volume_index: cand.volume_index,
+                        source_path: cand.source_path.clone(),
+                        source_nid: cand.source_nid,
+                        message_id_norm: cand.message_id_norm.clone(),
+                        detail: format!("output method-5 attach {f} (embedded presence)"),
+                    });
+                } else {
+                    let (class, _) = contract.classify("attachment_by_value", false);
+                    findings.push(QcFinding {
+                        class,
+                        property: "attachment_unexpected_output".into(),
+                        volume_index: cand.volume_index,
+                        source_path: cand.source_path.clone(),
+                        source_nid: cand.source_nid,
+                        message_id_norm: cand.message_id_norm.clone(),
+                        detail: format!("unexpected/unconsumed output attach {f}"),
+                    });
+                }
             }
         }
     }

@@ -462,7 +462,9 @@ SHA-256( b"pst-dedup/embedded-msg-hash/v1\0"
 
 Missing nested body uses the domain-separated `embedded-body-missing/v1` sentinel component (not the empty-body `hash_full_body("")` digest). Nested body UTF-8 length is charged against the same per-attach / run byte caps as by-value streams. Child embeds recurse with `depth+1` until `MAX_EMBEDDED_MSG_DEPTH = 3`; at the cap use domain-separated `attach-depth-limit/v1` sentinel (not raw blob, not panic). Unreadable nested objects stay Choice B unread. Stats: `strong_hash_embedded_parsed` / `_depth_limit` / `_unparsed`.
 
-**Not Relativity dedupe parity.** Relativity Server hashes four components separately, extracts embedded emails as **child documents**, and does **not** fold nested email into the parent’s AttachmentHash. Recursive hash-in-parent is a pst-dedup product choice for parent-centric keep-sets (matter extract still models children elsewhere). Full recursive nested **export** remains residual **D-0067-embedded-depth**.
+**Not Relativity dedupe parity.** Relativity Server hashes four components separately, extracts embedded emails as **child documents**, and does **not** fold nested email into the parent’s AttachmentHash. Recursive hash-in-parent is a pst-dedup product choice for parent-centric keep-sets (matter extract still models children elsewhere).
+
+**Nested unique-pst export (0094):** method-5 winners get a bounded nested `WriteMessage` (depth owner = writer `max_embedded_depth`, default 3; 32 MiB per-nest ceiling). Attach PC writes **`PidTagAttachDataObject` PtypObject** (`0x3701` / `0x000D`) for Outlook-discoverable nests; reader resolves via that property (scan fallback for older output). Child by-value attaches under nests stream via `open_attach_data_from_message_node` (nested NIDs are not in the NBT). unique-eml still ignores nested DTOs — nested MIME `message/rfc822` remains under **D-0067-embedded-depth**.
 
 ### Tier-2.5 recipient identity (0082)
 

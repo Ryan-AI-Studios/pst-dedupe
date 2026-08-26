@@ -195,6 +195,36 @@ impl PropContext {
         }
     }
 
+    /// Read a PtypObject (`0x000D`) heap value as `(nid, ulSize)` (MS-PST §2.3.3.5).
+    ///
+    /// Returns `Ok(None)` when the property is absent or not PtypObject. Corrupt
+    /// or truncated 8-byte heap allocations return `Err`.
+    pub fn get_object(&self, prop_id: u16) -> Result<Option<(u32, u32)>> {
+        let Some((prop_type, value_hnid)) = self.get_raw_hnid(prop_id) else {
+            return Ok(None);
+        };
+        if prop_type != 0x000D {
+            return Ok(None);
+        }
+        let hid = Hid(value_hnid);
+        if hid.is_null() || hid.hid_type() != 0 {
+            return Err(PstError::DataTruncated {
+                needed: 8,
+                available: 0,
+            });
+        }
+        let bytes = self.heap.get(hid)?;
+        if bytes.len() < 8 {
+            return Err(PstError::DataTruncated {
+                needed: 8,
+                available: bytes.len(),
+            });
+        }
+        let nid = LittleEndian::read_u32(&bytes[0..4]);
+        let size = LittleEndian::read_u32(&bytes[4..8]);
+        Ok(Some((nid, size)))
+    }
+
     /// Raw `(prop_type, value_hnid)` for a property tag, if present.
     ///
     /// Used by attachment streaming to distinguish HID (heap) vs NID (subnode)
@@ -432,23 +462,31 @@ pub fn load_pc_from_bids<R: Read + Seek>(
     PropContext::load_with_subnodes(data, subnodes)
 }
 
-/// Like [`load_pc_from_bids`], but refuse oversize body subnodes before materializing.
+/// Like [`load_pc_from_bids`], but refuse oversize body/HTML subnodes before materializing.
 ///
-/// When `body_prop_id` is stored as a subnode, peeks payload size via
+/// When any id in `body_prop_ids` is stored as a subnode, peeks payload size via
 /// [`block::block_payload_len_hint`] (BBT `cb` or XBLOCK `lcbTotal`) and returns
 /// [`PstError::ResourceLimit`] if over `body_byte_budget` — without
 /// `read_block_data` / insert into `PropContext.subnodes`.
+///
+/// Pass `&[PID_TAG_BODY]` for identity; export also includes `PID_TAG_BODY_HTML`
+/// so oversized HTML cannot be assembled before the nest budget rejects it.
 pub fn load_pc_from_bids_with_body_budget<R: Read + Seek>(
     reader: &mut R,
     bbt: &BbtIndex,
     bid_data: crate::ndb::BlockId,
     bid_sub: crate::ndb::BlockId,
     crypt: CryptMethod,
-    body_prop_id: u16,
+    body_prop_ids: &[u16],
     body_byte_budget: u64,
 ) -> Result<PropContext> {
     let data = block::read_block_data(reader, bbt, bid_data, crypt)?;
-    let body_value_hnid = body_subnode_value_hnid(&data, body_prop_id)?;
+    let mut budgeted_hnids: Vec<(u16, u32)> = Vec::new();
+    for &prop_id in body_prop_ids {
+        if let Some(hnid) = body_subnode_value_hnid(&data, prop_id)? {
+            budgeted_hnids.push((prop_id, hnid));
+        }
+    }
 
     let mut subnodes = HashMap::new();
     if !bid_sub.is_null() {
@@ -456,18 +494,22 @@ pub fn load_pc_from_bids_with_body_budget<R: Read + Seek>(
         if !needed.is_empty() {
             let entries = block::list_subnode_entries(reader, bbt, bid_sub)?;
 
-            // Preflight body subnode size before any needed-entry assemble/copy.
-            if let Some(body_hnid) = body_value_hnid {
+            // Aggregate-preflight budgeted body/HTML subnode sizes before any
+            // assemble/copy (0094): individually-under-budget plain+HTML must not
+            // both materialize when their sum exceeds the nest ceiling.
+            let mut aggregate_hint = 0u64;
+            for &(body_prop_id, body_hnid) in &budgeted_hnids {
                 for entry in &entries {
                     let raw_nid = entry.nid.0 as u32;
                     if raw_nid != body_hnid || !needed.contains(&raw_nid) {
                         continue;
                     }
                     let hint = block::block_payload_len_hint(reader, bbt, entry.bid_data, crypt)?;
-                    if hint > body_byte_budget {
+                    aggregate_hint = aggregate_hint.saturating_add(hint);
+                    if aggregate_hint > body_byte_budget {
                         return Err(PstError::ResourceLimit(format!(
-                            "embedded body prop 0x{body_prop_id:04x} subnode payload \
-                             hint={hint} exceeds budget={body_byte_budget}"
+                            "embedded body/html aggregate subnode hint={aggregate_hint} \
+                             (prop 0x{body_prop_id:04x} tip={hint}) exceeds budget={body_byte_budget}"
                         )));
                     }
                 }
@@ -838,7 +880,7 @@ mod targeted_subnode_tests {
             BlockId(PC_DATA_BID),
             BlockId(SLBLOCK_BID),
             CryptMethod::None,
-            0x1000, // PID_TAG_BODY
+            &[0x1000], // PID_TAG_BODY
             BUDGET,
         ) {
             Err(err) => assert!(

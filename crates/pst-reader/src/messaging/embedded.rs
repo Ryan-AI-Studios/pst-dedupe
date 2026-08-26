@@ -1,12 +1,12 @@
-//! Bounded embedded-message identity load (0090).
+//! Bounded embedded-message identity (0090) and nested export extract (0094).
 //!
 //! Method-5 (`ATTACH_EMBEDDED_MSG`) nested messages are **subnode objects under
 //! the attachment**, not NBT entries. [`PstFile::read_message_properties`] cannot
-//! resolve them. This module loads identity fields (header/body/recipients/child
-//! attaches) from a [`MessageNodeRef`] rooted at either an NBT message or a
-//! nested subnode message.
+//! resolve them. This module loads identity fields and full export fields from a
+//! [`MessageNodeRef`] rooted at either an NBT message or a nested subnode message.
 //!
-//! **Out of scope:** full recursive production extract (`D-0067-embedded-depth`).
+//! Resolve prefers `PidTagAttachDataObject` (PtypObject `0x3701`/`0x000D`); subnode
+//! `NormalMessage` scan remains a fallback for 0069-era files without the object.
 
 use sha2::{Digest, Sha256};
 
@@ -22,6 +22,9 @@ use crate::PstFile;
 
 /// Max nested embed depth for identity parse (align D-0067 / engine constant).
 pub const MAX_EMBEDDED_IDENTITY_DEPTH: u8 = 3;
+
+/// Per-nest payload ceiling for export extract (0094): body + HTML + child bytes.
+pub const MAX_NESTED_EXPORT_PAYLOAD_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Message root that is either an NBT entry or a nested subnode message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +85,48 @@ pub struct EmbeddedIdentityFields {
     pub crc_suspect: bool,
 }
 
+/// Full nested export fields (0094) — reader-local; CLI maps to NestedCanonicalMessage.
+#[derive(Debug, Clone)]
+pub struct EmbeddedExportFields {
+    pub subject: Option<String>,
+    pub sender: Option<String>,
+    pub display_to: Option<String>,
+    pub display_cc: Option<String>,
+    pub display_bcc: Option<String>,
+    pub recipients: Vec<Recipient>,
+    pub message_id: Option<String>,
+    pub message_class: Option<String>,
+    pub message_flags: Option<u32>,
+    pub submit_time: Option<i64>,
+    pub body_plain: Option<String>,
+    pub body_html: Option<Vec<u8>>,
+    pub attachments: Vec<EmbeddedExportAttach>,
+    pub body_incomplete: bool,
+    pub body_unavailable: bool,
+    /// Soft-skipped child attach rows during export list (`fail_on_row_error=false`).
+    /// Never invents bytes for omitted children; callers surface fidelity honesty.
+    pub attachments_incomplete: bool,
+    /// Source nested message root (NID + bids) for child stream keys.
+    pub source_msg_nid: NodeId,
+    pub bid_data: BlockId,
+    pub bid_sub: BlockId,
+}
+
+/// Child attach on an export extract (metadata + optional nested export).
+#[derive(Debug, Clone)]
+pub struct EmbeddedExportAttach {
+    pub nid: NodeId,
+    pub filename: String,
+    pub size: u32,
+    pub mime_tag: Option<String>,
+    pub attach_method: Option<i32>,
+    pub stream_available: bool,
+    pub is_cloud_link: bool,
+    pub embedded: Option<Box<EmbeddedExportFields>>,
+    /// Child method-5 hit remaining-depth / payload budget.
+    pub embedded_depth_limited: bool,
+}
+
 impl PstFile {
     /// Resolve an NBT message NID into a [`MessageNodeRef`].
     pub fn message_node_from_nbt(&self, message_nid: NodeId) -> Result<MessageNodeRef> {
@@ -98,8 +143,8 @@ impl PstFile {
 
     /// Resolve the nested message object under a method-5 attachment.
     ///
-    /// Walks: parent message → attach entry → attach subnodes → first
-    /// `NormalMessage` (nid type 0x04). Fail closed when missing.
+    /// Primary: `PidTagAttachDataObject` PtypObject on the attach PC → subnode NID.
+    /// Fallback: scan attach subnodes for first `NormalMessage` (0069-era files).
     pub fn resolve_embedded_root(
         &mut self,
         parent: &MessageNodeRef,
@@ -131,6 +176,34 @@ impl PstFile {
         if att_entry.bid_sub.is_null() {
             return Err(PstError::NoSubnodeBTree(att_entry.nid.0));
         }
+        let crypt = self.header.crypt_method;
+        // Prefer PtypObject 0x3701 discovery (MS-PST §2.4.6.2.2 / §2.3.3.5).
+        if !att_entry.bid_data.is_null() {
+            if let Ok(att_data) =
+                block::read_block_data(&mut self.reader, &self.bbt, att_entry.bid_data, crypt)
+            {
+                if let Ok(pc) = PropContext::load(att_data) {
+                    if let Ok(Some((obj_nid, _ul_size))) =
+                        pc.get_object(nid::PID_TAG_ATTACH_DATA_BINARY)
+                    {
+                        let target = NodeId(u64::from(obj_nid));
+                        if let Ok(Some(nested)) = block::find_subnode_entry(
+                            &mut self.reader,
+                            &self.bbt,
+                            att_entry.bid_sub,
+                            target,
+                        ) {
+                            return Ok(MessageNodeRef {
+                                nid: nested.nid,
+                                bid_data: nested.bid_data,
+                                bid_sub: nested.bid_sub,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback: 0069-era files without PidTagAttachDataObject.
         let subs = block::list_subnode_entries(&mut self.reader, &self.bbt, att_entry.bid_sub)?;
         let nested = subs
             .iter()
@@ -164,7 +237,7 @@ impl PstFile {
             root.bid_data,
             root.bid_sub,
             crypt,
-            nid::PID_TAG_BODY,
+            &[nid::PID_TAG_BODY],
             body_byte_budget,
         )?;
 
@@ -222,7 +295,7 @@ impl PstFile {
         let recipients = self.list_recipients_from_message_node(root)?;
         // Identity path: fail closed on any unreadable attach PC; prefer
         // AttachmentTable (0x671) row order when present.
-        let child_attachments = self.list_attachments_from_message_node(root, true)?;
+        let (child_attachments, _) = self.list_attachments_from_message_node(root, true)?;
         let crc_suspect = scope.exit();
 
         Ok(EmbeddedIdentityFields {
@@ -255,6 +328,216 @@ impl PstFile {
         self.read_identity_from_message_node(&root, body_byte_budget)
     }
 
+    /// Full nested export extract from a message node (0094).
+    ///
+    /// `remaining_child_depth` is how many further method-5 levels may be extracted
+    /// under this node (0 → mark child embeds depth-limited, do not invent).
+    /// `payload_budget` caps body+HTML+declared child bytes for this nest
+    /// ([`MAX_NESTED_EXPORT_PAYLOAD_BYTES`] recommended). Exhaustion →
+    /// [`PstError::ResourceLimit`] (CLI maps to depth-limit, not unparsed).
+    pub fn read_export_from_message_node(
+        &mut self,
+        root: &MessageNodeRef,
+        remaining_child_depth: u32,
+        payload_budget: u64,
+    ) -> Result<EmbeddedExportFields> {
+        let crypt = self.header.crypt_method;
+        // Budget plain + HTML subnodes before any assemble into PropContext.
+        let prop_ctx = pc::load_pc_from_bids_with_body_budget(
+            &mut self.reader,
+            &self.bbt,
+            root.bid_data,
+            root.bid_sub,
+            crypt,
+            &[nid::PID_TAG_BODY, nid::PID_TAG_BODY_HTML],
+            payload_budget,
+        )?;
+
+        let subject = prop_ctx.get_string(nid::PID_TAG_SUBJECT)?;
+        let submit_time = prop_ctx.get_time(nid::PID_TAG_CLIENT_SUBMIT_TIME)?;
+        let display_bcc = prop_ctx
+            .get_string(nid::PID_TAG_DISPLAY_BCC)
+            .unwrap_or_default();
+        let display_cc = prop_ctx
+            .get_string(nid::PID_TAG_DISPLAY_CC)
+            .unwrap_or_default();
+        let sender = prop_ctx
+            .get_string(nid::PID_TAG_SENDER_EMAIL_ADDRESS)?
+            .or(prop_ctx.get_string(nid::PID_TAG_SENDER_SMTP_ADDRESS)?);
+        let display_to = prop_ctx.get_string(nid::PID_TAG_DISPLAY_TO)?;
+        let message_id = prop_ctx.get_string(nid::PID_TAG_INTERNET_MESSAGE_ID)?;
+        // Do not invent IPM.Note here — writer defaults when mapping if missing.
+        let message_class = prop_ctx.get_string(nid::PID_TAG_MESSAGE_CLASS)?;
+        let message_flags = prop_ctx
+            .get_i32(nid::PID_TAG_MESSAGE_FLAGS)?
+            .map(|f| f as u32);
+
+        let mut used: u64 = 0;
+        let charge = |used: &mut u64, n: u64, budget: u64, what: &str| -> Result<()> {
+            let next = used.saturating_add(n);
+            if next > budget {
+                return Err(PstError::ResourceLimit(format!(
+                    "nested export {what} would use {next} bytes over budget={budget}"
+                )));
+            }
+            *used = next;
+            Ok(())
+        };
+
+        let mut body_incomplete = false;
+        let mut body_unavailable = false;
+        let body_plain = match prop_ctx.prop_value_byte_len(nid::PID_TAG_BODY)? {
+            Some(raw_len) if (raw_len as u64) > payload_budget.saturating_sub(used) => {
+                return Err(PstError::ResourceLimit(format!(
+                    "embedded export PidTagBody raw_len={raw_len} exceeds remaining budget"
+                )));
+            }
+            _ => match prop_ctx.get_string(nid::PID_TAG_BODY) {
+                Ok(Some(b)) => {
+                    charge(&mut used, b.len() as u64, payload_budget, "body_plain")?;
+                    Some(b)
+                }
+                Ok(None) => None,
+                Err(e) if is_truncation_or_crc(&e) => {
+                    body_incomplete = true;
+                    None
+                }
+                Err(PstError::ResourceLimit(_)) => {
+                    return Err(PstError::ResourceLimit(
+                        "embedded export body budget".into(),
+                    ))
+                }
+                Err(_) => {
+                    body_unavailable = true;
+                    None
+                }
+            },
+        };
+
+        // Preflight HTML stored length against remaining budget before clone/decode.
+        let body_html = match prop_ctx.prop_value_byte_len(nid::PID_TAG_BODY_HTML)? {
+            Some(raw_len) if (raw_len as u64) > payload_budget.saturating_sub(used) => {
+                return Err(PstError::ResourceLimit(format!(
+                    "embedded export PidTagBodyHtml raw_len={raw_len} exceeds remaining budget"
+                )));
+            }
+            _ => match prop_ctx.get_string(nid::PID_TAG_BODY_HTML) {
+                Ok(Some(s)) => {
+                    let bytes = s.into_bytes();
+                    charge(&mut used, bytes.len() as u64, payload_budget, "body_html")?;
+                    Some(bytes)
+                }
+                Ok(None) => match prop_ctx.get_binary(nid::PID_TAG_BODY_HTML) {
+                    Ok(Some(b)) => {
+                        charge(&mut used, b.len() as u64, payload_budget, "body_html")?;
+                        Some(b)
+                    }
+                    Ok(None) => None,
+                    Err(e) if is_truncation_or_crc(&e) => {
+                        body_incomplete = true;
+                        None
+                    }
+                    Err(_) => {
+                        body_incomplete = true;
+                        None
+                    }
+                },
+                Err(e) if is_truncation_or_crc(&e) => {
+                    body_incomplete = true;
+                    None
+                }
+                Err(_) => {
+                    body_incomplete = true;
+                    None
+                }
+            },
+        };
+
+        // Missing recipient table → empty (0082: never invent from Display*).
+        // Present-but-corrupt table → empty + honesty flag (do not look like absent).
+        let (recipients, recipients_incomplete) = match self.list_recipients_from_message_node(root)
+        {
+            Ok(rows) => (rows, false),
+            Err(_) => (Vec::new(), true),
+        };
+        // Soft list for export: prefer honesty flags over failing the whole nest.
+        let (child_meta, soft_skipped) = self.list_attachments_from_message_node(root, false)?;
+        let attachments_incomplete = soft_skipped > 0;
+
+        let mut attachments = Vec::with_capacity(child_meta.len());
+        for child in child_meta {
+            charge(
+                &mut used,
+                u64::from(child.size),
+                payload_budget,
+                "child_attach_size",
+            )?;
+            let is_method5 = child.attach_method == Some(nid::ATTACH_EMBEDDED_MSG);
+            let stream_available = !is_method5 && !child.is_cloud_link;
+            let mut embedded = None;
+            let mut embedded_depth_limited = false;
+            if is_method5 {
+                if remaining_child_depth == 0 {
+                    embedded_depth_limited = true;
+                } else if let Ok(nested_root) = self.resolve_embedded_root(root, child.nid) {
+                    match self.read_export_from_message_node(
+                        &nested_root,
+                        remaining_child_depth.saturating_sub(1),
+                        payload_budget,
+                    ) {
+                        Ok(fields) => embedded = Some(Box::new(fields)),
+                        Err(PstError::ResourceLimit(_)) => {
+                            embedded_depth_limited = true;
+                        }
+                        Err(_) => {
+                            // Leave embedded None → unparsed at writer for this child.
+                        }
+                    }
+                }
+            }
+            attachments.push(EmbeddedExportAttach {
+                nid: child.nid,
+                filename: child.filename,
+                size: child.size,
+                mime_tag: child.mime_tag,
+                attach_method: child.attach_method,
+                stream_available,
+                is_cloud_link: child.is_cloud_link,
+                embedded,
+                embedded_depth_limited,
+            });
+        }
+
+        if body_plain.is_none() && body_html.is_none() && !body_incomplete {
+            // No readable body properties — leave unavailable only when we already
+            // saw a hard body error; otherwise both None is honest empty.
+        }
+
+        let body_incomplete = body_incomplete || recipients_incomplete;
+
+        Ok(EmbeddedExportFields {
+            subject,
+            sender,
+            display_to,
+            display_cc,
+            display_bcc,
+            recipients,
+            message_id,
+            message_class,
+            message_flags,
+            submit_time,
+            body_plain,
+            body_html,
+            attachments,
+            body_incomplete,
+            body_unavailable,
+            attachments_incomplete,
+            source_msg_nid: root.nid,
+            bid_data: root.bid_data,
+            bid_sub: root.bid_sub,
+        })
+    }
+
     /// List attachments under a message node (NBT or nested subnode message).
     ///
     /// **Order:** Prefer the per-message AttachmentTable subnode (`NidType::AttachmentTable`
@@ -265,13 +548,16 @@ impl PstFile {
     /// Attachment-typed subnodes exist but the table is **absent**, identity
     /// (`fail_on_row_error=true`) returns `Err`. Soft path may fall back to Attachment
     /// subnode enumeration order (documented residual — not used for identity).
+    /// Returns `(attachments, soft_skipped_rows)`. Soft path (`fail_on_row_error=false`)
+    /// counts skipped/corrupt rows without inventing bytes; identity path returns
+    /// `soft_skipped=0` or `Err`.
     pub fn list_attachments_from_message_node(
         &mut self,
         root: &MessageNodeRef,
         fail_on_row_error: bool,
-    ) -> Result<Vec<EmbeddedChildAttach>> {
+    ) -> Result<(Vec<EmbeddedChildAttach>, u32)> {
         if root.bid_sub.is_null() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
         let sub_entries = block::list_subnode_entries(&mut self.reader, &self.bbt, root.bid_sub)?;
         let provider_npid = self.attachment_provider_type_npid();
@@ -307,7 +593,7 @@ impl PstFile {
                 fail_on_row_error,
             );
         }
-        Ok(Vec::new())
+        Ok((Vec::new(), 0))
     }
 
     fn list_attachments_via_attach_table(
@@ -317,7 +603,7 @@ impl PstFile {
         provider_npid: Option<u16>,
         crypt: crate::crypto::CryptMethod,
         fail_on_row_error: bool,
-    ) -> Result<Vec<EmbeddedChildAttach>> {
+    ) -> Result<(Vec<EmbeddedChildAttach>, u32)> {
         // Present table with null data BID is corrupt — not an empty attachment set.
         require_present_table_data_bid(table_entry)?;
 
@@ -351,6 +637,7 @@ impl PstFile {
             .collect();
 
         let mut attachments = Vec::with_capacity(table.row_count());
+        let mut soft_skipped = 0u32;
         for row in 0..table.row_count() {
             let Some(row_id) = table.get_row_id(row) else {
                 if fail_on_row_error {
@@ -359,6 +646,7 @@ impl PstFile {
                         available: 0,
                     });
                 }
+                soft_skipped = soft_skipped.saturating_add(1);
                 continue;
             };
             let nid = NodeId(u64::from(row_id));
@@ -366,6 +654,7 @@ impl PstFile {
                 if fail_on_row_error {
                     return Err(PstError::SubnodeNotFound(nid.0));
                 }
+                soft_skipped = soft_skipped.saturating_add(1);
                 continue;
             };
             match self.read_embedded_child_from_entry(entry, provider_npid, crypt) {
@@ -374,10 +663,11 @@ impl PstFile {
                     if fail_on_row_error {
                         return Err(e);
                     }
+                    soft_skipped = soft_skipped.saturating_add(1);
                 }
             }
         }
-        Ok(attachments)
+        Ok((attachments, soft_skipped))
     }
 
     fn list_attachments_by_subnode_enum(
@@ -386,8 +676,9 @@ impl PstFile {
         provider_npid: Option<u16>,
         crypt: crate::crypto::CryptMethod,
         fail_on_row_error: bool,
-    ) -> Result<Vec<EmbeddedChildAttach>> {
+    ) -> Result<(Vec<EmbeddedChildAttach>, u32)> {
         let mut attachments = Vec::new();
+        let mut soft_skipped = 0u32;
         for entry in sub_entries {
             if !matches!(entry.nid.nid_type(), NidType::Attachment) {
                 continue;
@@ -398,10 +689,11 @@ impl PstFile {
                     if fail_on_row_error {
                         return Err(e);
                     }
+                    soft_skipped = soft_skipped.saturating_add(1);
                 }
             }
         }
-        Ok(attachments)
+        Ok((attachments, soft_skipped))
     }
 
     fn read_embedded_child_from_entry(

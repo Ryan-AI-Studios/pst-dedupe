@@ -68,7 +68,8 @@ pub use integrity_telemetry::{IntegritySnapshot, MessageScope};
 // `with_crc_scope` / `message_scope_enter` live on the `integrity_telemetry` module.
 pub use messaging::attachment::{AttachmentDataReader, AttachmentInfo, AttachmentMeta};
 pub use messaging::embedded::{
-    EmbeddedChildAttach, EmbeddedIdentityFields, MessageNodeRef, MAX_EMBEDDED_IDENTITY_DEPTH,
+    EmbeddedChildAttach, EmbeddedExportAttach, EmbeddedExportFields, EmbeddedIdentityFields,
+    MessageNodeRef, MAX_EMBEDDED_IDENTITY_DEPTH, MAX_NESTED_EXPORT_PAYLOAD_BYTES,
 };
 pub use messaging::folder::FolderInfo;
 pub use messaging::message::{

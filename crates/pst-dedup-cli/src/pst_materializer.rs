@@ -17,10 +17,14 @@ use std::sync::{Arc, Mutex};
 use dedup_engine::attach_reason_from_pst_error;
 use dedup_engine::reason_from_pst_error;
 use dedup_engine::{
-    AttachStreamSource, CanonicalAttachment, CanonicalMessage, EmlWriteError, FamilyPolicy,
-    IntegrityReason, MaterializeError, MessageLocus, MessageMaterializer,
+    AttachStreamSource, CanonicalAttachment, CanonicalMessage, CanonicalRecipient, EmlWriteError,
+    FamilyPolicy, IntegrityReason, MaterializeError, MessageLocus, MessageMaterializer,
+    NestedCanonicalMessage, NestedExtractFail,
 };
-use pst_reader::{NodeId, PstFile};
+use pst_reader::{
+    EmbeddedExportAttach, EmbeddedExportFields, MessageNodeRef, NodeId, PstError, PstFile,
+    ATTACH_EMBEDDED_MSG, MAX_NESTED_EXPORT_PAYLOAD_BYTES,
+};
 
 use crate::attach_probe::{path_mtime_and_size, probe_attach_stream, ProbeLevel, ProbeResultCache};
 
@@ -453,8 +457,11 @@ impl MessageMaterializer for PstMaterializer {
 
                     // Prefer phase-1b cache (no re-I/O). Cache miss keeps optimistic.
                     // Skip deep probe for CloudLink (no offline payload to verify).
+                    // Skip method-5: binary open_attachment_data cannot open embeds;
+                    // nested extract later fills embedded_message (0094 P2).
+                    let is_method5 = att.attach_method == Some(ATTACH_EMBEDDED_MSG);
                     let mut applied_cache = false;
-                    if !parents_only && !att.is_cloud_link {
+                    if !parents_only && !att.is_cloud_link && !is_method5 {
                         if let (Some((cache, level)), Some((mtime, source_size))) =
                             (probe_cache.as_ref(), cache_identity)
                         {
@@ -491,7 +498,11 @@ impl MessageMaterializer for PstMaterializer {
                         }
                     }
 
-                    if !parents_only && !att.is_cloud_link && !applied_cache && deep_level.is_some()
+                    if !parents_only
+                        && !att.is_cloud_link
+                        && !is_method5
+                        && !applied_cache
+                        && deep_level.is_some()
                     {
                         // Cancel mid-materialize: do not re-degrade as attach fail.
                         let cancelled_now = cancel
@@ -541,6 +552,7 @@ impl MessageMaterializer for PstMaterializer {
                         }
                     } else if !parents_only
                         && !att.is_cloud_link
+                        && !is_method5
                         && !applied_cache
                         && load_payloads
                         && att.size > 0
@@ -605,6 +617,8 @@ impl MessageMaterializer for PstMaterializer {
                         is_cloud_link: att.is_cloud_link,
                         cloud_provider: att.cloud_provider,
                         cloud_url: att.cloud_url,
+                        embedded_message: None,
+                        embedded_extract_limit: false,
                     });
                 }
             }
@@ -661,20 +675,31 @@ impl MessageMaterializer for PstMaterializer {
 /// Previously a separate unbounded `HashMap` (D-0074-mat-lru / D4 double-open).
 /// When built via [`PstAttachStreamSource::with_handle_cache`], opens reuse the
 /// same sticky handles as materialize.
+///
+/// **0094:** [`Self::register_message_node`] records nested [`MessageNodeRef`]s so
+/// child by-value attaches under nests use `open_attach_data_from_message_node`
+/// (nested NIDs are not in the NBT). Keys are `(source_path, nid)` — NIDs are
+/// only unique within a single store.
 pub struct PstAttachStreamSource {
-    handles: SharedPstHandleCache,
+    pub(crate) handles: SharedPstHandleCache,
+    /// Nested (and optionally top-level) message roots keyed by `(source_path, nid)`.
+    pub(crate) message_nodes: HashMap<(String, u64), MessageNodeRef>,
 }
 
 impl PstAttachStreamSource {
     pub fn new() -> Self {
         Self {
             handles: Rc::new(RefCell::new(PstHandleCache::new(DEFAULT_MAX_OPEN_PSTS))),
+            message_nodes: HashMap::new(),
         }
     }
 
     /// Share a handle cache with [`PstMaterializer`] (preferred unique-pst path).
     pub fn with_handle_cache(handles: SharedPstHandleCache) -> Self {
-        Self { handles }
+        Self {
+            handles,
+            message_nodes: HashMap::new(),
+        }
     }
 
     pub fn source_pst_opens(&self) -> u64 {
@@ -683,6 +708,19 @@ impl PstAttachStreamSource {
 
     pub fn handle_cache(&self) -> SharedPstHandleCache {
         Rc::clone(&self.handles)
+    }
+
+    /// Register a message root for nested child-attach streaming (0094).
+    pub fn register_message_node(&mut self, source_path: &str, node: MessageNodeRef) {
+        self.message_nodes
+            .insert((source_path.to_string(), node.nid.0), node);
+    }
+
+    /// Lookup a registered message root (test / diagnostics).
+    pub fn lookup_message_node(&self, source_path: &str, nid: u64) -> Option<MessageNodeRef> {
+        self.message_nodes
+            .get(&(source_path.to_string(), nid))
+            .copied()
     }
 }
 
@@ -697,15 +735,33 @@ impl PstAttachStreamSource {
     ///
     /// Prefer this over [`AttachStreamSource::open_attach`] when the consumer must
     /// observe late warning-only CRC after stream complete (unique-pst writer path).
+    ///
+    /// When `(parent.source_path, parent.nid)` was registered via
+    /// [`Self::register_message_node`], opens via `open_attach_data_from_message_node`
+    /// (nested parents are not in the NBT).
     pub fn open_attachment_data_reader(
         &mut self,
         parent: &MessageLocus,
         attach_nid: u64,
     ) -> Result<pst_reader::AttachmentDataReader, EmlWriteError> {
+        let nested = self
+            .message_nodes
+            .get(&(parent.source_path.clone(), parent.nid))
+            .copied();
         let mut handles = self.handles.borrow_mut();
         let pst = handles
             .get_mut(&parent.source_path)
             .map_err(|e| EmlWriteError::Other(format!("open attach stream pst: {e}")))?;
+        if let Some(root) = nested {
+            return pst
+                .open_attach_data_from_message_node(&root, NodeId(attach_nid))
+                .map_err(|e| {
+                    EmlWriteError::Other(format!(
+                        "open_attach_data_from_message_node parent={:#x} attach={attach_nid:#x}: {e}",
+                        parent.nid
+                    ))
+                });
+        }
         pst.open_attachment_data(NodeId(parent.nid), NodeId(attach_nid))
             .map_err(|e| {
                 EmlWriteError::Other(format!(
@@ -713,6 +769,167 @@ impl PstAttachStreamSource {
                     parent.nid
                 ))
             })
+    }
+}
+
+/// Winner-only method-5 nested extract into [`CanonicalAttachment::embedded_message`] (0094).
+///
+/// `max_embedded_depth` must match writer `WritePstOpts::max_embedded_depth` (clamped 1–8).
+/// Depth/byte-budget exhaustion sets [`CanonicalAttachment::embedded_extract_limit`] so the
+/// writer emits `ATTACH_DEPTH_LIMIT` rather than unparsed.
+pub fn materialize_nested_for_winner(
+    attach_src: &mut PstAttachStreamSource,
+    msg: &mut CanonicalMessage,
+    max_embedded_depth: u32,
+) -> Result<(), String> {
+    let max_depth = max_embedded_depth.clamp(1, 8);
+    let source_path = msg.locus.source_path.clone();
+    let parent_nid = msg.locus.nid;
+    // Ensure parent NBT node is available for resolve; nested nodes registered below.
+    {
+        let mut handles = attach_src.handles.borrow_mut();
+        let pst = handles
+            .get_mut(&source_path)
+            .map_err(|e| format!("nested extract open pst: {e}"))?;
+        if let Ok(root) = pst.message_node_from_nbt(NodeId(parent_nid)) {
+            drop(handles);
+            attach_src.register_message_node(&source_path, root);
+        }
+    }
+    for att in &mut msg.attachments {
+        fill_nested_on_attach(attach_src, &source_path, parent_nid, att, max_depth)?;
+    }
+    Ok(())
+}
+
+fn fill_nested_on_attach(
+    attach_src: &mut PstAttachStreamSource,
+    source_path: &str,
+    parent_msg_nid: u64,
+    att: &mut CanonicalAttachment,
+    remaining_depth: u32,
+) -> Result<(), String> {
+    if att.attach_method != Some(ATTACH_EMBEDDED_MSG) {
+        return Ok(());
+    }
+    let Some(attach_nid) = att.attach_nid else {
+        return Ok(());
+    };
+    if remaining_depth == 0 {
+        att.embedded_extract_limit = true;
+        att.embedded_message = None;
+        return Ok(());
+    }
+    let parent = attach_src
+        .message_nodes
+        .get(&(source_path.to_string(), parent_msg_nid))
+        .copied()
+        .ok_or_else(|| {
+            format!("missing MessageNodeRef for parent {source_path} nid={parent_msg_nid:#x}")
+        })?;
+
+    let extract_result = {
+        let mut handles = attach_src.handles.borrow_mut();
+        let pst = handles
+            .get_mut(source_path)
+            .map_err(|e| format!("nested extract pst: {e}"))?;
+        match pst.resolve_embedded_root(&parent, NodeId(attach_nid)) {
+            Ok(nested_root) => {
+                match pst.read_export_from_message_node(
+                    &nested_root,
+                    remaining_depth.saturating_sub(1),
+                    MAX_NESTED_EXPORT_PAYLOAD_BYTES,
+                ) {
+                    Ok(fields) => Ok((nested_root, fields)),
+                    Err(PstError::ResourceLimit(_)) => Err(NestedExtractFail::DepthLimit),
+                    Err(_) => Err(NestedExtractFail::Unparsed),
+                }
+            }
+            Err(_) => Err(NestedExtractFail::Unparsed),
+        }
+    };
+
+    match extract_result {
+        Ok((_nested_root, fields)) => {
+            register_export_tree(attach_src, source_path, &fields);
+            att.embedded_extract_limit = false;
+            att.embedded_message = Some(Box::new(map_export_to_nested(&fields)));
+        }
+        Err(NestedExtractFail::DepthLimit) => {
+            att.embedded_extract_limit = true;
+            att.embedded_message = None;
+        }
+        Err(NestedExtractFail::Unparsed) => {
+            att.embedded_extract_limit = false;
+            att.embedded_message = None;
+        }
+    }
+    Ok(())
+}
+
+fn register_export_tree(
+    attach_src: &mut PstAttachStreamSource,
+    source_path: &str,
+    fields: &EmbeddedExportFields,
+) {
+    attach_src.register_message_node(
+        source_path,
+        MessageNodeRef {
+            nid: fields.source_msg_nid,
+            bid_data: fields.bid_data,
+            bid_sub: fields.bid_sub,
+        },
+    );
+    for child in &fields.attachments {
+        if let Some(ref emb) = child.embedded {
+            register_export_tree(attach_src, source_path, emb);
+        }
+    }
+}
+
+fn map_export_to_nested(fields: &EmbeddedExportFields) -> NestedCanonicalMessage {
+    NestedCanonicalMessage {
+        subject: fields.subject.clone(),
+        sender: fields.sender.clone(),
+        display_to: fields.display_to.clone(),
+        display_cc: fields.display_cc.clone(),
+        display_bcc: fields.display_bcc.clone(),
+        recipients: fields
+            .recipients
+            .iter()
+            .map(CanonicalRecipient::from_reader)
+            .collect(),
+        message_id: fields.message_id.clone(),
+        message_class: fields.message_class.clone(),
+        message_flags: fields.message_flags,
+        submit_time: fields.submit_time,
+        body_plain: fields.body_plain.clone(),
+        body_html: fields.body_html.clone(),
+        attachments: fields.attachments.iter().map(map_export_attach).collect(),
+        body_incomplete: fields.body_incomplete,
+        body_unavailable: fields.body_unavailable,
+        attachments_incomplete: fields.attachments_incomplete,
+        source_msg_nid: Some(fields.source_msg_nid.0),
+    }
+}
+
+fn map_export_attach(a: &EmbeddedExportAttach) -> CanonicalAttachment {
+    CanonicalAttachment {
+        filename: a.filename.clone(),
+        size: a.size,
+        mime: a.mime_tag.clone(),
+        data: None,
+        stream_available: a.stream_available,
+        attach_nid: Some(a.nid.0),
+        attach_method: a.attach_method,
+        is_cloud_link: a.is_cloud_link,
+        cloud_provider: None,
+        cloud_url: None,
+        embedded_message: a
+            .embedded
+            .as_ref()
+            .map(|e| Box::new(map_export_to_nested(e))),
+        embedded_extract_limit: a.embedded_depth_limited,
     }
 }
 
@@ -785,6 +1002,8 @@ mod handle_cache_tests {
                 is_cloud_link: false,
                 cloud_provider: None,
                 cloud_url: None,
+                embedded_message: None,
+                embedded_extract_limit: false,
             }],
             fidelity: RecoverableIntegrity::clean(),
             message_id_norm: None,
@@ -796,6 +1015,87 @@ mod handle_cache_tests {
         assert!(
             !is_attach_incomplete(&msg),
             "zero-byte empty-name by-value with listed success must not be attach-incomplete"
+        );
+    }
+
+    #[test]
+    fn message_nodes_keyed_by_source_path_and_nid() {
+        use pst_reader::BlockId;
+        let mut src = PstAttachStreamSource::new();
+        let a = MessageNodeRef {
+            nid: NodeId(0x2004),
+            bid_data: BlockId(0x11),
+            bid_sub: BlockId(0x12),
+        };
+        let b = MessageNodeRef {
+            nid: NodeId(0x2004),
+            bid_data: BlockId(0x21),
+            bid_sub: BlockId(0x22),
+        };
+        src.register_message_node(r"C:\a.pst", a);
+        src.register_message_node(r"C:\b.pst", b);
+        let got_a = src
+            .lookup_message_node(r"C:\a.pst", 0x2004)
+            .expect("a registered");
+        let got_b = src
+            .lookup_message_node(r"C:\b.pst", 0x2004)
+            .expect("b registered");
+        assert_eq!(got_a.bid_data, BlockId(0x11));
+        assert_eq!(got_b.bid_data, BlockId(0x21));
+        assert!(src.lookup_message_node(r"C:\missing.pst", 0x2004).is_none());
+    }
+
+    #[test]
+    fn method5_skips_binary_probe_gate() {
+        // Method-5 must not be treated as by-value binary for incompleteness.
+        // stream_available stays optimistic after list; nested extract fills later.
+        assert!(optimistic_listed_stream_available(100, "message.msg"));
+        let locus = MessageLocus {
+            source_path: "C:/a.pst".into(),
+            source_pst: "a.pst".into(),
+            folder_path: "Inbox".into(),
+            nid: 1,
+            is_orphaned: false,
+        };
+        let msg = CanonicalMessage {
+            locus,
+            message_id: None,
+            subject: Some("s".into()),
+            sender: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            recipients: Vec::new(),
+            message_flags: None,
+            submit_time: None,
+            size: Some(0),
+            message_class: None,
+            body_plain: Some("b".into()),
+            body_html: None,
+            attachments: vec![CanonicalAttachment {
+                filename: "message.msg".into(),
+                size: 64,
+                mime: None,
+                data: None,
+                stream_available: true, // optimistic; binary probe skipped for method-5
+                attach_nid: Some(100),
+                attach_method: Some(ATTACH_EMBEDDED_MSG),
+                is_cloud_link: false,
+                cloud_provider: None,
+                cloud_url: None,
+                embedded_message: None,
+                embedded_extract_limit: false,
+            }],
+            fidelity: RecoverableIntegrity::clean(),
+            message_id_norm: None,
+            content_hash: [0; 32],
+            edrm_mih_hex: None,
+            body_incomplete: false,
+            body_unavailable: false,
+        };
+        assert!(
+            !is_attach_incomplete(&msg),
+            "method-5 with optimistic stream_available must not be attach-incomplete"
         );
     }
 

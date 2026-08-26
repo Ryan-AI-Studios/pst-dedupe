@@ -72,9 +72,9 @@ pub use keepset::{
     DecisionRole, FamilyPolicy, FidelityMode, FolderClass, FolderRankMode, GroupingOutcome,
     KeepEntry, KeepPolicy, KeepSet, KeepSetError, KeepSetProvenance, KeepSetStats,
     MaterializeBuildOpts, MaterializeError, MaterializeFinalizeOpts, MessageLocus,
-    MessageMaterializer, PromoteReason, RankContext, RankKey, RecoverableScanItem, ResolvedKeepSet,
-    SoftSkipAttachRecord, DECISION_CSV_HEADER, DECISION_CSV_HEADER_V1, DUPLICATE_SOURCES_CAP,
-    KEEP_SET_SCHEMA,
+    MessageMaterializer, NestedCanonicalMessage, NestedExtractFail, PromoteReason, RankContext,
+    RankKey, RecoverableScanItem, ResolvedKeepSet, SoftSkipAttachRecord, DECISION_CSV_HEADER,
+    DECISION_CSV_HEADER_V1, DUPLICATE_SOURCES_CAP, KEEP_SET_SCHEMA,
 };
 pub use report::{write_csv_report, StreamingCsvReportWriter};
 pub use util::{filetime_to_unix, format_bytes, truncate_utf8};
