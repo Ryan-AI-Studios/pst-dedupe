@@ -48,8 +48,31 @@ pub const EXPORT_BODY_CLOUD_LINKS_CSV_NAME: &str = "export_body_cloud_links.csv"
 
 /// Row kind for a kept document-shaped body cloud URL (0085).
 pub const REASON_BODY_CLOUD_LINK: &str = "BODY_CLOUD_LINK";
-/// Message-level marker when body scan caps drop additional candidates (0085).
-pub const REASON_BODY_CLOUD_LINK_TRUNCATED: &str = "BODY_CLOUD_LINK_TRUNCATED";
+/// Honesty marker: document-shaped candidate(s) existed past the 100k window (0097).
+pub const REASON_BODY_CLOUD_LINK_WINDOW: &str = "BODY_CLOUD_LINK_WINDOW";
+/// Honesty marker: additional document-shaped candidates past the 50-link cap (0097).
+pub const REASON_BODY_CLOUD_LINK_MAX_LINKS_EXCEEDED: &str = "BODY_CLOUD_LINK_MAX_LINKS_EXCEEDED";
+/// Honesty marker: document-shaped URL exceeded 2048 chars; `cloud_url` holds the prefix (0097).
+pub const REASON_BODY_CLOUD_LINK_URL_TRUNCATED: &str = "BODY_CLOUD_LINK_URL_TRUNCATED";
+
+/// Pipe-join honesty-marker reason strings (order locked: WINDOW | MAX_LINKS | URL).
+pub fn body_cloud_honesty_reason(
+    window_dropped: bool,
+    max_links_exceeded: bool,
+    url_truncated: bool,
+) -> String {
+    let mut parts = Vec::new();
+    if window_dropped {
+        parts.push(REASON_BODY_CLOUD_LINK_WINDOW);
+    }
+    if max_links_exceeded {
+        parts.push(REASON_BODY_CLOUD_LINK_MAX_LINKS_EXCEEDED);
+    }
+    if url_truncated {
+        parts.push(REASON_BODY_CLOUD_LINK_URL_TRUNCATED);
+    }
+    parts.join("|")
+}
 
 /// Default CSV row cap (fail + info rows that would be written).
 pub const DEFAULT_ATTACH_LEDGER_MAX_ROWS: u64 = 500_000;
@@ -668,9 +691,14 @@ pub struct UniqueExportSummary {
     /// Total kept body-inline cloud link hits across written winners (0085).
     #[serde(default)]
     pub body_cloud_links_total: u64,
-    /// Messages where body scan caps truncated additional candidates (0085).
+    /// Messages where document-shaped candidates were actually dropped
+    /// (window tail / max-links / url-len).
     #[serde(default)]
     pub body_cloud_link_truncated_messages: u64,
+    /// Messages whose HTML or plain body exceeded the 100k scan window (0097).
+    /// Independent of whether any document-shaped candidate was dropped.
+    #[serde(default)]
+    pub body_scan_window_capped_messages: u64,
     /// Store RecordKey mode for this export (0087). Default `"deterministic"`.
     /// Values: `"deterministic"` | `"ephemeral"`.
     /// Always set by unique-pst writers; `default` reserved if Deserialize is added.
@@ -1361,25 +1389,30 @@ impl BodyCloudLinkRow {
         )
     }
 
-    /// Message-level truncation marker when caps drop additional candidates.
-    pub fn truncated_marker(
+    /// ≤1 honesty marker per message when document-shaped candidates were dropped.
+    ///
+    /// `link_index` is `u32::MAX` so it cannot collide with a real `link_index: 0`.
+    /// `cloud_url` is empty except URL-over-length (2048-char prefix). `url_source` empty.
+    pub fn honesty_marker(
         source_id: String,
         source_path: String,
         folder_path: String,
         msg_nid: u64,
         message_subject: String,
+        reason: String,
+        cloud_url: String,
     ) -> Self {
         Self {
             source_id,
             source_path,
             folder_path,
             msg_nid,
-            link_index: 0,
-            cloud_url: String::new(),
+            link_index: u32::MAX,
+            cloud_url,
             url_source: String::new(),
             truncated: true,
             message_subject,
-            reason: REASON_BODY_CLOUD_LINK_TRUNCATED.into(),
+            reason,
         }
     }
 }
@@ -2516,5 +2549,41 @@ mod tests {
         // Structure of the URL path/query must remain after the leading quote.
         assert!(line.contains("sharepoint.com/:x:/s/L/a.xlsx"));
         let _ = dangerous;
+    }
+
+    #[test]
+    fn body_cloud_honesty_marker_discriminator_and_link_index() {
+        let row = BodyCloudLinkRow::honesty_marker(
+            "0".into(),
+            r"C:\a.pst".into(),
+            "Inbox".into(),
+            1,
+            "subj".into(),
+            REASON_BODY_CLOUD_LINK_WINDOW.into(),
+            String::new(),
+        );
+        assert_eq!(row.link_index, u32::MAX);
+        assert!(row.truncated);
+        assert!(row.cloud_url.is_empty());
+        assert!(row.url_source.is_empty());
+        assert_eq!(row.reason, REASON_BODY_CLOUD_LINK_WINDOW);
+        let line = row.to_csv_line();
+        assert!(line.contains(&u32::MAX.to_string()));
+        assert!(line.contains(",true,"));
+        assert!(line.contains(REASON_BODY_CLOUD_LINK_WINDOW));
+        assert!(!line.contains("BODY_CLOUD_LINK_TRUNCATED"));
+    }
+
+    #[test]
+    fn body_cloud_honesty_reason_pipe_join_order() {
+        assert_eq!(
+            body_cloud_honesty_reason(true, true, true),
+            "BODY_CLOUD_LINK_WINDOW|BODY_CLOUD_LINK_MAX_LINKS_EXCEEDED|BODY_CLOUD_LINK_URL_TRUNCATED"
+        );
+        assert_eq!(
+            body_cloud_honesty_reason(false, true, false),
+            REASON_BODY_CLOUD_LINK_MAX_LINKS_EXCEEDED
+        );
+        assert!(body_cloud_honesty_reason(false, false, false).is_empty());
     }
 }

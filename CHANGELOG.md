@@ -7,6 +7,13 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0097 — Body-cloud truncation honesty)
+
+- `export_body_cloud_links.csv` no longer emits empty-URL `BODY_CLOUD_LINK_TRUNCATED` rows for every body over the 100k scan window. Window-only zero-candidate messages emit **0** CSV rows; `body_scan_window_capped_messages` counts those bodies.
+- `truncated` is a row-type discriminator. When document-shaped candidates were actually dropped, **≤1** honesty marker per message (`link_index=u32::MAX`) with reason `BODY_CLOUD_LINK_WINDOW` / `BODY_CLOUD_LINK_MAX_LINKS_EXCEEDED` / `BODY_CLOUD_LINK_URL_TRUNCATED` (pipe-joined). Umbrella `BODY_CLOUD_LINK_TRUNCATED` is gone.
+- Over-length (>2048) document-shaped URLs (including SafeLinks nested targets) are no longer silent drops: marker carries the first 2048-char prefix; prefix is **not** a kept hit and does not increment `body_cloud_links_total`.
+- Caps stay 100_000 / 2048 / 50. Closes **D-0097-body-cloud-truncate-honesty**.
+
 ### Added (0092 — Cloud named-prop NPMAP write)
 
 - Production writer replaces empty `NID_NAME_TO_ID_MAP` stub with allowlisted NPMAP when used: GUID/entry/string streams + MS-PST hash buckets (`BucketCount=251`).
@@ -69,6 +76,7 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 - **Offline body scan** for **document-shaped** commercial SharePoint/OneDrive URLs in HTML (primary) and plain body: action tokens `:w:`/`:x:` (Excel mandatory)/`:p:`/`:b:`/`:u:` (exclude `:f:`); Office/PDF extensions; `1drv.ms`; SafeLinks unwrap when nested target is document-shaped.
 - **Report pack:** `export_body_cloud_links.csv` (multi-row hit-list; full query preserved; CSV injection neutralized without URL rewrite); `export_messages.csv` appends `body_cloud_link_count`; summary `messages_with_body_cloud_links` / `body_cloud_links_total` / `body_cloud_link_truncated_messages`.
 - **Caps:** 100_000 body window, 2048 URL length, 50 links/message; truncation marker `BODY_CLOUD_LINK_TRUNCATED`.
+- **0097 follow-up:** umbrella `BODY_CLOUD_LINK_TRUNCATED` removed. Markers are now `BODY_CLOUD_LINK_WINDOW` / `BODY_CLOUD_LINK_MAX_LINKS_EXCEEDED` / `BODY_CLOUD_LINK_URL_TRUNCATED` (≤1 per message, `link_index=u32::MAX`) only when a document-shaped candidate was dropped; split `body_scan_window_capped_messages`. Update counsel greps.
 - **Product rules:** no network fetch; no invented Attachment Table rows; body hits do **not** set `is_attach_incomplete` / Mode A promote; exit 64 not forced by body-only hits; commercial host allowlist only.
 - **`fidelity_contract_v1.cloud_modern_attachments`:** attach-table **and** body-inline document-shaped detect offline; payload never Preserved; Mode A body-only known gap stated; sovereign residual **D-0085-sovereign-cloud-hosts**.
 - Closes **D-0084-body-cloud-links**. Opens **D-0085-sovereign-cloud-hosts**.
