@@ -674,6 +674,56 @@ fn fixed_template_object_tables_are_present_and_empty() {
     cleanup(&path);
 }
 
+/// 0098: enough preserve-path folders to walk `alloc_nid` through reserved
+/// nidIndex 0x30 (folder 0x602 → contents 0x60E == Contents Table Template).
+/// Before the skip, NBT last-wins left 0x60E as the empty template and
+/// `folders()` dropped that folder's messages (INC0102784: −50 verify).
+#[test]
+fn preserve_paths_many_folders_does_not_clobber_contents_template_nid() {
+    let path = scratch_path("nid_template_skip");
+    cleanup(&path);
+
+    const N: usize = 40;
+    let mut messages = Vec::with_capacity(N);
+    for i in 0..N {
+        let mut m = short_message(&format!("<f{i}@ex.com>"), &format!("S{i}"));
+        m.source_folder_path = Some(format!("F{i:02}"));
+        messages.push(m);
+    }
+    let opts = WritePstOpts {
+        folder_layout: FolderLayoutPolicy::PreservePaths {
+            multi_source_prefix: false,
+        },
+        ..WritePstOpts::default()
+    };
+    write_unicode_pst(&path, messages, &[], &opts).expect("write");
+
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let folders = pst.folders().expect("folders");
+    let listed: usize = folders.iter().map(|f| f.message_nids.len()).sum();
+    assert_eq!(
+        listed, N,
+        "folders() must list every written message; got {listed}"
+    );
+    assert!(
+        !folders.iter().any(|f| f.nid.0 == 0x602),
+        "nidIndex 0x30 must not be a user folder (collides with 0x60D-0x60F templates)"
+    );
+
+    let raw = pst
+        .read_node_data(pst_reader::NodeId(0x60E))
+        .expect("contents template 0x60E");
+    let table = pst_reader::ltp::tc::TableContext::load(raw, None).expect("load 0x60E");
+    assert_eq!(table.row_count(), 0, "0x60E must remain the empty template");
+    assert_eq!(
+        table.columns().len(),
+        27,
+        "0x60E must keep the Contents Table Template schema"
+    );
+
+    cleanup(&path);
+}
+
 // ── Associated-contents (FAI) table present for all three folders ──────────
 //
 // Codex round-6 P1 finding, Item 2: per MS-PST §2.4.2 a complete Folder object

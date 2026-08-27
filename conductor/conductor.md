@@ -229,12 +229,30 @@ Promoted from operator unique-pst smoke on Desktop `INC0102784.pst` + `INC010278
 
 **Suggested order:** **0093** → **0094** → **0095** → **0096** → **0097** (all Completed). Series N closed.
 
+## Series N+ — Verify count (template NID collision)
+
+| Track | Status | Summary |
+|---|---|---|
+| [0098-TemplateNidFolderCollision](0098-TemplateNidFolderCollision/spec.md) | **Completed** | Folder nidIndex `0x30` satellite TCs collided with MS-PST templates `0x60D`–`0x60F`; unique-pst verify **4005 vs 4055** (50 Purges orphans). `alloc_nid` skips reserved indices; duplicate NBT NID fail-closed. Closes **D-0098-template-nid-collision**. |
+
+## Series P — Unique-PST defensibility (post-0098 INC* soak)
+
+Ranked for affidavit-grade unique-PST: CRC class first, then full recipient TCs, then nested-depth flag. **No BCC track** (0082 default suppress stays). Hermes Series O frontend, if started, uses **0105+**. **0099 spec expanded 2026-08-26** (Phase 0 closed); 0100/0101 remain placeholders.
+
+| Track | Status | Summary |
+|---|---|---|
+| [0099-CrcPolyExportRiskHonesty](0099-CrcPolyExportRiskHonesty/spec.md) | **Ready** | Dual-rate poly CRC must not elevate unique-pst `export_risk`; thresholds key on effective (non-poly) `block_crc_read_rate`. INC* preflight `ok` vs `not_export_ready` (`block_crc_read_rate=1.0`, 6014 `ATTACH_STREAM_CRC`). Promotes **D-0077-systematic-poly** honesty half. Fingerprint residual. Never in-tool repair. |
+| [0100-RecipientTcMultipage](0100-RecipientTcMultipage/spec.md) | **Proposed** | Strategy A: full To/Cc recipient TC beyond 0093 single-page cap. INC* 39 msgs / 3082 truncated rows. Closes **D-0093-recipient-tc-multipage**. BCC default unchanged. |
+| [0101-EmbeddedDepthFlag](0101-EmbeddedDepthFlag/spec.md) | **Proposed** | Wire `--max-embedded-depth` (clamp 1–8, default 3) on unique-pst. INC* 4 `ATTACH_DEPTH_LIMIT` = 2 nests on one memo × 2 sources. Narrows unique-pst half of **D-0067-embedded-depth**. |
+
+**Suggested order:** **0099** → **0100** → **0101**.
+
 ## Notes
 
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups).
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099 Ready** (CRC/poly export-risk honesty); **0100–0101 Proposed** (recipient Strategy A, nested-depth flag).
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).

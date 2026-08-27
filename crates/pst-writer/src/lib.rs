@@ -103,10 +103,23 @@ pub(crate) const NID_ROOT_FOLDER: u64 = 0x122;
 // doc comments for the exact sources). These are absolute, fixed NIDs — NOT
 // derived via `Layout::alloc_nid` — one top-level node per template, each
 // containing a TCINFO column schema with zero data rows.
+//
+// **nidIndex collision (0098):** a folder allocated at nidIndex 0x30 is NID
+// 0x602; its hierarchy/contents/assoc tables are 0x60D/0x60E/0x60F — the
+// same NIDs as these templates. `Layout::alloc_nid` skips the reserved
+// indices below so user-folder tables are never clobbered by the empty
+// templates (INC0102784 unique-pst verify: 4055 written / 4005 found).
 pub(crate) const NID_HIERARCHY_TABLE_TEMPLATE: u64 = 0x60D;
 pub(crate) const NID_CONTENTS_TABLE_TEMPLATE: u64 = 0x60E;
 pub(crate) const NID_ASSOC_CONTENTS_TABLE_TEMPLATE: u64 = 0x60F;
 pub(crate) const NID_SEARCH_CONTENTS_TABLE_TEMPLATE: u64 = 0x610;
+/// nidIndex values occupied by MS-PST fixed template objects (any type
+/// suffix). `alloc_nid` must never reuse these.
+pub(crate) const RESERVED_NID_INDICES: &[u32] = &[
+    0x30, // 0x60D–0x610 table templates
+    0x33, // 0x671 attachment table template
+    0x34, // 0x692 recipient table template
+];
 /// Attachment Table Template (MS-PST fixed NID). Zero-row TC with the
 /// attachment-table column schema; per-message attachment tables also use
 /// this NID as their subnode key under the message's subnode BTree.
@@ -254,6 +267,10 @@ pub struct Layout {
     pub next_bid_counter: u64,
     pub next_nid_index: u32,
     pub used_bids: HashSet<u64>,
+    /// NBT node IDs already inserted. Duplicate NIDs last-win in the on-disk
+    /// NBT (HashMap parse) and silently clobber earlier tables — refuse at
+    /// insert (0098).
+    pub used_nids: HashSet<u64>,
     /// When set, leaf data blocks from the production chain writers are spilled
     /// immediately to the temp file (`on_disk = true`).
     pub eager: Option<EagerWriteCtx>,
@@ -335,8 +352,9 @@ impl Layout {
             blocks: Vec::new(),
             pages: Vec::new(),
             next_bid_counter: 0x10,
-            next_nid_index: 11, // reserve 1-10 for store, named map, root folder, etc.
+            next_nid_index: 11, // reserve 1-10; alloc_nid also skips template nidIndex 0x30/0x33/0x34 (0098)
             used_bids: HashSet::new(),
+            used_nids: HashSet::new(),
             eager: None,
         }
     }
@@ -426,9 +444,14 @@ impl Layout {
     }
 
     pub fn alloc_nid(&mut self, nid_type: u8) -> u64 {
-        let nid = ((self.next_nid_index as u64) << 5) | (nid_type as u64);
-        self.next_nid_index += 1;
-        nid
+        loop {
+            let index = self.next_nid_index;
+            self.next_nid_index = self.next_nid_index.saturating_add(1);
+            if RESERVED_NID_INDICES.contains(&index) {
+                continue;
+            }
+            return ((index as u64) << 5) | (nid_type as u64);
+        }
     }
 
     /// Add a node with its data block.
@@ -441,6 +464,7 @@ impl Layout {
             nid
         );
         let bid_data = self.alloc_bid(false);
+        assert!(self.used_nids.insert(nid), "duplicate NBT nid 0x{nid:X}");
         self.nodes.push(NodeEntry {
             nid,
             bid_data,
@@ -1716,5 +1740,53 @@ mod amap_complexity_tests {
             ratio4 < 50.0,
             "too many scan steps per block: {ratio4:.2} (steps={steps4} n={n4})"
         );
+    }
+}
+
+#[cfg(test)]
+mod nid_alloc_tests {
+    use super::*;
+
+    #[test]
+    fn alloc_nid_skips_reserved_template_indices() {
+        let reserved = [0x30u32, 0x33, 0x34];
+        let mut layout = Layout::new();
+        for _ in 0..80 {
+            let nid = layout.alloc_nid(NID_TYPE_NORMAL_FOLDER);
+            let idx = (nid >> 5) as u32;
+            assert!(
+                !reserved.contains(&idx),
+                "folder alloc hit reserved nidIndex {idx} (nid=0x{nid:X})"
+            );
+        }
+        let mut layout = Layout::new();
+        for _ in 0..80 {
+            let nid = layout.alloc_nid(NID_TYPE_NORMAL_MESSAGE);
+            let idx = (nid >> 5) as u32;
+            assert!(
+                !reserved.contains(&idx),
+                "message alloc hit reserved nidIndex {idx} (nid=0x{nid:X})"
+            );
+        }
+    }
+
+    #[test]
+    fn add_node_data_rejects_duplicate_nid() {
+        let mut layout = Layout::new();
+        layout
+            .add_node_data(0x222, vec![0u8; 32], 0, 0)
+            .expect("first insert");
+        let err = layout
+            .add_node_data(0x222, vec![0u8; 32], 0, 0)
+            .expect_err("duplicate must fail");
+        match err {
+            WriterError::Layout(msg) => {
+                assert!(
+                    msg.contains("0x222") || msg.contains("duplicate"),
+                    "unexpected layout message: {msg}"
+                );
+            }
+            other => panic!("expected Layout error, got {other:?}"),
+        }
     }
 }

@@ -1887,6 +1887,8 @@ pub fn write_unicode_pst_streaming(
     // column-descriptor byte-width bookkeeping needs to be correct, not any
     // row content. Registered the same way as other top-level nodes with no
     // parent/subnode (`NID_MESSAGE_STORE`/`NID_NAME_TO_ID_MAP` above).
+    // User-folder satellite TCs must not share these NIDs — `alloc_nid`
+    // skips nidIndex 0x30 / 0x33 / 0x34 (track 0098).
     let hierarchy_template_heap = {
         let mut heap = HeapBuilder::new(0xBC);
         let (columns, total_row_width) =
@@ -5326,6 +5328,11 @@ impl Layout {
         sub_bid: u64,
     ) -> Result<u64> {
         let bid_data = self.write_data_chain(data)?;
+        if !self.used_nids.insert(nid) {
+            return Err(WriterError::Layout(format!(
+                "duplicate NBT nid 0x{nid:X} (reserved template collision or double insert)"
+            )));
+        }
         self.nodes.push(NodeEntry {
             nid,
             bid_data,
@@ -5577,6 +5584,14 @@ fn write_nbt<W: Write + Seek>(
 ) -> Result<()> {
     let mut sorted: Vec<&NodeEntry> = layout.nodes.iter().collect();
     sorted.sort_by_key(|n| n.nid);
+    for w in sorted.windows(2) {
+        if w[0].nid == w[1].nid {
+            return Err(WriterError::Layout(format!(
+                "duplicate NBT nid 0x{:X}",
+                w[0].nid
+            )));
+        }
+    }
 
     let mut leaf_pages = Vec::new();
     let mut min_keys = Vec::new();

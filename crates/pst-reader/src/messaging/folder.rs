@@ -127,7 +127,7 @@ impl PstFile {
 #[cfg(test)]
 mod diagnose_real_pst {
     use super::*;
-    use crate::ltp::tc;
+    use crate::ltp::{pc, tc};
     use crate::ndb::nid::NidType;
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -135,14 +135,13 @@ mod diagnose_real_pst {
     /// Smoke-diagnose a real desktop PST without asserting product readiness.
     ///
     /// ```powershell
-    /// $env:PST_DIAG_PATH = 'C:\Users\RyanB\Desktop\INC0102784-2.pst'
+    /// $env:PST_DIAG_PATH = 'path\to\file.pst'
     /// cargo test -p pst-reader diagnose_desktop_pst -- --nocapture --ignored
     /// ```
     #[test]
     #[ignore = "manual real-PST diagnosis; set PST_DIAG_PATH"]
     fn diagnose_desktop_pst() {
-        let path = std::env::var("PST_DIAG_PATH")
-            .unwrap_or_else(|_| r"C:\Users\RyanB\Desktop\INC0102784-2.pst".to_string());
+        let path = std::env::var("PST_DIAG_PATH").expect("set PST_DIAG_PATH to a local PST");
         assert!(
             Path::new(&path).exists(),
             "PST not found at {path}; set PST_DIAG_PATH"
@@ -346,6 +345,93 @@ mod diagnose_real_pst {
                 f.message_count,
                 f.child_folder_nids.len()
             );
+        }
+
+        let mut listed: BTreeMap<u64, u64> = BTreeMap::new();
+        for f in &walked {
+            for nid in &f.message_nids {
+                listed.insert(nid.0, f.nid.0);
+            }
+        }
+        let mut nbt_msgs = 0u64;
+        let mut orphan_by_parent: BTreeMap<u64, u64> = BTreeMap::new();
+        for (nid_key, entry) in pst.nbt.iter() {
+            let nid = NodeId(*nid_key);
+            if !matches!(nid.nid_type(), NidType::NormalMessage) {
+                continue;
+            }
+            nbt_msgs += 1;
+            if listed.contains_key(nid_key) {
+                continue;
+            }
+            let parent = u64::from(entry.nid_parent);
+            *orphan_by_parent.entry(parent).or_insert(0) += 1;
+            if orphan_by_parent.values().sum::<u64>() <= 8 {
+                println!("orphan msg 0x{:X} nid_parent=0x{parent:X}", nid.0);
+            }
+        }
+        println!(
+            "nbt_normal_messages={nbt_msgs} listed_in_folders()={}",
+            listed.len()
+        );
+        println!("orphan_by_parent (parent_nid -> count):");
+        for (parent, c) in &orphan_by_parent {
+            let walked_path = walked
+                .iter()
+                .find(|f| f.nid.0 == *parent)
+                .map(|f| f.path.as_str())
+                .unwrap_or("(parent not in folders() walk)");
+            println!("  parent 0x{parent:X} count={c} path={walked_path}");
+            let folder_nid = NodeId(*parent);
+            let cont = folder_nid.contents_table();
+            if let Some(e) = pst.nbt.get(cont) {
+                println!(
+                    "    contents nid=0x{:X} bid_data={:?} bid_sub={:?} nid_parent={}",
+                    cont.0, e.bid_data, e.bid_sub, e.nid_parent
+                );
+            } else {
+                println!("    contents nid=0x{:X} MISSING from NBT", cont.0);
+            }
+            match tc::load_tc(
+                &mut pst.reader,
+                &pst.nbt,
+                &pst.bbt,
+                cont,
+                pst.header.crypt_method,
+            ) {
+                Ok(table) => {
+                    println!(
+                        "    load_tc OK rows={} cols={} row_size={}",
+                        table.row_count(),
+                        table.columns().len(),
+                        table.info().rgib[3]
+                    );
+                    println!(
+                        "    hidRowIndex=0x{:08X} hnidRows=0x{:08X}",
+                        table.info().hid_row_index.0,
+                        table.info().hnid_rows
+                    );
+                    for i in 0..table.row_count().min(3) {
+                        println!(
+                            "    row[{i}] row_id={:?} ltp={:?}",
+                            table.get_row_id(i),
+                            table.get_row_u32(i, nid::PID_TAG_LTP_ROW_ID)
+                        );
+                    }
+                }
+                Err(e) => println!("    load_tc ERR: {e}"),
+            }
+            if let Ok(pc) = pc::load_pc(
+                &mut pst.reader,
+                &pst.nbt,
+                &pst.bbt,
+                folder_nid,
+                pst.header.crypt_method,
+            ) {
+                let count = pc.get_i32(nid::PID_TAG_CONTENT_COUNT);
+                let name = pc.get_string(nid::PID_TAG_DISPLAY_NAME).ok().flatten();
+                println!("    PC DisplayName={name:?} ContentCount={count:?}");
+            }
         }
     }
 }

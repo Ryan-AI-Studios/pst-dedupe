@@ -7,6 +7,12 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0098 — Template NID / folder contents collision)
+
+- `alloc_nid` skips MS-PST reserved nidIndex `0x30` / `0x33` / `0x34` so a user folder’s hierarchy/contents/assoc tables cannot collide with empty template objects `0x60D`–`0x610` / `0x671` / `0x692`.
+- Duplicate NBT NIDs fail closed at insert and at `write_nbt` (last-wins previously dropped folder contents from `folders()` / unique-pst verify).
+- Closes **D-0098-template-nid-collision** (INC0102784: 4055 written / 4005 found; 50 Purges orphans).
+
 ### Fixed (0097 — Body-cloud truncation honesty)
 
 - `export_body_cloud_links.csv` no longer emits empty-URL `BODY_CLOUD_LINK_TRUNCATED` rows for every body over the 100k scan window. Window-only zero-candidate messages emit **0** CSV rows; `body_scan_window_capped_messages` counts those bodies.

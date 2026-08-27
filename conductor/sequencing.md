@@ -183,3 +183,19 @@
 | 4 | **0096** PermissionTypeExtract | **Completed** — four-crate extract; low signal on INC* (0 attach-table cloud) |
 
 **Suggested:** 0093 → 0094 → 0095 → 0096 → **0097** (all Completed). Series N closed.
+
+## Series N+ — Verify count (0098)
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0098** TemplateNidFolderCollision | **Completed** — skip reserved template nidIndex; INC* 4005 vs 4055 |
+
+## Series P — Unique-PST defensibility (0099–0101)
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0099** CrcPolyExportRiskHonesty | **Ready** — effective (non-poly) CRC rate for `export_risk`; D-0077-systematic-poly honesty half |
+| 2 | **0100** RecipientTcMultipage | **Proposed** — Strategy A full recipient TC; D-0093-recipient-tc-multipage |
+| 3 | **0101** EmbeddedDepthFlag | **Proposed** — unique-pst `--max-embedded-depth`; INC* 2 nests |
+
+**Suggested:** **0099** (Ready) → 0100 → 0101 (0100/0101 still Proposed). No BCC track. Frontend Series O → **0105+**.
