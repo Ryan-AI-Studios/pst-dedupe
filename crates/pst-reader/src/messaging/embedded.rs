@@ -12,7 +12,6 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{PstError, Result};
 use crate::ltp::pc::{self, PropContext};
-use crate::ltp::tc::TableContext;
 use crate::messaging::attachment::{classify_attach_pc, AttachmentDataReader, AttachmentInfo};
 use crate::messaging::message::is_truncation_or_crc;
 use crate::messaging::recipient::{opt_row_string, Recipient, RecipientType};
@@ -609,26 +608,14 @@ impl PstFile {
 
         let data =
             block::read_block_data(&mut self.reader, &self.bbt, table_entry.bid_data, crypt)?;
-        let subnode_rows = if !table_entry.bid_sub.is_null() {
-            let nested =
-                block::list_subnode_entries(&mut self.reader, &self.bbt, table_entry.bid_sub)?;
-            if nested.is_empty() {
-                None
-            } else {
-                let mut all_rows = Vec::new();
-                for entry in &nested {
-                    let entry_data =
-                        block::read_block_data(&mut self.reader, &self.bbt, entry.bid_data, crypt)?;
-                    all_rows.extend_from_slice(&entry_data);
-                }
-                Some(all_rows)
-            }
-        } else {
-            None
-        };
-
         // Corrupt attachment table → fail closed (never partial identity).
-        let table = TableContext::load(data, subnode_rows)?;
+        let table = crate::ltp::tc::load_from_table_bids(
+            data,
+            &mut self.reader,
+            &self.bbt,
+            table_entry.bid_sub,
+            crypt,
+        )?;
 
         let attach_by_nid: std::collections::HashMap<u64, &SubnodeEntry> = sub_entries
             .iter()
@@ -781,26 +768,14 @@ impl PstFile {
         let crypt = self.header.crypt_method;
         let data =
             block::read_block_data(&mut self.reader, &self.bbt, recip_entry.bid_data, crypt)?;
-        let subnode_rows = if !recip_entry.bid_sub.is_null() {
-            let nested =
-                block::list_subnode_entries(&mut self.reader, &self.bbt, recip_entry.bid_sub)?;
-            if nested.is_empty() {
-                None
-            } else {
-                let mut all_rows = Vec::new();
-                for entry in &nested {
-                    let entry_data =
-                        block::read_block_data(&mut self.reader, &self.bbt, entry.bid_data, crypt)?;
-                    all_rows.extend_from_slice(&entry_data);
-                }
-                Some(all_rows)
-            }
-        } else {
-            None
-        };
-
         // Present but unreadable → Err (not empty display-fallback).
-        let table = TableContext::load(data, subnode_rows)?;
+        let table = crate::ltp::tc::load_from_table_bids(
+            data,
+            &mut self.reader,
+            &self.bbt,
+            recip_entry.bid_sub,
+            crypt,
+        )?;
 
         let mut recipients = Vec::with_capacity(table.row_count());
         for row in 0..table.row_count() {
@@ -934,6 +909,7 @@ impl From<&AttachmentInfo> for EmbeddedChildAttach {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ltp::tc::TableContext;
 
     #[test]
     fn max_embedded_identity_depth_is_three() {
@@ -950,7 +926,7 @@ mod tests {
         // Identity maps TableContext::load Err → unread; garbage must not yield Ok.
         let garbage = vec![0u8; 64];
         assert!(
-            TableContext::load(garbage, None).is_err(),
+            TableContext::load(garbage).is_err(),
             "corrupt TC bytes must Err (not soft-empty)"
         );
     }

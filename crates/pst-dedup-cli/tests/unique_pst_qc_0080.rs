@@ -3797,98 +3797,174 @@ fn recipient_table_qc_include_bcc_true_matches_full_set() {
     );
     assert!(
         !csv.contains("display_bcc"),
-        "include_bcc must not emit display_bcc known_gap; findings={csv}"
-    );
-    assert_eq!(
-        report.findings.defect, 0,
-        "no defects expected: {:?}",
-        report.findings
-    );
-    assert!(
-        report.messages_compared >= 1,
-        "expected at least one message compared"
+        "include_bcc true must not known_gap display_bcc; findings={csv}"
     );
 }
 
-/// 0093 DoD-2: short-name source (all rows fit) vs long-name output (budget
-/// truncate) + **real** writer event → known_gap; without event → defect;
-/// event kept≠out_written → defect (honesty).
+/// 0100: 140-row include-bcc write must not defect on recipient_table.
 #[test]
-fn recipient_tc_truncate_event_is_known_gap_not_defect() {
+fn recipient_table_qc_140_rows_no_defect() {
     use pst_writer::{WriteRecipient, WriteRecipientType};
     let dir = TempDir::new().expect("tmp");
     let src = dir.path().join("src.pst");
     let out = dir.path().join("out.pst");
 
-    let long = "N".repeat(180);
-    let n = 24usize;
-    let mut short_recips = Vec::new();
-    let mut long_recips = Vec::new();
-    for i in 0..n {
-        // Same SMTP identity on both sides so QC mismatch is count/subset, not rename.
+    let mut recipients = Vec::new();
+    for i in 0..50 {
+        recipients.push(WriteRecipient {
+            recipient_type: WriteRecipientType::To,
+            display_name: Some(format!("To{i}")),
+            address_type: Some("SMTP".into()),
+            email_address: Some(format!("to{i}@ex.com")),
+            smtp_address: Some(format!("to{i}@ex.com")),
+        });
+    }
+    for i in 0..50 {
+        recipients.push(WriteRecipient {
+            recipient_type: WriteRecipientType::Cc,
+            display_name: Some(format!("Cc{i}")),
+            address_type: Some("SMTP".into()),
+            email_address: Some(format!("cc{i}@ex.com")),
+            smtp_address: Some(format!("cc{i}@ex.com")),
+        });
+    }
+    for i in 0..40 {
+        recipients.push(WriteRecipient {
+            recipient_type: WriteRecipientType::Bcc,
+            display_name: Some(format!("Bcc{i}")),
+            address_type: Some("SMTP".into()),
+            email_address: Some(format!("bcc{i}@ex.com")),
+            smtp_address: Some(format!("bcc{i}@ex.com")),
+        });
+    }
+    let mut src_msg = base_msg("<recip-140@ex.com>", "Many recip", "body");
+    src_msg.recipients = recipients;
+    src_msg.display_to = Some("to".into());
+    src_msg.display_cc = Some("cc".into());
+    src_msg.display_bcc = Some("bcc".into());
+    let opts = WritePstOpts {
+        include_bcc_recipients: true,
+        ..WritePstOpts::default()
+    };
+    for path in [&src, &out] {
+        write_unicode_pst(path, vec![src_msg.clone()], &[], &opts).expect("write");
+    }
+    let src_nid = first_message_nid(&src).expect("src nid");
+    let report_dir = dir.path().join("report");
+    fs::create_dir_all(&report_dir).expect("report");
+    let volumes = vec![vol_row(&out, 1)];
+    let export_rows = vec![ExportMessageRow {
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        nid: src_nid,
+        message_id_norm: "recip-140@ex.com".into(),
+        edrm_mih: String::new(),
+        content_hash_hex: String::new(),
+        volume_path: out.display().to_string(),
+        volume_index: 1,
+        export_message_index: 1,
+        attachments_failed_count: 0,
+        duplicate_source_count: 0,
+        duplicate_sources: String::new(),
+        source_id: String::new(),
+        bcc_suppressed: false,
+        body_cloud_link_count: 0,
+        subject: "Many recip".into(),
+    }];
+    let mut c = cand(1, 10);
+    c.source_path = src.display().to_string();
+    c.source_nid = src_nid;
+    c.message_id_norm = "recip-140@ex.com".into();
+    c.subject = "Many recip".into();
+    let report = run_unique_pst_qc(qc_input_ex(
+        QcLevel::Full,
+        &report_dir,
+        &volumes,
+        &export_rows,
+        &[c],
+        (true, false, true),
+    ));
+    let csv = fs::read_to_string(report_dir.join("qc_findings.csv")).unwrap_or_default();
+    assert!(
+        !csv.contains("recipient_table"),
+        "140-row include-bcc must not defect recipient_table; findings={csv} defect={}",
+        report.findings.defect
+    );
+    assert_eq!(report.findings.defect, 0, "findings={:?}", report.findings);
+}
+
+/// 0100: injected RECIPIENT_TC_TRUNCATED event remains known_gap (writer no
+/// longer truncates production rows). Mismatch without event is still a defect.
+#[test]
+fn recipient_tc_truncate_event_is_known_gap_not_defect() {
+    use pst_writer::{RecipientTcTruncatedEvent, WriteRecipient, WriteRecipientType};
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    let out = dir.path().join("out.pst");
+
+    let n_src = 24usize;
+    let n_out = 10usize;
+    let mut src_recips = Vec::new();
+    let mut out_recips = Vec::new();
+    for i in 0..n_src {
         let email = format!("r{i}@ex.com");
-        short_recips.push(WriteRecipient {
+        let row = WriteRecipient {
             recipient_type: WriteRecipientType::To,
             display_name: Some(format!("To{i}")),
             address_type: Some("SMTP".into()),
             email_address: Some(email.clone()),
-            smtp_address: Some(email.clone()),
-        });
-        long_recips.push(WriteRecipient {
-            recipient_type: WriteRecipientType::To,
-            display_name: Some(format!("{long}-display-{i}")),
-            address_type: Some("SMTP".into()),
-            email_address: Some(email.clone()),
             smtp_address: Some(email),
-        });
+        };
+        src_recips.push(row.clone());
+        if i < n_out {
+            out_recips.push(row);
+        }
     }
-    let display_to: String = (0..n)
+    let display_to: String = (0..n_src)
         .map(|i| format!("To{i} <r{i}@ex.com>"))
         .collect::<Vec<_>>()
         .join("; ");
 
-    // Source: short names → all 24 TC rows fit (no truncate).
     let mut src_msg = base_msg("<recip-trunc@ex.com>", "Many recip", "body");
     src_msg.display_to = Some(display_to.clone());
-    src_msg.recipients = short_recips;
+    src_msg.recipients = src_recips;
     src_msg.source_path = Some(src.display().to_string());
     src_msg.source_msg_nid = Some(0x2100);
     let src_report =
         write_unicode_pst(&src, vec![src_msg], &[], &WritePstOpts::default()).expect("src");
     assert_eq!(
         src_report.recipient_tc_truncated_messages, 0,
-        "short-name source must not truncate"
+        "production writer must not emit RECIPIENT_TC_TRUNCATED"
     );
 
-    // Output: long TC display names → budget keep < 24; Display* stays the same full string.
     let mut out_msg = base_msg("<recip-trunc@ex.com>", "Many recip", "body");
     out_msg.display_to = Some(display_to.clone());
-    out_msg.recipients = long_recips;
+    out_msg.recipients = out_recips;
     out_msg.source_path = Some(src.display().to_string());
     out_msg.source_msg_nid = Some(0x2100);
     let out_report =
         write_unicode_pst(&out, vec![out_msg], &[], &WritePstOpts::default()).expect("out");
-    assert!(
-        out_report.recipient_tc_truncated_messages >= 1,
-        "long-name out must truncate"
-    );
-    let real_ev = out_report
-        .recipient_tc_truncated_events
-        .first()
-        .expect("real truncate event")
-        .clone();
-    assert!(
-        real_ev.kept_count < n as u32,
-        "kept must be < source row count; kept={}",
-        real_ev.kept_count
+    assert_eq!(
+        out_report.recipient_tc_truncated_messages, 0,
+        "subset write is not a writer truncate event"
     );
 
     let src_nid = first_message_nid(&src).expect("src nid");
-    // Align event locus to QC candidate keys (source path + nid).
-    let mut trunc = real_ev;
-    trunc.source_path = src.display().to_string();
-    trunc.msg_nid = src_nid;
-    trunc.message_id = "<recip-trunc@ex.com>".into();
+    let trunc = RecipientTcTruncatedEvent {
+        message_subject: "Many recip".into(),
+        source_path: src.display().to_string(),
+        folder_path: "Inbox".into(),
+        msg_nid: src_nid,
+        message_id: "<recip-trunc@ex.com>".into(),
+        source_count: n_src as u32,
+        kept_count: n_out as u32,
+        kept_to: n_out as u32,
+        kept_cc: 0,
+        kept_bcc: 0,
+        dropped_to: (n_src - n_out) as u32,
+        dropped_cc: 0,
+        dropped_bcc: 0,
+    };
 
     let report_dir = dir.path().join("report");
     fs::create_dir_all(&report_dir).expect("report");

@@ -518,9 +518,9 @@ Messages with **no readable recipient table** still use the pre-0082 display-str
 
 **Reviewer note:** two near-identical messages in the unique-PST with `bcc_suppressed=true` are **not** a dedupe failure — BCC variance was kept for identity and omitted from the deliverable by policy. See the [runbook](unique-pst-ediscovery-runbook.md).
 
-### Recipient TC single-page budget (0093)
+### Recipient TC Strategy A (0100)
 
-Per-message recipient tables are single-page HN today. Very large To/Cc/Bcc lists may be **budget-truncated** (To first, then Cc, then Bcc; starting hint 48 is not an invariant). Summary surfaces `recipient_tc_truncated_messages`, `recipient_rows_truncated`, and `recipient_tc_truncations[]` (`RECIPIENT_TC_TRUNCATED`). Display* strings stay full. Differential QC treats a matching truncate event as **`known_gap`** (not `defect`); unexplained row loss without an event remains a defect. Multi-page TC = residual **D-0093-recipient-tc-multipage**.
+Per-message recipient tables write **every included row** (To/Cc; BCC still 0082 opt-in). The row matrix is a subnode (`hnidRows` = NID) packed with MS-PST §2.3.4.4 `RowsPerBlock = Floor(8176 / row_width)` (live 15-column schema width **56** → **146** rows per leaf). Recipient-table node data uses a multi-page HN (HNHDR + HNPAGEHDR; HID `hidIndex` 1-based **per page**). Empty tables keep `hnidRows = 0` and `bid_sub = 0`. Production unique-pst does **not** emit `RECIPIENT_TC_TRUNCATED` for included rows; Display* stay full. Differential QC still treats an **injected** matching truncate event as **`known_gap`**; unexplained To/Cc loss without an event remains a **defect**. Residuals: attachment-table TC (`D-0093-attachment-tc-page`); HNBITMAPHDR pages 8/136/264 (`D-0100-hn-bitmap-hdr`, fail closed).
 
 **Inline attachments:** signature logos can false-split attachment-parity comparisons. `--identity-ignore-inline-attachments` (opt-in, merge-increasing) uses MAPI flags (`PidTagAttachContentId` / rendered-in-body / hidden), not a size threshold.
 
