@@ -7,6 +7,12 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0099 — CRC / poly export-risk honesty)
+
+- Unique-pst `export_risk` keys catastrophic/advisory `block_crc_read_rate` on the **effective** (non-poly) rate from scan `files[]`. Dual-rate poly-class CRC (`page≥0.50` AND `block≥0.50`) no longer forces `not_export_ready` / `re_export_recommended`.
+- `ATTACH_STREAM_CRC` Info is discounted only when every CRC-noisy source is poly-class. Localized-block jobs and `attach_fail_rate` / failed volume / scan preflight are unchanged (fail closed).
+- Attest fields: `effective_block_crc_read_rate`, `poly_class_crc_discounted`, `discount_attach_stream_crc`, `poly_class_crc_sources`. Raw CRC counters stay on `inputs`. Closes **D-0077-systematic-poly** (export-risk half). Residual: `D-0077-poly-fingerprint`, `D-0099-attach-crc-job-level`.
+
 ### Fixed (0098 — Template NID / folder contents collision)
 
 - `alloc_nid` skips MS-PST reserved nidIndex `0x30` / `0x33` / `0x34` so a user folder’s hierarchy/contents/assoc tables cannot collide with empty template objects `0x60D`–`0x610` / `0x671` / `0x692`.

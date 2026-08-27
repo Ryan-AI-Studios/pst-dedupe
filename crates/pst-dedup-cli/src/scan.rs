@@ -1259,7 +1259,8 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         //   **blocks** Tier-2.
         // - `crc_suspect_messages` stays the pre-clear hit count (read evidence).
         // - Raw page/block/BID counters and rates are never zeroed.
-        // - `export_risk` still sees raw `block_crc_read_rate`.
+        // - Unique-pst `export_risk` (0099) keys thresholds on effective (non-poly)
+        //   `block_crc_read_rate`; poly-class CRC alone does not elevate post eval.
         // - Streaming unique may under-merge until keep-set rebuild (poly residual).
         let poly_class = is_poly_class_crc(
             tel.page_crc_mismatches,
@@ -1816,8 +1817,10 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
 ///
 /// When dual-rate fires, scan **clears** false-positive `CRC_SUSPECT` identity
 /// taint (reclassify) so Tier-2 proceeds without an auto-allow exception. Raw
-/// CRC counters remain for reporting and `export_risk`. Residual: true poly
-/// fingerprint/allowlist vs dual-rate heuristic.
+/// CRC counters remain for reporting. Unique-pst `export_risk` (0099) keys
+/// thresholds on the **effective** (non-poly) read rate; poly-class CRC alone
+/// does not elevate post evaluation. Residual: true poly fingerprint/allowlist
+/// vs dual-rate heuristic (`D-0077-poly-fingerprint`).
 ///
 /// ```text
 /// poly_class = (block_crc/block_reads ≥ 0.50) AND (page_crc/page_reads ≥ 0.50)

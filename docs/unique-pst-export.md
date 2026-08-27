@@ -288,11 +288,15 @@ Scan and unique-pst report page/block CRC and BID mismatch counters **per source
 | Signal | Read it as | Action |
 |---|---|---|
 | `distinct_bad_bids` small, `page_crc_mismatches` huge | a few bad blocks re-read many times | usually proceed; check attach fail rate |
-| `distinct_bad_bids` large / `exact=false` | widespread block corruption | re-export before trusting the unique set |
+| `distinct_bad_bids` large / `exact=false` | widespread block corruption **unless** `poly_class_crc` is true (every block looks “bad” on a non-standard CRC store) | re-export only when not poly-class; on poly-class this is expected |
 | `crc_suspect_messages` > 0 | documents **kept with possibly-wrong bytes**; held out of Tier 2 by default | higher unique count expected; flagged, not lost |
-| `block_crc_read_rate` ≥ 0.15 | the medium is failing, not the mailbox | `export_risk = not_export_ready` — re-image or re-export |
+| `block_crc_read_rate` ≥ 0.15 | the medium is failing, not the mailbox — **unless** that rate is poly-class noise excluded via `effective_block_crc_read_rate` | `export_risk = not_export_ready` when the **effective** (non-poly) rate crosses 0.15 |
+| `poly_class_crc` / `poly_class_crc_discounted` | computed≠stored is the store’s CRC (aspose / Permute-class), not a bad image | raw counters stay on `inputs` for the affidavit; post-export CRC gates do not elevate |
+| `ATTACH_STREAM_CRC` Info on a poly-class-only job | same trailer mismatch as pages/blocks | does **not** elevate `export_risk` after 0099 (`discount_attach_stream_crc`) |
 | `attach_fail_rate` over threshold | attachment payloads unreadable | re-export; the 0073 ledger names which |
-| `export_risk = not_export_ready` | failed volume, catastrophic rate, or scan already said so | do not hand off |
+| `export_risk = not_export_ready` | failed volume, catastrophic **effective** rate, attach fail, or scan already said so | do not hand off |
+
+`poly_class_crc_discounted` **may co-occur** with a non-CRC `not_export_ready` reason (`scan_recommendation=not_export_ready`, failed volume, attach fail). Both are true; `level` is still `max(scan, post)`. The Desk wizard banners on `level`.
 
 **CLI:** `--crc-log-limit` (default 10), `--crc-log-interval-secs` (default 30), `--allow-crc-suspect-tier2` (default off).
 

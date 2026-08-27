@@ -111,6 +111,7 @@
 | 53 | P2 N | **0095** UniquePstFolderTreeNormalize | ✅ Completed | Alias strip + lazy Unique Mail + D-0070 pre-seed closed; QC key symmetry + DI claimable |
 | 54 | P3 N | **0096** PermissionTypeExtract | ✅ Completed | Four-crate extract + PtypInteger32; closes D-0092-permission-type-extract |
 | 55 | P3 N | **0097** BodyCloudTruncationHonesty | ✅ Completed | C+A hybrid + split window_capped; closes D-0097-body-cloud-truncate-honesty |
+| 56 | P0 P | **0099** CrcPolyExportRiskHonesty | ✅ Completed | Effective (non-poly) CRC rate for unique-pst `export_risk`; D-0077-systematic-poly honesty half |
 
 ## Series K spine (clean unique export)
 
@@ -194,8 +195,8 @@
 
 | Order | Track | Notes |
 |---|---|---|
-| 1 | **0099** CrcPolyExportRiskHonesty | **Ready** — effective (non-poly) CRC rate for `export_risk`; D-0077-systematic-poly honesty half |
+| 1 | **0099** CrcPolyExportRiskHonesty | **Completed** — effective (non-poly) CRC rate for `export_risk`; D-0077-systematic-poly honesty half |
 | 2 | **0100** RecipientTcMultipage | **Proposed** — Strategy A full recipient TC; D-0093-recipient-tc-multipage |
 | 3 | **0101** EmbeddedDepthFlag | **Proposed** — unique-pst `--max-embedded-depth`; INC* 2 nests |
 
-**Suggested:** **0099** (Ready) → 0100 → 0101 (0100/0101 still Proposed). No BCC track. Frontend Series O → **0105+**.
+**Suggested:** **0099** (Completed) → 0100 → 0101 (0100/0101 still Proposed). No BCC track. Frontend Series O → **0105+**.
