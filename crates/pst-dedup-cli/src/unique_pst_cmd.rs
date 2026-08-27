@@ -1133,6 +1133,7 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
             failed_volume_index: None,
             scan_recommendation: scan.preflight.recommendation,
             attach_stream_crc_events: 0,
+            ..Default::default()
         },
     );
     let summary_abs =
@@ -3051,6 +3052,12 @@ pub fn run_unique_pst_with_options(
     } else {
         0.0
     };
+    // 0099: per-source poly class from scan files[]. If --jobs ever omits
+    // per-source CRC (D-0077-parallel-attrib), skip adjustment (fail closed:
+    // empty files → effective=None, no discount).
+    let crc_classes =
+        crate::unique_export_report::crc_source_classes_from_files(&outcome.summary.files);
+    let crc_adj = crate::unique_export_report::poly_crc_risk_adjustment(&crc_classes);
     let export_risk = crate::unique_export_report::compute_export_risk(
         &outcome.summary.preflight.recommendation,
         &crate::unique_export_report::ExportRiskInputs {
@@ -3062,6 +3069,10 @@ pub fn run_unique_pst_with_options(
             failed_volume_index: export_section.failed_volume_index,
             scan_recommendation: outcome.summary.preflight.recommendation,
             attach_stream_crc_events,
+            effective_block_crc_read_rate: crc_adj.effective_block_crc_read_rate,
+            poly_class_crc_discounted: crc_adj.poly_class_crc_discounted,
+            discount_attach_stream_crc: crc_adj.discount_attach_stream_crc,
+            poly_class_crc_sources: crc_adj.poly_class_crc_sources,
         },
     );
 
@@ -3335,6 +3346,9 @@ pub fn run_unique_pst_with_options(
         );
         // 0077 DoD-13: numbers/codes only — no PST-derived strings.
         println!("  export_risk:      {}", summary.export_risk.level.as_str());
+        if summary.export_risk.inputs.poly_class_crc_discounted {
+            println!("  poly_class_crc_discounted: true");
+        }
         // 0075 honesty counters (always printed, including when 0).
         println!(
             "  winners_from_recoverable_items: {}",

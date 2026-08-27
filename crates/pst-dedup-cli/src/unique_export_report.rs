@@ -360,7 +360,97 @@ impl RecipientTcTruncationRow {
     }
 }
 
-/// Inputs for post-export risk evaluation (0077).
+/// Per-source CRC class copied 1:1 from [`crate::scan::FileScanStats`] (0099).
+///
+/// Do not pre-average rates here — [`poly_crc_risk_adjustment`] owns the sums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrcSourceClass {
+    pub poly_class_crc: bool,
+    pub page_crc_mismatches: u64,
+    pub block_crc_mismatches: u64,
+    pub page_reads: u64,
+    pub block_reads: u64,
+}
+
+/// Post-export CRC adjustment: thresholds key on **effective** (non-poly) rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PolyCrcRiskAdjustment {
+    /// Non-poly CRC sum / non-poly reads. `None` if per-source stats missing (fail closed).
+    pub effective_block_crc_read_rate: Option<f64>,
+    /// True when ≥1 poly-class source was excluded from the rate used for thresholds.
+    pub poly_class_crc_discounted: bool,
+    /// True when attach-stream CRC can only be poly noise (no CRC-noisy non-poly source).
+    pub discount_attach_stream_crc: bool,
+    pub poly_class_crc_sources: u64,
+    pub non_poly_crc_noisy_sources: u64,
+}
+
+fn crc_noisy(s: &CrcSourceClass) -> bool {
+    s.page_crc_mismatches.saturating_add(s.block_crc_mismatches) > 0
+}
+
+/// Map scan `files[]` to CRC class rows (raw counters; no pre-averaged rates).
+pub fn crc_source_classes_from_files(files: &[crate::scan::FileScanStats]) -> Vec<CrcSourceClass> {
+    files
+        .iter()
+        .map(|f| CrcSourceClass {
+            poly_class_crc: f.poly_class_crc,
+            page_crc_mismatches: f.page_crc_mismatches,
+            block_crc_mismatches: f.block_crc_mismatches,
+            page_reads: f.page_reads,
+            block_reads: f.block_reads,
+        })
+        .collect()
+}
+
+/// Effective (non-poly) CRC rate and attach-CRC discount flags (0099).
+///
+/// Empty `sources` → fail closed (`effective = None`, discount flags false).
+pub fn poly_crc_risk_adjustment(sources: &[CrcSourceClass]) -> PolyCrcRiskAdjustment {
+    if sources.is_empty() {
+        return PolyCrcRiskAdjustment {
+            effective_block_crc_read_rate: None,
+            poly_class_crc_discounted: false,
+            discount_attach_stream_crc: false,
+            poly_class_crc_sources: 0,
+            non_poly_crc_noisy_sources: 0,
+        };
+    }
+
+    let poly_class_crc_sources = sources.iter().filter(|s| s.poly_class_crc).count() as u64;
+    let non_poly_crc_noisy_sources = sources
+        .iter()
+        .filter(|s| crc_noisy(s) && !s.poly_class_crc)
+        .count() as u64;
+
+    let mut crc_sum = 0u64;
+    let mut reads = 0u64;
+    for s in sources.iter().filter(|s| !s.poly_class_crc) {
+        crc_sum =
+            crc_sum.saturating_add(s.page_crc_mismatches.saturating_add(s.block_crc_mismatches));
+        reads = reads.saturating_add(s.page_reads.saturating_add(s.block_reads));
+    }
+    let effective = if reads == 0 {
+        0.0
+    } else {
+        (crc_sum as f64 / reads as f64).clamp(0.0, 1.0)
+    };
+
+    // Spec §3.1 `!any(crc_noisy && !poly)` plus §3.4 all-clean (flag false):
+    // attach CRC is "only poly noise" when a poly source was actually excluded.
+    let discount_attach_stream_crc = poly_class_crc_sources >= 1 && non_poly_crc_noisy_sources == 0;
+    let poly_class_crc_discounted = poly_class_crc_sources >= 1;
+
+    PolyCrcRiskAdjustment {
+        effective_block_crc_read_rate: Some(effective),
+        poly_class_crc_discounted,
+        discount_attach_stream_crc,
+        poly_class_crc_sources,
+        non_poly_crc_noisy_sources,
+    }
+}
+
+/// Inputs for post-export risk evaluation (0077 / 0099).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExportRiskInputs {
     pub attach_fail_rate: f64,
@@ -374,6 +464,37 @@ pub struct ExportRiskInputs {
     /// Warning-only: does not raise `attachments_failed` / attach_fail_rate.
     #[serde(default)]
     pub attach_stream_crc_events: u64,
+    /// Rate thresholds use when `Some` (non-poly sources). `None` → raw (fail closed).
+    #[serde(default)]
+    pub effective_block_crc_read_rate: Option<f64>,
+    /// Attest: ≥1 poly-class source was excluded from the keyed rate.
+    #[serde(default)]
+    pub poly_class_crc_discounted: bool,
+    /// Skip `attach_stream_crc_events>0` advisory (poly-only CRC noise).
+    #[serde(default)]
+    pub discount_attach_stream_crc: bool,
+    /// Telemetry copy of scan `poly_class_crc_sources`.
+    #[serde(default)]
+    pub poly_class_crc_sources: u64,
+}
+
+impl Default for ExportRiskInputs {
+    fn default() -> Self {
+        Self {
+            attach_fail_rate: 0.0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            degraded_winner_rate: 0.0,
+            partial: false,
+            failed_volume_index: None,
+            scan_recommendation: PreflightRecommendation::Ok,
+            attach_stream_crc_events: 0,
+            effective_block_crc_read_rate: None,
+            poly_class_crc_discounted: false,
+            discount_attach_stream_crc: false,
+            poly_class_crc_sources: 0,
+        }
+    }
 }
 
 /// Visible thresholds for `export_risk` (serde-defaulted; 0077).
@@ -458,12 +579,28 @@ pub fn compute_export_risk_with_thresholds(
         reasons.push("scan_preflight=re_export_recommended".into());
     }
 
+    // 0099: thresholds key on effective (non-poly) rate when present; else raw.
+    let keyed_block_crc_read_rate = inputs
+        .effective_block_crc_read_rate
+        .unwrap_or(inputs.block_crc_read_rate);
+    let using_effective = inputs.effective_block_crc_read_rate.is_some();
+    let crc_rate_reason = |rate: f64, threshold: f64| -> String {
+        if using_effective {
+            format!("effective_block_crc_read_rate={rate:.3}>{threshold}")
+        } else {
+            format!("block_crc_read_rate={rate:.3}>{threshold}")
+        }
+    };
+    let is_crc_rate_reason = |r: &str| {
+        r.starts_with("block_crc_read_rate=") || r.starts_with("effective_block_crc_read_rate=")
+    };
+
     // Catastrophic rates → not_export_ready (may fire without failed volume).
-    if inputs.block_crc_read_rate > thresholds.catastrophic_block_crc_read_rate {
+    if keyed_block_crc_read_rate > thresholds.catastrophic_block_crc_read_rate {
         post = PreflightRecommendation::NotExportReady;
-        reasons.push(format!(
-            "block_crc_read_rate={:.3}>{}",
-            inputs.block_crc_read_rate, thresholds.catastrophic_block_crc_read_rate
+        reasons.push(crc_rate_reason(
+            keyed_block_crc_read_rate,
+            thresholds.catastrophic_block_crc_read_rate,
         ));
     }
     if inputs.attach_fail_rate > thresholds.catastrophic_attach_fail_rate {
@@ -483,11 +620,11 @@ pub fn compute_export_risk_with_thresholds(
                 inputs.attach_fail_rate, thresholds.max_attach_fail_rate
             ));
         }
-        if inputs.block_crc_read_rate > thresholds.max_block_crc_read_rate {
+        if keyed_block_crc_read_rate > thresholds.max_block_crc_read_rate {
             post = PreflightRecommendation::ReExportRecommended;
-            reasons.push(format!(
-                "block_crc_read_rate={:.3}>{}",
-                inputs.block_crc_read_rate, thresholds.max_block_crc_read_rate
+            reasons.push(crc_rate_reason(
+                keyed_block_crc_read_rate,
+                thresholds.max_block_crc_read_rate,
             ));
         }
         if inputs.degraded_winner_rate > thresholds.max_degraded_winner_rate {
@@ -499,7 +636,8 @@ pub fn compute_export_risk_with_thresholds(
         }
         // Final attach stream CRC is warning-only (not attach_fail_rate) but still
         // elevates export_risk so operators re-export rather than trust the bytes.
-        if inputs.attach_stream_crc_events > 0 {
+        // 0099: skip when attach CRC can only be poly-class noise.
+        if inputs.attach_stream_crc_events > 0 && !inputs.discount_attach_stream_crc {
             post = PreflightRecommendation::ReExportRecommended;
             reasons.push(format!(
                 "attach_stream_crc_events={}>0",
@@ -516,17 +654,16 @@ pub fn compute_export_risk_with_thresholds(
                 inputs.attach_fail_rate, thresholds.max_attach_fail_rate
             ));
         }
-        if inputs.block_crc_read_rate > thresholds.max_block_crc_read_rate
-            && !reasons
-                .iter()
-                .any(|r| r.starts_with("block_crc_read_rate="))
+        if keyed_block_crc_read_rate > thresholds.max_block_crc_read_rate
+            && !reasons.iter().any(|r| is_crc_rate_reason(r))
         {
-            reasons.push(format!(
-                "block_crc_read_rate={:.3}>{}",
-                inputs.block_crc_read_rate, thresholds.max_block_crc_read_rate
+            reasons.push(crc_rate_reason(
+                keyed_block_crc_read_rate,
+                thresholds.max_block_crc_read_rate,
             ));
         }
         if inputs.attach_stream_crc_events > 0
+            && !inputs.discount_attach_stream_crc
             && !reasons
                 .iter()
                 .any(|r| r.starts_with("attach_stream_crc_events="))
@@ -536,6 +673,10 @@ pub fn compute_export_risk_with_thresholds(
                 inputs.attach_stream_crc_events
             ));
         }
+    }
+
+    if inputs.poly_class_crc_discounted {
+        reasons.push("poly_class_crc_discounted".into());
     }
 
     reasons.sort();
@@ -2301,14 +2442,8 @@ mod tests {
     #[test]
     fn export_risk_monotone_composition() {
         let inputs = ExportRiskInputs {
-            attach_fail_rate: 0.0,
-            block_crc_rate: 0.0,
-            block_crc_read_rate: 0.0,
-            degraded_winner_rate: 0.0,
-            partial: false,
-            failed_volume_index: None,
             scan_recommendation: PreflightRecommendation::ReExportRecommended,
-            attach_stream_crc_events: 0,
+            ..Default::default()
         };
         let risk = compute_export_risk(&PreflightRecommendation::ReExportRecommended, &inputs);
         assert_eq!(risk.level, PreflightRecommendation::ReExportRecommended);
@@ -2327,13 +2462,7 @@ mod tests {
     fn export_risk_advisory_cannot_reach_not_export_ready() {
         let inputs = ExportRiskInputs {
             attach_fail_rate: 0.06, // above 0.05 advisory, well below 0.50 catastrophic
-            block_crc_rate: 0.0,
-            block_crc_read_rate: 0.0,
-            degraded_winner_rate: 0.0,
-            partial: false,
-            failed_volume_index: None,
-            scan_recommendation: PreflightRecommendation::Ok,
-            attach_stream_crc_events: 0,
+            ..Default::default()
         };
         let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
         assert_eq!(risk.level, PreflightRecommendation::ReExportRecommended);
@@ -2349,14 +2478,9 @@ mod tests {
     #[test]
     fn export_risk_catastrophic_read_rate_without_failed_volume() {
         let inputs = ExportRiskInputs {
-            attach_fail_rate: 0.0,
             block_crc_rate: 1.0,
             block_crc_read_rate: 0.20,
-            degraded_winner_rate: 0.0,
-            partial: false,
-            failed_volume_index: None,
-            scan_recommendation: PreflightRecommendation::Ok,
-            attach_stream_crc_events: 0,
+            ..Default::default()
         };
         let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
         assert_eq!(risk.level, PreflightRecommendation::NotExportReady);
@@ -2373,14 +2497,8 @@ mod tests {
     #[test]
     fn export_risk_attach_stream_crc_events_recommend_reexport() {
         let inputs = ExportRiskInputs {
-            attach_fail_rate: 0.0,
-            block_crc_rate: 0.0,
-            block_crc_read_rate: 0.0,
-            degraded_winner_rate: 0.0,
-            partial: false,
-            failed_volume_index: None,
-            scan_recommendation: PreflightRecommendation::Ok,
             attach_stream_crc_events: 1,
+            ..Default::default()
         };
         let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
         assert_eq!(risk.level, PreflightRecommendation::ReExportRecommended);
@@ -2400,6 +2518,450 @@ mod tests {
             "reasons={:?}",
             risk.reasons
         );
+    }
+
+    fn poly_class(
+        page_crc: u64,
+        page_reads: u64,
+        block_crc: u64,
+        block_reads: u64,
+    ) -> CrcSourceClass {
+        CrcSourceClass {
+            poly_class_crc: true,
+            page_crc_mismatches: page_crc,
+            block_crc_mismatches: block_crc,
+            page_reads,
+            block_reads,
+        }
+    }
+
+    fn localized(
+        page_crc: u64,
+        page_reads: u64,
+        block_crc: u64,
+        block_reads: u64,
+    ) -> CrcSourceClass {
+        CrcSourceClass {
+            poly_class_crc: false,
+            page_crc_mismatches: page_crc,
+            block_crc_mismatches: block_crc,
+            page_reads,
+            block_reads,
+        }
+    }
+
+    fn file_stats(
+        poly: bool,
+        page_crc: u64,
+        page_reads: u64,
+        block_crc: u64,
+        block_reads: u64,
+    ) -> crate::scan::FileScanStats {
+        crate::scan::FileScanStats {
+            path: "x.pst".into(),
+            name: "x.pst".into(),
+            status: dedup_engine::integrity::FileScanStatus::Opened,
+            folders: 0,
+            messages: 0,
+            recoverable_messages: 0,
+            duplicates: 0,
+            skipped: 0,
+            skipped_by_reason: BTreeMap::new(),
+            degraded_messages: 0,
+            degraded_by_reason: BTreeMap::new(),
+            error_code: None,
+            error: None,
+            page_crc_mismatches: page_crc,
+            block_crc_mismatches: block_crc,
+            block_bid_mismatches: 0,
+            distinct_bad_bids: 0,
+            crc_suspect_messages: 0,
+            page_reads,
+            block_reads,
+            poly_class_crc: poly,
+        }
+    }
+
+    fn inputs_from_sources(
+        raw_block: f64,
+        attach_crc: u64,
+        sources: &[CrcSourceClass],
+    ) -> ExportRiskInputs {
+        let adj = poly_crc_risk_adjustment(sources);
+        ExportRiskInputs {
+            block_crc_read_rate: raw_block,
+            attach_stream_crc_events: attach_crc,
+            effective_block_crc_read_rate: adj.effective_block_crc_read_rate,
+            poly_class_crc_discounted: adj.poly_class_crc_discounted,
+            discount_attach_stream_crc: adj.discount_attach_stream_crc,
+            poly_class_crc_sources: adj.poly_class_crc_sources,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn poly_crc_all_poly_zero_effective() {
+        let sources = [poly_class(100, 100, 100, 100), poly_class(80, 80, 80, 80)];
+        let adj = poly_crc_risk_adjustment(&sources);
+        assert_eq!(adj.effective_block_crc_read_rate, Some(0.0));
+        assert!(adj.poly_class_crc_discounted);
+        assert!(adj.discount_attach_stream_crc);
+        assert_eq!(adj.poly_class_crc_sources, 2);
+        assert_eq!(adj.non_poly_crc_noisy_sources, 0);
+    }
+
+    #[test]
+    fn poly_crc_localized_only_passthrough() {
+        // High block, low page — not dual-rate. Combined rate = 85/200 = 0.425.
+        let sources = [localized(5, 100, 80, 100)];
+        let adj = poly_crc_risk_adjustment(&sources);
+        assert_eq!(adj.effective_block_crc_read_rate, Some(85.0 / 200.0));
+        assert!(!adj.poly_class_crc_discounted);
+        assert!(!adj.discount_attach_stream_crc);
+        assert_eq!(adj.non_poly_crc_noisy_sources, 1);
+    }
+
+    #[test]
+    fn poly_crc_mixed_poly_plus_localized() {
+        let sources = [
+            poly_class(100, 100, 100, 100),
+            localized(0, 0, 20, 100), // 20/100 = 0.20
+        ];
+        let adj = poly_crc_risk_adjustment(&sources);
+        assert_eq!(adj.effective_block_crc_read_rate, Some(0.20));
+        assert!(adj.poly_class_crc_discounted);
+        assert!(!adj.discount_attach_stream_crc);
+        assert_eq!(adj.non_poly_crc_noisy_sources, 1);
+    }
+
+    #[test]
+    fn poly_crc_mixed_poly_plus_clean() {
+        let sources = [poly_class(100, 100, 100, 100), localized(0, 100, 0, 100)];
+        let adj = poly_crc_risk_adjustment(&sources);
+        assert_eq!(adj.effective_block_crc_read_rate, Some(0.0));
+        assert!(adj.poly_class_crc_discounted);
+        assert!(adj.discount_attach_stream_crc);
+        assert_eq!(adj.non_poly_crc_noisy_sources, 0);
+    }
+
+    #[test]
+    fn poly_crc_empty_fail_closed() {
+        let adj = poly_crc_risk_adjustment(&[]);
+        assert_eq!(adj.effective_block_crc_read_rate, None);
+        assert!(!adj.poly_class_crc_discounted);
+        assert!(!adj.discount_attach_stream_crc);
+        assert_eq!(adj.poly_class_crc_sources, 0);
+        assert_eq!(adj.non_poly_crc_noisy_sources, 0);
+    }
+
+    #[test]
+    fn export_risk_all_poly_inc_like_ok() {
+        let sources = [
+            poly_class(100, 100, 100, 100),
+            poly_class(100, 100, 100, 100),
+        ];
+        let inputs = inputs_from_sources(1.0, 6014, &sources);
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::Ok);
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r == "poly_class_crc_discounted"),
+            "reasons={:?}",
+            risk.reasons
+        );
+        assert!(
+            !risk
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("block_crc_read_rate=")),
+            "must not emit raw block_crc_read_rate lie; reasons={:?}",
+            risk.reasons
+        );
+        assert!(
+            !risk
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("attach_stream_crc_events=")),
+            "reasons={:?}",
+            risk.reasons
+        );
+        assert_eq!(risk.inputs.block_crc_read_rate, 1.0);
+        assert_eq!(risk.inputs.attach_stream_crc_events, 6014);
+        assert_eq!(risk.inputs.effective_block_crc_read_rate, Some(0.0));
+    }
+
+    #[test]
+    fn export_risk_poly_does_not_lower_scan_not_export_ready() {
+        let sources = [poly_class(100, 100, 100, 100)];
+        let inputs = inputs_from_sources(1.0, 0, &sources);
+        let risk = compute_export_risk(&PreflightRecommendation::NotExportReady, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::NotExportReady);
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r == "scan_recommendation=not_export_ready"),
+            "reasons={:?}",
+            risk.reasons
+        );
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r == "poly_class_crc_discounted"),
+            "reasons={:?}",
+            risk.reasons
+        );
+    }
+
+    #[test]
+    fn export_risk_poly_plus_attach_fail_still_advisory() {
+        let sources = [poly_class(100, 100, 100, 100)];
+        let mut inputs = inputs_from_sources(1.0, 10, &sources);
+        inputs.attach_fail_rate = 0.06;
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::ReExportRecommended);
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r.starts_with("attach_fail_rate=")),
+            "reasons={:?}",
+            risk.reasons
+        );
+        assert!(
+            !risk
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("attach_stream_crc_events=")),
+            "reasons={:?}",
+            risk.reasons
+        );
+    }
+
+    #[test]
+    fn export_risk_mixed_localized_still_catastrophic() {
+        let sources = [poly_class(100, 100, 100, 100), localized(0, 0, 20, 100)];
+        let inputs = inputs_from_sources(1.0, 5, &sources);
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::NotExportReady);
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r.contains("effective_block_crc_read_rate=0.200>0.15")),
+            "reasons={:?}",
+            risk.reasons
+        );
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r == "attach_stream_crc_events=5>0"),
+            "mixed job must not discount attach CRC; reasons={:?}",
+            risk.reasons
+        );
+        assert!(
+            !risk
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("block_crc_read_rate=")),
+            "reasons={:?}",
+            risk.reasons
+        );
+    }
+
+    #[test]
+    fn crc_source_classes_from_files_maps_raw_counters() {
+        let files = vec![
+            file_stats(true, 100, 100, 100, 100),
+            file_stats(false, 0, 0, 20, 100),
+        ];
+        let classes = crc_source_classes_from_files(&files);
+        assert_eq!(classes.len(), 2);
+        assert!(classes[0].poly_class_crc);
+        assert_eq!(classes[0].page_crc_mismatches, 100);
+        assert_eq!(classes[0].block_crc_mismatches, 100);
+        assert_eq!(classes[0].page_reads, 100);
+        assert_eq!(classes[0].block_reads, 100);
+        assert!(!classes[1].poly_class_crc);
+        assert_eq!(classes[1].block_crc_mismatches, 20);
+        assert_eq!(classes[1].block_reads, 100);
+        // Mapper must not pre-average — no rate fields on CrcSourceClass.
+        let adj = poly_crc_risk_adjustment(&classes);
+        assert_eq!(adj.effective_block_crc_read_rate, Some(0.20));
+    }
+
+    #[test]
+    fn export_risk_matrix_table_driven() {
+        struct Row {
+            name: &'static str,
+            sources: Vec<CrcSourceClass>,
+            raw_block: f64,
+            attach_crc: u64,
+            attach_fail: f64,
+            failed_volume: Option<u32>,
+            scan: PreflightRecommendation,
+            expect_level: PreflightRecommendation,
+            require: &'static [&'static str],
+            forbid: &'static [&'static str],
+        }
+        let poly = poly_class(100, 100, 100, 100);
+        let loc = localized(0, 0, 20, 100);
+        let clean = localized(0, 100, 0, 100);
+        let rows = [
+            Row {
+                name: "all_poly",
+                sources: vec![poly, poly],
+                raw_block: 1.0,
+                attach_crc: 6014,
+                attach_fail: 0.0,
+                failed_volume: None,
+                scan: PreflightRecommendation::Ok,
+                expect_level: PreflightRecommendation::Ok,
+                require: &["poly_class_crc_discounted"],
+                forbid: &["block_crc_read_rate=", "attach_stream_crc_events="],
+            },
+            Row {
+                name: "all_clean",
+                sources: vec![clean],
+                raw_block: 0.0,
+                attach_crc: 0,
+                attach_fail: 0.0,
+                failed_volume: None,
+                scan: PreflightRecommendation::Ok,
+                expect_level: PreflightRecommendation::Ok,
+                require: &[],
+                forbid: &["poly_class_crc_discounted"],
+            },
+            Row {
+                name: "localized_only",
+                sources: vec![loc],
+                raw_block: 0.20,
+                attach_crc: 0,
+                attach_fail: 0.0,
+                failed_volume: None,
+                scan: PreflightRecommendation::Ok,
+                expect_level: PreflightRecommendation::NotExportReady,
+                require: &["effective_block_crc_read_rate=0.200>0.15"],
+                forbid: &["poly_class_crc_discounted"],
+            },
+            Row {
+                name: "poly_plus_clean",
+                sources: vec![poly, clean],
+                raw_block: 1.0,
+                attach_crc: 10,
+                attach_fail: 0.0,
+                failed_volume: None,
+                scan: PreflightRecommendation::Ok,
+                expect_level: PreflightRecommendation::Ok,
+                require: &["poly_class_crc_discounted"],
+                forbid: &["attach_stream_crc_events="],
+            },
+            Row {
+                name: "poly_plus_localized",
+                sources: vec![poly, loc],
+                raw_block: 1.0,
+                attach_crc: 3,
+                attach_fail: 0.0,
+                failed_volume: None,
+                scan: PreflightRecommendation::Ok,
+                expect_level: PreflightRecommendation::NotExportReady,
+                require: &[
+                    "effective_block_crc_read_rate=0.200>0.15",
+                    "attach_stream_crc_events=3>0",
+                    "poly_class_crc_discounted",
+                ],
+                forbid: &["block_crc_read_rate="],
+            },
+            Row {
+                name: "all_poly_attach_fail",
+                sources: vec![poly],
+                raw_block: 1.0,
+                attach_crc: 0,
+                attach_fail: 0.06,
+                failed_volume: None,
+                scan: PreflightRecommendation::Ok,
+                expect_level: PreflightRecommendation::ReExportRecommended,
+                require: &["attach_fail_rate=", "poly_class_crc_discounted"],
+                forbid: &[],
+            },
+            Row {
+                name: "all_poly_failed_volume",
+                sources: vec![poly],
+                raw_block: 1.0,
+                attach_crc: 0,
+                attach_fail: 0.0,
+                failed_volume: Some(1),
+                scan: PreflightRecommendation::Ok,
+                expect_level: PreflightRecommendation::NotExportReady,
+                require: &["failed_volume_index=", "poly_class_crc_discounted"],
+                forbid: &["block_crc_read_rate="],
+            },
+            Row {
+                name: "scan_ner_all_poly",
+                sources: vec![poly],
+                raw_block: 1.0,
+                attach_crc: 0,
+                attach_fail: 0.0,
+                failed_volume: None,
+                scan: PreflightRecommendation::NotExportReady,
+                expect_level: PreflightRecommendation::NotExportReady,
+                require: &[
+                    "scan_recommendation=not_export_ready",
+                    "poly_class_crc_discounted",
+                ],
+                forbid: &[],
+            },
+            Row {
+                name: "scan_rer_all_poly",
+                sources: vec![poly],
+                raw_block: 1.0,
+                attach_crc: 0,
+                attach_fail: 0.0,
+                failed_volume: None,
+                scan: PreflightRecommendation::ReExportRecommended,
+                expect_level: PreflightRecommendation::ReExportRecommended,
+                require: &[
+                    "scan_preflight=re_export_recommended",
+                    "poly_class_crc_discounted",
+                ],
+                forbid: &[],
+            },
+        ];
+        for row in rows {
+            let adj = poly_crc_risk_adjustment(&row.sources);
+            let inputs = ExportRiskInputs {
+                attach_fail_rate: row.attach_fail,
+                block_crc_read_rate: row.raw_block,
+                failed_volume_index: row.failed_volume,
+                scan_recommendation: row.scan,
+                attach_stream_crc_events: row.attach_crc,
+                effective_block_crc_read_rate: adj.effective_block_crc_read_rate,
+                poly_class_crc_discounted: adj.poly_class_crc_discounted,
+                discount_attach_stream_crc: adj.discount_attach_stream_crc,
+                poly_class_crc_sources: adj.poly_class_crc_sources,
+                ..Default::default()
+            };
+            let risk = compute_export_risk(&row.scan, &inputs);
+            assert_eq!(
+                risk.level, row.expect_level,
+                "{}: level {:?} reasons={:?}",
+                row.name, risk.level, risk.reasons
+            );
+            for needle in row.require {
+                assert!(
+                    risk.reasons.iter().any(|r| r.contains(needle)),
+                    "{}: missing {needle:?} in {:?}",
+                    row.name,
+                    risk.reasons
+                );
+            }
+            for needle in row.forbid {
+                assert!(
+                    !risk.reasons.iter().any(|r| r.starts_with(needle)),
+                    "{}: unexpected {needle:?} in {:?}",
+                    row.name,
+                    risk.reasons
+                );
+            }
+        }
     }
 
     #[test]

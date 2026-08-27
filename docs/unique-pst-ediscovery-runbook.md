@@ -190,8 +190,11 @@ Product defaults (CLI-configurable vs fixed product constants — do **not** ass
 | `max_skip_rate` | **0.05** | **CLI** `--max-skip-rate` |
 | `max_crc_skip_rate` | **0.01** | **CLI** `--max-crc-skip-rate` |
 | `max_attach_fail_rate` | **0.05** | **CLI** `--max-attach-fail-rate` |
-| `block_crc_read_rate` escalate class | **≥ 0.15** | **Fixed product constant** (0077 export-risk policy; not a CLI flag) |
-| Dual-rate poly heuristic | page ≥ **0.50** **AND** block ≥ **0.50** | **Fixed product constant** (0077 `CRC_SUSPECT` poly heuristic; not a CLI flag) |
+| `block_crc_read_rate` escalate class | **≥ 0.15** on the **effective** (non-poly) rate | **Fixed product constant** (0077/0099 export-risk policy; not a CLI flag). Poly-class sources are excluded from the keyed rate; raw `block_crc_read_rate` stays on `inputs`. |
+| Dual-rate poly heuristic | page ≥ **0.50** **AND** block ≥ **0.50** | **Fixed product constant** (0077 `CRC_SUSPECT` poly heuristic; not a CLI flag). Unique-pst `export_risk` (0099) uses the same classifier — poly-class CRC alone does not elevate post evaluation. |
+| `poly_class_crc_discounted` | attest that poly sources were excluded from the keyed rate | May **co-occur** with a non-CRC `not_export_ready` reason (scan preflight, failed volume, attach fail). Vocabulary still frozen. |
+| `distinct_bad_bids` large / `exact=false` | widespread corruption **unless** `poly_class_crc` | Expected on poly-class stores; do not treat as re-export evidence when `poly_class_crc` is true. |
+| `ATTACH_STREAM_CRC` Info | warning-only attach trailer mismatch | Elevates `export_risk` **unless** `discount_attach_stream_crc` (poly-class-only job). Never discounted: `attach_fail_rate`. |
 | `export_risk` vocabulary | `ok` \| `re_export_recommended` \| `not_export_ready` | **One** fixed vocabulary (optional `--fail-on-export-risk` gates exit **65**) |
 
 `export_risk` is computed post-export and **never lowers** scan preflight risk. Optional `--fail-on-export-risk` can turn advisory risk into exit **65**.

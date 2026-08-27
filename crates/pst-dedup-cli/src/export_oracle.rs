@@ -236,6 +236,10 @@ fn compare_integrity_counters(a: &Value, b: &Value, mismatches: &mut Vec<String>
         "/export_risk/level",
         "/scan/block_crc_rate",
         "/scan/block_crc_read_rate",
+        "/export_risk/inputs/effective_block_crc_read_rate",
+        "/export_risk/inputs/poly_class_crc_discounted",
+        "/export_risk/inputs/discount_attach_stream_crc",
+        "/export_risk/inputs/poly_class_crc_sources",
     ];
     for p in paths {
         let va = a.pointer(p);
