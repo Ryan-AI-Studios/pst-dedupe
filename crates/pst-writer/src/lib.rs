@@ -1108,6 +1108,202 @@ impl HeapBuilder {
     }
 }
 
+/// Multi-block Heap-on-Node (MS-PST §2.3.1.6) for the recipient-table node only.
+///
+/// Page 0 uses HNHDR; continuation pages use HNPAGEHDR. HID encoding is
+/// `((hid_block_index as u32) << 16) | ((hid_index as u32) << 5)` with
+/// 1-based `hid_index` **per page**. HNBITMAPHDR page indices (8, 136, 264, …)
+/// fail closed (`D-0100-hn-bitmap-hdr`).
+pub(crate) struct PagedHeapBuilder {
+    pages: Vec<HeapPage>,
+}
+
+struct HeapPage {
+    data: Vec<u8>,
+    allocations: Vec<(usize, usize)>,
+    header_size: usize,
+}
+
+fn is_hn_bitmap_page(index: usize) -> bool {
+    index >= 8 && (index - 8).is_multiple_of(128)
+}
+
+impl HeapPage {
+    fn page0(client_sig: u8) -> Self {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(0xEC);
+        data.push(client_sig);
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        Self {
+            data,
+            allocations: Vec::new(),
+            header_size: 12,
+        }
+    }
+
+    fn continuation() -> Self {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0u16.to_le_bytes()); // ibHnpm placeholder
+        Self {
+            data,
+            allocations: Vec::new(),
+            header_size: 2,
+        }
+    }
+
+    fn projected_len(&self, extra_bytes: usize) -> usize {
+        let mut used = self.data.len() + extra_bytes;
+        if used % 2 == 1 {
+            used += 1;
+        }
+        let alloc_count = self.allocations.len() + 1;
+        let pagemap = 4 + (alloc_count + 1) * 2;
+        used + pagemap
+    }
+
+    fn fits(&self, extra_bytes: usize) -> bool {
+        self.projected_len(extra_bytes) <= MAX_BLOCK_DATA && self.allocations.len() < 2047
+    }
+
+    fn write_pagemap(&mut self) {
+        if self.data.len() % 2 == 1 {
+            self.data.push(0);
+        }
+        let hnpm_offset = self.data.len();
+        let c_alloc = self.allocations.len() as u16;
+        self.data.extend_from_slice(&c_alloc.to_le_bytes());
+        self.data.extend_from_slice(&0u16.to_le_bytes());
+        self.data
+            .extend_from_slice(&(self.header_size as u16).to_le_bytes());
+        for (_, end) in &self.allocations {
+            self.data.extend_from_slice(&(*end as u16).to_le_bytes());
+        }
+        self.data[0..2].copy_from_slice(&(hnpm_offset as u16).to_le_bytes());
+    }
+}
+
+impl PagedHeapBuilder {
+    pub fn new(client_sig: u8) -> Self {
+        Self {
+            pages: vec![HeapPage::page0(client_sig)],
+        }
+    }
+
+    fn current_index(&self) -> usize {
+        self.pages.len().saturating_sub(1)
+    }
+
+    fn start_new_page(&mut self) -> Result<()> {
+        let next = self.pages.len();
+        if is_hn_bitmap_page(next) {
+            return Err(WriterError::Layout(format!(
+                "recipient TC heap would require HNBITMAPHDR at page {next} \
+                 (pages 8/136/264/… are unimplemented; D-0100-hn-bitmap-hdr)"
+            )));
+        }
+        if let Some(page) = self.pages.last_mut() {
+            page.write_pagemap();
+            if page.data.len() > MAX_BLOCK_DATA {
+                return Err(WriterError::Layout(format!(
+                    "HN page {} overflowed MAX_BLOCK_DATA after pagemap ({} bytes)",
+                    next - 1,
+                    page.data.len()
+                )));
+            }
+            page.data.resize(MAX_BLOCK_DATA, 0);
+        }
+        self.pages.push(HeapPage::continuation());
+        Ok(())
+    }
+
+    pub fn try_alloc(&mut self, bytes: &[u8]) -> Result<u32> {
+        if !self
+            .pages
+            .last()
+            .map(|p| p.fits(bytes.len()))
+            .unwrap_or(false)
+        {
+            self.start_new_page()?;
+            if !self
+                .pages
+                .last()
+                .map(|p| p.fits(bytes.len()))
+                .unwrap_or(false)
+            {
+                return Err(WriterError::Layout(format!(
+                    "allocation of {} bytes does not fit on a fresh HN page \
+                     (hidIndex/page budget exhausted after attempting a new page)",
+                    bytes.len()
+                )));
+            }
+        }
+        let block = self.current_index();
+        let page = self
+            .pages
+            .last_mut()
+            .ok_or_else(|| WriterError::Layout("paged heap has no current page".into()))?;
+        if page.allocations.len() >= 2047 {
+            return Err(WriterError::Layout(
+                "hidIndex would exceed 2047 on a page after attempting a new page".into(),
+            ));
+        }
+        let start = page.data.len();
+        page.data.extend_from_slice(bytes);
+        let end = page.data.len();
+        page.allocations.push((start, end));
+        let hid_index = page.allocations.len() as u32; // 1-based
+        Ok(((block as u32) << 16) | (hid_index << 5))
+    }
+
+    pub fn patch_u32(&mut self, hid: u32, field_offset: usize, value: u32) -> Result<()> {
+        let block = (hid >> 16) as usize;
+        let index = ((hid >> 5) & 0x7FF).saturating_sub(1) as usize;
+        let page_count = self.pages.len();
+        let page = self.pages.get_mut(block).ok_or_else(|| {
+            WriterError::Layout(format!(
+                "patch_u32: hid 0x{hid:X} hidBlockIndex {block} out of range ({page_count} pages)"
+            ))
+        })?;
+        let (start, end) = *page.allocations.get(index).ok_or_else(|| {
+            WriterError::Layout(format!(
+                "patch_u32: hid 0x{hid:X} does not identify a known heap allocation \
+                 (index {index} out of range on page {block})"
+            ))
+        })?;
+        let at = start + field_offset;
+        if at + 4 > end {
+            return Err(WriterError::Layout(format!(
+                "patch_u32: field_offset {field_offset} does not fit within hid 0x{hid:X} \
+                 ({start}..{end})"
+            )));
+        }
+        page.data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
+    pub fn finalize(&mut self, hid_user_root: u32) -> Vec<u8> {
+        if let Some(page) = self.pages.last_mut() {
+            page.write_pagemap();
+        }
+        if let Some(page0) = self.pages.first_mut() {
+            if page0.data.len() >= 8 {
+                page0.data[4..8].copy_from_slice(&hid_user_root.to_le_bytes());
+            }
+        }
+        let mut out = Vec::new();
+        let last = self.pages.len().saturating_sub(1);
+        for (i, page) in self.pages.iter_mut().enumerate() {
+            if i != last && page.data.len() < MAX_BLOCK_DATA {
+                page.data.resize(MAX_BLOCK_DATA, 0);
+            }
+            out.extend_from_slice(&page.data);
+        }
+        out
+    }
+}
+
 // ── BTH Builder ──────────────────────────────────────────────────────────────
 
 /// Build a BTree-on-Heap inside an existing HeapBuilder.

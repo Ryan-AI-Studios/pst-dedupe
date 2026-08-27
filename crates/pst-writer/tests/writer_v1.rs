@@ -656,7 +656,7 @@ fn fixed_template_object_tables_are_present_and_empty() {
         let raw = pst
             .read_node_data(pst_reader::NodeId(nid))
             .unwrap_or_else(|e| panic!("template object 0x{nid:X} must be readable, got: {e}"));
-        let table = pst_reader::ltp::tc::TableContext::load(raw, None).unwrap_or_else(|e| {
+        let table = pst_reader::ltp::tc::TableContext::load(raw).unwrap_or_else(|e| {
             panic!("template object 0x{nid:X} must parse as a valid TC, got: {e}")
         });
         assert_eq!(
@@ -713,7 +713,7 @@ fn preserve_paths_many_folders_does_not_clobber_contents_template_nid() {
     let raw = pst
         .read_node_data(pst_reader::NodeId(0x60E))
         .expect("contents template 0x60E");
-    let table = pst_reader::ltp::tc::TableContext::load(raw, None).expect("load 0x60E");
+    let table = pst_reader::ltp::tc::TableContext::load(raw).expect("load 0x60E");
     assert_eq!(table.row_count(), 0, "0x60E must remain the empty template");
     assert_eq!(
         table.columns().len(),
@@ -770,7 +770,7 @@ fn all_three_folders_have_readable_empty_associated_contents_table() {
         let raw = pst
             .read_node_data(assoc_nid)
             .unwrap_or_else(|e| panic!("associated-contents table for {} (nid 0x{:X}) must be readable via pst-reader, got: {e}", folder.name, assoc_nid.0));
-        let table = pst_reader::ltp::tc::TableContext::load(raw, None).unwrap_or_else(|e| {
+        let table = pst_reader::ltp::tc::TableContext::load(raw).unwrap_or_else(|e| {
             panic!(
                 "associated-contents table for {} must parse as a valid TC, got: {e}",
                 folder.name

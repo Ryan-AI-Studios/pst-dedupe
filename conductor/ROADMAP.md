@@ -377,15 +377,16 @@ Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedT
 
 ### Wave 7 — Unique-PST defensibility (Series P)
 
-Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0099 spec expanded 2026-08-26** (Phase 0 closed). Expand 0100/0101 before coding those. **Do not** add a BCC-write track (0082 default suppress is the disclosure policy).
+Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0100 spec expanded 2026-08-27** (Phase 0 closed). Expand 0101/0102 before coding those. **Do not** add a BCC-write track (0082 default suppress is the disclosure policy).
 
 | ID | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|
 | **0099** | CrcPolyExportRiskHonesty | **Completed** | **P0 P** | Dual-rate poly CRC must not elevate `export_risk`. Thresholds key on **effective** (non-poly) `block_crc_read_rate`; attach-stream CRC discounted only when every CRC-noisy source is poly-class. INC*: preflight `ok` vs `not_export_ready` (raw 1.0, 6014 events). Closes export-risk half of **D-0077-systematic-poly**; fingerprint residual **D-0077-poly-fingerprint**. Never in-tool repair. Spec: `0099-CrcPolyExportRiskHonesty/`. |
-| **0100** | RecipientTcMultipage | **Proposed** | **P0 P** | Strategy A full To/Cc recipient TC (subnode / multi-block HN). 0093 Strategy B left 39 msgs / 3082 rows as `known_gap` while contract says Preserved. Closes **D-0093-recipient-tc-multipage**. Spec: `0100-RecipientTcMultipage/`. |
+| **0100** | RecipientTcMultipage | **In progress** | **P0 P** | Strategy A: all included TC rows. Row-matrix subnode + RowsPerBlock packing + multi-block HN on the recipient-table node; shared `TableContext::load`. Closes **D-0093-recipient-tc-multipage**. BCC default unchanged. Spec: `0100-RecipientTcMultipage/`. |
 | **0101** | EmbeddedDepthFlag | **Proposed** | **P1 P** | CLI `--max-embedded-depth` (1–8, default 3). INC* 4 `ATTACH_DEPTH_LIMIT` = 2 method-5 nests × 2 sources. Narrows unique-pst **D-0067-embedded-depth**. Spec: `0101-EmbeddedDepthFlag/`. |
+| **0102** | ExportOracleInputsAttest | **Proposed** | **P2 P** | 0099 `/export_risk/inputs` attest pointers are stripped by oracle key `"inputs"`. Closes **D-0099-oracle-inputs-attest**. After 0101 unless oracle CI fails. Spec: `0102-ExportOracleInputsAttest/`. |
 
-**Order:** **0099** → **0100** → **0101**. Frontend Series O (if started) uses **0105+**.
+**Order:** **0099** → **0100** → **0101** → **0102**. Frontend Series O (if started) uses **0105+**.
 
 ### What each step is for
 

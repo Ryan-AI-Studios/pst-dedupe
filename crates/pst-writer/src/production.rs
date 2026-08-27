@@ -29,15 +29,16 @@
 //! ## Large single-property values: subnode storage (not silent truncation)
 //!
 //! This writer's [`HeapBuilder`] is **single-page** (`MAX_BLOCK_DATA` = 8176).
-//! Values that would overflow that page are moved to a **subnode** (NID in
+//! values that would overflow that page are moved to a **subnode** (NID in
 //! `dwValueHnid`) instead of being clipped. MS-PST itself allows multi-block HN
 //! (§2.3.1.6) and a format per-value threshold of 3580 before subnode
 //! (§2.6.1.2.2 / §2.6.2.3.2); our [`MAX_HEAP_VALUE_SIZE`] = 2048 is a **documented
 //! single-page HeapBuilder deviation**, not an inherent MS-PST limit. Helper
 //! strings (MID / subject / sender / Display* / `message_class`) also divert
 //! under a **cumulative** budget (escalate largest inline helpers when the
-//! MessageSize probe heap would overflow). `pst-reader`'s `PropContext` resolves
-//! subnode-typed HNIDs for PtypString/PtypBinary so round-trip verification works.
+//! MessageSize probe heap would overflow). **Recipient-table node data** uses
+//! [`PagedHeapBuilder`] (0100 Strategy A: HNHDR + HNPAGEHDR, HID `hidBlockIndex`).
+//! `pst-reader`'s `PropContext` resolves subnode-typed HNIDs for PtypString/PtypBinary so round-trip verification works.
 //!
 //! ## Scope (v1.1 / track 0069)
 //!
@@ -58,8 +59,8 @@ use md5::{Digest as Md5Digest, Md5};
 use sha2::{Digest as Sha2Digest, Sha256};
 
 use crate::{
-    write_data_block, BlockEntry, HeapBuilder, Layout, NodeEntry, Result, WriterError,
-    CLIENT_MAGIC, HEADER_SIZE, MAX_BLOCK_DATA, NID_ASSOC_CONTENTS_TABLE_TEMPLATE,
+    write_data_block, BlockEntry, HeapBuilder, Layout, NodeEntry, PagedHeapBuilder, Result,
+    WriterError, CLIENT_MAGIC, HEADER_SIZE, MAX_BLOCK_DATA, NID_ASSOC_CONTENTS_TABLE_TEMPLATE,
     NID_ATTACHMENT_TABLE_TEMPLATE, NID_CONTENTS_TABLE_TEMPLATE, NID_HIERARCHY_TABLE_TEMPLATE,
     NID_MESSAGE_STORE, NID_NAME_TO_ID_MAP, NID_RECIPIENT_TABLE_TEMPLATE, NID_ROOT_FOLDER,
     NID_SEARCH_CONTENTS_TABLE_TEMPLATE, NID_TYPE_NORMAL_FOLDER, NID_TYPE_NORMAL_MESSAGE,
@@ -181,10 +182,6 @@ const PTYP_MULTIPLE_INTEGER_32: u16 = 0x1003;
 /// helper strings still use escalate+reprobe when per-value diversion is not
 /// enough (track 0093).
 const MAX_HEAP_VALUE_SIZE: usize = 2048;
-
-/// Starting maximum rows for a single-page recipient TC (hint, not an invariant).
-/// Budget-aware build may keep fewer; event reports the actual kept count.
-const RECIPIENT_TC_ROW_HINT: usize = 48;
 
 /// Cap on in-process `recipient_tc_truncated_events` (mirrors attach-event shape).
 pub const RECIPIENT_TC_EVENTS_CAP: usize = 1000;
@@ -2072,21 +2069,6 @@ pub fn write_unicode_pst_streaming(
     })
 }
 
-fn record_recipient_tc_truncated(counters: &mut WriteCounters, event: RecipientTcTruncatedEvent) {
-    counters.recipient_tc_truncated_messages =
-        counters.recipient_tc_truncated_messages.saturating_add(1);
-    let dropped = event.source_count.saturating_sub(event.kept_count) as u64;
-    counters.recipient_rows_truncated = counters.recipient_rows_truncated.saturating_add(dropped);
-    counters.recipient_tc_truncated_events_total = counters
-        .recipient_tc_truncated_events_total
-        .saturating_add(1);
-    if counters.recipient_tc_truncated_events.len() < RECIPIENT_TC_EVENTS_CAP {
-        counters.recipient_tc_truncated_events.push(event);
-    } else {
-        counters.recipient_tc_truncated_events_truncated = true;
-    }
-}
-
 fn is_heap_page_overflow(err: &WriterError) -> bool {
     matches!(err, WriterError::Layout(msg) if msg.contains("heap page overflow"))
 }
@@ -2109,21 +2091,6 @@ fn order_recipients_for_tc<'a>(rows: &[&'a WriteRecipient]) -> Vec<&'a WriteReci
             .then(a.0.cmp(&b.0))
     });
     indexed.into_iter().map(|(_, r)| r).collect()
-}
-
-fn count_recipients_by_class(rows: &[&WriteRecipient]) -> (u32, u32, u32) {
-    let mut to = 0u32;
-    let mut cc = 0u32;
-    let mut bcc = 0u32;
-    for r in rows {
-        match r.recipient_type {
-            WriteRecipientType::To => to = to.saturating_add(1),
-            WriteRecipientType::Cc => cc = cc.saturating_add(1),
-            WriteRecipientType::Bcc => bcc = bcc.saturating_add(1),
-            WriteRecipientType::Other(_) => {}
-        }
-    }
-    (to, cc, bcc)
 }
 
 /// Divert the largest remaining inline helper string to a subnode.
@@ -2164,22 +2131,6 @@ fn escalate_largest_inline_helper(
     subnode_entries.push((sub_nid, bid_data, 0));
     props[i] = (pid, PcValue::SubnodeString(sub_nid));
     Ok(true)
-}
-
-/// Build recipient TC heap with budget-aware row cap (catch-and-retry).
-/// `ordered` must already be To→Cc→Bcc. Returns (heap bytes, kept count).
-fn build_recipient_table_budget_aware(ordered: &[&WriteRecipient]) -> Result<(Vec<u8>, usize)> {
-    let mut keep = ordered.len().min(RECIPIENT_TC_ROW_HINT);
-    loop {
-        let mut heap = HeapBuilder::new(0xBC);
-        match build_recipient_table_tc(&mut heap, &ordered[..keep]) {
-            Ok((hid, _)) => return Ok((heap.finalize(hid), keep)),
-            Err(e) if is_heap_page_overflow(&e) && keep > 0 => {
-                keep = keep.saturating_sub(1);
-            }
-            Err(e) => return Err(e),
-        }
-    }
 }
 
 /// Lowercase hex of a raw digest (sha2 0.11 / md-5 hybrid-array output).
@@ -3820,48 +3771,22 @@ fn build_message_payload(
 
     // Recipient table TC at fixed NID 0x692 — always present (MS-PST MUST),
     // including zero rows. BCC rows filtered unless include_bcc_recipients.
-    // Strategy B (0093): To→Cc→Bcc order, then budget-aware keep (≤ ROW_HINT).
+    // Strategy A (0100): all included rows; row-matrix subnode + multi-page HN.
     let recip_filtered: Vec<&WriteRecipient> = msg
         .recipients
         .iter()
         .filter(|r| include_bcc_recipients || !r.recipient_type.is_bcc())
         .collect();
     let recip_ordered = order_recipients_for_tc(&recip_filtered);
-    let (recip_table_heap, recip_kept) = build_recipient_table_budget_aware(&recip_ordered)?;
-    if recip_kept < recip_ordered.len() {
-        let source_slice = &recip_ordered[..];
-        let kept_slice = &recip_ordered[..recip_kept];
-        let (src_to, src_cc, src_bcc) = count_recipients_by_class(source_slice);
-        let (kept_to, kept_cc, kept_bcc) = count_recipients_by_class(kept_slice);
-        let event = RecipientTcTruncatedEvent {
-            message_subject: msg.subject.clone(),
-            source_path: msg.source_path.clone().unwrap_or_default(),
-            folder_path: msg.source_folder_path.clone().unwrap_or_default(),
-            msg_nid: msg.source_msg_nid.unwrap_or(0),
-            message_id: msg.message_id.clone().unwrap_or_default(),
-            source_count: recip_ordered.len() as u32,
-            kept_count: recip_kept as u32,
-            kept_to,
-            kept_cc,
-            kept_bcc,
-            dropped_to: src_to.saturating_sub(kept_to),
-            dropped_cc: src_cc.saturating_sub(kept_cc),
-            dropped_bcc: src_bcc.saturating_sub(kept_bcc),
-        };
-        tracing::warn!(
-            total = event.source_count,
-            kept = event.kept_count,
-            kept_to = event.kept_to,
-            kept_cc = event.kept_cc,
-            kept_bcc = event.kept_bcc,
-            "recipient TC truncated to fit single-page heap; DisplayTo/Cc/Bcc unchanged"
-        );
-        record_recipient_tc_truncated(counters, event);
-    }
-    let recip_table_len = recip_table_heap.len() as u64;
-    let recip_table_bid = layout.write_data_chain(recip_table_heap)?;
-    subnode_entries.push((NID_RECIPIENT_TABLE, recip_table_bid, 0));
-    written_content_bytes += recip_table_len;
+    let recip_built = build_recipient_table_strategy_a(layout, &recip_ordered)?;
+    let recip_table_len = recip_built.heap.len() as u64;
+    let recip_table_bid = layout.write_data_chain(recip_built.heap)?;
+    subnode_entries.push((
+        NID_RECIPIENT_TABLE,
+        recip_table_bid,
+        recip_built.table_bid_sub,
+    ));
+    written_content_bytes += recip_table_len.saturating_add(recip_built.extra_content_bytes);
 
     props.push((PID_TAG_HAS_ATTACHMENTS, PcValue::Bool(has_attaches)));
     props.push((PID_TAG_MESSAGE_FLAGS, PcValue::I32(flags)));
@@ -4325,8 +4250,8 @@ pub fn build_bth_checked(
 /// RowIndex BTH maps `dwRowID` (4-byte attach/message NID) → `dwRowIndex`
 /// (4-byte 0-based matrix index). `pst_reader::ltp::tc` requires `cbKey >= 4`
 /// for row-id keys.
-pub fn build_bth_u32_checked(
-    heap: &mut HeapBuilder,
+pub(crate) fn build_bth_u32_checked(
+    heap: &mut impl HeapTryAlloc,
     cb_key: u8,
     cb_ent: u8,
     records: &mut [(u32, Vec<u8>)],
@@ -4370,6 +4295,31 @@ pub fn build_bth_u32_checked(
 
     heap.patch_u32(hid_root, 4, hid_leaf)?;
     Ok(hid_root)
+}
+
+/// Heap allocation surface shared by single-page [`HeapBuilder`] and
+/// recipient-table [`PagedHeapBuilder`].
+pub(crate) trait HeapTryAlloc {
+    fn try_alloc(&mut self, bytes: &[u8]) -> Result<u32>;
+    fn patch_u32(&mut self, hid: u32, field_offset: usize, value: u32) -> Result<()>;
+}
+
+impl HeapTryAlloc for HeapBuilder {
+    fn try_alloc(&mut self, bytes: &[u8]) -> Result<u32> {
+        HeapBuilder::try_alloc(self, bytes)
+    }
+    fn patch_u32(&mut self, hid: u32, field_offset: usize, value: u32) -> Result<()> {
+        HeapBuilder::patch_u32(self, hid, field_offset, value)
+    }
+}
+
+impl HeapTryAlloc for PagedHeapBuilder {
+    fn try_alloc(&mut self, bytes: &[u8]) -> Result<u32> {
+        PagedHeapBuilder::try_alloc(self, bytes)
+    }
+    fn patch_u32(&mut self, hid: u32, field_offset: usize, value: u32) -> Result<()> {
+        PagedHeapBuilder::patch_u32(self, hid, field_offset, value)
+    }
 }
 
 /// Build an MS-PST-conformant attachment table TC on `heap`.
@@ -4476,32 +4426,57 @@ fn build_attachment_table_tc(
     Ok((hid_tcinfo, heap_data_len(heap)))
 }
 
-/// Build an MS-PST-conformant recipient table TC on `heap` (0082).
+/// Result of Strategy A recipient-table build.
+struct RecipientTableBuilt {
+    heap: Vec<u8>,
+    table_bid_sub: u64,
+    extra_content_bytes: u64,
+}
+
+/// Allocate a TC cell value: HID on the (paged) heap, or cell NID when larger
+/// than [`MAX_HEAP_VALUE_SIZE`] (new in this builder — 0100).
+fn alloc_tc_value(
+    heap: &mut PagedHeapBuilder,
+    layout: &mut Layout,
+    sub_counter: &mut u32,
+    table_subs: &mut Vec<(u64, u64, u64)>,
+    extra_bytes: &mut u64,
+    bytes: &[u8],
+) -> Result<u32> {
+    if bytes.len() > MAX_HEAP_VALUE_SIZE {
+        let nid = next_subnode_nid(sub_counter);
+        let bid = layout.write_data_chain(bytes.to_vec())?;
+        table_subs.push((nid, bid, 0));
+        *extra_bytes = extra_bytes.saturating_add(bytes.len() as u64);
+        return Ok(nid as u32);
+    }
+    heap.try_alloc(bytes)
+}
+
+/// Build an MS-PST-conformant recipient table TC (0082 / 0100 Strategy A).
 ///
 /// Columns match [`RECIPIENT_TABLE_COLUMNS`] / the NBT template at
 /// [`NID_RECIPIENT_TABLE_TEMPLATE`] (14 MUST + product `PidTagSmtpAddress`).
-/// Structural fields are synthesized when the source omits them:
-/// - ObjectType = `MAPI_MAILUSER` (6)
-/// - Responsibility = true
-/// - SendRichInfo = false
-/// - DisplayType = 0 (`DT_MAILUSER`)
-/// - RecordKey / EntryId / SearchKey from row seed (store-style 16-byte keys)
-/// - LtpRowId = synthetic index-based key; LtpRowVer = 1-based row index
-///
-/// **RowIndex BTH** (`hidRowIndex`): key = LtpRowId (u32), value = 0-based
-/// row index. Empty tables use `hidRowIndex = 0` and an empty row matrix.
-///
-/// `PidTagSmtpAddress` is present in the column schema always; the existence
-/// bitmap bit is set only when the caller supplied a non-empty SMTP value.
-fn build_recipient_table_tc(
-    heap: &mut HeapBuilder,
+/// Non-empty tables store the row matrix as a subnode (`hnidRows` = NID) packed
+/// with RowsPerBlock; empty tables use `hnidRows = 0` and `bid_sub = 0`.
+fn build_recipient_table_strategy_a(
+    layout: &mut Layout,
     rows: &[&WriteRecipient],
-) -> Result<(u32, usize)> {
-    // Caller applies Strategy B budget-aware keep + To→Cc→Bcc ordering.
+) -> Result<RecipientTableBuilt> {
     let (columns, total_row_width) = build_template_tc_columns(&RECIPIENT_TABLE_COLUMNS);
     let ncols = columns.len();
     let bitmap_bytes = ncols.div_ceil(8);
     let row_width = total_row_width as usize;
+    if row_width == 0 {
+        return Err(WriterError::Layout(
+            "recipient TC row_width is 0; cannot pack row matrix".into(),
+        ));
+    }
+
+    let mut heap = PagedHeapBuilder::new(0xBC);
+    let mut table_subs: Vec<(u64, u64, u64)> = Vec::new();
+    let mut extra_content_bytes = 0u64;
+    let mut sub_counter = 0u32;
 
     let mut row_matrix: Vec<u8> = Vec::with_capacity(rows.len() * row_width);
     let mut row_index_records: Vec<(u32, Vec<u8>)> = Vec::with_capacity(rows.len());
@@ -4538,20 +4513,75 @@ fn build_recipient_table_tc(
         let entry_id = build_folder_entry_id(u64::from(row_id), &record_key);
         let search_key = synthesize_recipient_search_key(&addr_type, email, smtp);
 
-        let display_hid = heap.try_alloc(&utf16le_bytes(display))?;
-        let addr_type_hid = heap.try_alloc(&utf16le_bytes(&addr_type))?;
-        let email_hid = heap.try_alloc(&utf16le_bytes(email))?;
-        let seven_hid = heap.try_alloc(&utf16le_bytes(seven_bit))?;
-        let record_key_hid = heap.try_alloc(&record_key)?;
-        let entry_id_hid = heap.try_alloc(&entry_id)?;
-        let search_key_hid = heap.try_alloc(&search_key)?;
+        let display_hid = alloc_tc_value(
+            &mut heap,
+            layout,
+            &mut sub_counter,
+            &mut table_subs,
+            &mut extra_content_bytes,
+            &utf16le_bytes(display),
+        )?;
+        let addr_type_hid = alloc_tc_value(
+            &mut heap,
+            layout,
+            &mut sub_counter,
+            &mut table_subs,
+            &mut extra_content_bytes,
+            &utf16le_bytes(&addr_type),
+        )?;
+        let email_hid = alloc_tc_value(
+            &mut heap,
+            layout,
+            &mut sub_counter,
+            &mut table_subs,
+            &mut extra_content_bytes,
+            &utf16le_bytes(email),
+        )?;
+        let seven_hid = alloc_tc_value(
+            &mut heap,
+            layout,
+            &mut sub_counter,
+            &mut table_subs,
+            &mut extra_content_bytes,
+            &utf16le_bytes(seven_bit),
+        )?;
+        let record_key_hid = alloc_tc_value(
+            &mut heap,
+            layout,
+            &mut sub_counter,
+            &mut table_subs,
+            &mut extra_content_bytes,
+            &record_key,
+        )?;
+        let entry_id_hid = alloc_tc_value(
+            &mut heap,
+            layout,
+            &mut sub_counter,
+            &mut table_subs,
+            &mut extra_content_bytes,
+            &entry_id,
+        )?;
+        let search_key_hid = alloc_tc_value(
+            &mut heap,
+            layout,
+            &mut sub_counter,
+            &mut table_subs,
+            &mut extra_content_bytes,
+            &search_key,
+        )?;
         let smtp_hid = match smtp {
-            Some(s) => Some(heap.try_alloc(&utf16le_bytes(s))?),
+            Some(s) => Some(alloc_tc_value(
+                &mut heap,
+                layout,
+                &mut sub_counter,
+                &mut table_subs,
+                &mut extra_content_bytes,
+                &utf16le_bytes(s),
+            )?),
             None => None,
         };
 
         let mut row = vec![0u8; row_width];
-        // Columns present by default (all MUST + 7Bit). Smtp optional.
         let mut present_bits: Vec<bool> = vec![true; ncols];
 
         for (col_idx, col) in columns.iter().enumerate() {
@@ -4564,7 +4594,6 @@ fn build_recipient_table_tc(
                     copy_col_bytes(&mut row, ib, cb, &v)?;
                 }
                 PID_TAG_RESPONSIBILITY => {
-                    // PtypBoolean true = 0x01
                     if cb < 1 {
                         return Err(WriterError::Layout(
                             "build_recipient_table_tc: Responsibility column width 0".into(),
@@ -4611,7 +4640,7 @@ fn build_recipient_table_tc(
                             "build_recipient_table_tc: SendRichInfo column width 0".into(),
                         ));
                     }
-                    row[ib] = 0; // false
+                    row[ib] = 0;
                 }
                 PID_TAG_LTP_ROW_ID => {
                     copy_col_bytes(&mut row, ib, cb, &row_id.to_le_bytes())?;
@@ -4628,7 +4657,6 @@ fn build_recipient_table_tc(
             }
         }
 
-        // Existence bitmap at end of row.
         let bitmap_start = row_width - bitmap_bytes;
         for (col_idx, col) in columns.iter().enumerate() {
             if present_bits[col_idx] {
@@ -4644,7 +4672,7 @@ fn build_recipient_table_tc(
     let hid_row_index = if rows.is_empty() {
         0u32
     } else {
-        build_bth_u32_checked(heap, 4, 4, &mut row_index_records)?
+        build_bth_u32_checked(&mut heap, 4, 4, &mut row_index_records)?
     };
 
     let mut tcinfo = Vec::new();
@@ -4666,12 +4694,29 @@ fn build_recipient_table_tc(
     }
 
     let hid_tcinfo = heap.try_alloc(&tcinfo)?;
-    let hid_rows = heap.try_alloc(&row_matrix)?;
-
     heap.patch_u32(hid_tcinfo, 10, hid_row_index)?;
-    heap.patch_u32(hid_tcinfo, 14, hid_rows)?;
 
-    Ok((hid_tcinfo, heap_data_len(heap)))
+    if rows.is_empty() {
+        heap.patch_u32(hid_tcinfo, 14, 0)?;
+        return Ok(RecipientTableBuilt {
+            heap: heap.finalize(hid_tcinfo),
+            table_bid_sub: 0,
+            extra_content_bytes: 0,
+        });
+    }
+
+    let (matrix_bid, matrix_bytes) = layout.write_row_matrix_tree(&row_matrix, row_width)?;
+    extra_content_bytes = extra_content_bytes.saturating_add(matrix_bytes);
+    let matrix_nid = next_subnode_nid(&mut sub_counter);
+    table_subs.insert(0, (matrix_nid, matrix_bid, 0));
+    heap.patch_u32(hid_tcinfo, 14, matrix_nid as u32)?;
+
+    let table_bid_sub = layout.add_subnode_leaf(&table_subs)?;
+    Ok(RecipientTableBuilt {
+        heap: heap.finalize(hid_tcinfo),
+        table_bid_sub,
+        extra_content_bytes,
+    })
 }
 
 /// Copy up to 4 LE value bytes into a TC row cell, checking bounds.
@@ -5342,6 +5387,70 @@ impl Layout {
         Ok(bid_data)
     }
 
+    /// Pack a TC row matrix into a data tree with integral rows per 8176-byte
+    /// leaf (MS-PST §2.3.4.4). Non-last leaves are padded to `MAX_BLOCK_DATA`;
+    /// the last leaf is only the remaining rows (dead space is not stored as
+    /// extra rows). Returns `(root_bid, total_payload_bytes)`.
+    fn write_row_matrix_tree(&mut self, row_matrix: &[u8], row_width: usize) -> Result<(u64, u64)> {
+        if row_matrix.is_empty() {
+            return Ok((0, 0));
+        }
+        let row_count = row_matrix
+            .len()
+            .checked_div(row_width)
+            .ok_or_else(|| WriterError::Layout("row_width is 0; cannot pack row matrix".into()))?;
+        if !row_matrix.len().is_multiple_of(row_width) {
+            return Err(WriterError::Layout(format!(
+                "row matrix length {} is not a multiple of row_width {row_width}",
+                row_matrix.len()
+            )));
+        }
+        let rows_per_block = MAX_BLOCK_DATA
+            .checked_div(row_width)
+            .ok_or_else(|| WriterError::Layout("row_width is 0; cannot pack row matrix".into()))?;
+        if rows_per_block == 0 {
+            return Err(WriterError::Layout(format!(
+                "row_width {row_width} exceeds MAX_BLOCK_DATA {MAX_BLOCK_DATA}"
+            )));
+        }
+        let mut chunks: Vec<(u64, u32)> = Vec::new();
+        let mut i = 0usize;
+        while i < row_count {
+            let remaining = row_count - i;
+            let take = remaining.min(rows_per_block);
+            let is_last = i + take == row_count;
+            let mut payload = row_matrix[i * row_width..(i + take) * row_width].to_vec();
+            if !is_last {
+                payload.resize(MAX_BLOCK_DATA, 0);
+            }
+            let bid = self.alloc_bid(false);
+            let len = payload.len() as u32;
+            self.push_leaf_block(bid, payload)?;
+            chunks.push((bid, len));
+            i += take;
+        }
+        let total: u64 = chunks.iter().map(|(_, l)| u64::from(*l)).sum();
+        if chunks.len() == 1 {
+            return Ok((chunks[0].0, total));
+        }
+        if chunks.len() <= MAX_XBLOCK_ENTRIES {
+            let bid = self.build_xblock(&chunks)?;
+            return Ok((bid, total));
+        }
+        let mut xblock_bids = Vec::new();
+        for group in chunks.chunks(MAX_XBLOCK_ENTRIES) {
+            xblock_bids.push(self.build_xblock(group)?);
+        }
+        if xblock_bids.len() > MAX_XBLOCK_ENTRIES {
+            return Err(WriterError::AllocationFailed(format!(
+                "row matrix requires {} XBLOCKs, exceeding one XXBLOCK capacity",
+                xblock_bids.len()
+            )));
+        }
+        let bid = self.build_xxblock(&xblock_bids, total as u32)?;
+        Ok((bid, total))
+    }
+
     /// Build a single-block SLBLOCK subnode leaf listing `entries` (nid,
     /// bidData, bidSub).
     ///
@@ -5771,6 +5880,63 @@ mod tests {
             xblock.data[7],
         ]);
         assert_eq!(lcb_total as usize, data.len());
+    }
+
+    /// Width 100 → RowsPerBlock=81, 76 bytes dead space. Naive `write_data_chain`
+    /// would put those 76 bytes (start of row 81) in the first 8176-byte chunk.
+    #[test]
+    fn write_row_matrix_tree_does_not_split_rows_across_leaves() {
+        let mut layout = Layout::new();
+        let row_width = 100usize;
+        let rows_per_block = MAX_BLOCK_DATA / row_width;
+        assert_eq!(rows_per_block, 81);
+        let row_count = rows_per_block + 2;
+        let mut matrix = Vec::with_capacity(row_count * row_width);
+        for i in 0..row_count {
+            matrix.extend(vec![i as u8; row_width]);
+        }
+        let (bid, total) = layout
+            .write_row_matrix_tree(&matrix, row_width)
+            .expect("pack");
+        assert_eq!(bid & 0x02, 0x02, "two leaves require an XBLOCK");
+        assert_eq!(
+            total as usize,
+            MAX_BLOCK_DATA + 2 * row_width,
+            "non-last leaf padded to 8176"
+        );
+        let xblock = layout.blocks.iter().find(|b| b.bid == bid).expect("xblock");
+        let c_entries = u16::from_le_bytes([xblock.data[2], xblock.data[3]]);
+        assert_eq!(c_entries, 2);
+        let leaf0_bid = u64::from_le_bytes(xblock.data[8..16].try_into().expect("bid0"));
+        let leaf1_bid = u64::from_le_bytes(xblock.data[16..24].try_into().expect("bid1"));
+        let leaf0 = layout
+            .blocks
+            .iter()
+            .find(|b| b.bid == leaf0_bid)
+            .expect("leaf0");
+        let leaf1 = layout
+            .blocks
+            .iter()
+            .find(|b| b.bid == leaf1_bid)
+            .expect("leaf1");
+        assert_eq!(leaf0.data.len(), MAX_BLOCK_DATA);
+        assert_eq!(
+            &leaf0.data[rows_per_block * row_width..],
+            &vec![0u8; MAX_BLOCK_DATA - rows_per_block * row_width][..],
+            "dead space is padding, not the next row"
+        );
+        assert_eq!(leaf0.data[0], 0);
+        assert_eq!(
+            leaf0.data[rows_per_block * row_width - 1],
+            (rows_per_block - 1) as u8
+        );
+        assert_eq!(leaf1.data.len(), 2 * row_width);
+        assert_eq!(leaf1.data[0], rows_per_block as u8);
+        assert_eq!(leaf1.data[row_width], (rows_per_block + 1) as u8);
+        // Naive chain of the flat matrix would place matrix[8176]=row 81's byte 76
+        // in the first chunk — that byte is fill value 81, not padding 0.
+        assert_eq!(matrix[MAX_BLOCK_DATA], rows_per_block as u8);
+        assert_ne!(leaf0.data[MAX_BLOCK_DATA - 1], matrix[MAX_BLOCK_DATA - 1]);
     }
 
     /// PidTagMessageSize (MAPI 0x0E08) is a PtypInteger32 / PT_LONG property

@@ -995,7 +995,7 @@ fn attachment_table_template_present_empty_at_0x671() {
     let raw = pst
         .read_node_data(pst_reader::NodeId(0x671))
         .expect("NBT template 0x671 must be readable");
-    let table = pst_reader::ltp::tc::TableContext::load(raw, None).expect("TC load");
+    let table = pst_reader::ltp::tc::TableContext::load(raw).expect("TC load");
     assert_eq!(table.row_count(), 0, "template must have zero rows");
     assert_eq!(
         table.columns().len(),
@@ -1041,7 +1041,7 @@ fn per_message_attachment_table_rows_and_row_index() {
     let table_raw = pst
         .read_subnode_data(msg_nid, pst_reader::NodeId(0x671))
         .expect("message subnode 0x671 attachment table");
-    let table = pst_reader::ltp::tc::TableContext::load(table_raw, None).expect("TC");
+    let table = pst_reader::ltp::tc::TableContext::load(table_raw).expect("TC");
     assert_eq!(table.row_count(), 1, "one attach → one table row");
     assert_eq!(
         table.get_row_id(0),
@@ -1085,7 +1085,7 @@ fn recipient_table_template_present_empty_at_0x692() {
     let raw = pst
         .read_node_data(pst_reader::NodeId(0x692))
         .expect("NBT template 0x692 must be readable");
-    let table = pst_reader::ltp::tc::TableContext::load(raw, None).expect("TC load");
+    let table = pst_reader::ltp::tc::TableContext::load(raw).expect("TC load");
     assert_eq!(table.row_count(), 0, "template must have zero rows");
     assert_eq!(
         table.columns().len(),
@@ -1122,7 +1122,7 @@ fn every_message_has_recipient_table_subnode_0x692() {
     let table_raw = pst
         .read_subnode_data(msg_nid, pst_reader::NodeId(0x692))
         .expect("message subnode 0x692 recipient table");
-    let table = pst_reader::ltp::tc::TableContext::load(table_raw, None).expect("TC");
+    let table = pst_reader::ltp::tc::TableContext::load(table_raw).expect("TC");
     assert_eq!(table.row_count(), 0, "zero-row recipient TC still present");
     assert_eq!(table.columns().len(), 15);
 
@@ -2557,41 +2557,62 @@ fn cumulative_helper_strings_divert_without_heap_overflow() {
     cleanup(&path);
 }
 
-// ── 0093: Strategy B recipient TC — ≥136 rows, To-first, Display* full ───────
+// ── 0100: Strategy A recipient TC — all included rows, multi-page HN ─────────
+
+fn recip_row(ty: WriteRecipientType, label: &str, i: usize) -> WriteRecipient {
+    WriteRecipient {
+        recipient_type: ty,
+        display_name: Some(format!("{label}{i}")),
+        address_type: Some("SMTP".into()),
+        email_address: Some(format!("{}{i}@ex.com", label.to_ascii_lowercase())),
+        smtp_address: Some(format!("{}{i}@ex.com", label.to_ascii_lowercase())),
+    }
+}
+
+/// Inspect the per-message recipient-table subnode (NID type 0x12).
+fn recipient_table_subnode(
+    path: &Path,
+    msg_nid: pst_reader::NodeId,
+) -> (Vec<u8>, pst_reader::BlockId) {
+    let pst = pst_reader::PstFile::open(path).expect("open");
+    let msg_entry = pst.nbt().get(msg_nid).cloned().expect("message nbt");
+    let mut file = std::fs::File::open(path).expect("file");
+    let subs =
+        pst_reader::ndb::block::list_subnode_entries(&mut file, pst.bbt(), msg_entry.bid_sub)
+            .expect("message subnodes");
+    let recip = subs
+        .iter()
+        .find(|e| {
+            matches!(
+                e.nid.nid_type(),
+                pst_reader::ndb::nid::NidType::RecipientTable
+            )
+        })
+        .expect("recipient table subnode");
+    let data = pst_reader::ndb::block::read_block_data(
+        &mut file,
+        pst.bbt(),
+        recip.bid_data,
+        pst_reader::crypto::CryptMethod::None,
+    )
+    .expect("recip heap");
+    (data, recip.bid_sub)
+}
 
 #[test]
-fn recipient_tc_budget_truncates_with_event_and_keeps_display() {
-    let path = scratch_path("recip_tc_budget");
+fn recipient_tc_writes_all_140_included_rows_and_keeps_display() {
+    let path = scratch_path("recip_tc_all_rows");
     cleanup(&path);
 
     let mut recipients = Vec::new();
-    // Intentionally interleave classes so order-before-cap is exercised.
     for i in 0..40 {
-        recipients.push(WriteRecipient {
-            recipient_type: WriteRecipientType::Bcc,
-            display_name: Some(format!("Bcc{i}")),
-            address_type: Some("SMTP".into()),
-            email_address: Some(format!("bcc{i}@ex.com")),
-            smtp_address: Some(format!("bcc{i}@ex.com")),
-        });
+        recipients.push(recip_row(WriteRecipientType::Bcc, "Bcc", i));
     }
     for i in 0..50 {
-        recipients.push(WriteRecipient {
-            recipient_type: WriteRecipientType::Cc,
-            display_name: Some(format!("Cc{i}")),
-            address_type: Some("SMTP".into()),
-            email_address: Some(format!("cc{i}@ex.com")),
-            smtp_address: Some(format!("cc{i}@ex.com")),
-        });
+        recipients.push(recip_row(WriteRecipientType::Cc, "Cc", i));
     }
     for i in 0..50 {
-        recipients.push(WriteRecipient {
-            recipient_type: WriteRecipientType::To,
-            display_name: Some(format!("To{i}")),
-            address_type: Some("SMTP".into()),
-            email_address: Some(format!("to{i}@ex.com")),
-            smtp_address: Some(format!("to{i}@ex.com")),
-        });
+        recipients.push(recip_row(WriteRecipientType::To, "To", i));
     }
     assert_eq!(recipients.len(), 140);
 
@@ -2608,7 +2629,7 @@ fn recipient_tc_budget_truncates_with_event_and_keeps_display() {
         .collect::<Vec<_>>()
         .join("; ");
 
-    let mut msg = base_msg("<recip-budget@ex.com>", "Many recipients");
+    let mut msg = base_msg("<recip-all@ex.com>", "Many recipients");
     msg.source_path = Some(r"C:\src\budget.pst".into());
     msg.source_msg_nid = Some(0x2044);
     msg.display_to = Some(display_to.clone());
@@ -2622,127 +2643,199 @@ fn recipient_tc_budget_truncates_with_event_and_keeps_display() {
     };
     let report = write_unicode_pst(&path, vec![msg], &[], &opts).expect("write completes");
     assert_eq!(report.messages_written, 1);
-    assert!(
-        report.recipient_tc_truncated_messages >= 1,
-        "expected truncate counter: {:?}",
-        report.recipient_tc_truncated_messages
-    );
-    assert!(
-        report.recipient_rows_truncated > 0,
-        "expected rows truncated > 0"
-    );
-    assert!(
-        !report.recipient_tc_truncated_events.is_empty(),
-        "expected RECIPIENT_TC_TRUNCATED event"
-    );
-    let ev = &report.recipient_tc_truncated_events[0];
-    assert_eq!(ev.reason(), "RECIPIENT_TC_TRUNCATED");
-    assert_eq!(ev.source_count, 140);
-    assert!(ev.kept_count < ev.source_count);
-    assert!(ev.kept_count > 0);
-    // To-first: with 50 To rows and hint 48, all kept should be To when names are short.
-    assert_eq!(
-        ev.kept_to, ev.kept_count,
-        "To-first: only To kept when To>=hint"
-    );
-    assert_eq!(ev.kept_cc, 0);
-    assert_eq!(ev.kept_bcc, 0);
+    assert_eq!(report.recipient_tc_truncated_messages, 0);
+    assert_eq!(report.recipient_rows_truncated, 0);
+    assert!(report.recipient_tc_truncated_events.is_empty());
 
     let nid = first_message_nid(&path, "Unique Mail");
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
     let recips = pst.list_recipients(nid).expect("list");
-    assert_eq!(recips.len() as u32, ev.kept_count);
-    assert!(
-        recips
-            .iter()
-            .all(|r| r.recipient_type == pst_reader::RecipientType::To),
-        "kept rows must be To-first: {recips:?}"
-    );
+    assert_eq!(recips.len(), 140);
+    let n_to = recips
+        .iter()
+        .filter(|r| r.recipient_type == pst_reader::RecipientType::To)
+        .count();
+    let n_cc = recips
+        .iter()
+        .filter(|r| r.recipient_type == pst_reader::RecipientType::Cc)
+        .count();
+    let n_bcc = recips
+        .iter()
+        .filter(|r| r.recipient_type == pst_reader::RecipientType::Bcc)
+        .count();
+    assert_eq!((n_to, n_cc, n_bcc), (50, 50, 40));
+    // Continuation-page HN strings must round-trip (opt_row_string would
+    // hide InvalidHid as None).
+    assert_eq!(recips[0].display_name.as_deref(), Some("To0"));
+    assert_eq!(recips[49].display_name.as_deref(), Some("To49"));
+    assert_eq!(recips[139].display_name.as_deref(), Some("Bcc39"));
+    // To→Cc→Bcc order preserved.
+    assert!(recips[..50]
+        .iter()
+        .all(|r| r.recipient_type == pst_reader::RecipientType::To));
+    assert!(recips[50..100]
+        .iter()
+        .all(|r| r.recipient_type == pst_reader::RecipientType::Cc));
+    assert!(recips[100..]
+        .iter()
+        .all(|r| r.recipient_type == pst_reader::RecipientType::Bcc));
 
     let extract = pst.read_message_extract(nid).expect("extract");
     assert_eq!(extract.display_to.as_deref(), Some(display_to.as_str()));
     assert_eq!(extract.display_cc.as_deref(), Some(display_cc.as_str()));
     assert_eq!(extract.display_bcc.as_deref(), Some(display_bcc.as_str()));
 
+    let (heap, bid_sub) = recipient_table_subnode(&path, nid);
+    assert!(
+        !bid_sub.is_null(),
+        "non-empty recipient TC must have bid_sub"
+    );
+    assert!(
+        heap.len() > 8176,
+        "140-row TC must exercise multi-page HN (heap {} bytes)",
+        heap.len()
+    );
+    let mut file = std::fs::File::open(&path).expect("file");
+    let pst2 = pst_reader::PstFile::open(&path).expect("open2");
+    let table = pst_reader::ltp::tc::load_from_table_bids(
+        heap,
+        &mut file,
+        pst2.bbt(),
+        bid_sub,
+        pst_reader::crypto::CryptMethod::None,
+    )
+    .expect("load recip TC");
+    assert_ne!(
+        table.info().hnid_rows & 0x1F,
+        0,
+        "hnidRows must be a NID (nidType != 0), got 0x{:08X}",
+        table.info().hnid_rows
+    );
+    assert_eq!(table.row_count(), 140);
+
     cleanup(&path);
 }
 
-/// 0093 DoD-2 proof: long per-row strings force budget keep **below** ROW_HINT 48.
+/// Default BCC omit: BCC rows absent; To+Cc complete; DisplayBcc still written
+/// only when include_bcc (this test uses default omit so DisplayBcc is omitted
+/// from the PC — reader extract may be None). QC known_gap is a CLI test.
 #[test]
-fn recipient_tc_budget_keep_below_hint_with_long_names() {
-    let path = scratch_path("recip_tc_budget_long");
+fn recipient_tc_default_bcc_omit_writes_to_cc_only() {
+    let path = scratch_path("recip_tc_bcc_omit");
     cleanup(&path);
-
-    // ~7–8 HIDs/row; long UTF-16 display/email/smtp force catch-and-retry under 48.
-    let long = "N".repeat(180);
     let mut recipients = Vec::new();
-    for i in 0..60 {
-        let email = format!("{long}{i}@example.com");
-        recipients.push(WriteRecipient {
-            recipient_type: if i < 30 {
-                WriteRecipientType::To
-            } else {
-                WriteRecipientType::Cc
-            },
-            display_name: Some(format!("{long}-display-{i}")),
-            address_type: Some("SMTP".into()),
-            email_address: Some(email.clone()),
-            smtp_address: Some(email),
-        });
+    for i in 0..5 {
+        recipients.push(recip_row(WriteRecipientType::To, "To", i));
+        recipients.push(recip_row(WriteRecipientType::Cc, "Cc", i));
+        recipients.push(recip_row(WriteRecipientType::Bcc, "Bcc", i));
     }
-    let display_to = (0..30)
-        .map(|i| format!("{long}-display-{i} <{long}{i}@example.com>"))
-        .collect::<Vec<_>>()
-        .join("; ");
-    let display_cc = (30..60)
-        .map(|i| format!("{long}-display-{i} <{long}{i}@example.com>"))
-        .collect::<Vec<_>>()
-        .join("; ");
-
-    let mut msg = base_msg("<recip-long@ex.com>", "Long recip names");
-    msg.source_path = Some(r"C:\src\long.pst".into());
-    msg.source_msg_nid = Some(0x2055);
-    msg.display_to = Some(display_to.clone());
-    msg.display_cc = Some(display_cc.clone());
+    let mut msg = base_msg("<recip-bcc@ex.com>", "Bcc omit");
+    msg.display_to = Some("to".into());
+    msg.display_cc = Some("cc".into());
+    msg.display_bcc = Some("bcc".into());
     msg.recipients = recipients;
-
-    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default())
-        .expect("write must complete under long-name budget pressure");
-    assert!(
-        report.recipient_tc_truncated_messages >= 1,
-        "expected truncate: {:?}",
-        report.recipient_tc_truncated_messages
-    );
-    let ev = report
-        .recipient_tc_truncated_events
-        .first()
-        .expect("truncate event");
-    assert_eq!(ev.source_count, 60);
-    assert!(
-        ev.kept_count < 48,
-        "long names must force kept < ROW_HINT 48; kept={}",
-        ev.kept_count
-    );
-    assert!(ev.kept_count > 0);
-    // To-first under budget: all kept should be To while To count (30) >= kept.
-    assert_eq!(ev.kept_to, ev.kept_count);
-    assert_eq!(ev.kept_cc, 0);
-
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
     let nid = first_message_nid(&path, "Unique Mail");
     let mut pst = pst_reader::PstFile::open(&path).expect("open");
     let recips = pst.list_recipients(nid).expect("list");
-    assert_eq!(recips.len() as u32, ev.kept_count);
-    let extract = pst.read_message_extract(nid).expect("extract");
-    assert_eq!(
-        extract.display_to.as_deref(),
-        Some(display_to.as_str()),
-        "DisplayTo must stay full (not clipped)"
-    );
-    assert_eq!(
-        extract.display_cc.as_deref(),
-        Some(display_cc.as_str()),
-        "DisplayCc must stay full (not clipped)"
-    );
+    assert_eq!(recips.len(), 10);
+    assert!(recips
+        .iter()
+        .all(|r| r.recipient_type != pst_reader::RecipientType::Bcc));
+    cleanup(&path);
+}
 
+/// >RowsPerBlock (live width 56 → Floor(8176/56)=146) so the matrix spans leaves.
+#[test]
+fn recipient_tc_matrix_spans_rows_per_block() {
+    let path = scratch_path("recip_tc_span");
+    cleanup(&path);
+    const N: usize = 160;
+    let mut recipients = Vec::with_capacity(N);
+    for i in 0..N {
+        recipients.push(recip_row(WriteRecipientType::To, "To", i));
+    }
+    let mut msg = base_msg("<recip-span@ex.com>", "Span matrix");
+    msg.recipients = recipients;
+    let report = write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    assert_eq!(report.recipient_tc_truncated_messages, 0);
+    let nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let recips = pst.list_recipients(nid).expect("list");
+    assert_eq!(
+        recips.len(),
+        N,
+        "reader must ignore dead space; exact count"
+    );
+    assert_eq!(recips[0].display_name.as_deref(), Some("To0"));
+    assert_eq!(
+        recips[145].display_name.as_deref(),
+        Some("To145"),
+        "last row of first matrix leaf"
+    );
+    assert_eq!(
+        recips[146].display_name.as_deref(),
+        Some("To146"),
+        "first row of second matrix leaf"
+    );
+    assert_eq!(recips[159].display_name.as_deref(), Some("To159"));
+    let (heap, bid_sub) = recipient_table_subnode(&path, nid);
+    assert!(!bid_sub.is_null());
+    let mut file = std::fs::File::open(&path).expect("file");
+    let pst2 = pst_reader::PstFile::open(&path).expect("open2");
+    let table = pst_reader::ltp::tc::load_from_table_bids(
+        heap,
+        &mut file,
+        pst2.bbt(),
+        bid_sub,
+        pst_reader::crypto::CryptMethod::None,
+    )
+    .expect("load");
+    assert_eq!(table.row_count(), N);
+    cleanup(&path);
+}
+
+#[test]
+fn recipient_tc_empty_hnid_rows_and_bid_sub_zero() {
+    let path = scratch_path("recip_tc_empty");
+    cleanup(&path);
+    let msg = base_msg("<recip-empty@ex.com>", "No recips");
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    let nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let recips = pst.list_recipients(nid).expect("list");
+    assert!(recips.is_empty());
+    let (heap, bid_sub) = recipient_table_subnode(&path, nid);
+    assert!(bid_sub.is_null(), "empty TC bid_sub must be 0");
+    let table = pst_reader::ltp::tc::TableContext::load(heap).expect("load empty");
+    assert_eq!(table.info().hnid_rows, 0);
+    assert!(
+        table.info().hid_row_index.is_null(),
+        "empty TC hidRowIndex must be 0"
+    );
+    assert_eq!(table.row_count(), 0);
+    cleanup(&path);
+}
+
+#[test]
+fn recipient_tc_long_string_cell_nid_round_trips() {
+    let path = scratch_path("recip_tc_cell_nid");
+    cleanup(&path);
+    // UTF-16 bytes = 2 * chars; MAX_HEAP_VALUE_SIZE = 2048 → 1025 chars diverts.
+    let long = "N".repeat(1025);
+    let mut msg = base_msg("<recip-longcell@ex.com>", "Long cell");
+    msg.recipients = vec![WriteRecipient {
+        recipient_type: WriteRecipientType::To,
+        display_name: Some(long.clone()),
+        address_type: Some("SMTP".into()),
+        email_address: Some("long@ex.com".into()),
+        smtp_address: Some("long@ex.com".into()),
+    }];
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    let nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let recips = pst.list_recipients(nid).expect("list");
+    assert_eq!(recips.len(), 1);
+    assert_eq!(recips[0].display_name.as_deref(), Some(long.as_str()));
     cleanup(&path);
 }

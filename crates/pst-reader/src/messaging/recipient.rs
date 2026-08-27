@@ -4,7 +4,6 @@
 //! never invented into rows (0082 / fidelity_contract).
 
 use crate::error::Result;
-use crate::ltp::tc::TableContext;
 use crate::ndb::block;
 use crate::ndb::nid::{self, NidType, NodeId};
 use crate::PstFile;
@@ -207,26 +206,13 @@ impl PstFile {
         let data =
             block::read_block_data(&mut self.reader, &self.bbt, recip_entry.bid_data, crypt)?;
 
-        // Rows may live inline in the TC heap or in a nested subnode (same pattern as load_tc).
-        let subnode_rows = if !recip_entry.bid_sub.is_null() {
-            let nested =
-                block::list_subnode_entries(&mut self.reader, &self.bbt, recip_entry.bid_sub)?;
-            if nested.is_empty() {
-                None
-            } else {
-                let mut all_rows = Vec::new();
-                for entry in &nested {
-                    let entry_data =
-                        block::read_block_data(&mut self.reader, &self.bbt, entry.bid_data, crypt)?;
-                    all_rows.extend_from_slice(&entry_data);
-                }
-                Some(all_rows)
-            }
-        } else {
-            None
-        };
-
-        let table = match TableContext::load(data, subnode_rows) {
+        let table = match crate::ltp::tc::load_from_table_bids(
+            data,
+            &mut self.reader,
+            &self.bbt,
+            recip_entry.bid_sub,
+            crypt,
+        ) {
             Ok(t) => t,
             Err(e) => {
                 tracing::debug!(
