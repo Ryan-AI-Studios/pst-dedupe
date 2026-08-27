@@ -237,22 +237,23 @@ Promoted from operator unique-pst smoke on Desktop `INC0102784.pst` + `INC010278
 
 ## Series P — Unique-PST defensibility (post-0098 INC* soak)
 
-Ranked for affidavit-grade unique-PST: CRC class first, then full recipient TCs, then nested-depth flag. **No BCC track** (0082 default suppress stays). Hermes Series O frontend, if started, uses **0105+**. **0099 spec expanded 2026-08-26** (Phase 0 closed); 0100/0101 remain placeholders.
+Ranked for affidavit-grade unique-PST: CRC class first, then full recipient TCs, then nested-depth flag. **No BCC track** (0082 default suppress stays). Hermes Series O frontend, if started, uses **0105+**. **0100 spec expanded 2026-08-27** (Phase 0 closed). 0101 remains a placeholder. **0102** is a thin oracle-attest placeholder minted from PR #89 Bugbot (do not steal into 0100).
 
 | Track | Status | Summary |
 |---|---|---|
 | [0099-CrcPolyExportRiskHonesty](0099-CrcPolyExportRiskHonesty/spec.md) | **Completed** | Dual-rate poly CRC must not elevate unique-pst `export_risk`; thresholds key on effective (non-poly) `block_crc_read_rate`. INC* preflight `ok` vs `not_export_ready` (`block_crc_read_rate=1.0`, 6014 `ATTACH_STREAM_CRC`). Promotes **D-0077-systematic-poly** honesty half. Fingerprint residual. Never in-tool repair. |
-| [0100-RecipientTcMultipage](0100-RecipientTcMultipage/spec.md) | **Proposed** | Strategy A: full To/Cc recipient TC beyond 0093 single-page cap. INC* 39 msgs / 3082 truncated rows. Closes **D-0093-recipient-tc-multipage**. BCC default unchanged. |
+| [0100-RecipientTcMultipage](0100-RecipientTcMultipage/spec.md) | **In progress** | Strategy A: full included recipient TC. Row-matrix subnode + RowsPerBlock + multi-block HN on the table node; shared `TableContext::load` (four concat sites). Closes **D-0093-recipient-tc-multipage**. BCC default unchanged. No Strategy B cap after ship. |
 | [0101-EmbeddedDepthFlag](0101-EmbeddedDepthFlag/spec.md) | **Proposed** | Wire `--max-embedded-depth` (clamp 1–8, default 3) on unique-pst. INC* 4 `ATTACH_DEPTH_LIMIT` = 2 nests on one memo × 2 sources. Narrows unique-pst half of **D-0067-embedded-depth**. |
+| [0102-ExportOracleInputsAttest](0102-ExportOracleInputsAttest/spec.md) | **Proposed** | 0099 attest pointers `/export_risk/inputs/…` are stripped by oracle key `"inputs"`. Closes **D-0099-oracle-inputs-attest**. After 0101 unless oracle CI is failing. |
 
-**Suggested order:** **0099** → **0100** → **0101**.
+**Suggested order:** **0099** → **0100** → **0101** → **0102**.
 
 ## Notes
 
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099 Completed** (CRC/poly export-risk honesty); **0100–0101 Proposed** (recipient Strategy A, nested-depth flag).
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099 Completed**; **0100 In progress** (recipient Strategy A); **0101–0102 Proposed** (depth flag; oracle `export_risk.inputs` attest).
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).
