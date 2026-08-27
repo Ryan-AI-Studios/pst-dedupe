@@ -196,8 +196,8 @@
 | Order | Track | Notes |
 |---|---|---|
 | 1 | **0099** CrcPolyExportRiskHonesty | **Completed** — effective (non-poly) CRC rate for `export_risk`; D-0077-systematic-poly honesty half |
-| 2 | **0100** RecipientTcMultipage | **In progress** — Strategy A (row-matrix subnode + RowsPerBlock + multi-block HN); D-0093-recipient-tc-multipage |
+| 2 | **0100** RecipientTcMultipage | **Completed** — Strategy A (row-matrix subnode + RowsPerBlock + multi-block HN); D-0093-recipient-tc-multipage |
 | 3 | **0101** EmbeddedDepthFlag | **Proposed** — unique-pst `--max-embedded-depth`; INC* 2 nests |
 | 4 | **0102** ExportOracleInputsAttest | **Proposed** — 0099 oracle `/export_risk/inputs` attest actually compares; D-0099-oracle-inputs-attest |
 
-**Suggested:** **0099** (Completed) → **0100** (In progress) → 0101 → 0102. No BCC track. Frontend Series O → **0105+**.
+**Suggested:** **0099** (Completed) → **0100** (Completed) → 0101 → 0102. No BCC track. Frontend Series O → **0105+**.

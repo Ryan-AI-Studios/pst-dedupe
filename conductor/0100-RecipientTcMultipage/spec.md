@@ -8,7 +8,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** `C:\dev\Dedupe-plan.md` → unique-PST recipient fidelity (file not present on this machine at plan-time; re-verify at execute)
 - **Cross-repo contract:** n/a
-- **Status:** In progress
+- **Status:** Completed
 - **Depends on:** 0082 · 0093 (Strategy **B** shipped) · 0098 · 0099 (all **Completed**)
 - **Spec authored:** 2026-08-27
 - **Series:** P (Unique-PST defensibility)
