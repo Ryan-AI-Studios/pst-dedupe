@@ -421,7 +421,9 @@ fn collect_cell_subnodes(
     for row_index in 0..row_count {
         let row_start = row_index * row_size;
         for col in &info.columns {
-            if col.cb_data != 4 {
+            // Only PtypString / PtypString8 / PtypBinary store HNIDs. Integer
+            // cells (RowID, RecipientType, …) can have nidType ≠ 0 by coincidence.
+            if col.cb_data != 4 || !matches!(col.prop_type, 0x001F | 0x001E | 0x0102) {
                 continue;
             }
             let data_offset = row_start + col.ib_data as usize;
@@ -630,6 +632,54 @@ mod tests {
         assert_eq!(
             table.get_row_string(0, 0x3001).expect("str").as_deref(),
             Some("NidName")
+        );
+    }
+
+    #[test]
+    fn integer_column_is_not_resolved_as_cell_subnode() {
+        // Two columns: Unicode HNID + PtypInteger32 whose value equals a sibling NID.
+        let cell_nid: u32 = 0x3F;
+        let matrix_nid: u32 = 0x5F;
+        let decoy_nid: u32 = 0x7F; // would be loaded if integer cells were treated as HNIDs
+        let name = utf16le("Keep");
+        let mut matrix = Vec::new();
+        matrix.extend_from_slice(&cell_nid.to_le_bytes());
+        matrix.extend_from_slice(&decoy_nid.to_le_bytes());
+        matrix.push(0x03); // CEB bits 0 and 1
+        let mut info = Vec::new();
+        info.push(0x7C);
+        info.push(2);
+        info.extend_from_slice(&0u16.to_le_bytes());
+        info.extend_from_slice(&0u16.to_le_bytes());
+        info.extend_from_slice(&0u16.to_le_bytes());
+        info.extend_from_slice(&9u16.to_le_bytes());
+        info.extend_from_slice(&0u32.to_le_bytes());
+        info.extend_from_slice(&matrix_nid.to_le_bytes());
+        info.extend_from_slice(&0x3001u16.to_le_bytes());
+        info.extend_from_slice(&0x001Fu16.to_le_bytes());
+        info.extend_from_slice(&0u16.to_le_bytes());
+        info.push(4);
+        info.push(0);
+        info.extend_from_slice(&0x0C15u16.to_le_bytes());
+        info.extend_from_slice(&0x0003u16.to_le_bytes());
+        info.extend_from_slice(&4u16.to_le_bytes());
+        info.push(4);
+        info.push(1);
+        let heap = build_hn(0x7C, &[info], 0);
+        let mut map = HashMap::new();
+        map.insert(matrix_nid, matrix);
+        map.insert(cell_nid, name);
+        map.insert(decoy_nid, utf16le("DECOY"));
+        let mut resolver = MapResolver(map);
+        let table = TableContext::load_with_resolver(heap, &mut resolver).expect("load");
+        assert_eq!(table.row_count(), 1);
+        assert_eq!(
+            table.get_row_string(0, 0x3001).expect("str").as_deref(),
+            Some("Keep")
+        );
+        assert!(
+            !table.cell_subnodes.contains_key(&decoy_nid),
+            "integer cell 0x{decoy_nid:X} must not be collected as a string/binary HNID"
         );
     }
 }
