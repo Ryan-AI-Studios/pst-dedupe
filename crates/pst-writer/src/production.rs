@@ -5882,6 +5882,63 @@ mod tests {
         assert_eq!(lcb_total as usize, data.len());
     }
 
+    /// Width 100 → RowsPerBlock=81, 76 bytes dead space. Naive `write_data_chain`
+    /// would put those 76 bytes (start of row 81) in the first 8176-byte chunk.
+    #[test]
+    fn write_row_matrix_tree_does_not_split_rows_across_leaves() {
+        let mut layout = Layout::new();
+        let row_width = 100usize;
+        let rows_per_block = MAX_BLOCK_DATA / row_width;
+        assert_eq!(rows_per_block, 81);
+        let row_count = rows_per_block + 2;
+        let mut matrix = Vec::with_capacity(row_count * row_width);
+        for i in 0..row_count {
+            matrix.extend(vec![i as u8; row_width]);
+        }
+        let (bid, total) = layout
+            .write_row_matrix_tree(&matrix, row_width)
+            .expect("pack");
+        assert_eq!(bid & 0x02, 0x02, "two leaves require an XBLOCK");
+        assert_eq!(
+            total as usize,
+            MAX_BLOCK_DATA + 2 * row_width,
+            "non-last leaf padded to 8176"
+        );
+        let xblock = layout.blocks.iter().find(|b| b.bid == bid).expect("xblock");
+        let c_entries = u16::from_le_bytes([xblock.data[2], xblock.data[3]]);
+        assert_eq!(c_entries, 2);
+        let leaf0_bid = u64::from_le_bytes(xblock.data[8..16].try_into().expect("bid0"));
+        let leaf1_bid = u64::from_le_bytes(xblock.data[16..24].try_into().expect("bid1"));
+        let leaf0 = layout
+            .blocks
+            .iter()
+            .find(|b| b.bid == leaf0_bid)
+            .expect("leaf0");
+        let leaf1 = layout
+            .blocks
+            .iter()
+            .find(|b| b.bid == leaf1_bid)
+            .expect("leaf1");
+        assert_eq!(leaf0.data.len(), MAX_BLOCK_DATA);
+        assert_eq!(
+            &leaf0.data[rows_per_block * row_width..],
+            &vec![0u8; MAX_BLOCK_DATA - rows_per_block * row_width][..],
+            "dead space is padding, not the next row"
+        );
+        assert_eq!(leaf0.data[0], 0);
+        assert_eq!(
+            leaf0.data[rows_per_block * row_width - 1],
+            (rows_per_block - 1) as u8
+        );
+        assert_eq!(leaf1.data.len(), 2 * row_width);
+        assert_eq!(leaf1.data[0], rows_per_block as u8);
+        assert_eq!(leaf1.data[row_width], (rows_per_block + 1) as u8);
+        // Naive chain of the flat matrix would place matrix[8176]=row 81's byte 76
+        // in the first chunk — that byte is fill value 81, not padding 0.
+        assert_eq!(matrix[MAX_BLOCK_DATA], rows_per_block as u8);
+        assert_ne!(leaf0.data[MAX_BLOCK_DATA - 1], matrix[MAX_BLOCK_DATA - 1]);
+    }
+
     /// PidTagMessageSize (MAPI 0x0E08) is a PtypInteger32 / PT_LONG property
     /// (MS-OXPROPS) — representable range `0..=i32::MAX`. `write_data_chain`
     /// must refuse anything larger than that with a hard `BodyTooLarge`

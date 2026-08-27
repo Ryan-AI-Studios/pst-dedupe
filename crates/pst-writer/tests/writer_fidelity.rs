@@ -2664,6 +2664,11 @@ fn recipient_tc_writes_all_140_included_rows_and_keeps_display() {
         .filter(|r| r.recipient_type == pst_reader::RecipientType::Bcc)
         .count();
     assert_eq!((n_to, n_cc, n_bcc), (50, 50, 40));
+    // Continuation-page HN strings must round-trip (opt_row_string would
+    // hide InvalidHid as None).
+    assert_eq!(recips[0].display_name.as_deref(), Some("To0"));
+    assert_eq!(recips[49].display_name.as_deref(), Some("To49"));
+    assert_eq!(recips[139].display_name.as_deref(), Some("Bcc39"));
     // To→Cc→Bcc order preserved.
     assert!(recips[..50]
         .iter()
@@ -2762,6 +2767,18 @@ fn recipient_tc_matrix_spans_rows_per_block() {
         N,
         "reader must ignore dead space; exact count"
     );
+    assert_eq!(recips[0].display_name.as_deref(), Some("To0"));
+    assert_eq!(
+        recips[145].display_name.as_deref(),
+        Some("To145"),
+        "last row of first matrix leaf"
+    );
+    assert_eq!(
+        recips[146].display_name.as_deref(),
+        Some("To146"),
+        "first row of second matrix leaf"
+    );
+    assert_eq!(recips[159].display_name.as_deref(), Some("To159"));
     let (heap, bid_sub) = recipient_table_subnode(&path, nid);
     assert!(!bid_sub.is_null());
     let mut file = std::fs::File::open(&path).expect("file");
@@ -2792,6 +2809,10 @@ fn recipient_tc_empty_hnid_rows_and_bid_sub_zero() {
     assert!(bid_sub.is_null(), "empty TC bid_sub must be 0");
     let table = pst_reader::ltp::tc::TableContext::load(heap).expect("load empty");
     assert_eq!(table.info().hnid_rows, 0);
+    assert!(
+        table.info().hid_row_index.is_null(),
+        "empty TC hidRowIndex must be 0"
+    );
     assert_eq!(table.row_count(), 0);
     cleanup(&path);
 }
