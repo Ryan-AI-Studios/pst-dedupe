@@ -46,8 +46,9 @@
 
 | Item | Value |
 |---|---|
-| PR | _(filled after open)_ |
-| Merge SHA | _(filled after squash-merge)_ |
+| PR | [#100](https://github.com/Ryan-AI-Studios/pst-dedupe/pull/100) |
+| Merge SHA | `dfd19bd` |
+| CI note | First `test` run flaked on unrelated `process-runner::start_succeeds_exactly_one_job_row` (`wait_until_idle` 5s); rerun green. Required checks + verify-parity passed. |
 
 ## Notes
 
