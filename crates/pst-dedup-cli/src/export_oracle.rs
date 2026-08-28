@@ -15,10 +15,14 @@
 //!
 //! The allowlist includes **additive 0079 measurement fields** so a parent
 //! (pre-instrumentation) pack without `phase_timings` / `messages_materialized`
-//! / etc. still compares equal to a HEAD pack when product semantics match.
-//! Operator gate: build parent binary in a worktree, run both, call
-//! [`compare_export_packs`]. Optional CI: set `PST_DEDUPE_BASELINE_BIN` (see
-//! `unique_pst` integration test). Parent-oracle results are also recorded in
+//! / etc. still compares equal to a HEAD pack when **measurement** product
+//! semantics match. That equalization does **not** cover `export_risk.inputs`
+//! attest fields (0099): a **pre-0099** pack that omits
+//! `effective_block_crc_read_rate` / `poly_class_crc_discounted` /
+//! `discount_attach_stream_crc` / `poly_class_crc_sources` **must mismatch**
+//! HEAD — intended. Operator gate: build a **post-0099** parent binary, set
+//! `PST_DEDUPE_BASELINE_BIN`, run [`compare_export_packs`]. Optional CI: see
+//! `unique_pst` integration test. Parent-oracle results are also recorded in
 //! `conductor/0079-MaterializeWritePerformance/baseline.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,7 +38,12 @@ use sha2::{Digest, Sha256};
 ///
 /// Keep this list in sync with `docs/unique-pst-export.md` phase-timings section
 /// and any new 0079-style counters. Product fields (keep_set, export fidelity
-/// counters, exit_code, degraded_reasons) are **not** allowlisted.
+/// counters, exit_code, degraded_reasons, **`export_risk` / `export_risk.inputs`**)
+/// are **not** allowlisted. Strip is **name-based**; do not reuse allowlist names
+/// (`path`, `bytes`, `out`, `inputs`, hashes, timings) for product fields, or the
+/// oracle must go path-aware. Job-level `/inputs` (source paths) is blanked at
+/// root only in [`normalize_summary_for_oracle`] — never recursive-strip `"inputs"`
+/// (that deleted the 0099 attest object).
 const SUMMARY_ALLOWLIST_KEYS: &[&str] = &[
     "duration_ms",
     "duration_secs",
@@ -45,7 +54,6 @@ const SUMMARY_ALLOWLIST_KEYS: &[&str] = &[
     "report_dir",
     "decision_csv",
     "keep_set_json",
-    "inputs",
     // Volume digests change with store record key (D10).
     "sha256_hex",
     "md5_hex",
@@ -425,6 +433,7 @@ pub fn normalize_summary_for_oracle(v: &mut Value) {
         }
     }
     if let Some(obj) = v.as_object_mut() {
+        // Job-level UniqueExportSummary.inputs (source paths). Not export_risk.inputs.
         obj.insert("inputs".into(), Value::Array(vec![]));
     }
 }
@@ -815,5 +824,160 @@ mod tests {
     fn oracle_diff_ok_when_empty() {
         let d = OracleDiff { mismatches: vec![] };
         assert!(d.ok());
+    }
+
+    fn attest_summary(effective: f64, discounted: bool, root_paths: &[&str]) -> Value {
+        json!({
+            "ok": true,
+            "inputs": root_paths,
+            "export_risk": {
+                "level": "ok",
+                "reasons": ["poly_class_crc_discounted"],
+                "inputs": {
+                    "effective_block_crc_read_rate": effective,
+                    "poly_class_crc_discounted": discounted,
+                    "discount_attach_stream_crc": true,
+                    "poly_class_crc_sources": 2
+                }
+            },
+            "export": { "messages_written_total": 1, "attachments_failed": 0 },
+            "keep_set": { "stats": { "degraded_winners": 0 } },
+            "scan": { "block_crc_rate": 0.0, "block_crc_read_rate": 1.0 }
+        })
+    }
+
+    #[test]
+    fn normalize_preserves_export_risk_inputs_attest() {
+        let mut v = attest_summary(0.0, true, &["C:/a.pst"]);
+        let before_eff = v
+            .pointer("/export_risk/inputs/effective_block_crc_read_rate")
+            .cloned();
+        let before_disc = v
+            .pointer("/export_risk/inputs/poly_class_crc_discounted")
+            .cloned();
+        let before_attach = v
+            .pointer("/export_risk/inputs/discount_attach_stream_crc")
+            .cloned();
+        let before_sources = v
+            .pointer("/export_risk/inputs/poly_class_crc_sources")
+            .cloned();
+        normalize_summary_for_oracle(&mut v);
+        assert_eq!(
+            v.pointer("/export_risk/inputs/effective_block_crc_read_rate"),
+            before_eff.as_ref()
+        );
+        assert_eq!(
+            v.pointer("/export_risk/inputs/poly_class_crc_discounted"),
+            before_disc.as_ref()
+        );
+        assert_eq!(
+            v.pointer("/export_risk/inputs/discount_attach_stream_crc"),
+            before_attach.as_ref()
+        );
+        assert_eq!(
+            v.pointer("/export_risk/inputs/poly_class_crc_sources"),
+            before_sources.as_ref()
+        );
+        assert_eq!(v.pointer("/inputs"), Some(&json!([])));
+    }
+
+    #[test]
+    fn attest_effective_rate_mismatch() {
+        let mut a = attest_summary(0.0, true, &["C:/a.pst"]);
+        let mut b = attest_summary(0.20, true, &["C:/a.pst"]);
+        normalize_summary_for_oracle(&mut a);
+        normalize_summary_for_oracle(&mut b);
+        let mut mismatches = Vec::new();
+        compare_integrity_counters(&a, &b, &mut mismatches);
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("/export_risk/inputs/effective_block_crc_read_rate")),
+            "expected effective_block_crc_read_rate pointer mismatch; got {mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn attest_poly_discount_mismatch() {
+        let mut a = attest_summary(0.0, true, &["C:/a.pst"]);
+        let mut b = attest_summary(0.0, false, &["C:/a.pst"]);
+        normalize_summary_for_oracle(&mut a);
+        normalize_summary_for_oracle(&mut b);
+        let mut mismatches = Vec::new();
+        compare_integrity_counters(&a, &b, &mut mismatches);
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("/export_risk/inputs/poly_class_crc_discounted")),
+            "expected poly_class_crc_discounted pointer mismatch; got {mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn root_inputs_paths_equalize() {
+        let mut a = attest_summary(0.0, true, &["C:/a.pst"]);
+        let mut b = attest_summary(0.0, true, &["D:/b.pst"]);
+        normalize_summary_for_oracle(&mut a);
+        normalize_summary_for_oracle(&mut b);
+        assert_eq!(a.pointer("/inputs"), Some(&json!([])));
+        assert_eq!(b.pointer("/inputs"), Some(&json!([])));
+        assert!(a.pointer("/export_risk/inputs").is_some());
+        assert!(b.pointer("/export_risk/inputs").is_some());
+        let mut mismatches = Vec::new();
+        compare_integrity_counters(&a, &b, &mut mismatches);
+        assert!(
+            mismatches.is_empty(),
+            "root path arrays must equalize; got {mismatches:?}"
+        );
+        assert_eq!(
+            a, b,
+            "normalized summaries differing only in root inputs must match"
+        );
+    }
+
+    #[test]
+    fn identical_attest_matches() {
+        let mut a = attest_summary(0.0, true, &["C:/a.pst"]);
+        let mut b = attest_summary(0.0, true, &["C:/a.pst"]);
+        normalize_summary_for_oracle(&mut a);
+        normalize_summary_for_oracle(&mut b);
+        let mut mismatches = Vec::new();
+        compare_integrity_counters(&a, &b, &mut mismatches);
+        assert!(
+            !mismatches
+                .iter()
+                .any(|m| m.contains("/export_risk/inputs/")),
+            "identical attest must not mismatch on export_risk.inputs; got {mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn pre0099_parent_attest_mismatches() {
+        let mut head = attest_summary(0.0, true, &["C:/a.pst"]);
+        let mut parent = json!({
+            "ok": true,
+            "inputs": ["C:/a.pst"],
+            "export_risk": {
+                "level": "ok",
+                "reasons": ["poly_class_crc_discounted"],
+                "inputs": {
+                    "attach_fail_rate": 0.0,
+                    "block_crc_read_rate": 1.0
+                }
+            },
+            "export": { "messages_written_total": 1, "attachments_failed": 0 },
+            "keep_set": { "stats": { "degraded_winners": 0 } },
+            "scan": { "block_crc_rate": 0.0, "block_crc_read_rate": 1.0 }
+        });
+        normalize_summary_for_oracle(&mut head);
+        normalize_summary_for_oracle(&mut parent);
+        let mut mismatches = Vec::new();
+        compare_integrity_counters(&head, &parent, &mut mismatches);
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("/export_risk/inputs/effective_block_crc_read_rate")),
+            "pre-0099 parent omitting attest keys must mismatch; got {mismatches:?}"
+        );
     }
 }

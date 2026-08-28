@@ -7,6 +7,12 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0102 — export oracle `export_risk.inputs` attest)
+
+- Unique-pst `export_oracle` no longer recursive-strips the name `inputs`, so 0099
+  `export_risk.inputs` attest fields survive normalize and compare. Job-level
+  `summary.inputs` paths still blank at root only. Closes **D-0099-oracle-inputs-attest**.
+
 ### Added (0101 — unique-pst `--max-embedded-depth`)
 
 - `unique-pst --max-embedded-depth` (default **3**, valid **1–8**; clap rejects outside that range). The same effective value reaches nested extract and the writer. Identity hash depth stays 3.

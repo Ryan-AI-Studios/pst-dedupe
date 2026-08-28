@@ -819,7 +819,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0099-attach-crc-job-level | P3 | Write-time `ATTACH_STREAM_CRC` is a job-level sum; poly discount keys off **scan-time** `crc_noisy` / `poly_class_crc` | Spec §3.7 declined per-event writer attribution (enough for INC* all-poly). Residual: a poly+clean job could discount attach CRC that actually came from write-time reads of the clean source, because scan may not have streamed those attach blocks. Do not treat as a 0099 regression. | residual / after **0099** |
-| D-0099-oracle-inputs-attest | P3 | `export_oracle` attest pointers `/export_risk/inputs/…` never compare | PR #89 Bugbot: `"inputs"` is on `SUMMARY_ALLOWLIST_KEYS`, so `strip_keys_recursive` deletes `export_risk.inputs` before `compare_integrity_counters`. 0099 DoD required the pointers and forbade allowlisting them. **Owner: 0102 (Proposed).** | residual / **0102** |
+| D-0099-oracle-inputs-attest | P3 | `export_oracle` attest pointers `/export_risk/inputs/…` never compare | PR #89 Bugbot: `"inputs"` was on `SUMMARY_ALLOWLIST_KEYS`, so `strip_keys_recursive` deleted `export_risk.inputs` before `compare_integrity_counters`. **Closed in 0102:** removed `"inputs"` from the allowlist; root `/inputs` blanking kept. | **closed / 0102** |
 
 ## From track 0078-UniqueExportExitCodes (planned)
 
