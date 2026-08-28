@@ -237,7 +237,7 @@ Promoted from operator unique-pst smoke on Desktop `INC0102784.pst` + `INC010278
 
 ## Series P — Unique-PST defensibility (post-0098 INC* soak, 0099–0104)
 
-Ranked for affidavit-grade unique-PST: CRC class first, then full recipient TCs, then nested-depth flag. **No BCC track** (0082 default suppress stays). Hermes Series O frontend, if started, uses **0105+**. **0101 Completed** (PR **#92** `4bbf620`). **0102 Completed** (oracle `export_risk.inputs` attest; PRs **#94** / **#95**). **0103 Completed** (recipient-table SLBLOCK NID order; PR **#96** `f66ae9b`). **0104 Completed** (attach-table TC Strategy A).
+Ranked for affidavit-grade unique-PST: CRC class first, then full recipient TCs, then nested-depth flag. **No BCC track** (0082 default suppress stays). Hermes Series O frontend, if started, uses **0106+**. **0101 Completed** (PR **#92** `4bbf620`). **0102 Completed** (oracle `export_risk.inputs` attest; PRs **#94** / **#95**). **0103 Completed** (recipient-table SLBLOCK NID order; PR **#96** `f66ae9b`). **0104 Completed** (attach-table TC Strategy A).
 
 | Track | Status | Summary |
 |---|---|---|
@@ -246,16 +246,26 @@ Ranked for affidavit-grade unique-PST: CRC class first, then full recipient TCs,
 | [0101-EmbeddedDepthFlag](0101-EmbeddedDepthFlag/spec.md) | **Completed** | Wire `--max-embedded-depth` (clap reject outside 1–8, default 3) on unique-pst. Same value to materialize + writer. CI: 4@3 vs 4@4 and 8@7 vs 8@8. Narrows unique-pst half of **D-0067-embedded-depth** (row stays open). Identity hash depth stays 3. PR **#92** `4bbf620`. HITL INC* at depth 8 skipped. |
 | [0102-ExportOracleInputsAttest](0102-ExportOracleInputsAttest/spec.md) | **Completed** | Recursive oracle `"inputs"` strip deleted `export_risk.inputs` so 0099 attest pointers never compared. Removed `"inputs"` from `SUMMARY_ALLOWLIST_KEYS`; blank job-level `/inputs` at root only. Closes **D-0099-oracle-inputs-attest**. |
 | [0103-RecipientTcSlblockNidOrder](0103-RecipientTcSlblockNidOrder/spec.md) | **Completed** | Trailing matrix `push` + `add_subnode_leaf` NID-ascending emit-sort (fail closed on duplicates). Closes **D-0100-slblock-nid-order**. PR **#96** `f66ae9b`. |
-| [0104-AttachmentTcMultipage](0104-AttachmentTcMultipage/spec.md) | **Completed** | Strategy A for per-message attachment table (`0x671`): row-matrix subnode + RowsPerBlock + multi-block HN. Closes **D-0093-attachment-tc-page**. HNBITMAPHDR stay fail-closed. PR **#98** `a35927c`. Frontend stays **0105+**. |
+| [0104-AttachmentTcMultipage](0104-AttachmentTcMultipage/spec.md) | **Completed** | Strategy A for per-message attachment table (`0x671`): row-matrix subnode + RowsPerBlock + multi-block HN. Closes **D-0093-attachment-tc-page**. HNBITMAPHDR stay fail-closed. PR **#98** `a35927c`. Frontend stays **0106+**. |
 
 **Suggested order:** **0099** → **0100** → **0101** → **0102** → **0103** → **0104**.
+
+## Series Q — Unique-export honesty residuals (post-0104)
+
+Series P closed. Next unique-export honesty item is the parked 0097 Bugbot (false `BODY_CLOUD_LINK_WINDOW`). **No BCC track.** Frontend Series O, if started, uses **0106+**.
+
+| Track | Status | Summary |
+|---|---|---|
+| [0105-BodyCloudWindowEdgeNormalize](0105-BodyCloudWindowEdgeNormalize/spec.md) | **Completed** | Window-edge bare dedupe runs `normalize_candidate` before classify; over-length URLs join `seen`. Closes **D-0097-window-edge-normalize**. Not frontend. |
+
+**Suggested order:** **0105**.
 
 ## Notes
 
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099–0104 Completed**. Frontend if started uses **0105+**.
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099–0104 Completed**. **Series Q 0105 Completed** (window-edge normalize). Frontend if started uses **0106+**.
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).

@@ -107,6 +107,8 @@ impl ScanAccum {
         if self.overlength_prefix.is_none() {
             self.overlength_prefix = Some(url.chars().take(MAX_URL_LEN).collect());
         }
+        // Dedup identity is the full classified URL, not the marker prefix.
+        self.seen.insert(url.to_string());
     }
 
     fn note_max_links(&mut self) {
@@ -254,7 +256,11 @@ fn handle_window_edge_bare(m_start: usize, original: &str, acc: &mut ScanAccum) 
         return false;
     }
     if let Some(full) = full_bare_url_from(original, m_start) {
-        if let Some((final_url, _, overlength)) = classify_url(full) {
+        let cand = normalize_candidate(full, true);
+        if cand.is_empty() {
+            return true;
+        }
+        if let Some((final_url, _, overlength)) = classify_url(&cand) {
             // Cut prefix is never a kept hit; only unique unseen URLs count as drops.
             if acc.seen.contains(&final_url) {
                 return true;
@@ -263,6 +269,7 @@ fn handle_window_edge_bare(m_start: usize, original: &str, acc: &mut ScanAccum) 
             if overlength {
                 acc.note_overlength(&final_url);
             }
+            acc.seen.insert(final_url);
         }
     }
     true
@@ -387,11 +394,11 @@ fn try_keep_candidate(
         source
     };
     if overlength {
-        acc.note_overlength(&final_url);
-        // Past the keep-cap, an extra over-length unique is also a max-links drop.
+        // Max-links before seen-insert so a unique over-length past the cap still notes max_links.
         if acc.hits.len() >= MAX_LINKS_PER_MESSAGE && !acc.seen.contains(&final_url) {
             acc.note_max_links();
         }
+        acc.note_overlength(&final_url);
         return;
     }
     if acc.seen.contains(&final_url) {
@@ -1085,6 +1092,63 @@ mod tests {
             scan
         );
         assert!(!scan.window_dropped);
+    }
+
+    #[test]
+    fn body_window_duplicate_cut_url_trailing_period_not_dropped() {
+        // Trailing sentence `.` lives in `tail` (outside the padded `head`).
+        let url = "https://contoso.sharepoint.com/:x:/s/L/book.xlsx?d=1";
+        let head = "https://contoso.sharepoint.com/:x:/s/L/book.xls";
+        let tail = "x?d=1.";
+        assert_eq!(format!("{head}{tail}"), format!("{url}."));
+        let lead = format!("{url} ");
+        let pad_len = MAX_BODY_SCAN_CHARS - lead.chars().count() - head.chars().count();
+        let mut body = lead;
+        body.push_str(&" ".repeat(pad_len));
+        body.push_str(head);
+        body.push_str(tail);
+        let scan = scan_body_cloud_links(None, Some(&body));
+        assert_eq!(scan.hits.len(), 1);
+        assert_eq!(scan.hits[0].url, url);
+        assert!(!scan.hits[0].url.ends_with('.'));
+        assert!(scan.window_capped);
+        assert!(
+            !scan.window_dropped,
+            "punctuated duplicate cut must not set window_dropped: {:?}",
+            scan
+        );
+        assert!(!scan.truncated);
+    }
+
+    #[test]
+    fn body_window_overlength_then_edge_duplicate_not_window() {
+        // Lead is over-length (not a kept hit); edge cut reconstructs the same URL.
+        let long_q = "a".repeat(3000);
+        let url = format!("https://contoso.sharepoint.com/:x:/s/L/f.xlsx?d={long_q}");
+        assert!(url.chars().count() > MAX_URL_LEN);
+        let head = "https://contoso.sharepoint.com/:x:/s/L/f.xls";
+        let tail = format!("x?d={long_q}");
+        assert_eq!(format!("{head}{tail}"), url);
+        let lead = format!("{url} ");
+        let pad_len = MAX_BODY_SCAN_CHARS - lead.chars().count() - head.chars().count();
+        let mut body = lead;
+        body.push_str(&" ".repeat(pad_len));
+        body.push_str(head);
+        body.push_str(&tail);
+        let scan = scan_body_cloud_links(None, Some(&body));
+        assert!(
+            scan.hits.is_empty(),
+            "over-length URL must not be a kept hit: {:?}",
+            scan.hits
+        );
+        assert!(scan.url_truncated);
+        assert!(scan.window_capped);
+        assert!(
+            !scan.window_dropped,
+            "edge duplicate of noted over-length must not set window_dropped: {:?}",
+            scan
+        );
+        assert!(scan.truncated);
     }
 
     fn fifty_plain_urls_then_cut(first: &str, head: &str, tail: &str) -> String {
