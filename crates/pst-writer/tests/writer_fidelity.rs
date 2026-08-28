@@ -2874,5 +2874,71 @@ fn recipient_tc_long_string_cell_nid_round_trips() {
     let recips = pst.list_recipients(nid).expect("list");
     assert_eq!(recips.len(), 1);
     assert_eq!(recips[0].display_name.as_deref(), Some(long.as_str()));
+
+    // seven_bit mirrors display → 2 cell NIDs + matrix = 3 SLENTRYs, NID-ascending.
+    let (heap, bid_sub) = recipient_table_subnode(&path, nid);
+    assert!(!bid_sub.is_null(), "cell-NID TC must have bid_sub");
+    let mut file = std::fs::File::open(&path).expect("file");
+    let pst2 = pst_reader::PstFile::open(&path).expect("open2");
+    let subs = pst_reader::ndb::block::list_subnode_entries(&mut file, pst2.bbt(), bid_sub)
+        .expect("recip SLBLOCK");
+    assert_eq!(subs.len(), 3, "display + seven_bit + matrix");
+    assert!(
+        subs.windows(2).all(|w| w[0].nid.0 < w[1].nid.0),
+        "SLBLOCK NIDs must be strictly increasing: {:?}",
+        subs.iter().map(|e| e.nid.0).collect::<Vec<_>>()
+    );
+    let table = pst_reader::ltp::tc::load_from_table_bids(
+        heap,
+        &mut file,
+        pst2.bbt(),
+        bid_sub,
+        pst_reader::crypto::CryptMethod::None,
+    )
+    .expect("load recip TC");
+    let hnid_rows = table.info().hnid_rows as u64;
+    assert!(
+        subs.iter().any(|e| e.nid.0 == hnid_rows),
+        "hnidRows 0x{hnid_rows:X} must appear in SLBLOCK"
+    );
+
+    cleanup(&path);
+}
+
+/// Long display + long email (smtp short/None): three cell NIDs + matrix = 4.
+#[test]
+fn recipient_tc_two_cell_nids_slblock_sorted() {
+    let path = scratch_path("recip_tc_two_cell");
+    cleanup(&path);
+    let long = "N".repeat(1025);
+    let mut msg = base_msg("<recip-twocell@ex.com>", "Two long cells");
+    msg.recipients = vec![WriteRecipient {
+        recipient_type: WriteRecipientType::To,
+        display_name: Some(long.clone()),
+        address_type: Some("SMTP".into()),
+        email_address: Some(long.clone()),
+        smtp_address: None,
+    }];
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+    let nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let recips = pst.list_recipients(nid).expect("list");
+    assert_eq!(recips.len(), 1);
+    assert_eq!(recips[0].display_name.as_deref(), Some(long.as_str()));
+    assert_eq!(recips[0].email_address.as_deref(), Some(long.as_str()));
+
+    let (_heap, bid_sub) = recipient_table_subnode(&path, nid);
+    assert!(!bid_sub.is_null());
+    let mut file = std::fs::File::open(&path).expect("file");
+    let pst2 = pst_reader::PstFile::open(&path).expect("open2");
+    let subs = pst_reader::ndb::block::list_subnode_entries(&mut file, pst2.bbt(), bid_sub)
+        .expect("recip SLBLOCK");
+    // display + seven_bit (mirrors display) + email + matrix
+    assert_eq!(subs.len(), 4);
+    assert!(
+        subs.windows(2).all(|w| w[0].nid.0 < w[1].nid.0),
+        "SLBLOCK NIDs must be strictly increasing: {:?}",
+        subs.iter().map(|e| e.nid.0).collect::<Vec<_>>()
+    );
     cleanup(&path);
 }
