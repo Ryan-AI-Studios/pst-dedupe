@@ -7,6 +7,12 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0104 — attachment TC Strategy A multipage)
+
+- Unique-pst per-message attachment table (`0x671`) uses Strategy A (paged HN +
+  row-matrix subnode + cell NID for long filenames) so large attach lists no
+  longer trip single-page heap overflow. Closes **D-0093-attachment-tc-page**.
+
 ### Fixed (0103 — recipient TC SLBLOCK NID order)
 
 - Unique-pst recipient-table SLBLOCK NIDs are sorted ascending so Outlook can

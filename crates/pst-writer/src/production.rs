@@ -36,8 +36,9 @@
 //! single-page HeapBuilder deviation**, not an inherent MS-PST limit. Helper
 //! strings (MID / subject / sender / Display* / `message_class`) also divert
 //! under a **cumulative** budget (escalate largest inline helpers when the
-//! MessageSize probe heap would overflow). **Recipient-table node data** uses
-//! [`PagedHeapBuilder`] (0100 Strategy A: HNHDR + HNPAGEHDR, HID `hidBlockIndex`).
+//! MessageSize probe heap would overflow). **Recipient- and attachment-table
+//! node data** use [`PagedHeapBuilder`] (0100/0104 Strategy A: HNHDR + HNPAGEHDR,
+//! HID `hidBlockIndex`).
 //! `pst-reader`'s `PropContext` resolves subnode-typed HNIDs for PtypString/PtypBinary so round-trip verification works.
 //!
 //! ## Scope (v1.1 / track 0069)
@@ -3747,26 +3748,16 @@ fn build_message_payload(
     let mut flags = msg.message_flags.map(|f| f as i32).unwrap_or(MSGFLAG_READ);
     if has_attaches {
         flags |= MSGFLAG_HASATTACH;
-        // Attachment table TC at fixed NID 0x671 — full MS-PST column schema
-        // + RowIndex BTH (key = attach NID, value = 0-based row index).
-        let table_rows: Vec<(u64, u32, i32, String)> = written_attaches
+        // Non-empty attach tables need non-zero bid_sub (matrix/cell subnodes).
+        let table_rows: Vec<(u64, u32, i32, &str)> = written_attaches
             .iter()
-            .map(|a| (a.nid, a.attach_size, a.method, a.filename.clone()))
+            .map(|a| (a.nid, a.attach_size, a.method, a.filename.as_str()))
             .collect();
-        let table_heap = {
-            let mut heap = HeapBuilder::new(0xBC);
-            let row_refs: Vec<(u64, u32, i32, &str)> = table_rows
-                .iter()
-                .map(|(nid, size, method, name)| (*nid, *size, *method, name.as_str()))
-                .collect();
-            let (hid, _heap_after) = build_attachment_table_tc(&mut heap, &row_refs)?;
-            heap.finalize(hid)
-        };
-        let table_len = table_heap.len() as u64;
-        let table_bid = layout.write_data_chain(table_heap)?;
-        subnode_entries.push((NID_ATTACHMENT_TABLE, table_bid, 0));
-        // Real attachment-table heap size (not a fabricated constant).
-        written_content_bytes += table_len;
+        let built = build_attachment_table_strategy_a(layout, &table_rows)?;
+        let table_len = built.heap.len() as u64;
+        let table_bid = layout.write_data_chain(built.heap)?;
+        subnode_entries.push((NID_ATTACHMENT_TABLE, table_bid, built.table_bid_sub));
+        written_content_bytes += table_len.saturating_add(built.extra_content_bytes);
     }
 
     // Recipient table TC at fixed NID 0x692 — always present (MS-PST MUST),
@@ -4298,7 +4289,7 @@ pub(crate) fn build_bth_u32_checked(
 }
 
 /// Heap allocation surface shared by single-page [`HeapBuilder`] and
-/// recipient-table [`PagedHeapBuilder`].
+/// TC-heap [`PagedHeapBuilder`].
 pub(crate) trait HeapTryAlloc {
     fn try_alloc(&mut self, bytes: &[u8]) -> Result<u32>;
     fn patch_u32(&mut self, hid: u32, field_offset: usize, value: u32) -> Result<()>;
@@ -4322,35 +4313,60 @@ impl HeapTryAlloc for PagedHeapBuilder {
     }
 }
 
-/// Build an MS-PST-conformant attachment table TC on `heap`.
+/// Result of Strategy A attachment-table build (0104).
+struct AttachmentTableBuilt {
+    heap: Vec<u8>,
+    table_bid_sub: u64,
+    extra_content_bytes: u64,
+}
+
+/// Build an MS-PST-conformant attachment table TC (0104 Strategy A).
 ///
 /// Columns match [`ATTACHMENT_TABLE_COLUMNS`] / the NBT template at
-/// [`NID_ATTACHMENT_TABLE_TEMPLATE`]. Each row carries AttachSize, Filename
-/// (UTF-16LE heap string via HNID), AttachMethod, RenderingPosition
-/// (`0xFFFFFFFF`), LtpRowId (= attach NID), LtpRowVer (= 1-based row index),
-/// and a full existence bitmap.
-///
-/// **RowIndex BTH** (`hidRowIndex` at TCINFO offset 10): key = attach NID
-/// (u32), value = 0-based row index (u32). `hnidRows` is patched at offset 14.
-///
-/// Returns `(hid_user_root, heap_bytes_after_build)` where the second value is
-/// the heap data length after all allocations (pre-finalize). Callers that
-/// need MessageSize should prefer `heap.finalize(hid).len()` for the final
-/// on-disk heap size.
-fn build_attachment_table_tc(
-    heap: &mut HeapBuilder,
+/// [`NID_ATTACHMENT_TABLE_TEMPLATE`]. Caller omits the table when `rows` would
+/// be empty (MS-PST: optional iff ≥1 Attachment object). Non-empty tables store
+/// the row matrix as a subnode (`hnidRows` = NID) packed with RowsPerBlock;
+/// filenames larger than [`MAX_HEAP_VALUE_SIZE`] divert to cell NIDs on the
+/// table SLBLOCK.
+fn build_attachment_table_strategy_a(
+    layout: &mut Layout,
     rows: &[(u64, u32, i32, &str)],
-) -> Result<(u32, usize)> {
+) -> Result<AttachmentTableBuilt> {
+    if rows.is_empty() {
+        return Err(WriterError::Layout(
+            "build_attachment_table_strategy_a called with zero rows; \
+             omit NID_ATTACHMENT_TABLE instead"
+                .into(),
+        ));
+    }
+
     let (columns, total_row_width) = build_template_tc_columns(&ATTACHMENT_TABLE_COLUMNS);
     let ncols = columns.len();
     let bitmap_bytes = ncols.div_ceil(8);
     let row_width = total_row_width as usize;
+    if row_width == 0 {
+        return Err(WriterError::Layout(
+            "attachment TC row_width is 0; cannot pack row matrix".into(),
+        ));
+    }
+
+    let mut heap = PagedHeapBuilder::new(0xBC);
+    let mut table_subs: Vec<(u64, u64, u64)> = Vec::new();
+    let mut extra_content_bytes = 0u64;
+    let mut sub_counter = 0u32;
 
     let mut row_matrix: Vec<u8> = Vec::with_capacity(rows.len() * row_width);
     let mut row_index_records: Vec<(u32, Vec<u8>)> = Vec::with_capacity(rows.len());
 
     for (i, (attach_nid, size, method, filename)) in rows.iter().enumerate() {
-        let fname_hid = heap.try_alloc(&utf16le_bytes(filename))?;
+        let fname_hid = alloc_tc_value(
+            &mut heap,
+            layout,
+            &mut sub_counter,
+            &mut table_subs,
+            &mut extra_content_bytes,
+            &utf16le_bytes(filename),
+        )?;
         let mut row = vec![0u8; row_width];
 
         for col in &columns {
@@ -4366,20 +4382,19 @@ fn build_attachment_table_tc(
                 PID_TAG_LTP_ROW_VER => ((i as u32) + 1).to_le_bytes(),
                 _ => {
                     return Err(WriterError::Layout(format!(
-                        "build_attachment_table_tc: unexpected column prop 0x{prop_id:04X}"
+                        "build_attachment_table_strategy_a: unexpected column prop 0x{prop_id:04X}"
                     )));
                 }
             };
             if ib + cb > row_width || cb > 4 {
                 return Err(WriterError::Layout(format!(
-                    "build_attachment_table_tc: column 0x{prop_id:04X} out of row bounds \
+                    "build_attachment_table_strategy_a: column 0x{prop_id:04X} out of row bounds \
                      (ib={ib} cb={cb} row_width={row_width})"
                 )));
             }
             row[ib..ib + cb].copy_from_slice(&bytes[..cb]);
         }
 
-        // Existence bitmap at end of row — all present columns set.
         let bitmap_start = row_width - bitmap_bytes;
         for col in &columns {
             let bit = col.4 as usize;
@@ -4390,15 +4405,8 @@ fn build_attachment_table_tc(
         row_index_records.push((*attach_nid as u32, (i as u32).to_le_bytes().to_vec()));
     }
 
-    // RowIndex BTH (required when there are rows so get_row_id works).
-    let hid_row_index = if rows.is_empty() {
-        0u32
-    } else {
-        build_bth_u32_checked(heap, 4, 4, &mut row_index_records)?
-    };
+    let hid_row_index = build_bth_u32_checked(&mut heap, 4, 4, &mut row_index_records)?;
 
-    // TCINFO: bType + cCols + rgib[4*2] + hidRowIndex(4) + hnidRows(4) = 18
-    // then TCOLDESCs. Patch hidRowIndex @ field offset 10, hnidRows @ 14.
     let mut tcinfo = Vec::new();
     tcinfo.push(0x7C);
     tcinfo.push(columns.len() as u8);
@@ -4418,12 +4426,20 @@ fn build_attachment_table_tc(
     }
 
     let hid_tcinfo = heap.try_alloc(&tcinfo)?;
-    let hid_rows = heap.try_alloc(&row_matrix)?;
-
     heap.patch_u32(hid_tcinfo, 10, hid_row_index)?;
-    heap.patch_u32(hid_tcinfo, 14, hid_rows)?;
 
-    Ok((hid_tcinfo, heap_data_len(heap)))
+    let (matrix_bid, matrix_bytes) = layout.write_row_matrix_tree(&row_matrix, row_width)?;
+    extra_content_bytes = extra_content_bytes.saturating_add(matrix_bytes);
+    let matrix_nid = next_subnode_nid(&mut sub_counter);
+    table_subs.push((matrix_nid, matrix_bid, 0));
+    heap.patch_u32(hid_tcinfo, 14, matrix_nid as u32)?;
+
+    let table_bid_sub = layout.add_subnode_leaf(&table_subs)?;
+    Ok(AttachmentTableBuilt {
+        heap: heap.finalize(hid_tcinfo),
+        table_bid_sub,
+        extra_content_bytes,
+    })
 }
 
 /// Result of Strategy A recipient-table build.
@@ -4808,11 +4824,6 @@ fn synthesize_recipient_search_key(addr_type: &str, email: &str, smtp: Option<&s
         ""
     };
     format!("{}:{}", ty.to_ascii_uppercase(), addr.to_ascii_uppercase()).into_bytes()
-}
-
-/// Current allocated heap data length (pre-finalize), for sizing probes.
-fn heap_data_len(heap: &HeapBuilder) -> usize {
-    heap.data.len()
 }
 
 /// Result-based inline TC builder mirroring `crate::build_tc_inline`.
@@ -5457,9 +5468,11 @@ impl Layout {
     /// Used for large body/HTML diversions, the attachment table
     /// (`NID_ATTACHMENT_TABLE`), attach objects (type `0x05`), attach data
     /// diversions, and nested embedded-message objects under attach subnodes
-    /// (track 0069). One SLBLOCK always suffices for current scale; returns a
-    /// typed error rather than silently dropping entries if capacity is
-    /// exceeded (multi-level SI hierarchy remains a future concern).
+    /// (track 0069). Attachment-table cells+matrix (0104) and recipient-table
+    /// cells+matrix (0100) each share one monotonic `sub_counter` on their
+    /// own table SLBLOCK. One SLBLOCK always suffices for current scale;
+    /// returns a typed error rather than silently dropping entries if capacity
+    /// is exceeded (multi-level SI hierarchy remains a future concern).
     ///
     /// MS-PST subnode BTree is searched by NID (BTree-family inference; the
     /// SLBLOCK section itself does not say `rgentries MUST be sorted`). This
@@ -5467,10 +5480,11 @@ impl Layout {
     /// resolve cell/matrix NIDs. CI proves on-disk order, not COM Outlook.
     ///
     /// Duplicate NIDs are a layout error. Today's callers cannot hit that:
-    /// recipient-table cells+matrix share one monotonic `sub_counter`; message
-    /// leaves mix `subnode_counter` (type 0x1F), `attach_nid_counter` (type
-    /// 0x05), and fixed `0x671`/`0x692` — disjoint low 5 bits. The guard is
-    /// defense against a future bug, not a live green-test flip.
+    /// recipient- and attachment-table cells+matrix each share one monotonic
+    /// `sub_counter`; message leaves mix `subnode_counter` (type 0x1F),
+    /// `attach_nid_counter` (type 0x05), and fixed `0x671`/`0x692` — disjoint
+    /// low 5 bits. The guard is defense against a future bug, not a live
+    /// green-test flip.
     pub fn add_subnode_leaf(&mut self, entries: &[(u64, u64, u64)]) -> Result<u64> {
         let mut sorted: Vec<(u64, u64, u64)> = entries.to_vec();
         sorted.sort_by_key(|(nid, _, _)| *nid);

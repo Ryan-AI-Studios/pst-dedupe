@@ -30,7 +30,7 @@ single-block only; keep using it only for existing fixture callers.
 | Multi-GB streaming write | **Yes (v1.2 / 0070)** | `write_unicode_pst_streaming`: AMap-aware layout, chunked attach stream, progress + `stop_and_finalize`, SHA-256/MD5 report; see **Scale** section. |
 | Encrypted / Permute output | **No** | Residual; unencrypted only. |
 | ANSI PST | **No** | Never. |
-| Recipient table | **Yes (0082 / 0100 Strategy A)** | Store template NID **`0x692`** (zero rows, **14 MUST columns** per MS-PST Recipient Table Template). Every written message gets a per-message recipient TC subnode (may be **zero rows** when source had none / unreadable — empty TC still present: `hnidRows = 0`, `bid_sub = 0`). One row per **included** recipient; optional extra column `PidTagSmtpAddress` (`0x39FE`) when known. Structural columns synthesized when source omits them (`ObjectType=6`, Responsibility, RecordKey/EntryId/SearchKey patterns, etc.). **0100 Strategy A:** all included rows (To→Cc→Bcc **order** only; no cap). Row matrix is a subnode (`hnidRows` = NID) packed with §2.3.4.4 RowsPerBlock (live width 56 → 146). Recipient-table node uses multi-page HN (HNHDR + HNPAGEHDR). Per-row strings &gt; `MAX_HEAP_VALUE_SIZE` (2048) divert to a cell NID; cell-NID + matrix SLENTRYs are written in NID order (0103). Production does not emit `RECIPIENT_TC_TRUNCATED`. Display* on the message PC stay full. Residuals: attachment-table TC (`D-0093-attachment-tc-page`); HNBITMAPHDR (`D-0100-hn-bitmap-hdr`). |
+| Recipient table | **Yes (0082 / 0100 Strategy A)** | Store template NID **`0x692`** (zero rows, **14 MUST columns** per MS-PST Recipient Table Template). Every written message gets a per-message recipient TC subnode (may be **zero rows** when source had none / unreadable — empty TC still present: `hnidRows = 0`, `bid_sub = 0`). One row per **included** recipient; optional extra column `PidTagSmtpAddress` (`0x39FE`) when known. Structural columns synthesized when source omits them (`ObjectType=6`, Responsibility, RecordKey/EntryId/SearchKey patterns, etc.). **0100 Strategy A:** all included rows (To→Cc→Bcc **order** only; no cap). Row matrix is a subnode (`hnidRows` = NID) packed with §2.3.4.4 RowsPerBlock (live width 56 → 146). Recipient-table node uses multi-page HN (HNHDR + HNPAGEHDR). Per-row strings &gt; `MAX_HEAP_VALUE_SIZE` (2048) divert to a cell NID; cell-NID + matrix SLENTRYs are written in NID order (0103). Production does not emit `RECIPIENT_TC_TRUNCATED`. Display* on the message PC stay full. Residual: HNBITMAPHDR (`D-0100-hn-bitmap-hdr`; attach heaps share fail-closed). |
 | Named-prop set beyond the store stub | **Allowlisted (0092)** | When used: real NPMAP (GUID/entry/string + hash buckets, BucketCount=251) for `PSETID_Attachment` allowlist (`AttachmentProviderType` MUST when known; Url/PermissionType MAY if present). Empty stub when unused. Full encyclopedia still out of scope (**D-0084-cloud-named-prop-write** closed for allowlisted write). |
 | RTF | **No** | v1 never writes `PidTagRtfCompressed` or any RTF-native hint — there is nothing RTF-related to clear because nothing RTF-related is ever produced. |
 | `PidTagMessageFlags` | `MSGFLAG_READ` (0x1); `\| MSGFLAG_HASATTACH` (0x10) when ≥1 attach written | Paperclip + read default (0069). |
@@ -49,7 +49,7 @@ shape above without regressing XBLOCK bodies, IPM special folders, or safety.
 | Behavior | Detail |
 |---|---|
 | **By-value (`ATTACH_BY_VALUE` = 1)** | `PidTagAttachDataBinary` heap-inline when small; **subnode + XBLOCK** when larger than one heap page. |
-| **Attachment table** | PST-level **template** at NBT NID `0x671` (zero rows, full column schema). Per-message subnode NID `0x671` TC with one row per successfully written attach: AttachSize, AttachFilename (HNID), AttachMethod, RenderingPosition (`0xFFFFFFFF`), LtpRowId (= attach NID), LtpRowVer; **RowIndex BTH** (`hidRowIndex`, key=attach NID, value=0-based index). |
+| **Attachment table** | PST-level **template** at NBT NID `0x671` (zero rows, six MUST columns). Per-message subnode NID `0x671` TC (**0104 Strategy A**) with one row per successfully written attach: AttachSize, AttachFilename (HID or cell NID when &gt;2048 UTF-16 bytes), AttachMethod, RenderingPosition (`0xFFFFFFFF`), LtpRowId (= attach NID), LtpRowVer; **RowIndex BTH** (`hidRowIndex`, key=attach NID, value=0-based index). Row matrix is a **subnode** (`hnidRows` = NID, RowsPerBlock from width **25** → **327**); table node uses multi-page HN. Zero attaches → table omitted. |
 | **Attach object NIDs** | Type `0x05` (`NID_TYPE_ATTACHMENT`) as **message subnodes only** (never top-level NBT). |
 | **HasAttachments** | `true` only when ≥1 attach was actually written. |
 | **MessageFlags** | Always `MSGFLAG_READ` (0x1). OR `MSGFLAG_HASATTACH` (0x10) when attaches written. |
@@ -462,8 +462,8 @@ message_size = len(PC heap bytes, computed WITHOUT the MessageSize property
              + len(bytes of body_html), if diverted to a subnode
              + per written attach: attach PC len (+ raw bytes if subnode-diverted;
                or + nested size for embeds)
-             + len(finalized attachment-table heap), when attaches present
-               (real table size — never a fabricated constant)
+             + len(finalized attachment-table heap) + matrix/cell extra bytes,
+               when attaches present (real table size — never a fabricated constant)
 ```
 
 The "without MessageSize itself" step avoids circularity: the PC is built once

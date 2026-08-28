@@ -114,6 +114,9 @@
 | 56 | P0 P | **0099** CrcPolyExportRiskHonesty | ✅ Completed | Effective (non-poly) CRC rate for unique-pst `export_risk`; D-0077-systematic-poly honesty half |
 | 57 | P0 P | **0100** RecipientTcMultipage | ✅ Completed | Strategy A recipient TC; D-0093-recipient-tc-multipage |
 | 58 | P1 P | **0101** EmbeddedDepthFlag | ✅ Completed | unique-pst `--max-embedded-depth`; D-0067 CLI half; PR #92 |
+| 59 | P2 P | **0102** ExportOracleInputsAttest | ✅ Completed | oracle `export_risk.inputs` attest; D-0099-oracle-inputs-attest |
+| 60 | P2 P | **0103** RecipientTcSlblockNidOrder | ✅ Completed | SLBLOCK NID order; D-0100-slblock-nid-order; PR #96 |
+| 61 | P2 P | **0104** AttachmentTcMultipage | ✅ Completed | attach-table Strategy A; D-0093-attachment-tc-page |
 
 ## Series K spine (clean unique export)
 
@@ -193,7 +196,7 @@
 |---|---|---|
 | 1 | **0098** TemplateNidFolderCollision | **Completed** — skip reserved template nidIndex; INC* 4005 vs 4055 |
 
-## Series P — Unique-PST defensibility (0099–0103)
+## Series P — Unique-PST defensibility (0099–0104)
 
 | Order | Track | Notes |
 |---|---|---|
@@ -202,5 +205,6 @@
 | 3 | **0101** EmbeddedDepthFlag | **Completed** — unique-pst `--max-embedded-depth` (default 3, reject outside 1–8); D-0067 CLI half; PR #92 |
 | 4 | **0102** ExportOracleInputsAttest | **Completed** — remove recursive `"inputs"` strip; keep root `/inputs` blanking; 0099 pointers actually compare; D-0099-oracle-inputs-attest |
 | 5 | **0103** RecipientTcSlblockNidOrder | **Completed** — trailing push + `add_subnode_leaf` emit-sort; D-0100-slblock-nid-order; PR #96 `f66ae9b` |
+| 6 | **0104** AttachmentTcMultipage | **Completed** — Strategy A attach table (`0x671`); D-0093-attachment-tc-page |
 
-**Suggested:** **0099**–**0103** all **Completed**. No BCC track. Frontend Series O → **0105+**. Next free ID **0104** unused — do not steal for frontend.
+**Suggested:** **0099**–**0104** **Completed**. No BCC track. Frontend Series O → **0105+**.
