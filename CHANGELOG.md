@@ -7,6 +7,11 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0101 — unique-pst `--max-embedded-depth`)
+
+- `unique-pst --max-embedded-depth` (default **3**, valid **1–8**; clap rejects outside that range). The same effective value reaches nested extract and the writer. Identity hash depth stays 3.
+- `unique_export_report_v1` gained always-present `export.max_embedded_depth` (consumers should ignore unknown keys; schema id **not** bumped). Remaining over-depth nests still ledger `ATTACH_DEPTH_LIMIT`.
+
 ### Fixed (0099 — CRC / poly export-risk honesty)
 
 - Unique-pst `export_risk` keys catastrophic/advisory `block_crc_read_rate` on the **effective** (non-poly) rate from scan `files[]`. Dual-rate poly-class CRC (`page≥0.50` AND `block≥0.50`) no longer forces `not_export_ready` / `re_export_recommended`.

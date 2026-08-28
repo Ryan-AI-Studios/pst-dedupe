@@ -469,6 +469,7 @@ fn digest_probe_unique_pst_dual_flag_exit_and_recommendation() {
         qc_scanpst: false,
         include_bcc_recipients: false,
         promote_on_attach_fail: false,
+        max_embedded_depth: 3,
     };
 
     let outcome = run_unique_pst_with_options(

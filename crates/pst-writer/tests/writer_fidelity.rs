@@ -706,6 +706,43 @@ fn embedded_depth_cap_enforced() {
     cleanup(&path);
 }
 
+/// 0101: writer halt at product ceiling — chain of 9 nested levels @ max 8.
+#[test]
+fn embedded_depth_chain_of_nine_halts_at_eight() {
+    let path = scratch_path("embed_depth_9_at_8");
+    cleanup(&path);
+
+    let mut leaf = base_msg("<d9@ex.com>", "Depth 9");
+    for d in (0..9).rev() {
+        let mut parent = base_msg(&format!("<d{d}@ex.com>"), &format!("Depth {d}"));
+        parent.attachments.push(WriteAttachment {
+            filename: format!("nested{d}.msg"),
+            attach_method: Some(5),
+            embedded_message: Some(Box::new(leaf)),
+            ..Default::default()
+        });
+        leaf = parent;
+    }
+
+    let opts = WritePstOpts {
+        max_embedded_depth: 8,
+        ..WritePstOpts::default()
+    };
+    let report = write_unicode_pst(&path, vec![leaf], &[], &opts).expect("write");
+    assert!(
+        report.embedded_depth_limit_hits > 0,
+        "depth limit must fire at ceiling; hits={}",
+        report.embedded_depth_limit_hits
+    );
+    assert!(
+        report.embedded_messages_written <= 8,
+        "at most 8 nested written; got {}",
+        report.embedded_messages_written
+    );
+
+    cleanup(&path);
+}
+
 // ── 14: MessageSize grows with attach bytes ──────────────────────────────────
 
 #[test]

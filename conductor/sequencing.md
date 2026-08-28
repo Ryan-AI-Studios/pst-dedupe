@@ -112,6 +112,8 @@
 | 54 | P3 N | **0096** PermissionTypeExtract | ✅ Completed | Four-crate extract + PtypInteger32; closes D-0092-permission-type-extract |
 | 55 | P3 N | **0097** BodyCloudTruncationHonesty | ✅ Completed | C+A hybrid + split window_capped; closes D-0097-body-cloud-truncate-honesty |
 | 56 | P0 P | **0099** CrcPolyExportRiskHonesty | ✅ Completed | Effective (non-poly) CRC rate for unique-pst `export_risk`; D-0077-systematic-poly honesty half |
+| 57 | P0 P | **0100** RecipientTcMultipage | ✅ Completed | Strategy A recipient TC; D-0093-recipient-tc-multipage |
+| 58 | P1 P | **0101** EmbeddedDepthFlag | 🔄 In progress | unique-pst `--max-embedded-depth`; D-0067 CLI half |
 
 ## Series K spine (clean unique export)
 
@@ -191,13 +193,14 @@
 |---|---|---|
 | 1 | **0098** TemplateNidFolderCollision | **Completed** — skip reserved template nidIndex; INC* 4005 vs 4055 |
 
-## Series P — Unique-PST defensibility (0099–0102)
+## Series P — Unique-PST defensibility (0099–0103)
 
 | Order | Track | Notes |
 |---|---|---|
 | 1 | **0099** CrcPolyExportRiskHonesty | **Completed** — effective (non-poly) CRC rate for `export_risk`; D-0077-systematic-poly honesty half |
 | 2 | **0100** RecipientTcMultipage | **Completed** — Strategy A (row-matrix subnode + RowsPerBlock + multi-block HN); D-0093-recipient-tc-multipage |
-| 3 | **0101** EmbeddedDepthFlag | **Proposed** — unique-pst `--max-embedded-depth`; INC* 2 nests |
+| 3 | **0101** EmbeddedDepthFlag | **In Progress** — unique-pst `--max-embedded-depth` (default 3, reject outside 1–8); D-0067 CLI half |
 | 4 | **0102** ExportOracleInputsAttest | **Proposed** — 0099 oracle `/export_risk/inputs` attest actually compares; D-0099-oracle-inputs-attest |
+| 5 | **0103** RecipientTcSlblockNidOrder | **Proposed** — 0100 SLBLOCK unsorted when cell NIDs exist; D-0100-slblock-nid-order |
 
-**Suggested:** **0099** (Completed) → **0100** (Completed) → 0101 → 0102. No BCC track. Frontend Series O → **0105+**.
+**Suggested:** **0099** (Completed) → **0100** (Completed) → **0101** (Ready) → 0102 → 0103. No BCC track. Frontend Series O → **0105+**.

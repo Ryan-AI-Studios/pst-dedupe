@@ -149,6 +149,7 @@ Default keep-set grouping unites messages **across custodians** (global scope). 
 | Chronological winner | `--policy earliest_date` prefers earliest submit time (delivery fallback); missing dates rank last — disclose when used. |
 | `first_seen` honesty | Default `first_seen` is **sorted input-path order**, not chronological send time. |
 | Per-source isolation | `--dedupe-scope per-source` when cross-mailbox collapse is not authorized. |
+| Nested `.msg` deeper than 3 | If `export_attachments.csv` / histogram shows `ATTACH_DEPTH_LIMIT`, re-run with `--max-embedded-depth 8` (product ceiling). Remaining rows stay disclosed; leftover exit 64 is not a parser bug. Optional INC* HITL: `output/inc0102784-post-0101/` (operator-local; never commit). |
 
 Full flag table: [`unique-pst-export.md`](unique-pst-export.md).
 

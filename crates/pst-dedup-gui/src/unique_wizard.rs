@@ -418,6 +418,7 @@ impl UniqueWizardForm {
             include_bcc_recipients: false,
             // Mode A promote: CLI opt-in; GUI pass-through default false (0083).
             promote_on_attach_fail: false,
+            max_embedded_depth: 3,
         })
     }
 
