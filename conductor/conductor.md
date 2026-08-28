@@ -246,7 +246,7 @@ Ranked for affidavit-grade unique-PST: CRC class first, then full recipient TCs,
 | [0101-EmbeddedDepthFlag](0101-EmbeddedDepthFlag/spec.md) | **Completed** | Wire `--max-embedded-depth` (clap reject outside 1–8, default 3) on unique-pst. Same value to materialize + writer. CI: 4@3 vs 4@4 and 8@7 vs 8@8. Narrows unique-pst half of **D-0067-embedded-depth** (row stays open). Identity hash depth stays 3. PR **#92** `4bbf620`. HITL INC* at depth 8 skipped. |
 | [0102-ExportOracleInputsAttest](0102-ExportOracleInputsAttest/spec.md) | **Completed** | Recursive oracle `"inputs"` strip deleted `export_risk.inputs` so 0099 attest pointers never compared. Removed `"inputs"` from `SUMMARY_ALLOWLIST_KEYS`; blank job-level `/inputs` at root only. Closes **D-0099-oracle-inputs-attest**. |
 | [0103-RecipientTcSlblockNidOrder](0103-RecipientTcSlblockNidOrder/spec.md) | **Completed** | Trailing matrix `push` + `add_subnode_leaf` NID-ascending emit-sort (fail closed on duplicates). Closes **D-0100-slblock-nid-order**. PR **#96** `f66ae9b`. |
-| [0104-AttachmentTcMultipage](0104-AttachmentTcMultipage/spec.md) | **Completed** | Strategy A for per-message attachment table (`0x671`): row-matrix subnode + RowsPerBlock + multi-block HN. Closes **D-0093-attachment-tc-page**. HNBITMAPHDR stay fail-closed. Frontend stays **0105+**. |
+| [0104-AttachmentTcMultipage](0104-AttachmentTcMultipage/spec.md) | **Completed** | Strategy A for per-message attachment table (`0x671`): row-matrix subnode + RowsPerBlock + multi-block HN. Closes **D-0093-attachment-tc-page**. HNBITMAPHDR stay fail-closed. PR **#98** `a35927c`. Frontend stays **0105+**. |
 
 **Suggested order:** **0099** → **0100** → **0101** → **0102** → **0103** → **0104**.
 

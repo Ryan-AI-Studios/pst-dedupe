@@ -1,9 +1,11 @@
 # 0104 — Attachment TC Multipage — Review
 
-**Status:** Completed (engineering); publish in progress at write time  
-**Branch:** `track/0104-attachment-tc-multipage`  
-**Ledger:** `faab1343-e32e-4d07-87db-333fe9ed5c0f` (FEATURE `crates/pst-writer`)  
-**PR / merge SHA:** filled after squash-merge
+**Status:** Completed  
+**Branch:** `track/0104-attachment-tc-multipage` (deleted after merge)  
+**Product commit:** `ce6228f` — `track(0104): attachment TC Strategy A multipage`  
+**PR:** [#98](https://github.com/Ryan-AI-Studios/pst-dedupe/pull/98)  
+**Merge SHA:** `a35927c`  
+**Ledger:** `faab1343-e32e-4d07-87db-333fe9ed5c0f` (FEATURE `crates/pst-writer`; promoted by post-commit hook)
 
 ## DoD matrix
 
