@@ -117,6 +117,7 @@
 | 59 | P2 P | **0102** ExportOracleInputsAttest | ✅ Completed | oracle `export_risk.inputs` attest; D-0099-oracle-inputs-attest |
 | 60 | P2 P | **0103** RecipientTcSlblockNidOrder | ✅ Completed | SLBLOCK NID order; D-0100-slblock-nid-order; PR #96 |
 | 61 | P2 P | **0104** AttachmentTcMultipage | ✅ Completed | attach-table Strategy A; D-0093-attachment-tc-page |
+| 62 | P3 Q | **0105** BodyCloudWindowEdgeNormalize | ✅ Completed | window-edge `normalize_candidate`; D-0097-window-edge-normalize |
 
 ## Series K spine (clean unique export)
 
@@ -207,4 +208,10 @@
 | 5 | **0103** RecipientTcSlblockNidOrder | **Completed** — trailing push + `add_subnode_leaf` emit-sort; D-0100-slblock-nid-order; PR #96 `f66ae9b` |
 | 6 | **0104** AttachmentTcMultipage | **Completed** — Strategy A attach table (`0x671`); D-0093-attachment-tc-page |
 
-**Suggested:** **0099**–**0104** **Completed**. No BCC track. Frontend Series O → **0105+**.
+**Suggested:** **0099**–**0104** **Completed**. No BCC track. Frontend Series O → **0106+**.
+
+## Series Q — Unique-export honesty residuals (0105)
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0105** BodyCloudWindowEdgeNormalize | **Completed** — window-edge bare dedupe uses `normalize_candidate`; over-length joins `seen`; D-0097-window-edge-normalize |

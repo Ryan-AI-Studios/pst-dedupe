@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0105 — body-cloud window-edge normalize)
+
+- Body-cloud window-edge duplicate of a kept URL with trailing sentence punctuation (or an already-noted over-length URL) no longer emits a false `BODY_CLOUD_LINK_WINDOW` marker. Closes **D-0097-window-edge-normalize**.
+
 ### Fixed (0104 — attachment TC Strategy A multipage)
 
 - Unique-pst per-message attachment table (`0x671`) uses Strategy A (paged HN +
