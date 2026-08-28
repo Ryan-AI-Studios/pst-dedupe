@@ -81,6 +81,7 @@ Preserve-layout unique-PST trees are counsel-useful and QC-honest:
 | `--max-open-psts <N>` | **0079** — max sticky source PST handles for materialize + attach stream (default **32**, LRU) |
 | `--include-bcc-recipients` | **0082** — write Bcc TC rows + `PidTagDisplayBcc` into the unique-PST (default **OFF**). Default suppresses BCC on the deliverable so consolidating custodians does not over-disclose relative to a single custodian's outward view. **Identity hashing still includes BCC** when the source recipient table is present (internal only). See [BCC disclosure](#bcc-disclosure-0082). |
 | `--promote-on-attach-fail` | **0083 Mode A** — pre-write promote when a keep-set peer materializes with incomplete attaches and a ranked peer is complete (default **off** = Mode C ledger-only). Mode B write-time mid-message promote is **not** supported. Under default global scope may perform **cross-custodian de-duplication** — see [runbook](unique-pst-ediscovery-runbook.md). Pair with `--deep-attach-preflight` for richer incomplete detection. |
+| `--max-embedded-depth <1-8>` | **0101** — nested `ATTACH_EMBEDDED_MSG` extract/write depth (default **3**). Values outside **1–8** are a usage error (not silently clamped). Deeper nests ledger `ATTACH_DEPTH_LIMIT`. The 32 MiB per-nest byte budget also maps to that same code. |
 
 ### Deep attach preflight (0074) — honesty
 
@@ -143,7 +144,7 @@ If volume *k* fails fatally (disk full, path unwritable, layout hard fail):
 
 ```text
 {report-dir}/
-  summary.json              # unique_export_report_v1 (+ 0073 attach histogram fields)
+  summary.json              # unique_export_report_v1 (+ 0073 attach histogram fields; 0101 always-present export.max_embedded_depth — schema id not bumped)
   decisions.csv             # keep-set decision stream
   keepset.json              # winners + stats (no bodies)
   volumes.csv               # one row per completed volume (+ sha256/md5)
@@ -482,7 +483,17 @@ Missing nested body uses the domain-separated `embedded-body-missing/v1` sentine
 
 **Not Relativity dedupe parity.** Relativity Server hashes four components separately, extracts embedded emails as **child documents**, and does **not** fold nested email into the parent’s AttachmentHash. Recursive hash-in-parent is a pst-dedup product choice for parent-centric keep-sets (matter extract still models children elsewhere).
 
-**Nested unique-pst export (0094):** method-5 winners get a bounded nested `WriteMessage` (depth owner = writer `max_embedded_depth`, default 3; 32 MiB per-nest ceiling). Attach PC writes **`PidTagAttachDataObject` PtypObject** (`0x3701` / `0x000D`) for Outlook-discoverable nests; reader resolves via that property (scan fallback for older output). Child by-value attaches under nests stream via `open_attach_data_from_message_node` (nested NIDs are not in the NBT). unique-eml still ignores nested DTOs — nested MIME `message/rfc822` remains under **D-0067-embedded-depth**.
+**Nested unique-pst export (0094 / 0101):** method-5 winners get a bounded nested `WriteMessage`. **CLI owns the knob:** `unique-pst --max-embedded-depth` (default **3**, valid **1–8**; clap rejects outside that range). The same effective value is passed to `materialize_nested_for_winner` and `WritePstOpts::max_embedded_depth`. 32 MiB per-nest ceiling unchanged. Attach PC writes **`PidTagAttachDataObject` PtypObject** (`0x3701` / `0x000D`) for Outlook-discoverable nests; reader resolves via that property (scan fallback for older output). Child by-value attaches under nests stream via `open_attach_data_from_message_node` (nested NIDs are not in the NBT). unique-eml still ignores nested DTOs — nested MIME `message/rfc822` remains under **D-0067-embedded-depth**.
+
+**Depth names (do not conflate):**
+
+| Name | Owner | Role |
+|---|---|---|
+| `WritePstOpts::max_embedded_depth` / `--max-embedded-depth` | writer + unique-pst CLI | Extract/write knob, clamp [1, 8], default 3 |
+| `MAX_EMBEDDED_IDENTITY_DEPTH` | `pst-reader` | 0090 hash recursion, **locked 3** |
+| `DEFAULT_MAX_EMBEDDED_DEPTH` | `eml_pack` / `named_prop_map` | Default 3 on those surfaces; unique-eml OOS |
+
+`unique_export_report_v1` gained always-present `export.max_embedded_depth` (consumers should ignore unknown keys; schema id **not** bumped).
 
 ### Tier-2.5 recipient identity (0082)
 

@@ -606,6 +606,7 @@ fn cancel_exit_130_and_summary() {
         qc_scanpst: false,
         include_bcc_recipients: false,
         promote_on_attach_fail: false,
+        max_embedded_depth: 3,
     };
     let outcome = pst_dedup_cli::run_unique_pst_with_options(
         args,
@@ -628,6 +629,10 @@ fn cancel_exit_130_and_summary() {
     assert_eq!(
         v["promote_on_attach_fail"], false,
         "cancelled summary must echo promote_on_attach_fail=false when flag off"
+    );
+    assert_eq!(
+        v["export"]["max_embedded_depth"], 3,
+        "cancel path must echo effective depth; body={body}"
     );
 }
 
@@ -711,6 +716,7 @@ fn cancel_summary_echoes_promote_on_attach_fail_true() {
         qc_scanpst: false,
         include_bcc_recipients: false,
         promote_on_attach_fail: true,
+        max_embedded_depth: 3,
     };
     let outcome = pst_dedup_cli::run_unique_pst_with_options(
         args,
@@ -726,6 +732,10 @@ fn cancel_summary_echoes_promote_on_attach_fail_true() {
     assert_eq!(outcome.exit.as_u8(), 130);
     let body = fs::read_to_string(&outcome.summary_path).expect("summary");
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["export"]["max_embedded_depth"], 3,
+        "cancel path must echo effective depth, not omit/hardcode; body={body}"
+    );
     assert_eq!(
         v["promote_on_attach_fail"], true,
         "cancelled summary must not hardcode promote_on_attach_fail=false"

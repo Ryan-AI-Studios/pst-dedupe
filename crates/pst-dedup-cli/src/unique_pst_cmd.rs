@@ -275,6 +275,14 @@ pub struct UniquePstClapArgs {
     /// copy (cross-custodian de-duplication); see the eDiscovery runbook.
     #[arg(long = "promote-on-attach-fail", action = clap::ArgAction::SetTrue)]
     pub promote_on_attach_fail: bool,
+    /// Nested ATTACH_EMBEDDED_MSG extract/write depth (0094/0101).
+    /// Default 3; valid 1–8. Deeper nests ledger ATTACH_DEPTH_LIMIT.
+    #[arg(
+        long = "max-embedded-depth",
+        default_value_t = 3,
+        value_parser = parse_max_embedded_depth_arg
+    )]
+    pub max_embedded_depth: u32,
 }
 
 /// Runtime options for `unique-pst` orchestration.
@@ -359,6 +367,8 @@ pub struct UniquePstCliArgs {
     pub include_bcc_recipients: bool,
     /// Mode A pre-write promote-on-attach-fail (0083). Default false.
     pub promote_on_attach_fail: bool,
+    /// Nested ATTACH_EMBEDDED_MSG extract/write depth (0101). Default 3; clamp 1–8.
+    pub max_embedded_depth: u32,
 }
 
 /// Run options / hooks for GUI and library callers (0072).
@@ -539,6 +549,7 @@ impl UniquePstClapArgs {
             qc_scanpst: self.qc_scanpst,
             include_bcc_recipients: self.include_bcc_recipients,
             promote_on_attach_fail: self.promote_on_attach_fail,
+            max_embedded_depth: self.max_embedded_depth,
         })
     }
 }
@@ -557,6 +568,18 @@ impl FolderLayoutArg {
             Self::Flat => "flat",
         }
     }
+}
+
+fn parse_max_embedded_depth_arg(s: &str) -> std::result::Result<u32, String> {
+    let n: u32 = s.parse().map_err(|_| {
+        format!("invalid --max-embedded-depth '{s}': expected an integer from 1 to 8")
+    })?;
+    if !(1..=8).contains(&n) {
+        return Err(format!(
+            "invalid --max-embedded-depth '{s}': expected an integer from 1 to 8"
+        ));
+    }
+    Ok(n)
 }
 
 fn parse_folder_layout_arg(s: &str) -> std::result::Result<FolderLayoutArg, String> {
@@ -921,6 +944,8 @@ struct CancelledSummaryCtx<'a> {
     artifact_state: crate::export_outcome::ArtifactState,
     /// Operator-requested Mode A flag (echo into cancelled summary; 0083).
     promote_on_attach_fail: bool,
+    /// Effective extract/write depth (clamped 1–8; 0101). Do not hardcode 3.
+    max_embedded_depth: u32,
 }
 
 /// Quarantine written volumes after cancel: rename each volume to
@@ -1177,6 +1202,7 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
             recipient_tc_truncated_events_total: None,
             recipient_tc_truncations: None,
             include_bcc_recipients: false,
+            max_embedded_depth: ctx.max_embedded_depth,
         },
         verification: VerificationReport {
             ok: false,
@@ -1317,6 +1343,8 @@ pub fn run_unique_pst_with_options(
     let stderr = run_opts.stderr_progress;
     let on_progress = run_opts.on_progress.map(|f| Arc::new(Mutex::new(f)));
     let on_log = run_opts.on_log.map(|f| Arc::new(Mutex::new(f)));
+    // 0101: one assignment for materialize, writer, named-prop scan, cancel summary.
+    let nested_extract_depth = args.max_embedded_depth.clamp(1, 8);
 
     pst_reader::integrity_telemetry::set_log_limit(
         args.crc_log_limit,
@@ -1453,6 +1481,7 @@ pub fn run_unique_pst_with_options(
             messages_materialized,
             artifact_state,
             promote_on_attach_fail: args.promote_on_attach_fail,
+            max_embedded_depth: nested_extract_depth,
         });
         return Ok(cancelled_outcome(
             report_dir,
@@ -1634,6 +1663,7 @@ pub fn run_unique_pst_with_options(
                 messages_materialized,
                 artifact_state,
                 promote_on_attach_fail: args.promote_on_attach_fail,
+                max_embedded_depth: nested_extract_depth,
             });
             return Ok(cancelled_outcome(
                 report_dir,
@@ -1712,6 +1742,7 @@ pub fn run_unique_pst_with_options(
                 messages_materialized,
                 artifact_state,
                 promote_on_attach_fail: args.promote_on_attach_fail,
+                max_embedded_depth: nested_extract_depth,
             });
             return Ok(cancelled_outcome(
                 report_dir,
@@ -1965,8 +1996,6 @@ pub fn run_unique_pst_with_options(
     let mat_opts = MaterializeFinalizeOpts {
         promote_on_attach_fail: args.promote_on_attach_fail,
     };
-    // 0094: winner-only nested extract uses writer depth budget (default 3).
-    let nested_extract_depth = 3u32;
     let materialized_count =
         finalize_with_materialize_opts(&mut resolved, &mut mat, &mat_opts, &mut |mut msg| {
             if let Err(e) =
@@ -3038,6 +3067,7 @@ pub fn run_unique_pst_with_options(
                     .collect(),
             ),
             include_bcc_recipients: args.include_bcc_recipients,
+            max_embedded_depth: nested_extract_depth,
         };
         if let Some(finish) = attach_ledger_finish.as_ref() {
             finish.apply_to_export_section(&mut section);
@@ -3334,6 +3364,7 @@ pub fn run_unique_pst_with_options(
             "  attach written:   {}  attach failed: {}",
             attach_written_total, attach_failed_total
         );
+        println!("  max_embedded_depth: {nested_extract_depth}");
         println!(
             "  partial:          {}  ok: {ok}  cancelled: {cancelled}",
             summary.export.partial
@@ -4147,6 +4178,7 @@ mod tests {
             qc_scanpst: false,
             include_bcc_recipients: false,
             promote_on_attach_fail: false,
+            max_embedded_depth: 3,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -4257,6 +4289,7 @@ mod tests {
             qc_scanpst: false,
             include_bcc_recipients: false,
             promote_on_attach_fail: false,
+            max_embedded_depth: 3,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -4374,6 +4407,7 @@ mod tests {
             qc_scanpst: false,
             include_bcc_recipients: false,
             promote_on_attach_fail: false,
+            max_embedded_depth: 3,
         };
         let outcome = run_unique_pst_with_options(
             args,
@@ -4482,6 +4516,7 @@ mod tests {
             qc_scanpst: false,
             include_bcc_recipients: false,
             promote_on_attach_fail: false,
+            max_embedded_depth: 3,
         };
         let outcome = run_unique_pst_with_options(
             args,

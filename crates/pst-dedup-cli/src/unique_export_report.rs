@@ -300,6 +300,8 @@ pub struct ExportSection {
     /// Default false. Clean-room `qc-pst` reads this so re-QC matches the export policy.
     #[serde(default)]
     pub include_bcc_recipients: bool,
+    /// Effective nested extract/write depth used for this job (0101). Always serialized.
+    pub max_embedded_depth: u32,
 }
 
 /// Serializable recipient TC truncate row for `summary.json` (0093).
@@ -2259,6 +2261,7 @@ mod tests {
             recipient_tc_truncated_events_total: None,
             recipient_tc_truncations: None,
             include_bcc_recipients: false,
+            max_embedded_depth: 3,
         };
         finish.apply_to_export_section(&mut export);
         assert!(export.attachment_ledger.is_none());
@@ -2371,6 +2374,7 @@ mod tests {
             recipient_tc_truncated_events_total: None,
             recipient_tc_truncations: None,
             include_bcc_recipients: false,
+            max_embedded_depth: 3,
         };
         finish.apply_to_export_section(&mut export);
         assert!(export.attachments_failed_by_reason.is_none());
