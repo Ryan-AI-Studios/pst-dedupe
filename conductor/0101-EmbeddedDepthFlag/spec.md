@@ -8,7 +8,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** `C:\dev\Dedupe-plan.md` → unique-PST nested export (file not present on this machine at plan-time; re-verify at execute)
 - **Cross-repo contract:** n/a
-- **Status:** In Progress
+- **Status:** Completed
 - **Depends on:** 0094 · 0098 (Completed). 0100 Completed is not a code dependency; Series P order is 0099 → 0100 → **0101** → 0102.
 - **Spec authored:** 2026-08-27
 - **Series:** P (Unique-PST defensibility)
