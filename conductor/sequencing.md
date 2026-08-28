@@ -201,6 +201,6 @@
 | 2 | **0100** RecipientTcMultipage | **Completed** — Strategy A (row-matrix subnode + RowsPerBlock + multi-block HN); D-0093-recipient-tc-multipage |
 | 3 | **0101** EmbeddedDepthFlag | **Completed** — unique-pst `--max-embedded-depth` (default 3, reject outside 1–8); D-0067 CLI half; PR #92 |
 | 4 | **0102** ExportOracleInputsAttest | **Completed** — remove recursive `"inputs"` strip; keep root `/inputs` blanking; 0099 pointers actually compare; D-0099-oracle-inputs-attest |
-| 5 | **0103** RecipientTcSlblockNidOrder | **Proposed** — 0100 SLBLOCK unsorted when cell NIDs exist; D-0100-slblock-nid-order |
+| 5 | **0103** RecipientTcSlblockNidOrder | **Completed** — trailing push + `add_subnode_leaf` emit-sort; D-0100-slblock-nid-order; PR #96 `f66ae9b` |
 
-**Suggested:** **0099** (Completed) → **0100** (Completed) → **0101** (Completed) → 0102 → 0103. No BCC track. Frontend Series O → **0105+**.
+**Suggested:** **0099**–**0103** all **Completed**. No BCC track. Frontend Series O → **0105+**. Next free ID **0104** unused — do not steal for frontend.
