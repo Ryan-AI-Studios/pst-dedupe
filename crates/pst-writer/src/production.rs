@@ -4708,7 +4708,7 @@ fn build_recipient_table_strategy_a(
     let (matrix_bid, matrix_bytes) = layout.write_row_matrix_tree(&row_matrix, row_width)?;
     extra_content_bytes = extra_content_bytes.saturating_add(matrix_bytes);
     let matrix_nid = next_subnode_nid(&mut sub_counter);
-    table_subs.insert(0, (matrix_nid, matrix_bid, 0));
+    table_subs.push((matrix_nid, matrix_bid, 0));
     heap.patch_u32(hid_tcinfo, 14, matrix_nid as u32)?;
 
     let table_bid_sub = layout.add_subnode_leaf(&table_subs)?;
@@ -5460,13 +5460,34 @@ impl Layout {
     /// (track 0069). One SLBLOCK always suffices for current scale; returns a
     /// typed error rather than silently dropping entries if capacity is
     /// exceeded (multi-level SI hierarchy remains a future concern).
+    ///
+    /// MS-PST subnode BTree is searched by NID (BTree-family inference; the
+    /// SLBLOCK section itself does not say `rgentries MUST be sorted`). This
+    /// function emits **strictly increasing** SLENTRY keys so Outlook can
+    /// resolve cell/matrix NIDs. CI proves on-disk order, not COM Outlook.
+    ///
+    /// Duplicate NIDs are a layout error. Today's callers cannot hit that:
+    /// recipient-table cells+matrix share one monotonic `sub_counter`; message
+    /// leaves mix `subnode_counter` (type 0x1F), `attach_nid_counter` (type
+    /// 0x05), and fixed `0x671`/`0x692` — disjoint low 5 bits. The guard is
+    /// defense against a future bug, not a live green-test flip.
     pub fn add_subnode_leaf(&mut self, entries: &[(u64, u64, u64)]) -> Result<u64> {
-        let mut payload = Vec::with_capacity(8 + entries.len() * 24);
+        let mut sorted: Vec<(u64, u64, u64)> = entries.to_vec();
+        sorted.sort_by_key(|(nid, _, _)| *nid);
+        for w in sorted.windows(2) {
+            if w[0].0 == w[1].0 {
+                return Err(WriterError::Layout(format!(
+                    "duplicate SLENTRY nid 0x{:X}",
+                    w[0].0
+                )));
+            }
+        }
+        let mut payload = Vec::with_capacity(8 + sorted.len() * 24);
         payload.push(0x02); // btype (subnode block)
         payload.push(0x00); // cLevel = 0 (SLBLOCK: leaf)
-        payload.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        payload.extend_from_slice(&(sorted.len() as u16).to_le_bytes());
         payload.extend_from_slice(&0u32.to_le_bytes()); // reserved
-        for (nid, bid_data, bid_sub) in entries {
+        for (nid, bid_data, bid_sub) in &sorted {
             payload.extend_from_slice(&nid.to_le_bytes());
             payload.extend_from_slice(&bid_data.to_le_bytes());
             payload.extend_from_slice(&bid_sub.to_le_bytes());
@@ -5474,7 +5495,7 @@ impl Layout {
         if payload.len() > MAX_BLOCK_DATA {
             return Err(WriterError::Layout(format!(
                 "{} subnode entries exceed v1's single-SLBLOCK capacity",
-                entries.len()
+                sorted.len()
             )));
         }
         let bid = self.alloc_bid(true);
@@ -6652,5 +6673,49 @@ mod tests {
         let c = job_store_key_material_from_loci([("C:\\a.pst", "Inbox", 43u64)]);
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn add_subnode_leaf_emits_nids_ascending() {
+        let mut layout = Layout::new();
+        let bid = layout
+            .add_subnode_leaf(&[(0x9F, 1, 0), (0x3F, 2, 0), (0x5F, 3, 0)])
+            .expect("slblock");
+        let block = layout
+            .blocks
+            .iter()
+            .find(|b| b.bid == bid)
+            .expect("slblock present");
+        assert_eq!(block.data[0], 0x02, "btype");
+        assert_eq!(block.data[1], 0x00, "cLevel");
+        let c_entries = u16::from_le_bytes([block.data[2], block.data[3]]);
+        assert_eq!(c_entries, 3);
+        let nid0 = u64::from_le_bytes(block.data[8..16].try_into().expect("nid0"));
+        let bid0 = u64::from_le_bytes(block.data[16..24].try_into().expect("bid0"));
+        let nid1 = u64::from_le_bytes(block.data[32..40].try_into().expect("nid1"));
+        let bid1 = u64::from_le_bytes(block.data[40..48].try_into().expect("bid1"));
+        let nid2 = u64::from_le_bytes(block.data[56..64].try_into().expect("nid2"));
+        let bid2 = u64::from_le_bytes(block.data[64..72].try_into().expect("bid2"));
+        assert_eq!((nid0, bid0), (0x3F, 2));
+        assert_eq!((nid1, bid1), (0x5F, 3));
+        assert_eq!((nid2, bid2), (0x9F, 1));
+    }
+
+    #[test]
+    fn add_subnode_leaf_duplicate_nid_errors() {
+        let mut layout = Layout::new();
+        let err = layout
+            .add_subnode_leaf(&[(0x3F, 1, 0), (0x5F, 2, 0), (0x3F, 3, 0)])
+            .expect_err("duplicate nid must fail closed");
+        match err {
+            WriterError::Layout(msg) => {
+                assert!(
+                    msg.contains("0x3F"),
+                    "Layout error should name duplicate nid, got {msg}"
+                );
+            }
+            other => panic!("expected WriterError::Layout, got {other:?}"),
+        }
+        assert!(layout.blocks.is_empty(), "failed encode must not allocate");
     }
 }

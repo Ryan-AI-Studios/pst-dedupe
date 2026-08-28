@@ -7,6 +7,12 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0103 — recipient TC SLBLOCK NID order)
+
+- Unique-pst recipient-table SLBLOCK NIDs are sorted ascending so Outlook can
+  resolve long-string cell NIDs (`add_subnode_leaf` emit-sort; matrix push not
+  `insert(0)`). Closes **D-0100-slblock-nid-order**.
+
 ### Fixed (0102 — export oracle `export_risk.inputs` attest)
 
 - Unique-pst `export_oracle` no longer recursive-strips the name `inputs`, so 0099
