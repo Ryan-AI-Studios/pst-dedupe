@@ -1052,6 +1052,36 @@ fn attachment_table_template_present_empty_at_0x671() {
 
 // ── Per-message attachment table TC + RowIndex ───────────────────────────────
 
+/// Inspect the per-message attachment-table subnode (NID type 0x11).
+fn attachment_table_subnode(
+    path: &Path,
+    msg_nid: pst_reader::NodeId,
+) -> (Vec<u8>, pst_reader::BlockId) {
+    let pst = pst_reader::PstFile::open(path).expect("open");
+    let msg_entry = pst.nbt().get(msg_nid).cloned().expect("message nbt");
+    let mut file = std::fs::File::open(path).expect("file");
+    let subs =
+        pst_reader::ndb::block::list_subnode_entries(&mut file, pst.bbt(), msg_entry.bid_sub)
+            .expect("message subnodes");
+    let attach_tc = subs
+        .iter()
+        .find(|e| {
+            matches!(
+                e.nid.nid_type(),
+                pst_reader::ndb::nid::NidType::AttachmentTable
+            )
+        })
+        .expect("attachment table subnode");
+    let data = pst_reader::ndb::block::read_block_data(
+        &mut file,
+        pst.bbt(),
+        attach_tc.bid_data,
+        pst_reader::crypto::CryptMethod::None,
+    )
+    .expect("attach table heap");
+    (data, attach_tc.bid_sub)
+}
+
 #[test]
 fn per_message_attachment_table_rows_and_row_index() {
     let path = scratch_path("msg_att_table");
@@ -1075,10 +1105,27 @@ fn per_message_attachment_table_rows_and_row_index() {
     assert_eq!(attaches.len(), 1);
     let attach_nid = attaches[0].nid.0 as u32;
 
-    let table_raw = pst
-        .read_subnode_data(msg_nid, pst_reader::NodeId(0x671))
-        .expect("message subnode 0x671 attachment table");
-    let table = pst_reader::ltp::tc::TableContext::load(table_raw).expect("TC");
+    let (heap, bid_sub) = attachment_table_subnode(&path, msg_nid);
+    assert!(
+        !bid_sub.is_null(),
+        "non-empty attachment TC must have bid_sub"
+    );
+    let mut file = std::fs::File::open(&path).expect("file");
+    let pst2 = pst_reader::PstFile::open(&path).expect("open2");
+    let table = pst_reader::ltp::tc::load_from_table_bids(
+        heap,
+        &mut file,
+        pst2.bbt(),
+        bid_sub,
+        pst_reader::crypto::CryptMethod::None,
+    )
+    .expect("load attach TC");
+    assert_ne!(
+        table.info().hnid_rows & 0x1F,
+        0,
+        "hnidRows must be a NID (nidType != 0), got 0x{:08X}",
+        table.info().hnid_rows
+    );
     assert_eq!(table.row_count(), 1, "one attach → one table row");
     assert_eq!(
         table.get_row_id(0),
@@ -1105,6 +1152,174 @@ fn per_message_attachment_table_rows_and_row_index() {
         .expect("string")
         .expect("filename present");
     assert_eq!(fname, "row.txt");
+
+    cleanup(&path);
+}
+
+// ── 0104: Strategy A attachment TC — multipage HN + matrix subnode ───────────
+
+#[test]
+fn attachment_tc_many_rows_round_trips() {
+    let path = scratch_path("attach_tc_many");
+    cleanup(&path);
+
+    const N: usize = 200;
+    let mut msg = base_msg("<att-many@ex.com>", "Many attaches");
+    for i in 0..N {
+        let name = format!("attach_filename_test_{i:04}.txt");
+        msg.attachments.push(WriteAttachment {
+            filename: name,
+            size: 1,
+            attach_method: Some(1),
+            data: Some(b"x".to_vec()),
+            ..Default::default()
+        });
+    }
+
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+
+    let msg_nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let attaches = pst.list_attachments(msg_nid).expect("list");
+    assert_eq!(attaches.len(), N);
+
+    let (heap, bid_sub) = attachment_table_subnode(&path, msg_nid);
+    assert!(!bid_sub.is_null());
+    assert!(
+        heap.len() > 8176,
+        "200 ≥20-char filenames must exercise multi-page HN (heap {} bytes)",
+        heap.len()
+    );
+    let mut file = std::fs::File::open(&path).expect("file");
+    let pst2 = pst_reader::PstFile::open(&path).expect("open2");
+    let table = pst_reader::ltp::tc::load_from_table_bids(
+        heap,
+        &mut file,
+        pst2.bbt(),
+        bid_sub,
+        pst_reader::crypto::CryptMethod::None,
+    )
+    .expect("load attach TC");
+    assert_eq!(table.row_count(), N);
+    for i in 0..N {
+        let expected = format!("attach_filename_test_{i:04}.txt");
+        let fname = table
+            .get_row_string(i, 0x3704)
+            .expect("string")
+            .expect("filename present");
+        assert_eq!(fname, expected, "row {i}");
+    }
+
+    cleanup(&path);
+}
+
+/// >RowsPerBlock (live width 25 → Floor(8176/25)=327) so the matrix spans leaves.
+#[test]
+fn attachment_tc_matrix_spans_rows_per_block() {
+    let path = scratch_path("attach_tc_span");
+    cleanup(&path);
+
+    const N: usize = 328;
+    let mut msg = base_msg("<att-span@ex.com>", "Span matrix");
+    for i in 0..N {
+        msg.attachments.push(WriteAttachment {
+            filename: format!("a{i}.txt"),
+            size: 1,
+            attach_method: Some(1),
+            data: Some(b"x".to_vec()),
+            ..Default::default()
+        });
+    }
+
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+
+    let msg_nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let attaches = pst.list_attachments(msg_nid).expect("list");
+    assert_eq!(attaches.len(), N);
+
+    let (heap, bid_sub) = attachment_table_subnode(&path, msg_nid);
+    assert!(!bid_sub.is_null());
+    let mut file = std::fs::File::open(&path).expect("file");
+    let pst2 = pst_reader::PstFile::open(&path).expect("open2");
+    let table = pst_reader::ltp::tc::load_from_table_bids(
+        heap,
+        &mut file,
+        pst2.bbt(),
+        bid_sub,
+        pst_reader::crypto::CryptMethod::None,
+    )
+    .expect("load attach TC");
+    assert_eq!(
+        table.info().rgib[3],
+        25,
+        "re-verify attach TC row_width before RowsPerBlock"
+    );
+    assert_eq!(table.row_count(), N);
+    // RowsPerBlock = Floor(8176/25) = 327 — sample both sides of the leaf edge.
+    let edge_last = table
+        .get_row_string(326, 0x3704)
+        .expect("string")
+        .expect("filename present");
+    assert_eq!(edge_last, "a326.txt", "last row of first matrix leaf");
+    let edge_first = table
+        .get_row_string(327, 0x3704)
+        .expect("string")
+        .expect("filename present");
+    assert_eq!(edge_first, "a327.txt", "first row of second matrix leaf");
+
+    cleanup(&path);
+}
+
+#[test]
+fn attachment_tc_long_filename_cell_nid() {
+    let path = scratch_path("attach_tc_longcell");
+    cleanup(&path);
+
+    // UTF-16 bytes = 2 * chars; MAX_HEAP_VALUE_SIZE = 2048 → 1025 chars diverts.
+    let long = "N".repeat(1025);
+    let mut msg = base_msg("<att-longcell@ex.com>", "Long filename");
+    msg.attachments.push(WriteAttachment {
+        filename: long.clone(),
+        size: 1,
+        attach_method: Some(1),
+        data: Some(b"x".to_vec()),
+        ..Default::default()
+    });
+
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+
+    let msg_nid = first_message_nid(&path, "Unique Mail");
+    let (heap, bid_sub) = attachment_table_subnode(&path, msg_nid);
+    assert!(!bid_sub.is_null(), "cell-NID attach TC must have bid_sub");
+    let mut file = std::fs::File::open(&path).expect("file");
+    let pst2 = pst_reader::PstFile::open(&path).expect("open2");
+    let subs = pst_reader::ndb::block::list_subnode_entries(&mut file, pst2.bbt(), bid_sub)
+        .expect("attach table SLBLOCK");
+    assert!(
+        subs.len() >= 2,
+        "filename cell + matrix: got {}",
+        subs.len()
+    );
+    assert!(
+        subs.windows(2).all(|w| w[0].nid.0 < w[1].nid.0),
+        "SLBLOCK NIDs must be strictly increasing: {:?}",
+        subs.iter().map(|e| e.nid.0).collect::<Vec<_>>()
+    );
+    let table = pst_reader::ltp::tc::load_from_table_bids(
+        heap,
+        &mut file,
+        pst2.bbt(),
+        bid_sub,
+        pst_reader::crypto::CryptMethod::None,
+    )
+    .expect("load attach TC");
+    assert_eq!(table.row_count(), 1);
+    let fname = table
+        .get_row_string(0, 0x3704)
+        .expect("string")
+        .expect("filename present");
+    assert_eq!(fname, long);
 
     cleanup(&path);
 }
@@ -1165,6 +1380,22 @@ fn every_message_has_recipient_table_subnode_0x692() {
 
     let recips = pst.list_recipients(msg_nid).expect("list_recipients");
     assert!(recips.is_empty());
+
+    // Zero attaches → no per-message attachment table (MS-PST optional).
+    let msg_entry = pst.nbt().get(msg_nid).cloned().expect("message nbt");
+    let mut file = std::fs::File::open(&path).expect("file");
+    let subs =
+        pst_reader::ndb::block::list_subnode_entries(&mut file, pst.bbt(), msg_entry.bid_sub)
+            .expect("message subnodes");
+    assert!(
+        subs.iter().all(|e| {
+            !matches!(
+                e.nid.nid_type(),
+                pst_reader::ndb::nid::NidType::AttachmentTable
+            )
+        }),
+        "zero-attach message must omit NID 0x671"
+    );
 
     cleanup(&path);
 }
@@ -1490,6 +1721,77 @@ fn message_size_uses_real_attachment_table_size() {
 
     cleanup(&path_body);
     cleanup(&path_att);
+}
+
+/// MessageSize must count attachment-table matrix bytes (`extra_content_bytes`).
+///
+/// 328 short-name rows → RowsPerBlock 327 → matrix payload 8176 + 25 = 8201.
+/// Subtract on-disk PC/heap contributions; the residual must cover that matrix.
+/// Dropping `built.extra_content_bytes` from MessageSize would leave residual ≪ 8201.
+#[test]
+fn message_size_counts_attachment_table_matrix_bytes() {
+    let path = scratch_path("msz_att_matrix");
+    cleanup(&path);
+
+    const N: usize = 328;
+    const ROW_WIDTH: usize = 25;
+    const ROWS_PER_BLOCK: usize = 8176 / ROW_WIDTH; // 327
+    let matrix_bytes = 8176 + (N - ROWS_PER_BLOCK) * ROW_WIDTH; // 8201
+
+    let mut msg = base_msg("<msz-matrix@ex.com>", "Matrix size");
+    msg.recipients.clear();
+    for i in 0..N {
+        msg.attachments.push(WriteAttachment {
+            filename: format!("a{i}.txt"),
+            size: 1,
+            attach_method: Some(1),
+            data: Some(b"x".to_vec()),
+            ..Default::default()
+        });
+    }
+    write_unicode_pst(&path, vec![msg], &[], &WritePstOpts::default()).expect("write");
+
+    let msg_nid = first_message_nid(&path, "Unique Mail");
+    let mut pst = pst_reader::PstFile::open(&path).expect("open");
+    let message_size = pst
+        .read_message_properties(msg_nid)
+        .expect("props")
+        .message_size
+        .expect("MessageSize") as u64;
+
+    let msg_pc_len = pst.read_node_data(msg_nid).expect("msg pc").len() as u64;
+    let attaches = pst.list_attachments(msg_nid).expect("list");
+    assert_eq!(attaches.len(), N);
+    let mut attach_pc_sum = 0u64;
+    for a in &attaches {
+        attach_pc_sum += pst
+            .read_subnode_data(msg_nid, a.nid)
+            .expect("attach pc")
+            .len() as u64;
+    }
+
+    let (table_heap, table_bid_sub) = attachment_table_subnode(&path, msg_nid);
+    assert!(!table_bid_sub.is_null());
+    let table_heap_len = table_heap.len() as u64;
+
+    let (recip_heap, recip_bid_sub) = recipient_table_subnode(&path, msg_nid);
+    assert!(
+        recip_bid_sub.is_null(),
+        "empty recip TC has no matrix/cells"
+    );
+    let recip_heap_len = recip_heap.len() as u64;
+
+    let accounted_without_matrix = msg_pc_len + attach_pc_sum + table_heap_len + recip_heap_len;
+    let residual = message_size.saturating_sub(accounted_without_matrix);
+    assert!(
+        residual >= matrix_bytes as u64,
+        "MessageSize residual after PC/heaps ({residual}) must cover attach-table matrix \
+         ({matrix_bytes}); got message_size={message_size} accounted_without_matrix=\
+         {accounted_without_matrix} (msg_pc={msg_pc_len} attaches={attach_pc_sum} \
+         table_heap={table_heap_len} recip_heap={recip_heap_len})"
+    );
+
+    cleanup(&path);
 }
 
 // ── Degraded folder path counter ─────────────────────────────────────────────

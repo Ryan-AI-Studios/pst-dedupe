@@ -377,7 +377,7 @@ Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedT
 
 ### Wave 7 — Unique-PST defensibility (Series P)
 
-Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0101 Completed** (PR **#92**). **0102 Completed** (oracle attest). **0103 Completed** (SLBLOCK NID order; PR **#96**). **Do not** add a BCC-write track (0082 default suppress is the disclosure policy).
+Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0101 Completed** (PR **#92**). **0102 Completed** (oracle attest). **0103 Completed** (SLBLOCK NID order; PR **#96**). **0104 Completed** (attach-table Strategy A). **Do not** add a BCC-write track (0082 default suppress is the disclosure policy).
 
 | ID | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|
@@ -386,8 +386,9 @@ Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0
 | **0101** | EmbeddedDepthFlag | **Completed** | **P1 P** | CLI `--max-embedded-depth` (reject outside 1–8, default 3). Same value to materialize + writer. CI proves 4@3 vs 4@4 and 8@7 vs 8@8. Narrows unique-pst **D-0067-embedded-depth** (row stays open). Identity hash depth stays 3. PR **#92**. Spec: `0101-EmbeddedDepthFlag/`. |
 | **0102** | ExportOracleInputsAttest | **Completed** | **P2 P** | Recursive oracle `"inputs"` strip deleted `export_risk.inputs`. Removed that allowlist key; blank job-level `/inputs` at root only; keep 0099 pointers. Closes **D-0099-oracle-inputs-attest**. Spec: `0102-ExportOracleInputsAttest/`. |
 | **0103** | RecipientTcSlblockNidOrder | **Completed** | **P2 P** | Trailing matrix `push` + `add_subnode_leaf` NID-ascending emit-sort; fail closed on duplicate NIDs. Closes **D-0100-slblock-nid-order**. PR **#96** `f66ae9b`. Spec: `0103-RecipientTcSlblockNidOrder/`. |
+| **0104** | AttachmentTcMultipage | **Completed** | **P2 P** | Strategy A for per-message attachment table (`0x671`): row-matrix subnode + RowsPerBlock (`Floor(8176/25)=327`) + multi-block HN. Closes **D-0093-attachment-tc-page**. HNBITMAPHDR stay fail-closed. Spec: `0104-AttachmentTcMultipage/`. |
 
-**Order:** **0099** → **0100** → **0101** → **0102** → **0103**. Frontend Series O (if started) uses **0105+**.
+**Order:** **0099** → **0100** → **0101** → **0102** → **0103** → **0104**. Frontend Series O (if started) uses **0105+**.
 
 ### What each step is for
 

@@ -1108,7 +1108,8 @@ impl HeapBuilder {
     }
 }
 
-/// Multi-block Heap-on-Node (MS-PST §2.3.1.6) for the recipient-table node only.
+/// Multi-block Heap-on-Node (MS-PST §2.3.1.6) for TC heap nodes (recipient /
+/// attachment tables).
 ///
 /// Page 0 uses HNHDR; continuation pages use HNPAGEHDR. HID encoding is
 /// `((hid_block_index as u32) << 16) | ((hid_index as u32) << 5)` with
@@ -1199,7 +1200,7 @@ impl PagedHeapBuilder {
         let next = self.pages.len();
         if is_hn_bitmap_page(next) {
             return Err(WriterError::Layout(format!(
-                "recipient TC heap would require HNBITMAPHDR at page {next} \
+                "TC heap would require HNBITMAPHDR at page {next} \
                  (pages 8/136/264/… are unimplemented; D-0100-hn-bitmap-hdr)"
             )));
         }
