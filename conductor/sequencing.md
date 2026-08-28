@@ -200,7 +200,7 @@
 | 1 | **0099** CrcPolyExportRiskHonesty | **Completed** — effective (non-poly) CRC rate for `export_risk`; D-0077-systematic-poly honesty half |
 | 2 | **0100** RecipientTcMultipage | **Completed** — Strategy A (row-matrix subnode + RowsPerBlock + multi-block HN); D-0093-recipient-tc-multipage |
 | 3 | **0101** EmbeddedDepthFlag | **Completed** — unique-pst `--max-embedded-depth` (default 3, reject outside 1–8); D-0067 CLI half; PR #92 |
-| 4 | **0102** ExportOracleInputsAttest | **Proposed** — 0099 oracle `/export_risk/inputs` attest actually compares; D-0099-oracle-inputs-attest |
+| 4 | **0102** ExportOracleInputsAttest | **Completed** — remove recursive `"inputs"` strip; keep root `/inputs` blanking; 0099 pointers actually compare; D-0099-oracle-inputs-attest |
 | 5 | **0103** RecipientTcSlblockNidOrder | **Proposed** — 0100 SLBLOCK unsorted when cell NIDs exist; D-0100-slblock-nid-order |
 
 **Suggested:** **0099** (Completed) → **0100** (Completed) → **0101** (Completed) → 0102 → 0103. No BCC track. Frontend Series O → **0105+**.

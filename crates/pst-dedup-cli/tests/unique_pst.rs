@@ -1504,8 +1504,10 @@ fn unique_pst_attachments_on_degraded_and_attach_fails_stable() {
 }
 
 /// Optional operator gate: parent binary vs current `pst-dedup` under the
-/// structural oracle. Set `PST_DEDUPE_BASELINE_BIN` to a pre-0079 (or parent
-/// commit) `pst-dedup.exe`. Skips when unset — parent-vs-HEAD numbers live in
+/// structural oracle. Set `PST_DEDUPE_BASELINE_BIN` to a **post-0099** parent
+/// `pst-dedup.exe` (0079 measurement equalization still holds; pre-0099 parents
+/// legitimately mismatch on `export_risk.inputs` attest pointers). Skips when
+/// unset — parent-vs-HEAD numbers live in
 /// `conductor/0079-MaterializeWritePerformance/baseline.md`.
 #[test]
 fn unique_pst_parent_baseline_oracle_when_env_set() {

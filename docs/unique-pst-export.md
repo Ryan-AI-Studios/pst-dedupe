@@ -186,9 +186,18 @@ Soft warning when `prepared_bytes_peak` exceeds **1 GiB** (stability; see D-0079
 
 **Oracle allowlist:** structural pack compare (`export_oracle`) strips the additive
 measurement fields above (plus paths/hashes/timings) so a **pre-0079 parent** pack
-without them still compares equal to HEAD when product semantics match. Operator
-parent-vs-HEAD gate: build parent binary, set `PST_DEDUPE_BASELINE_BIN`, run
-`unique_pst_parent_baseline_oracle_when_env_set` (or call `compare_export_packs`).
+without them still compares equal to HEAD on **measurement** product semantics.
+That equalization does **not** cover `export_risk.inputs` attest fields (0099):
+a **pre-0099** parent that omits `effective_block_crc_read_rate` /
+`poly_class_crc_discounted` / `discount_attach_stream_crc` /
+`poly_class_crc_sources` **must mismatch** HEAD — intended (that is the attest).
+Job-level `summary.inputs` (source paths) is blanked at **root only**; do **not**
+recursive-strip the name `inputs` — that object key is also `export_risk.inputs`
+(product attest). Oracle pointers `/export_risk/inputs/effective_block_crc_read_rate`
+(and siblings) must compare. Operator parent-vs-HEAD gate: build a **post-0099**
+parent binary, set `PST_DEDUPE_BASELINE_BIN`, run
+`unique_pst_parent_baseline_oracle_when_env_set` (or call `compare_export_packs`);
+a pre-0099 baseline is expected-red on those pointers.
 
 ### Sensitivity (handoff)
 
