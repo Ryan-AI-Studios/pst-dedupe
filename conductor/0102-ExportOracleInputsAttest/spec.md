@@ -9,7 +9,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** `docs/unique-pst-export.md` + this track. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-08-28 fold-in); do **not** chase it at execute.
 - **Cross-repo contract:** n/a
-- **Status:** In progress
+- **Status:** Completed
 - **Depends on:** 0099 (Completed). 0100 / 0101 Completed are not code dependencies; Series P order is 0099 → 0100 → 0101 → **0102** → 0103.
 - **Spec authored:** 2026-08-28
 - **Series:** P (Unique-PST defensibility)
@@ -220,10 +220,10 @@ Operator gate: `PST_DEDUPE_BASELINE_BIN` must point at a **post-0099** binary if
 
 Complete only when ALL hold:
 
-- [ ] **DoD-1 — Strip honesty:** `"inputs"` is **not** on `SUMMARY_ALLOWLIST_KEYS`. After `normalize_summary_for_oracle`, `/export_risk/inputs` and the four attest pointers remain with original values. Root `/inputs` is still `[]`. The four pointers remain in `compare_integrity_counters`. Attest field names are **not** on the allowlist.
-- [ ] **DoD-2 — Tests:** Synthetic unit tests in `export_oracle.rs`: (a) pointers survive normalize; (b) differ-only-in-`effective_block_crc_read_rate` **mismatches** and the mismatch string **contains that pointer**; (c) differ-only-in-`poly_class_crc_discounted` **mismatches** with that pointer string; (d) differ-only-in-root-`inputs` paths **matches** after normalize; (e) identical attest **matches**; (f) `allowlist_equalizes_parent_without_0079_counters` still green; (g) pre-0099-shaped `export_risk.inputs` (four attest keys omitted) vs HEAD-shaped **mismatches** on `/export_risk/inputs/…`. No client PSTs in git.
-- [ ] **DoD-3 — Docs:** `docs/unique-pst-export.md` oracle-allowlist paragraph names the two `inputs` keys **and** qualifies pre-0079 parent equality (measurement only; pre-0099 attest mismatch is intended; `PST_DEDUPE_BASELINE_BIN` = post-0099). Same qualification on `export_oracle.rs` module doc and `unique_pst_parent_baseline_oracle_when_env_set` doc-comment. CHANGELOG one-liner. `D-0099-oracle-inputs-attest` closed in `docs/deferred.md`.
-- [ ] **DoD-4 — Recorded:** `review.md`; registry **Completed**; ledger commit (`BUGFIX` on `crates/pst-dedup-cli` at implement). No HITL required.
+- [x] **DoD-1 — Strip honesty:** `"inputs"` is **not** on `SUMMARY_ALLOWLIST_KEYS`. After `normalize_summary_for_oracle`, `/export_risk/inputs` and the four attest pointers remain with original values. Root `/inputs` is still `[]`. The four pointers remain in `compare_integrity_counters`. Attest field names are **not** on the allowlist.
+- [x] **DoD-2 — Tests:** Synthetic unit tests in `export_oracle.rs`: (a) pointers survive normalize; (b) differ-only-in-`effective_block_crc_read_rate` **mismatches** and the mismatch string **contains that pointer**; (c) differ-only-in-`poly_class_crc_discounted` **mismatches** with that pointer string; (d) differ-only-in-root-`inputs` paths **matches** after normalize; (e) identical attest **matches**; (f) `allowlist_equalizes_parent_without_0079_counters` still green; (g) pre-0099-shaped `export_risk.inputs` (four attest keys omitted) vs HEAD-shaped **mismatches** on `/export_risk/inputs/…`. No client PSTs in git.
+- [x] **DoD-3 — Docs:** `docs/unique-pst-export.md` oracle-allowlist paragraph names the two `inputs` keys **and** qualifies pre-0079 parent equality (measurement only; pre-0099 attest mismatch is intended; `PST_DEDUPE_BASELINE_BIN` = post-0099). Same qualification on `export_oracle.rs` module doc and `unique_pst_parent_baseline_oracle_when_env_set` doc-comment. CHANGELOG one-liner. `D-0099-oracle-inputs-attest` closed in `docs/deferred.md`.
+- [x] **DoD-4 — Recorded:** `review.md`; registry **Completed**; ledger commit (`BUGFIX` on `crates/pst-dedup-cli` at implement). No HITL required.
 
 ---
 

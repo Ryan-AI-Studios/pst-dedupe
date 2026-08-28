@@ -101,11 +101,11 @@ No `cargo test --test unique_pst` requirement. No INC*.
 
 ## Phase 4 — Finalize → DoD-4
 
-- [ ] `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test -p pst-dedup-cli --lib export_oracle` (filter re-verify); workspace tests before publish.
-- [ ] Write `review.md` in this track dir: results, evidence, no new deferred (row closed).
-- [ ] Update `../conductor.md`: this track **Completed**. Light `sequencing.md` / `ROADMAP.md`.
-- [ ] Commit the implement ledger transaction (`BUGFIX` on `crates/pst-dedup-cli`).
-- [ ] Notify: 0103 remains next Series P placeholder. No BCC track. Frontend stays **0105+**.
+- [x] `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test -p pst-dedup-cli --lib export_oracle` (filter re-verify); workspace tests before publish.
+- [x] Write `review.md` in this track dir: results, evidence, no new deferred (row closed).
+- [x] Update `../conductor.md`: this track **Completed**. Light `sequencing.md` / `ROADMAP.md`.
+- [x] Commit the implement ledger transaction (`BUGFIX` on `crates/pst-dedup-cli`).
+- [x] Notify: 0103 remains next Series P placeholder. No BCC track. Frontend stays **0105+**.
 
 ---
 

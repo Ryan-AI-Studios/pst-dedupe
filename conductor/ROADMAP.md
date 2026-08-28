@@ -377,14 +377,14 @@ Series J: [`0062`](0062-ReleaseHardeningRc/spec.md)–[`0063`](0063-SecurityRedT
 
 ### Wave 7 — Unique-PST defensibility (Series P)
 
-Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0101 Completed** (PR **#92**). **0102 In progress** (oracle attest). Expand **0103** before coding it. **Do not** add a BCC-write track (0082 default suppress is the disclosure policy).
+Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0101 Completed** (PR **#92**). **0102 Completed** (oracle attest). Expand **0103** before coding it. **Do not** add a BCC-write track (0082 default suppress is the disclosure policy).
 
 | ID | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|
 | **0099** | CrcPolyExportRiskHonesty | **Completed** | **P0 P** | Dual-rate poly CRC must not elevate `export_risk`. Thresholds key on **effective** (non-poly) `block_crc_read_rate`; attach-stream CRC discounted only when every CRC-noisy source is poly-class. INC*: preflight `ok` vs `not_export_ready` (raw 1.0, 6014 events). Closes export-risk half of **D-0077-systematic-poly**; fingerprint residual **D-0077-poly-fingerprint**. Never in-tool repair. Spec: `0099-CrcPolyExportRiskHonesty/`. |
 | **0100** | RecipientTcMultipage | **Completed** | **P0 P** | Strategy A: all included TC rows. Row-matrix subnode + RowsPerBlock packing + multi-block HN on the recipient-table node; shared `TableContext::load`. Closes **D-0093-recipient-tc-multipage**. BCC default unchanged. PR **#90**. Spec: `0100-RecipientTcMultipage/`. |
 | **0101** | EmbeddedDepthFlag | **Completed** | **P1 P** | CLI `--max-embedded-depth` (reject outside 1–8, default 3). Same value to materialize + writer. CI proves 4@3 vs 4@4 and 8@7 vs 8@8. Narrows unique-pst **D-0067-embedded-depth** (row stays open). Identity hash depth stays 3. PR **#92**. Spec: `0101-EmbeddedDepthFlag/`. |
-| **0102** | ExportOracleInputsAttest | **In progress** | **P2 P** | Recursive oracle `"inputs"` strip deletes `export_risk.inputs`. Remove that allowlist key; blank job-level `/inputs` at root only; keep 0099 pointers. Closes **D-0099-oracle-inputs-attest**. Spec: `0102-ExportOracleInputsAttest/`. |
+| **0102** | ExportOracleInputsAttest | **Completed** | **P2 P** | Recursive oracle `"inputs"` strip deleted `export_risk.inputs`. Removed that allowlist key; blank job-level `/inputs` at root only; keep 0099 pointers. Closes **D-0099-oracle-inputs-attest**. Spec: `0102-ExportOracleInputsAttest/`. |
 | **0103** | RecipientTcSlblockNidOrder | **Proposed** | **P2 P** | 0100 `table_subs.insert(0, matrix_nid)` leaves SLBLOCK unsorted once cell NIDs exist. Closes **D-0100-slblock-nid-order**. Spec: `0103-RecipientTcSlblockNidOrder/`. |
 
 **Order:** **0099** → **0100** → **0101** → **0102** → **0103**. Frontend Series O (if started) uses **0105+**.
