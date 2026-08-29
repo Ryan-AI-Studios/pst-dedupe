@@ -492,15 +492,16 @@ Missing nested body uses the domain-separated `embedded-body-missing/v1` sentine
 
 **Not Relativity dedupe parity.** Relativity Server hashes four components separately, extracts embedded emails as **child documents**, and does **not** fold nested email into the parent’s AttachmentHash. Recursive hash-in-parent is a pst-dedup product choice for parent-centric keep-sets (matter extract still models children elsewhere).
 
-**Nested unique-pst export (0094 / 0101):** method-5 winners get a bounded nested `WriteMessage`. **CLI owns the knob:** `unique-pst --max-embedded-depth` (default **3**, valid **1–8**; clap rejects outside that range). The same effective value is passed to `materialize_nested_for_winner` and `WritePstOpts::max_embedded_depth`. 32 MiB per-nest ceiling unchanged. Attach PC writes **`PidTagAttachDataObject` PtypObject** (`0x3701` / `0x000D`) for Outlook-discoverable nests; reader resolves via that property (scan fallback for older output). Child by-value attaches under nests stream via `open_attach_data_from_message_node` (nested NIDs are not in the NBT). unique-eml still ignores nested DTOs — nested MIME `message/rfc822` remains under **D-0067-embedded-depth**.
+**Nested unique-pst export (0094 / 0101):** method-5 winners get a bounded nested `WriteMessage`. **CLI owns the knob:** `unique-pst --max-embedded-depth` (default **3**, valid **1–8**; clap rejects outside that range). The same effective value is passed to `materialize_nested_for_winner` and `WritePstOpts::max_embedded_depth`. 32 MiB per-nest ceiling unchanged. Attach PC writes **`PidTagAttachDataObject` PtypObject** (`0x3701` / `0x000D`) for Outlook-discoverable nests; reader resolves via that property (scan fallback for older output). Child by-value attaches under nests stream via `open_attach_data_from_message_node` (nested NIDs are not in the NBT). **unique-eml (0106)** consumes the same `NestedCanonicalMessage` DTO with the same extract helper and the same `--max-embedded-depth` semantics to write reconstructed nested RFC 5322 MIME (matter/Relativity child-document extract remains under **D-0067-embedded-depth**).
 
 **Depth names (do not conflate):**
 
 | Name | Owner | Role |
 |---|---|---|
 | `WritePstOpts::max_embedded_depth` / `--max-embedded-depth` | writer + unique-pst CLI | Extract/write knob, clamp [1, 8], default 3 |
+| `EmlWriteOpts::max_embedded_depth` / unique-eml `--max-embedded-depth` | eml_pack + unique-eml CLI | Extract/write knob, clamp [1, 8], default 3 (0106) |
 | `MAX_EMBEDDED_IDENTITY_DEPTH` | `pst-reader` | 0090 hash recursion, **locked 3** |
-| `DEFAULT_MAX_EMBEDDED_DEPTH` | `eml_pack` / `named_prop_map` | Default 3 on those surfaces; unique-eml OOS |
+| `DEFAULT_MAX_EMBEDDED_DEPTH` | `eml_pack` / `named_prop_map` | Default 3 on those surfaces |
 
 `unique_export_report_v1` gained always-present `export.max_embedded_depth` (consumers should ignore unknown keys; schema id **not** bumped).
 

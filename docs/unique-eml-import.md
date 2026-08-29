@@ -25,6 +25,7 @@ mail clients. This is the Series K **interim** path while production PST write
 | `--attach-ledger full\|summary-only\|off` | **0089** — attachment failure ledger (default **`full`**). CSV at `{out}/export_attachments.csv`. |
 | `--attach-ledger-max-rows <N>` | Cap on CSV rows (default **500000**); histogram never truncated. |
 | `--ledger-path-mode full\|basename` | How `source_path` is written in the attach ledger (default **`full`**). |
+| `--max-embedded-depth <1-8>` | **0106** — nested `ATTACH_EMBEDDED_MSG` extract/write depth (default **3**). Values outside **1–8** are a usage error. Deeper nests ledger `ATTACH_DEPTH_LIMIT`. |
 | Integrity flags | Same as `scan` / `keep-set` (`--mode`, thresholds, `--allow-failed-files`). |
 
 **Locks:**
@@ -84,7 +85,7 @@ mail clients. This is the Series K **interim** path while production PST write
 |---|---|
 | Round-trip | **Not** bit-identical to original MIME — reconstructed from MAPI properties. |
 | Date | Always **UTC +0000** for reproducibility across operator machines. |
-| Embedded messages | Labeled `Content-Type: message/rfc822`; deep nested MAPI re-extract may be residual. |
+| Embedded messages | When nested extract succeeds, the `message/rfc822` body is reconstructed RFC 5322 (not a MAPI dump). Extract/depth failures skip the part and ledger `ATTACH_EMBEDDED_UNPARSED` / `ATTACH_DEPTH_LIMIT`. By-value attached `.eml` (method ≠ 5) is still dumped as rfc822. Deep matter/Relativity child documents remain residual (`D-0067`). |
 | Cloud/modern attaches | Hyperlink-only / cloud attaches are not downloaded (residual). |
 | Degraded winners | Still exported with `X-Pst-Dedupe-Degraded` + manifest flags. |
 | Partial pack | Non-zero integrity exit still flushes written EML + manifest stats. |

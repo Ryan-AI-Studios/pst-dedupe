@@ -475,6 +475,14 @@ enum Commands {
         /// How `source_path` columns are written in export CSVs: `full` (default) or `basename` (0081/0089).
         #[arg(long = "ledger-path-mode", default_value = "full", value_parser = parse_ledger_path_mode)]
         ledger_path_mode: pst_dedup_cli::unique_export_report::LedgerPathMode,
+        /// Nested ATTACH_EMBEDDED_MSG extract/write depth (0106).
+        /// Default 3; valid 1–8. Deeper nests ledger ATTACH_DEPTH_LIMIT.
+        #[arg(
+            long = "max-embedded-depth",
+            default_value_t = 3,
+            value_parser = pst_dedup_cli::unique_pst_cmd::parse_max_embedded_depth_arg
+        )]
+        max_embedded_depth: u32,
     },
 
     /// Export unique messages as streaming PST volume(s) + report pack (`unique_export_report_v1`).
@@ -1290,6 +1298,7 @@ fn run(cli: Cli) -> Result<CliExit> {
             attach_ledger,
             attach_ledger_max_rows,
             ledger_path_mode,
+            max_embedded_depth,
         } => {
             let mut all = paths;
             all.extend(input);
@@ -1357,6 +1366,7 @@ fn run(cli: Cli) -> Result<CliExit> {
                 attach_ledger,
                 attach_ledger_max_rows,
                 ledger_path_mode,
+                max_embedded_depth,
             });
         }
         Commands::UniquePst(clap_args) => {

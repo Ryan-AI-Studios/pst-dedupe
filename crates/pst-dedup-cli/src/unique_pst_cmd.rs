@@ -570,7 +570,7 @@ impl FolderLayoutArg {
     }
 }
 
-fn parse_max_embedded_depth_arg(s: &str) -> std::result::Result<u32, String> {
+pub fn parse_max_embedded_depth_arg(s: &str) -> std::result::Result<u32, String> {
     let n: u32 = s.parse().map_err(|_| {
         format!("invalid --max-embedded-depth '{s}': expected an integer from 1 to 8")
     })?;

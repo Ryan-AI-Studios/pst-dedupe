@@ -678,7 +678,7 @@ pub enum NestedExtractFail {
 ///
 /// Dedicated type — not [`CanonicalMessage`] (nests have no locus / content_hash /
 /// fidelity / MIH). Mapped to `WriteMessage` by `pst-writer::from_canonical_message*`.
-/// unique-eml ignores this field this track.
+/// Consumed by unique-eml nested MIME reconstruct (0106).
 #[derive(Clone, Debug, Default)]
 pub struct NestedCanonicalMessage {
     pub subject: Option<String>,
