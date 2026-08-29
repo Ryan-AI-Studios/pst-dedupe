@@ -228,7 +228,7 @@ pub fn write_eml_pack_from_keep_set(
         }
     };
 
-    // Mode A honesty before write: promoted marks then soft-skip rows.
+    // Drain before write so co-export cannot silently drop Mode A ledger rows.
     if let Some(ledger) = attach_ledger.as_mut() {
         for w in &keep_set.winners {
             if w.promoted_from_failure {
@@ -642,7 +642,7 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
     )?;
 
     // Prepare out dir: create if missing; refuse non-empty unless --overwrite.
-    prepare_out_dir(&out, args.overwrite)?;
+    prepare_out_dir(&out, args.overwrite, "--out")?;
 
     pst_reader::integrity_telemetry::set_log_limit(
         args.crc_log_limit,
@@ -1038,28 +1038,27 @@ fn guard_unique_eml_paths(
     Ok(())
 }
 
-pub(crate) fn prepare_out_dir(out: &Path, overwrite: bool) -> Result<()> {
+pub(crate) fn prepare_out_dir(out: &Path, overwrite: bool, flag_label: &str) -> Result<()> {
     if out.exists() {
         if !out.is_dir() {
             return Err(CliError::Usage(format!(
-                "--out exists and is not a directory: {}",
+                "{flag_label} exists and is not a directory: {}",
                 out.display()
             )));
         }
         let non_empty = fs::read_dir(out)
-            .map_err(|e| CliError::Msg(format!("read --out {}: {e}", out.display())))?
+            .map_err(|e| CliError::Msg(format!("read {flag_label} {}: {e}", out.display())))?
             .next()
             .is_some();
         if non_empty && !overwrite {
             return Err(CliError::Usage(format!(
-                "--out is not empty (pass --overwrite to replace contents): {}",
+                "{flag_label} is not empty (pass --overwrite to replace contents): {}",
                 out.display()
             )));
         }
         if non_empty && overwrite {
-            // Clear contents so volume dirs and manifest are fresh.
             for entry in fs::read_dir(out)
-                .map_err(|e| CliError::Msg(format!("read --out {}: {e}", out.display())))?
+                .map_err(|e| CliError::Msg(format!("read {flag_label} {}: {e}", out.display())))?
             {
                 let entry = entry.map_err(|e| CliError::Msg(format!("read_dir entry: {e}")))?;
                 let p = entry.path();
@@ -1074,7 +1073,7 @@ pub(crate) fn prepare_out_dir(out: &Path, overwrite: bool) -> Result<()> {
         }
     } else {
         fs::create_dir_all(out)
-            .map_err(|e| CliError::Msg(format!("create --out {}: {e}", out.display())))?;
+            .map_err(|e| CliError::Msg(format!("create {flag_label} {}: {e}", out.display())))?;
     }
     Ok(())
 }

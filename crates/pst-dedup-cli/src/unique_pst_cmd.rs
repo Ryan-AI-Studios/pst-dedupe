@@ -1440,7 +1440,7 @@ pub fn run_unique_pst_with_options(
     prepare_report_dir(&report_dir, args.overwrite)?;
     // Prepare also-eml before scan so non-empty-without-overwrite fails cheaply.
     if let Some(eml_dir) = also_eml_dir.as_ref() {
-        crate::unique_eml_cmd::prepare_out_dir(eml_dir, args.overwrite)?;
+        crate::unique_eml_cmd::prepare_out_dir(eml_dir, args.overwrite, "--also-eml")?;
     }
 
     // Remove stale primary out if overwrite.
@@ -3017,7 +3017,6 @@ pub fn run_unique_pst_with_options(
         ))
     };
 
-    // ── 0107: also-eml co-export from the same keep-set (skip if PST cancelled) ─
     let also_eml_out_str = also_eml_dir.as_ref().map(|p| p.display().to_string());
     let mut also_eml_ran = false;
     let mut also_eml_eml_written = 0u64;
@@ -3027,8 +3026,10 @@ pub fn run_unique_pst_with_options(
     let mut also_eml_pack_exit: Option<crate::error::CliExit> = None;
     let mut also_eml_pack_reasons: Vec<String> = Vec::new();
     let mut also_eml_cancelled = false;
+    // Empty keep-set still "ran" write (idle); prepare_incomplete refused write entirely.
+    let pst_write_ran = !prepare_incomplete && (volume_index > 0 || prepared.is_empty());
     if let Some(eml_dir) = also_eml_dir.as_ref() {
-        if !cancelled {
+        if !cancelled && pst_write_ran {
             emit_log(stderr, &on_log, "stage=also_eml");
             emit_stage_progress(
                 &on_progress,
@@ -3105,7 +3106,8 @@ pub fn run_unique_pst_with_options(
                     also_eml_ran = true;
                     also_eml_exit_code = crate::error::CliExit::Generic.as_u8();
                     also_eml_pack_exit = Some(crate::error::CliExit::Generic);
-                    also_eml_pack_reasons = vec!["COUNT_MISMATCH".to_string()];
+                    // Helper Err is not a count mismatch; summary error.code carries also_eml.
+                    also_eml_pack_reasons = Vec::new();
                     emit_log(
                         stderr,
                         &on_log,
@@ -3252,7 +3254,10 @@ pub fn run_unique_pst_with_options(
     let process_cancelled = cancelled || also_eml_cancelled;
     if also_eml_cancelled {
         combined_exit = crate::error::CliExit::Cancelled;
-        combined_reason_strings = vec![crate::export_outcome::reason::CANCELLED.to_string()];
+        combined_reason_strings = crate::export_outcome::merge_exit_reasons(
+            &[crate::export_outcome::reason::CANCELLED.to_string()],
+            &combined_reason_strings,
+        );
     } else if let Some(eml_exit) = also_eml_pack_exit {
         let pst_exit = classified.exit;
         combined_exit = crate::export_outcome::worse_cli_exit(pst_exit, eml_exit);

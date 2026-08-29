@@ -325,6 +325,16 @@ fn also_eml_nonempty_without_overwrite_errors() {
         !result.status.success(),
         "non-empty also-eml without --overwrite must fail"
     );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stdout.contains("--also-eml") || stderr.contains("--also-eml"),
+        "usage error must name --also-eml, not --out: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("--out is not empty") && !stderr.contains("--out is not empty"),
+        "must not mislabel as --out: stdout={stdout} stderr={stderr}"
+    );
     assert!(!out.exists(), "must fail before PST write");
 }
 

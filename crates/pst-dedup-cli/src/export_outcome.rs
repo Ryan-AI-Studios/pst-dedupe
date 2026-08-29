@@ -453,6 +453,31 @@ mod tests {
     }
 
     #[test]
+    fn worse_cli_exit_generic_beats_partial_and_cancelled_beats_generic() {
+        // Raw u8 max would wrongly prefer PartialFidelity(64) over Generic(1).
+        assert_eq!(
+            worse_cli_exit(CliExit::PartialFidelity, CliExit::Generic),
+            CliExit::Generic
+        );
+        assert_eq!(
+            worse_cli_exit(CliExit::Generic, CliExit::PartialFidelity),
+            CliExit::Generic
+        );
+        assert_eq!(
+            worse_cli_exit(CliExit::Cancelled, CliExit::Generic),
+            CliExit::Cancelled
+        );
+        assert_eq!(
+            worse_cli_exit(CliExit::Generic, CliExit::Cancelled),
+            CliExit::Cancelled
+        );
+        assert_eq!(
+            worse_cli_exit(CliExit::ExportRiskBlocked, CliExit::PartialFidelity),
+            CliExit::ExportRiskBlocked
+        );
+    }
+
+    #[test]
     fn attach_soft_fail_partial_64() {
         let mut i = ok_base();
         i.attach_failed_total = 3;
