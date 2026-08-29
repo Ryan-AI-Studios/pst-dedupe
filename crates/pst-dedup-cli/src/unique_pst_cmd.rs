@@ -953,10 +953,13 @@ struct CancelledSummaryCtx<'a> {
 }
 
 /// Rename an also-eml pack directory after cancel (PST volumes untouched).
-fn quarantine_also_eml_dir(dir: &Path) -> crate::export_outcome::QuarantineResult {
+/// On success returns the destination path for summary rewrite.
+fn quarantine_also_eml_dir(
+    dir: &Path,
+) -> (crate::export_outcome::QuarantineResult, Option<PathBuf>) {
     use crate::export_outcome::QuarantineResult;
     if !dir.exists() {
-        return QuarantineResult::NoVolumes;
+        return (QuarantineResult::NoVolumes, None);
     }
     let stamp = quarantine_utc_stamp();
     let parent = dir.parent().unwrap_or_else(|| Path::new("."));
@@ -966,8 +969,8 @@ fn quarantine_also_eml_dir(dir: &Path) -> crate::export_outcome::QuarantineResul
         .unwrap_or_else(|| "also_eml".to_string());
     let dest = parent.join(format!("{name}.cancelled-{stamp}.partial"));
     match fs::rename(dir, &dest) {
-        Ok(()) => QuarantineResult::Succeeded,
-        Err(_) => QuarantineResult::Failed,
+        Ok(()) => (QuarantineResult::Succeeded, Some(dest)),
+        Err(_) => (QuarantineResult::Failed, None),
     }
 }
 
@@ -3064,6 +3067,8 @@ pub fn run_unique_pst_with_options(
                     scan_ok: exit_err.is_none(),
                     fail_on_partial_fidelity: args.fail_on_partial_fidelity,
                     allow_partial_fidelity: args.allow_partial_fidelity,
+                    risk_gate: crate::export_outcome::RiskGate::Off,
+                    export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
                     cancel: cancel_flag,
                     mat: &mut mat,
                     attach_src: &mut attach_src,
@@ -3082,7 +3087,10 @@ pub fn run_unique_pst_with_options(
                     also_eml_cancelled = pack.cancelled;
                     if pack.cancelled {
                         // Quarantine also-eml dir only — never PST volumes / report-dir.
-                        let q = quarantine_also_eml_dir(eml_dir);
+                        let (q, dest) = quarantine_also_eml_dir(eml_dir);
+                        if let Some(dest) = dest.as_ref() {
+                            crate::unique_eml_cmd::rewrite_quarantined_eml_summary(dest, q);
+                        }
                         emit_log(
                             stderr,
                             &on_log,
@@ -3106,8 +3114,18 @@ pub fn run_unique_pst_with_options(
                     also_eml_ran = true;
                     also_eml_exit_code = crate::error::CliExit::Generic.as_u8();
                     also_eml_pack_exit = Some(crate::error::CliExit::Generic);
-                    // Helper Err is not a count mismatch; summary error.code carries also_eml.
                     also_eml_pack_reasons = Vec::new();
+                    if !eml_dir.join("summary.json").is_file() {
+                        crate::unique_eml_cmd::write_eml_hard_fail_summary(
+                            eml_dir,
+                            &keep_set,
+                            outcome.summary.clone(),
+                            args.policy,
+                            effective_family,
+                            nested_extract_depth,
+                            &e,
+                        );
+                    }
                     emit_log(
                         stderr,
                         &on_log,

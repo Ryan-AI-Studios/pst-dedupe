@@ -742,3 +742,43 @@ fn unique_eml_production_soft_fail_writes_ledger_row() {
         }
     }
 }
+
+/// Standalone unique-eml must honor `--fail-on-export-risk ok` (exit 65).
+#[test]
+fn unique_eml_fail_on_export_risk_ok_exits_65() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("pack");
+    let result = Command::new(bin())
+        .args([
+            "unique-eml",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--fail-on-export-risk",
+            "ok",
+            "--json",
+            "--allow-partial-fidelity",
+        ])
+        .output()
+        .expect("run");
+    let code = result.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        code,
+        65,
+        "risk gate ok must exit 65; stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    assert_eq!(v["exit_code"].as_u64(), Some(65));
+    let reasons = v["exit_reason"].as_array().expect("exit_reason");
+    assert!(
+        reasons.iter().any(|r| r.as_str() == Some("RISK_GATE")),
+        "expected RISK_GATE in exit_reason: {reasons:?}"
+    );
+}

@@ -165,6 +165,10 @@ pub struct WriteEmlPackFromKeepSetInput<'a> {
     pub scan_ok: bool,
     pub fail_on_partial_fidelity: bool,
     pub allow_partial_fidelity: bool,
+    /// Standalone unique-eml passes the parsed CLI gate; also-eml keeps [`RiskGate::Off`].
+    pub risk_gate: crate::export_outcome::RiskGate,
+    /// Risk level fed to classify (unique-eml historically uses Ok; also-eml locks Ok).
+    pub export_risk: dedup_engine::integrity::PreflightRecommendation,
     pub cancel: Option<&'a AtomicBool>,
     pub mat: &'a mut PstMaterializer,
     pub attach_src: &'a mut PstAttachStreamSource,
@@ -190,8 +194,174 @@ fn eml_pack_cancel_requested(cancel: Option<&AtomicBool>) -> bool {
     cancel.is_some_and(|f| f.load(Ordering::Relaxed))
 }
 
+/// Best-effort failed `{out}/summary.json` when pack write aborts with `Err`.
+pub(crate) fn write_eml_hard_fail_summary(
+    out: &Path,
+    keep_set: &KeepSet,
+    scan: ScanSummary,
+    policy: KeepPolicy,
+    family_policy: FamilyPolicy,
+    max_embedded_depth: u32,
+    err: &CliError,
+) {
+    let _ = fs::create_dir_all(out);
+    let summary_path = out.join("summary.json");
+    let summary_abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
+    let bytes_written = out
+        .join("VOL001")
+        .exists()
+        .then_some(true)
+        .or_else(|| {
+            fs::read_dir(out)
+                .ok()
+                .map(|rd| rd.filter_map(|e| e.ok()).any(|_| true))
+        })
+        .unwrap_or(false);
+    let classified = crate::export_outcome::classify_export(
+        crate::export_outcome::ExportOkInput {
+            scan_ok: true,
+            verify_ok: true,
+            export_err_absent: false,
+            export_partial: true,
+            messages_written_total: 0,
+            unique: keep_set.stats.unique,
+            attach_failed_total: 0,
+            body_soft_fail_total: 0,
+            report_ok: false,
+        },
+        dedup_engine::integrity::PreflightRecommendation::Ok,
+        crate::export_outcome::RiskGate::Off,
+        true,
+        false,
+    );
+    let artifact_state = crate::export_outcome::artifact_state_for(
+        &classified,
+        bytes_written,
+        crate::export_outcome::QuarantineResult::NotAttempted,
+    );
+    let payload = UniqueEmlSummaryOut {
+        schema: keep_set.schema.clone(),
+        eml_pack_schema: EML_PACK_SCHEMA.to_string(),
+        policy: policy.as_str().to_string(),
+        family_policy: family_policy.as_str().to_string(),
+        keep_set: keep_set.clone(),
+        scan,
+        out: out.display().to_string(),
+        manifest_json: out.join("manifest.json").display().to_string(),
+        decision_csv: None,
+        keep_set_json: None,
+        eml_written: 0,
+        unique: keep_set.stats.unique,
+        volumes: 0,
+        attach_parts_written: 0,
+        embedded_messages_written: 0,
+        attach_parts_failed: 0,
+        max_embedded_depth,
+        attachment_ledger: None,
+        attachment_ledger_mode: None,
+        attachment_ledger_truncated: None,
+        attachment_ledger_rows_written: None,
+        attachments_failed_by_reason: None,
+        fidelity: classified.fidelity,
+        exit_code: classified.exit.as_u8(),
+        exit_reason: classified
+            .reasons
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        artifact_state,
+        summary_path: summary_abs.display().to_string(),
+    };
+    if let Ok(mut v) = serde_json::to_value(&payload) {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("ok".into(), serde_json::Value::Bool(false));
+            obj.insert(
+                "error".into(),
+                serde_json::json!({
+                    "code": "eml_pack",
+                    "message": err.to_string(),
+                }),
+            );
+        }
+        if let Ok(body) = serde_json::to_string_pretty(&v) {
+            let _ = fs::write(&summary_path, body);
+        }
+    }
+}
+
+/// Rewrite also-eml summary after cancel quarantine rename (paths + artifact_state).
+pub fn rewrite_quarantined_eml_summary(
+    dest_dir: &Path,
+    quarantine: crate::export_outcome::QuarantineResult,
+) {
+    let summary_path = dest_dir.join("summary.json");
+    let Ok(body) = fs::read_to_string(&summary_path) else {
+        return;
+    };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return;
+    };
+    let Some(obj) = v.as_object_mut() else {
+        return;
+    };
+    let abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
+    obj.insert(
+        "summary_path".into(),
+        serde_json::Value::String(abs.display().to_string()),
+    );
+    obj.insert(
+        "out".into(),
+        serde_json::Value::String(dest_dir.display().to_string()),
+    );
+    let state = match quarantine {
+        crate::export_outcome::QuarantineResult::Succeeded => {
+            crate::export_outcome::ArtifactState::PartialQuarantined
+        }
+        crate::export_outcome::QuarantineResult::Failed
+        | crate::export_outcome::QuarantineResult::NotAttempted => {
+            crate::export_outcome::ArtifactState::InvalidInPlace
+        }
+        crate::export_outcome::QuarantineResult::NoVolumes => {
+            crate::export_outcome::ArtifactState::Absent
+        }
+    };
+    obj.insert(
+        "artifact_state".into(),
+        serde_json::Value::String(state.as_str().to_string()),
+    );
+    if let Ok(body) = serde_json::to_string_pretty(&v) {
+        let _ = fs::write(&summary_path, body);
+    }
+}
+
 /// Write a unique-EML pack from an in-memory keep-set (no scan/resolve).
 pub fn write_eml_pack_from_keep_set(
+    input: WriteEmlPackFromKeepSetInput<'_>,
+) -> Result<WriteEmlPackFromKeepSetResult> {
+    let out = input.out;
+    let keep_set = input.keep_set;
+    let scan = input.scan.clone();
+    let policy = input.policy;
+    let family_policy = input.family_policy;
+    let max_embedded_depth = input.write_opts.max_embedded_depth;
+    match write_eml_pack_from_keep_set_inner(input) {
+        Ok(r) => Ok(r),
+        Err(err) => {
+            write_eml_hard_fail_summary(
+                out,
+                keep_set,
+                scan,
+                policy,
+                family_policy,
+                max_embedded_depth,
+                &err,
+            );
+            Err(err)
+        }
+    }
+}
+
+fn write_eml_pack_from_keep_set_inner(
     input: WriteEmlPackFromKeepSetInput<'_>,
 ) -> Result<WriteEmlPackFromKeepSetResult> {
     let nested_depth = input.write_opts.max_embedded_depth;
@@ -202,6 +372,7 @@ pub fn write_eml_pack_from_keep_set(
     let paths = input.paths;
     let write_opts = input.write_opts;
     let ledger_path_mode = input.ledger_path_mode;
+    let scan_for_summary = input.scan.clone();
 
     let manifest_path = match input.manifest_json {
         Some(p) => p.to_path_buf(),
@@ -442,11 +613,12 @@ pub fn write_eml_pack_from_keep_set(
         body_soft_fail_total: 0,
         report_ok,
     };
-    let risk_gate = crate::export_outcome::RiskGate::Off;
+    let risk_gate = input.risk_gate;
+    let export_risk = input.export_risk;
     let fail_on_partial = input.fail_on_partial_fidelity && !input.allow_partial_fidelity;
     let mut classified = crate::export_outcome::classify_export(
         export_ok_input,
-        dedup_engine::integrity::PreflightRecommendation::Ok,
+        export_risk,
         risk_gate,
         fail_on_partial,
         cancelled,
@@ -476,7 +648,7 @@ pub fn write_eml_pack_from_keep_set(
         policy: input.policy.as_str().to_string(),
         family_policy: input.family_policy.as_str().to_string(),
         keep_set: keep_set.clone(),
-        scan: input.scan,
+        scan: scan_for_summary,
         out: out.display().to_string(),
         manifest_json: manifest_path.display().to_string(),
         decision_csv: None,
@@ -535,7 +707,7 @@ pub fn write_eml_pack_from_keep_set(
         hard_input.report_ok = false;
         classified = crate::export_outcome::classify_export(
             hard_input,
-            dedup_engine::integrity::PreflightRecommendation::Ok,
+            export_risk,
             risk_gate,
             fail_on_partial,
             cancelled,
@@ -768,6 +940,11 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
     }
 
     let exit_err = evaluate_exit_policy(&outcome.summary, &opts).err();
+    let risk_gate = args
+        .fail_on_export_risk
+        .as_deref()
+        .and_then(crate::export_outcome::RiskGate::parse)
+        .unwrap_or(crate::export_outcome::RiskGate::Off);
     let pack = write_eml_pack_from_keep_set(WriteEmlPackFromKeepSetInput {
         keep_set: &keep_set,
         paths: &paths,
@@ -785,6 +962,8 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         scan_ok: exit_err.is_none(),
         fail_on_partial_fidelity: args.fail_on_partial_fidelity,
         allow_partial_fidelity: args.allow_partial_fidelity,
+        risk_gate,
+        export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
         cancel: None,
         mat: &mut mat,
         attach_src: &mut attach_src,
@@ -813,15 +992,52 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
             }
         }
     }
-    // Rewrite summary.json so decision/keep-set paths are present when requested.
     let summary_path = out.join("summary.json");
     let summary_abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
     let summary_path_str = summary_abs.display().to_string();
-    if let Ok(body) = serde_json::to_string_pretty(&v) {
-        let _ = fs::write(&summary_path, body);
+    let mut classified_exit = pack.exit;
+    let stitch_body = serde_json::to_string_pretty(&v)
+        .map_err(|e| CliError::Msg(format!("summary.json serialize failed after stitch: {e}")))?;
+    if let Err(e) = fs::write(&summary_path, &stitch_body) {
+        let msg = format!("summary.json rewrite failed: {e}");
+        tracing::warn!(path = %summary_path.display(), "{msg}");
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("ok".into(), serde_json::Value::Bool(false));
+            obj.insert(
+                "fidelity".into(),
+                serde_json::Value::String(
+                    crate::export_outcome::ExportFidelity::Failed
+                        .as_str()
+                        .to_string(),
+                ),
+            );
+            obj.insert(
+                "exit_code".into(),
+                serde_json::Value::from(crate::error::CliExit::Generic.as_u8()),
+            );
+            obj.insert(
+                "error".into(),
+                serde_json::json!({ "code": "report", "message": msg }),
+            );
+        }
+        if let Ok(body) = serde_json::to_string_pretty(&v) {
+            let _ = fs::write(&summary_path, body);
+        }
+        classified_exit = crate::error::CliExit::Generic;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            return Err(CliError::AlreadyEmitted {
+                message: msg,
+                exit: classified_exit,
+            });
+        }
+        let _ = writeln!(std::io::stderr(), "summary: {summary_path_str}");
+        return Err(CliError::AlreadyEmitted {
+            message: msg,
+            exit: classified_exit,
+        });
     }
 
-    let classified_exit = pack.exit;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&v)?);
         if classified_exit != crate::error::CliExit::Success {
