@@ -11,7 +11,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes `E-Discovery — ideal frontend` + `E-Discovery — recommended stack`. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-08-29); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is research only (layout, not tokens).
-- **Status:** Ready — not started
+- **Status:** Completed — PR **#111** / `5a76f0b`
 - **Depends on:** Series S **0108–0109 Completed** · Desk **0020** (egui Process stays) · `matter-core` schema **v39** + `load_case_overview` (0038)
 - **Spec authored:** 2026-08-29 (placeholder → Ready)
 - **Series:** O (Review chrome) — first track
@@ -359,7 +359,7 @@ If `trunk` cannot be installed in CI, mint **no new ID**: add `D-0110-ci-trunk` 
 
 | ID | Item | After this plan |
 |---|---|---|
-| **0110** | Matter chrome + one overview command | **Ready — not started** |
+| **0110** | Matter chrome + one overview command | **Completed** (PR **#111** / `5a76f0b`) |
 | **0111** | Virtualized first-pass queue | Proposed |
 | **0112** | Three-pane review window | Proposed |
 | **0113** | Produce checklist; DAT only | Proposed |
