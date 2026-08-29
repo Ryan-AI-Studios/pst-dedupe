@@ -853,6 +853,10 @@ enum AttachBody {
         msg: Box<CanonicalMessage>,
         /// Depth passed to the recursive inner write (parent depth + 1).
         write_depth: u32,
+        /// Nested extract omitted child attach rows — ledger without inventing MIME.
+        attachments_incomplete: bool,
+        /// Soft-fails for children cleared when `source_msg_nid` was missing.
+        pending_child_fails: Vec<EmlAttachEvent>,
     },
 }
 
@@ -985,7 +989,23 @@ fn prepare_one_attach(
             return Err(EmlWriteError::AttachSkipped("ATTACH_DEPTH_LIMIT"));
         }
         if let Some(nested) = att.embedded_message.as_deref() {
-            let inner = nested_to_canonical(nested, &parent.locus);
+            let (mut inner, missing_nid) = nested_to_canonical(nested, &parent.locus);
+            let mut pending_child_fails = Vec::new();
+            // Spec §3.8: no invented stream parent; soft-fail children (incl. in-memory).
+            if missing_nid && !inner.attachments.is_empty() {
+                let missing_err = EmlWriteError::Other(
+                    "nested source_msg_nid missing for child attach stream open".into(),
+                );
+                for (idx, child) in inner.attachments.iter().enumerate() {
+                    pending_child_fails.push(eml_attach_event_from_soft_fail(
+                        &inner,
+                        child,
+                        idx as u32,
+                        &missing_err,
+                    ));
+                }
+                inner.attachments.clear();
+            }
             return Ok(PreparedPart {
                 embedded: true,
                 filename,
@@ -993,6 +1013,8 @@ fn prepare_one_attach(
                 body: AttachBody::Nested {
                     msg: Box::new(inner),
                     write_depth: depth + 1,
+                    attachments_incomplete: nested.attachments_incomplete,
+                    pending_child_fails,
                 },
                 unparsed: false,
             });
@@ -1024,12 +1046,14 @@ fn prepare_one_attach(
 
 /// Map a nested DTO onto a synthetic [`CanonicalMessage`] for recursive MIME write.
 ///
-/// Stream opens for child attaches use `winner_locus.source_path` + `nested.source_msg_nid`.
+/// Returns `(msg, missing_source_msg_nid)`. Locus `nid` is `0` only when missing
+/// (omits optional `X-Pst-Dedupe-Nid`); callers must soft-fail children, not stream.
 fn nested_to_canonical(
     nested: &NestedCanonicalMessage,
     winner_locus: &MessageLocus,
-) -> CanonicalMessage {
-    CanonicalMessage {
+) -> (CanonicalMessage, bool) {
+    let missing_nid = nested.source_msg_nid.is_none();
+    let msg = CanonicalMessage {
         locus: MessageLocus {
             source_path: winner_locus.source_path.clone(),
             source_pst: winner_locus.source_pst.clone(),
@@ -1057,7 +1081,8 @@ fn nested_to_canonical(
         edrm_mih_hex: None,
         body_incomplete: nested.body_incomplete,
         body_unavailable: nested.body_unavailable,
-    }
+    };
+    (msg, missing_nid)
 }
 
 fn open_attach_body(
@@ -1065,6 +1090,12 @@ fn open_attach_body(
     att: &CanonicalAttachment,
     attach_streams: &mut dyn AttachStreamSource,
 ) -> Result<AttachBody, EmlWriteError> {
+    // Nested missing source_msg_nid uses locus.nid == 0; never invent stream parent.
+    if parent.locus.nid == 0 {
+        return Err(EmlWriteError::Other(
+            "nested source_msg_nid missing for child attach stream open".into(),
+        ));
+    }
     // Prefer in-memory small payload when present (tests / small probes).
     if let Some(data) = &att.data {
         return Ok(AttachBody::Memory(data.clone()));
@@ -1100,9 +1131,33 @@ fn write_prepared_part<W: Write>(
         write_crlf_line(w, "Content-Transfer-Encoding: 8bit")?;
         write_crlf_blank(w)?;
         match part.body {
-            AttachBody::Nested { msg, write_depth } => {
-                let nested_res =
+            AttachBody::Nested {
+                msg,
+                write_depth,
+                attachments_incomplete,
+                pending_child_fails,
+            } => {
+                let mut nested_res =
                     write_canonical_eml_to(w, &msg, attach_streams, opts, write_depth)?;
+                // Mirror unique-pst: incomplete nested attach list → ATTACH_META_FAILED, no MIME part.
+                if attachments_incomplete {
+                    nested_res.attachments_failed += 1;
+                    nested_res.attachment_events.push(EmlAttachEvent {
+                        attach_index: 0,
+                        filename: "(nested attach list incomplete)".into(),
+                        size: None,
+                        attach_method: -1,
+                        attach_nid: None,
+                        reason_code: "ATTACH_META_FAILED".into(),
+                        severity: "fail".into(),
+                        error_detail: "nested attach list incomplete".into(),
+                        cloud_provider: String::new(),
+                        cloud_url: String::new(),
+                        message_subject: Some(msg.subject.clone().unwrap_or_default()),
+                    });
+                }
+                nested_res.attachments_failed += pending_child_fails.len() as u64;
+                nested_res.attachment_events.extend(pending_child_fails);
                 write_crlf_blank(w)?;
                 result.embedded_messages_written += 1 + nested_res.embedded_messages_written;
                 result.attachments_file_written += nested_res.attachments_file_written;
@@ -1905,6 +1960,121 @@ mod tests {
             Some(""),
             "inner None subject must stay empty, not outer winner: {depth_ev:?}"
         );
+    }
+
+    #[test]
+    fn nested_attachments_incomplete_emits_meta_failed_no_invented_part() {
+        let mut msg = base_msg();
+        msg.attachments.push(CanonicalAttachment {
+            filename: "nested.msg".into(),
+            size: 0,
+            mime: None,
+            data: None,
+            stream_available: false,
+            attach_nid: Some(200),
+            attach_method: Some(ATTACH_EMBEDDED_MSG),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
+            cloud_permission_type: None,
+            embedded_message: Some(Box::new(NestedCanonicalMessage {
+                subject: Some("Inner incomplete".into()),
+                sender: Some("inner@ex.com".into()),
+                body_plain: Some("inner body".into()),
+                source_msg_nid: Some(0x200),
+                attachments_incomplete: true,
+                ..Default::default()
+            })),
+            embedded_extract_limit: false,
+        });
+        let mut src = NullAttachStreamSource;
+        let mut buf = Vec::new();
+        let res = write_canonical_eml_to(&mut buf, &msg, &mut src, &EmlWriteOpts::default(), 0)
+            .expect("write");
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains("Subject: Inner incomplete"));
+        assert!(s.contains("inner body"));
+        assert!(
+            !s.contains("(nested attach list incomplete)"),
+            "must not invent a MIME part for incomplete list:\n{s}"
+        );
+        assert_eq!(res.embedded_messages_written, 1);
+        assert_eq!(res.attachments_failed, 1);
+        assert_eq!(res.attachments_file_written, 0);
+        let ev = res
+            .attachment_events
+            .iter()
+            .find(|e| e.reason_code == "ATTACH_META_FAILED")
+            .expect("ATTACH_META_FAILED");
+        assert_eq!(ev.message_subject.as_deref(), Some("Inner incomplete"));
+        assert_eq!(ev.filename, "(nested attach list incomplete)");
+    }
+
+    #[test]
+    fn nested_missing_source_msg_nid_soft_fails_children() {
+        let mut msg = base_msg();
+        msg.attachments.push(CanonicalAttachment {
+            filename: "nested.msg".into(),
+            size: 0,
+            mime: None,
+            data: None,
+            stream_available: false,
+            attach_nid: Some(200),
+            attach_method: Some(ATTACH_EMBEDDED_MSG),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
+            cloud_permission_type: None,
+            embedded_message: Some(Box::new(NestedCanonicalMessage {
+                subject: Some("Inner no nid".into()),
+                sender: Some("inner@ex.com".into()),
+                body_plain: Some("inner body".into()),
+                source_msg_nid: None,
+                attachments: vec![CanonicalAttachment {
+                    filename: "child.txt".into(),
+                    size: 5,
+                    mime: Some("text/plain".into()),
+                    data: Some(b"Hello".to_vec()),
+                    stream_available: true,
+                    attach_nid: Some(300),
+                    attach_method: Some(1),
+                    is_cloud_link: false,
+                    cloud_provider: None,
+                    cloud_url: None,
+                    cloud_permission_type: None,
+                    embedded_message: None,
+                    embedded_extract_limit: false,
+                }],
+                ..Default::default()
+            })),
+            embedded_extract_limit: false,
+        });
+        let mut src = NullAttachStreamSource;
+        let mut buf = Vec::new();
+        let res = write_canonical_eml_to(&mut buf, &msg, &mut src, &EmlWriteOpts::default(), 0)
+            .expect("write");
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains("Subject: Inner no nid"));
+        assert!(s.contains("inner body"));
+        assert!(
+            !s.contains("SGVsbG8="),
+            "in-memory child must not bypass missing nid:\n{s}"
+        );
+        assert!(!s.contains("child.txt"), "child part must be absent:\n{s}");
+        assert_eq!(res.embedded_messages_written, 1);
+        assert_eq!(res.attachments_file_written, 0);
+        assert_eq!(res.attachments_failed, 1);
+        assert_eq!(res.attachment_events.len(), 1);
+        assert_eq!(
+            res.attachment_events[0].reason_code,
+            "ATTACH_STREAM_OPEN_FAILED"
+        );
+        assert_eq!(
+            res.attachment_events[0].message_subject.as_deref(),
+            Some("Inner no nid")
+        );
+        assert_eq!(res.attachment_events[0].filename, "child.txt");
+        assert!(!s.contains("X-Pst-Dedupe-Nid: 0x0"));
     }
 
     /// True if any message/rfc822 part block advertises base64 CTE.
