@@ -617,13 +617,17 @@ Integrity thresholds, export partials, verification failures, and **`attachments
 | Flag | Default | Effect |
 |---|---|---|
 | `--fail-on-partial-fidelity` | **on** (implicit) | Partial → exit **64** |
-| `--allow-partial-fidelity` | off | Partial → exit **0**; JSON still `fidelity: partial` |
+| `--allow-partial-fidelity` | off | Partial → exit **0**; JSON still `fidelity: partial` and `ok: false` with `error.code=partial_fidelity` |
 | both fidelity flags | — | **exit 2** (usage) |
 | `--fail-on-export-risk <ok\|re_export_recommended\|not_export_ready>` | **off** | When `export_risk` rank ≥ level → exit **65** |
 
 ### JSON fields (additive)
 
 `fidelity`, `exit_code`, `exit_reason`, `artifact_state`, `summary_path` — all on every summary. `ok == (fidelity == complete)`. **`exit_code` must equal the process exit status.**
+
+With `--also-eml`, `fidelity` / `ok` / `exit_code` describe the **combined** unique-pst + also-eml job (worse classified fidelity; 0078 exit precedence). `artifact_state` remains the PST `--out` disposition only (also-eml cancel does not quarantine PST volumes). The also-eml pack keeps its own `{also_eml}/summary.json` (including pack `fidelity`).
+
+`--allow-partial-fidelity` unique-pst summaries with `fidelity=partial` carry `ok=false` and `error.code=partial_fidelity` (`retryable` stays `false`). Automation must read `fidelity` / `ok`, not treat a missing `error` key or exit 0 as complete.
 
 `artifact_state`: `complete` | `partial_retained` | `partial_quarantined` | `invalid_in_place` | `absent`.
 - **`partial_retained`**: message-complete soft-fail deliverable (exit 64) — ship only with disclosure.

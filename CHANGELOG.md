@@ -7,6 +7,12 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0109 — also-eml classify / cancel honesty)
+
+- Unique-pst combined `fidelity` is the worse of PST + also-eml classified fidelities (not derived from combined exit). `ok == (fidelity == complete) && !cancelled` for all unique-pst jobs, including `--allow-partial-fidelity` (exit 0 stays `ok: false` / `error.code=partial_fidelity`) and risk-gate **65** (stays `fidelity=complete`).
+- Also-eml cancel + failed unique-pst `summary.json` rewrite keeps process exit **130** / cancel-retryable (no longer clobbered to Generic 1).
+- Cancel `Err`→`Ok` pack conversion recovers `eml_written` / `attach_parts_failed` / `embedded_messages_written` from on-disk summary (not zeros). Closes **D-0109-also-eml-classify**.
+
 ### Fixed (0108 — poly degraded-winner export-risk honesty)
 
 - Unique-pst `export_risk` keys advisory `degraded_winner_rate` on **`effective_degraded_winner_rate`** when present: poly-only `CrcSuspect` / `AttachStreamCrc` on `poly_class_crc` sources are excluded (same poly discount gate as 0099). Raw `degraded_winner_rate` stays on `inputs`; body/attach and non-poly CRC still elevate. Attest: `degraded_winners_poly_only`. Closes **D-0108-poly-degraded-winner-risk**. Residual: **D-0108-keepset-crc-retaint** (keep-set still re-taints).
