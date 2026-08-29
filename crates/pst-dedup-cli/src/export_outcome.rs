@@ -264,6 +264,52 @@ pub fn worse_cli_exit(a: CliExit, b: CliExit) -> CliExit {
     }
 }
 
+fn export_fidelity_precedence_rank(f: ExportFidelity) -> u8 {
+    match f {
+        ExportFidelity::Failed => 2,
+        ExportFidelity::Partial => 1,
+        ExportFidelity::Complete => 0,
+    }
+}
+
+/// Worse of two fidelities: Failed > Partial > Complete.
+pub fn worse_export_fidelity(a: ExportFidelity, b: ExportFidelity) -> ExportFidelity {
+    if export_fidelity_precedence_rank(a) >= export_fidelity_precedence_rank(b) {
+        a
+    } else {
+        b
+    }
+}
+
+/// Apply optional also-eml fidelity onto a PST outcome (worse-of); callers set `ok` from the result.
+pub(crate) fn finalize_unique_pst_classify(
+    mut pst: ExportOutcome,
+    eml_fidelity: Option<ExportFidelity>,
+) -> ExportOutcome {
+    if let Some(eml) = eml_fidelity {
+        pst.fidelity = worse_export_fidelity(pst.fidelity, eml);
+    }
+    pst
+}
+
+/// Reclassify after unique-pst `summary.json` write failure.
+///
+/// Cancel (including also-eml cancel) keeps 130 / CANCELLED; otherwise force
+/// `report_ok=false` → Generic 1.
+pub(crate) fn classify_after_summary_write_failure(
+    mut base: ExportOkInput,
+    risk: PreflightRecommendation,
+    risk_gate: RiskGate,
+    fail_on_partial: bool,
+    process_cancelled: bool,
+) -> ExportOutcome {
+    if process_cancelled {
+        return classify_export(base, risk, risk_gate, fail_on_partial, true);
+    }
+    base.report_ok = false;
+    classify_export(base, risk, risk_gate, fail_on_partial, false)
+}
+
 /// Merge exit-reason codes worst-first without duplicates (stable within each side).
 pub fn merge_exit_reasons(primary: &[String], secondary: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -475,6 +521,143 @@ mod tests {
             worse_cli_exit(CliExit::ExportRiskBlocked, CliExit::PartialFidelity),
             CliExit::ExportRiskBlocked
         );
+    }
+
+    #[test]
+    fn worse_export_fidelity_order() {
+        assert_eq!(
+            worse_export_fidelity(ExportFidelity::Failed, ExportFidelity::Partial),
+            ExportFidelity::Failed
+        );
+        assert_eq!(
+            worse_export_fidelity(ExportFidelity::Partial, ExportFidelity::Failed),
+            ExportFidelity::Failed
+        );
+        assert_eq!(
+            worse_export_fidelity(ExportFidelity::Partial, ExportFidelity::Complete),
+            ExportFidelity::Partial
+        );
+        assert_eq!(
+            worse_export_fidelity(ExportFidelity::Complete, ExportFidelity::Partial),
+            ExportFidelity::Partial
+        );
+        assert_eq!(
+            worse_export_fidelity(ExportFidelity::Complete, ExportFidelity::Complete),
+            ExportFidelity::Complete
+        );
+        assert_eq!(
+            worse_export_fidelity(ExportFidelity::Failed, ExportFidelity::Failed),
+            ExportFidelity::Failed
+        );
+        assert_eq!(
+            worse_export_fidelity(ExportFidelity::Partial, ExportFidelity::Partial),
+            ExportFidelity::Partial
+        );
+    }
+
+    /// Distinctive non-fidelity fields so finalize tests can detect accidental merges.
+    fn pst_outcome(fidelity: ExportFidelity) -> ExportOutcome {
+        ExportOutcome {
+            fidelity,
+            exit: CliExit::ExportRiskBlocked,
+            reasons: vec![reason::RISK_GATE],
+            cancelled: false,
+        }
+    }
+
+    fn assert_finalize_preserves_non_fidelity(before: &ExportOutcome, after: &ExportOutcome) {
+        assert_eq!(after.exit, before.exit);
+        assert_eq!(after.reasons, before.reasons);
+        assert_eq!(after.cancelled, before.cancelled);
+    }
+
+    #[test]
+    fn finalize_allow_partial_also_eml_stays_partial() {
+        let before = pst_outcome(ExportFidelity::Partial);
+        let out = finalize_unique_pst_classify(before.clone(), Some(ExportFidelity::Complete));
+        assert_eq!(out.fidelity, ExportFidelity::Partial);
+        assert_finalize_preserves_non_fidelity(&before, &out);
+        let ok = out.fidelity == ExportFidelity::Complete;
+        assert!(!ok);
+    }
+
+    #[test]
+    fn finalize_allow_partial_without_also_eml() {
+        let before = pst_outcome(ExportFidelity::Partial);
+        let out = finalize_unique_pst_classify(before.clone(), None);
+        assert_eq!(out.fidelity, ExportFidelity::Partial);
+        assert_finalize_preserves_non_fidelity(&before, &out);
+        let ok = out.fidelity == ExportFidelity::Complete;
+        assert!(!ok);
+    }
+
+    #[test]
+    fn finalize_risk_gate_complete_stays_complete() {
+        // Risk-gate 65: Complete + Complete must stay Complete.
+        let before = pst_outcome(ExportFidelity::Complete);
+        let out = finalize_unique_pst_classify(before.clone(), Some(ExportFidelity::Complete));
+        assert_eq!(out.fidelity, ExportFidelity::Complete);
+        assert_finalize_preserves_non_fidelity(&before, &out);
+    }
+
+    #[test]
+    fn finalize_eml_partial_marks_combined_partial() {
+        let before = pst_outcome(ExportFidelity::Complete);
+        let out = finalize_unique_pst_classify(before.clone(), Some(ExportFidelity::Partial));
+        assert_eq!(out.fidelity, ExportFidelity::Partial);
+        assert_finalize_preserves_non_fidelity(&before, &out);
+    }
+
+    #[test]
+    fn finalize_also_eml_cancel_failed_fidelity() {
+        let before = pst_outcome(ExportFidelity::Complete);
+        let out = finalize_unique_pst_classify(before.clone(), Some(ExportFidelity::Failed));
+        assert_eq!(out.fidelity, ExportFidelity::Failed);
+        assert_finalize_preserves_non_fidelity(&before, &out);
+    }
+
+    #[test]
+    fn classify_after_summary_write_failure_preserves_also_eml_cancel() {
+        let mut base = ok_base();
+        base.report_ok = false;
+        let o = classify_after_summary_write_failure(
+            base,
+            PreflightRecommendation::Ok,
+            RiskGate::Off,
+            true,
+            true,
+        );
+        assert_eq!(o.exit, CliExit::Cancelled);
+        assert_eq!(o.exit as u8, 130);
+        assert!(o.cancelled);
+        assert_eq!(o.reasons, vec![reason::CANCELLED]);
+        assert!(summary_is_retryable(
+            o.exit,
+            true,
+            &o.reasons,
+            Some("cancelled")
+        ));
+    }
+
+    #[test]
+    fn classify_after_summary_write_failure_report_fail_not_cancel() {
+        let o = classify_after_summary_write_failure(
+            ok_base(),
+            PreflightRecommendation::Ok,
+            RiskGate::Off,
+            true,
+            false,
+        );
+        assert_eq!(o.exit, CliExit::Generic);
+        assert_eq!(o.exit as u8, 1);
+        assert!(!o.cancelled);
+        assert!(o.reasons.contains(&reason::REPORT_WRITE_FAILED));
+        assert!(!summary_is_retryable(
+            o.exit,
+            false,
+            &o.reasons,
+            Some("report")
+        ));
     }
 
     #[test]

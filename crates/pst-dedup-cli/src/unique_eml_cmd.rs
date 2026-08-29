@@ -188,6 +188,7 @@ pub struct WriteEmlPackFromKeepSetResult {
     pub exit: crate::error::CliExit,
     pub exit_reasons: Vec<String>,
     pub cancelled: bool,
+    pub fidelity: crate::export_outcome::ExportFidelity,
 }
 
 fn eml_pack_cancel_requested(cancel: Option<&AtomicBool>) -> bool {
@@ -458,16 +459,19 @@ pub fn write_eml_pack_from_keep_set(
                             "artifact_state": "invalid_in_place",
                         })
                     });
+                let (eml_written, attach_parts_failed, embedded_messages_written, volumes) =
+                    also_eml_recovered_counts(out);
                 return Ok(WriteEmlPackFromKeepSetResult {
                     summary_json,
-                    eml_written: count_eml_under(out),
+                    eml_written,
                     attach_parts_written: 0,
-                    attach_parts_failed: 0,
-                    embedded_messages_written: 0,
-                    volumes: if out.join("VOL001").is_dir() { 1 } else { 0 },
+                    attach_parts_failed,
+                    embedded_messages_written,
+                    volumes,
                     exit: crate::error::CliExit::Cancelled,
                     exit_reasons: vec![crate::export_outcome::reason::CANCELLED.to_string()],
                     cancelled: true,
+                    fidelity: crate::export_outcome::ExportFidelity::Failed,
                 });
             }
             Err(err)
@@ -882,6 +886,7 @@ fn write_eml_pack_from_keep_set_inner(
             .map(|s| (*s).to_string())
             .collect(),
         cancelled,
+        fidelity: classified.fidelity,
     })
 }
 

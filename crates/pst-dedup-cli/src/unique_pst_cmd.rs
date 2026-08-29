@@ -3065,6 +3065,7 @@ pub fn run_unique_pst_with_options(
     let mut also_eml_pack_exit: Option<crate::error::CliExit> = None;
     let mut also_eml_pack_reasons: Vec<String> = Vec::new();
     let mut also_eml_cancelled = false;
+    let mut also_eml_fidelity: Option<crate::export_outcome::ExportFidelity> = None;
     // Empty keep-set still "ran" write (idle); prepare_incomplete refused write entirely.
     let pst_write_ran = !prepare_incomplete && (volume_index > 0 || prepared.is_empty());
     if let Some(eml_dir) = also_eml_dir.as_ref() {
@@ -3121,6 +3122,7 @@ pub fn run_unique_pst_with_options(
                     also_eml_pack_exit = Some(pack.exit);
                     also_eml_pack_reasons = pack.exit_reasons;
                     also_eml_cancelled = pack.cancelled;
+                    also_eml_fidelity = Some(pack.fidelity);
                     if pack.cancelled {
                         let (_q, rewrite_ok) =
                             quarantine_also_eml_after_cancel(eml_dir, stderr, &on_log);
@@ -3149,6 +3151,7 @@ pub fn run_unique_pst_with_options(
                 }
                 Err(e) => {
                     also_eml_ran = true;
+                    also_eml_fidelity = Some(crate::export_outcome::ExportFidelity::Failed);
                     // Cancel during also-eml wins over subsequent helper I/O Err (exit 130).
                     let cancel_during_eml = cancel_flag.is_some_and(|f| f.load(Ordering::Relaxed));
                     if cancel_during_eml {
@@ -3413,18 +3416,11 @@ pub fn run_unique_pst_with_options(
         })
         .collect();
     classified.reasons = combined_static_reasons;
-    if also_eml_ran || also_eml_cancelled {
-        classified.fidelity = match combined_exit {
-            crate::error::CliExit::Success => crate::export_outcome::ExportFidelity::Complete,
-            crate::error::CliExit::PartialFidelity => {
-                crate::export_outcome::ExportFidelity::Partial
-            }
-            _ => crate::export_outcome::ExportFidelity::Failed,
-        };
-    }
+    classified = crate::export_outcome::finalize_unique_pst_classify(classified, also_eml_fidelity);
 
-    // ok follows combined exit (true only when combined is 0).
-    let ok = combined_exit == crate::error::CliExit::Success && !process_cancelled;
+    // ok follows fidelity (0078); exit 0 can still be partial under --allow-partial-fidelity.
+    let ok = classified.fidelity == crate::export_outcome::ExportFidelity::Complete
+        && !process_cancelled;
 
     let summary_error = if !ok || process_cancelled {
         let (code, message) = if process_cancelled {
@@ -3544,15 +3540,12 @@ pub fn run_unique_pst_with_options(
     let mut summary_error = summary_error;
     if summary_write_failed.is_some() {
         ok = false;
-        // Force hard-fail classify dimensions for report write.
-        let mut forced = export_ok_input;
-        forced.report_ok = false;
-        classified = crate::export_outcome::classify_export(
-            forced,
+        classified = crate::export_outcome::classify_after_summary_write_failure(
+            export_ok_input,
             summary.export_risk.level,
             risk_gate,
             fail_on_partial,
-            cancelled,
+            process_cancelled,
         );
         summary.ok = false;
         summary.fidelity = classified.fidelity;
@@ -3562,16 +3555,26 @@ pub fn run_unique_pst_with_options(
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        if let Some(msg) = summary_write_failed.clone() {
-            summary_error = Some(SummaryError {
-                code: "report".to_string(),
-                message: msg,
-            });
-            summary.error = summary_error.clone();
+        match (process_cancelled, summary_write_failed.clone()) {
+            (true, Some(_)) => {
+                summary_error = Some(SummaryError {
+                    code: "cancelled".to_string(),
+                    message: "cancelled".to_string(),
+                });
+                summary.error = summary_error.clone();
+            }
+            (false, Some(msg)) => {
+                summary_error = Some(SummaryError {
+                    code: "report".to_string(),
+                    message: msg,
+                });
+                summary.error = summary_error.clone();
+            }
+            _ => {}
         }
         summary.retryable = crate::export_outcome::summary_is_retryable(
             classified.exit,
-            cancelled,
+            process_cancelled,
             &classified.reasons,
             summary_error.as_ref().map(|e| e.code.as_str()),
         );

@@ -269,18 +269,18 @@ Series Q closed. unique-eml nested MIME is honest (0106), so `unique-pst --also-
 |---|---|---|
 | [0107-UniquePstAlsoEml](0107-UniquePstAlsoEml/spec.md) | **Completed** | Wire `unique-pst --also-eml` to a unique-eml pack from the **same** keep-set (no second scan). Closes **D-0071-also-eml**. Not frontend. PR [#104](https://github.com/Ryan-AI-Studios/pst-dedupe/pull/104) / `339dfa0`. |
 
-**Suggested order:** **0108** Completed. Series S **0109** Proposed. Frontend Series O **0110+**.
+**Suggested order:** **0108** Completed. Series S **0109** In progress. Frontend Series O **0110+**.
 
 ## Series S — Unique-export HITL residuals (post-0107)
 
-Structural INC* HITL **2026-08-29** is green (4055/4055, depth 8, also-eml). Remaining honesty: poly CRC still inflates `degraded_winner_rate`; PR #104 Bugbot on also-eml classify. **No BCC track.** Frontend **0110+**.
+Structural INC* HITL **2026-08-29** is green (4055/4055, depth 8, also-eml). **0108** Completed (effective degrade rate). Remaining honesty: PR #104 Bugbot on also-eml classify/cancel. **No BCC track.** Frontend **0110+**.
 
 | Track | Status | Summary |
 |---|---|---|
 | [0108-PolyDegradedWinnerRisk](0108-PolyDegradedWinnerRisk/spec.md) | **Completed** | Effective `degraded_winner_rate` excludes poly-only `CrcSuspect`/`AttachStreamCrc` on poly-class sources. HITL: 3931 CRC-only vs 124 also `BODY_UNAVAILABLE` → effective ≈ 0.031 (still advisory; stops the 1.000 lie). Closes **D-0108-poly-degraded-winner-risk**. Not frontend. |
-| [0109-AlsoEmlClassifyHonesty](0109-AlsoEmlClassifyHonesty/spec.md) | **Proposed — placeholder** | Combined also-eml fidelity/ok/cancel rewrite honesty (PR #104 Bugbot). Closes **D-0109-also-eml-classify**. Not frontend. |
+| [0109-AlsoEmlClassifyHonesty](0109-AlsoEmlClassifyHonesty/spec.md) | **In progress** | Combined also-eml fidelity/ok/cancel rewrite honesty (PR #104 Bugbot). Closes **D-0109-also-eml-classify**. Not frontend. |
 
-**Suggested order:** **0108** Completed → **0109** Proposed. Expand **0109** with `/plan-track 109` before Implement.
+**Suggested order:** **0108** Completed → **0109** In progress. Frontend **0110+**.
 
 ## Series O — Review chrome (Tauri 2 + Leptos)
 
@@ -303,7 +303,7 @@ After Series S (or in parallel with mock-only work). **Stack lock:** Tauri 2 + L
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099–0104 Completed**. **Series Q 0105–0106 Completed** (window-edge + unique-eml nested MIME). **Series R 0107 Completed** (`unique-pst --also-eml` co-export; PR #104 / `339dfa0`). **Series S 0108 Completed / 0109 Proposed** (poly degrade risk + also-eml classify). **Series O 0110–0116 Proposed** (Tauri 2 + Leptos chrome; 0115 parked).
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099–0104 Completed**. **Series Q 0105–0106 Completed** (window-edge + unique-eml nested MIME). **Series R 0107 Completed** (`unique-pst --also-eml` co-export; PR #104 / `339dfa0`). **Series S 0108 Completed / 0109 In progress** (poly degrade risk + also-eml classify). **Series O 0110–0116 Proposed** (Tauri 2 + Leptos chrome; 0115 parked).
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).
