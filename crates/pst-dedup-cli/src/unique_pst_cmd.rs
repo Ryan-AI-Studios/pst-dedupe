@@ -962,16 +962,52 @@ fn quarantine_also_eml_dir(
         return (QuarantineResult::NoVolumes, None);
     }
     let stamp = quarantine_utc_stamp();
-    let parent = dir.parent().unwrap_or_else(|| Path::new("."));
-    let name = dir
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "also_eml".to_string());
-    let dest = parent.join(format!("{name}.cancelled-{stamp}.partial"));
+    let dest = cancelled_partial_path(dir, &stamp);
     match fs::rename(dir, &dest) {
         Ok(()) => (QuarantineResult::Succeeded, Some(dest)),
-        Err(_) => (QuarantineResult::Failed, None),
+        Err(e) => {
+            tracing::warn!(
+                from = %dir.display(),
+                to = %dest.display(),
+                "also-eml cancel quarantine rename failed: {e}"
+            );
+            (QuarantineResult::Failed, None)
+        }
     }
+}
+
+/// Quarantine also-eml after cancel; rewrite moved summary; surface rewrite I/O.
+/// Returns `(quarantine_result, summary_rewrite_ok)`.
+fn quarantine_also_eml_after_cancel(
+    eml_dir: &Path,
+    stderr: bool,
+    on_log: &Option<LogCb>,
+) -> (crate::export_outcome::QuarantineResult, bool) {
+    let (q, dest) = quarantine_also_eml_dir(eml_dir);
+    let mut rewrite_ok = true;
+    if let Some(dest) = dest.as_ref() {
+        if let Err(e) = crate::unique_eml_cmd::rewrite_quarantined_eml_summary(dest, q) {
+            rewrite_ok = false;
+            emit_log(
+                stderr,
+                on_log,
+                &format!("warning: also-eml quarantine summary rewrite: {e}"),
+            );
+        }
+    } else if matches!(q, crate::export_outcome::QuarantineResult::Failed) {
+        rewrite_ok = false;
+        emit_log(
+            stderr,
+            on_log,
+            "warning: also-eml cancel quarantine rename failed (PST kept)",
+        );
+    }
+    emit_log(
+        stderr,
+        on_log,
+        &format!("also-eml cancel quarantine: {q:?}"),
+    );
+    (q, rewrite_ok)
 }
 
 /// Quarantine written volumes after cancel: rename each volume to
@@ -3086,24 +3122,17 @@ pub fn run_unique_pst_with_options(
                     also_eml_pack_reasons = pack.exit_reasons;
                     also_eml_cancelled = pack.cancelled;
                     if pack.cancelled {
-                        // Quarantine also-eml dir only — never PST volumes / report-dir.
-                        let (q, dest) = quarantine_also_eml_dir(eml_dir);
-                        if let Some(dest) = dest.as_ref() {
-                            if let Err(e) =
-                                crate::unique_eml_cmd::rewrite_quarantined_eml_summary(dest, q)
-                            {
-                                emit_log(
-                                    stderr,
-                                    &on_log,
-                                    &format!("warning: also-eml quarantine summary rewrite: {e}"),
-                                );
-                            }
+                        let (_q, rewrite_ok) =
+                            quarantine_also_eml_after_cancel(eml_dir, stderr, &on_log);
+                        if !rewrite_ok
+                            && !also_eml_pack_reasons
+                                .iter()
+                                .any(|r| r == crate::export_outcome::reason::REPORT_WRITE_FAILED)
+                        {
+                            also_eml_pack_reasons.push(
+                                crate::export_outcome::reason::REPORT_WRITE_FAILED.to_string(),
+                            );
                         }
-                        emit_log(
-                            stderr,
-                            &on_log,
-                            &format!("also-eml cancel quarantine: {q:?}"),
-                        );
                     }
                     emit_log(
                         stderr,
@@ -3120,25 +3149,58 @@ pub fn run_unique_pst_with_options(
                 }
                 Err(e) => {
                     also_eml_ran = true;
-                    also_eml_exit_code = crate::error::CliExit::Generic.as_u8();
-                    also_eml_pack_exit = Some(crate::error::CliExit::Generic);
-                    also_eml_pack_reasons = Vec::new();
-                    if !eml_dir.join("summary.json").is_file() {
-                        crate::unique_eml_cmd::write_eml_hard_fail_summary(
-                            eml_dir,
-                            &keep_set,
-                            outcome.summary.clone(),
-                            args.policy,
-                            effective_family,
-                            nested_extract_depth,
-                            &e,
+                    // Cancel during also-eml wins over subsequent helper I/O Err (exit 130).
+                    let cancel_during_eml = cancel_flag.is_some_and(|f| f.load(Ordering::Relaxed));
+                    if cancel_during_eml {
+                        also_eml_cancelled = true;
+                        also_eml_exit_code = crate::error::CliExit::Cancelled.as_u8();
+                        also_eml_pack_exit = Some(crate::error::CliExit::Cancelled);
+                        also_eml_pack_reasons =
+                            vec![crate::export_outcome::reason::CANCELLED.to_string()];
+                        if !eml_dir.join("summary.json").is_file() {
+                            crate::unique_eml_cmd::write_eml_hard_fail_summary(
+                                eml_dir,
+                                &keep_set,
+                                outcome.summary.clone(),
+                                args.policy,
+                                effective_family,
+                                nested_extract_depth,
+                                &e,
+                            );
+                        }
+                        let (_q, rewrite_ok) =
+                            quarantine_also_eml_after_cancel(eml_dir, stderr, &on_log);
+                        if !rewrite_ok {
+                            also_eml_pack_reasons.push(
+                                crate::export_outcome::reason::REPORT_WRITE_FAILED.to_string(),
+                            );
+                        }
+                        emit_log(
+                            stderr,
+                            &on_log,
+                            &format!("warning: also-eml cancelled with helper Err (PST kept): {e}"),
+                        );
+                    } else {
+                        also_eml_exit_code = crate::error::CliExit::Generic.as_u8();
+                        also_eml_pack_exit = Some(crate::error::CliExit::Generic);
+                        also_eml_pack_reasons = Vec::new();
+                        if !eml_dir.join("summary.json").is_file() {
+                            crate::unique_eml_cmd::write_eml_hard_fail_summary(
+                                eml_dir,
+                                &keep_set,
+                                outcome.summary.clone(),
+                                args.policy,
+                                effective_family,
+                                nested_extract_depth,
+                                &e,
+                            );
+                        }
+                        emit_log(
+                            stderr,
+                            &on_log,
+                            &format!("warning: also-eml hard-fail (PST kept): {e}"),
                         );
                     }
-                    emit_log(
-                        stderr,
-                        &on_log,
-                        &format!("warning: also-eml hard-fail (PST kept): {e}"),
-                    );
                 }
             }
         }
@@ -4262,6 +4324,25 @@ mod tests {
             err.to_string().to_ascii_lowercase().contains("also-eml"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn cancelled_partial_path_skips_existing_dest() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let vol = dir.path().join("also_eml");
+        fs::create_dir_all(&vol).expect("mkdir");
+        let stamp = "1720000000-001";
+        let primary = dir
+            .path()
+            .join(format!("also_eml.cancelled-{stamp}.partial"));
+        fs::create_dir_all(&primary).expect("plant primary");
+        let dest = cancelled_partial_path(&vol, stamp);
+        let s = dest.to_string_lossy();
+        assert!(
+            s.contains("_2") || s.contains(&format!("_{}", 2)),
+            "collision must bump suffix: {s}"
+        );
+        assert!(!dest.exists() || dest != primary);
     }
 
     #[test]

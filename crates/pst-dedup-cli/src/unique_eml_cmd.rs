@@ -379,6 +379,7 @@ pub fn write_eml_pack_from_keep_set(
     let policy = input.policy;
     let family_policy = input.family_policy;
     let max_embedded_depth = input.write_opts.max_embedded_depth;
+    let cancel = input.cancel;
     match write_eml_pack_from_keep_set_inner(input) {
         Ok(r) => Ok(r),
         Err(err) => {
@@ -387,12 +388,36 @@ pub fn write_eml_pack_from_keep_set(
                 write_eml_hard_fail_summary(
                     out,
                     keep_set,
-                    scan,
+                    scan.clone(),
                     policy,
                     family_policy,
                     max_embedded_depth,
                     &err,
                 );
+            }
+            // Cancel during write must not become Generic Err after late I/O failure.
+            if eml_pack_cancel_requested(cancel) {
+                let summary_json = fs::read_to_string(out.join("summary.json"))
+                    .ok()
+                    .and_then(|b| serde_json::from_str(&b).ok())
+                    .unwrap_or_else(|| {
+                        serde_json::json!({
+                            "ok": false,
+                            "exit_code": crate::error::CliExit::Cancelled.as_u8(),
+                            "artifact_state": "invalid_in_place",
+                        })
+                    });
+                return Ok(WriteEmlPackFromKeepSetResult {
+                    summary_json,
+                    eml_written: count_eml_under(out),
+                    attach_parts_written: 0,
+                    attach_parts_failed: 0,
+                    embedded_messages_written: 0,
+                    volumes: if out.join("VOL001").is_dir() { 1 } else { 0 },
+                    exit: crate::error::CliExit::Cancelled,
+                    exit_reasons: vec![crate::export_outcome::reason::CANCELLED.to_string()],
+                    cancelled: true,
+                });
             }
             Err(err)
         }

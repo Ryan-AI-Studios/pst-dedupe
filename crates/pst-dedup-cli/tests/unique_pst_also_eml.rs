@@ -845,6 +845,151 @@ fn cancel_during_pst_write_skips_also_eml() {
 }
 
 #[test]
+fn helper_cancel_with_blocked_summary_returns_cancelled_ok() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    write_unicode_pst(
+        &src,
+        vec![base_msg("<cx@ex.com>", "Cancel")],
+        &[],
+        &WritePstOpts::default(),
+    )
+    .expect("write");
+    let mut pst = pst_reader::PstFile::open(&src).expect("open");
+    let nid = pst
+        .folders()
+        .expect("folders")
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("nid")
+        .0;
+    let src_display = src.display().to_string();
+    let keep_set = KeepSet {
+        schema: "keep_set_v1".into(),
+        policy: KeepPolicy::FirstSeen,
+        family_policy: FamilyPolicy::ParentsOnly,
+        created_from: None,
+        identity_level: None,
+        dedupe_scope: None,
+        winners: vec![KeepEntry {
+            locus: MessageLocus {
+                source_path: src_display,
+                source_pst: "src.pst".into(),
+                folder_path: "Inbox".into(),
+                nid,
+                is_orphaned: false,
+            },
+            message_id_norm: Some("<cx@ex.com>".into()),
+            content_hash: [0u8; 32],
+            edrm_mih_hex: None,
+            integrity: RecoverableIntegrity::clean(),
+            size: 10,
+            promoted_from_failure: false,
+            folder_class: None,
+            decided_by: None,
+            duplicate_source_count: 0,
+            duplicate_sources: vec![],
+            duplicate_sources_truncated: false,
+        }],
+        stats: KeepSetStats {
+            unique: 1,
+            recoverable: 1,
+            ..KeepSetStats::default()
+        },
+    };
+    let pack_out = dir.path().join("pack");
+    fs::create_dir_all(&pack_out).expect("mkdir");
+    fs::create_dir_all(pack_out.join("summary.json")).expect("block summary");
+    let cancel = AtomicBool::new(true);
+    let mut mat = PstMaterializer::new(FamilyPolicy::ParentsOnly);
+    let mut attach_src = PstAttachStreamSource::new();
+    let preflight = dedup_engine::integrity::compute_preflight(
+        &dedup_engine::integrity::PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            1,
+            0,
+            0,
+            0,
+            1,
+            dedup_engine::integrity::IntegrityThresholds::default(),
+        ),
+    );
+    let scan = pst_dedup_cli::scan::ScanSummary {
+        schema: "scan_integrity_v1".into(),
+        mode: ScanMode::BestEffort,
+        files: vec![],
+        total_messages: 1,
+        unique: 1,
+        duplicates: 0,
+        tier1_hits: 0,
+        tier2_hits: 0,
+        savings_bytes: 0,
+        skipped: 0,
+        skipped_by_reason: Default::default(),
+        recoverable_messages: 1,
+        degraded_messages: 0,
+        degraded_by_reason: Default::default(),
+        orphaned_messages: 0,
+        failed_files: 0,
+        partial_files: 0,
+        opened_files: 1,
+        duration_secs: 0.0,
+        preflight,
+        skips: vec![],
+        integrity_csv: None,
+        grouping: Default::default(),
+        page_crc_mismatches: 0,
+        block_crc_mismatches: 0,
+        block_bid_mismatches: 0,
+        distinct_bad_bids: 0,
+        distinct_bad_bids_exact: true,
+        crc_suspect_messages: 0,
+        page_reads: 0,
+        block_reads: 0,
+        block_crc_rate: 0.0,
+        block_crc_read_rate: 0.0,
+        poly_class_crc_sources: 0,
+    };
+    let pack = write_eml_pack_from_keep_set(WriteEmlPackFromKeepSetInput {
+        keep_set: &keep_set,
+        paths: std::slice::from_ref(&src),
+        out: &pack_out,
+        policy: KeepPolicy::FirstSeen,
+        family_policy: FamilyPolicy::ParentsOnly,
+        write_opts: dedup_engine::EmlWriteOpts {
+            family_policy: FamilyPolicy::ParentsOnly,
+            max_embedded_depth: 3,
+        },
+        files_per_volume: 10_000,
+        volume_prefix: "VOL".into(),
+        attach_ledger: AttachLedgerMode::Off,
+        attach_ledger_max_rows: 500_000,
+        ledger_path_mode: LedgerPathMode::Full,
+        soft_skip_attach_records: &[],
+        scan,
+        scan_ok: true,
+        fail_on_partial_fidelity: false,
+        allow_partial_fidelity: true,
+        risk_gate: pst_dedup_cli::export_outcome::RiskGate::Off,
+        export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
+        cancel: Some(&cancel),
+        mat: &mut mat,
+        attach_src: &mut attach_src,
+        manifest_json: None,
+        materialized_count: 1,
+    })
+    .expect("cancel must not surface as Generic Err");
+    assert!(pack.cancelled);
+    assert_eq!(pack.exit.as_u8(), 130);
+    assert!(
+        pack.exit_reasons.iter().any(|r| r == "CANCELLED"),
+        "reasons={:?}",
+        pack.exit_reasons
+    );
+}
+
+#[test]
 fn summary_write_failure_returns_err() {
     let dir = TempDir::new().expect("tmp");
     let src = dir.path().join("src.pst");
