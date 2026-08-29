@@ -120,7 +120,7 @@ struct UniqueEmlSummaryOut {
     embedded_messages_written: u64,
     /// Data-path attach fail counter for fidelity (0078); classify source of truth.
     attach_parts_failed: u64,
-    /// Effective nested extract/write depth (always serialized; 0106).
+    /// Effective nested extract/write depth used for extract + EML write.
     max_embedded_depth: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     attachment_ledger: Option<String>,
@@ -809,11 +809,8 @@ fn attach_ledger_row_from_eml_event(
         winner_promoted,
         peer_source_id: String::new(),
         peer_msg_nid: String::new(),
-        message_subject: ev
-            .message_subject
-            .clone()
-            .or_else(|| msg.subject.clone())
-            .unwrap_or_default(),
+        // Event subject is authoritative (incl. empty nested None); never fall back to winner.
+        message_subject: ev.message_subject.clone().unwrap_or_default(),
         cloud_provider: ev.cloud_provider.clone(),
         cloud_url: ev.cloud_url.clone(),
     }
@@ -1169,6 +1166,83 @@ mod tests {
         assert_eq!(first, EXPORT_ATTACHMENTS_CSV_HEADER);
         assert!(csv.contains("ATTACH_STREAM_OPEN_FAILED"));
         assert!(csv.contains("missing.bin"));
+    }
+
+    /// Nested soft-fail subject is authoritative; empty event must not fall back to winner.
+    #[test]
+    fn nested_event_subject_not_winner_fallback() {
+        let msg = CanonicalMessage {
+            locus: dedup_engine::keepset::MessageLocus {
+                source_path: r"C:\in\a.pst".into(),
+                source_pst: "a.pst".into(),
+                folder_path: "Inbox".into(),
+                nid: 1,
+                is_orphaned: false,
+            },
+            message_id: None,
+            subject: Some("Outer winner".into()),
+            sender: None,
+            display_to: None,
+            display_cc: None,
+            display_bcc: None,
+            recipients: Vec::new(),
+            message_flags: None,
+            submit_time: None,
+            size: None,
+            message_class: None,
+            body_plain: Some("x".into()),
+            body_html: None,
+            attachments: Vec::new(),
+            fidelity: dedup_engine::integrity::RecoverableIntegrity::clean(),
+            message_id_norm: None,
+            content_hash: [0u8; 32],
+            edrm_mih_hex: None,
+            body_incomplete: false,
+            body_unavailable: false,
+        };
+        let empty_ev = EmlAttachEvent {
+            attach_index: 0,
+            filename: "nested.msg".into(),
+            size: None,
+            attach_method: 5,
+            attach_nid: Some(9),
+            reason_code: "ATTACH_DEPTH_LIMIT".into(),
+            severity: "fail".into(),
+            error_detail: String::new(),
+            cloud_provider: String::new(),
+            cloud_url: String::new(),
+            message_subject: Some(String::new()),
+        };
+        let row = attach_ledger_row_from_eml_event(
+            &empty_ev,
+            &msg,
+            &[r"C:\in\a.pst".into()],
+            LedgerPathMode::Full,
+            "",
+            0,
+            false,
+        );
+        assert_eq!(
+            row.message_subject, "",
+            "empty nested subject must not become winner subject"
+        );
+        let none_ev = EmlAttachEvent {
+            message_subject: None,
+            ..empty_ev
+        };
+        let row_none = attach_ledger_row_from_eml_event(
+            &none_ev,
+            &msg,
+            &[r"C:\in\a.pst".into()],
+            LedgerPathMode::Full,
+            "",
+            0,
+            false,
+        );
+        assert_eq!(
+            row_none.message_subject, "",
+            "None event subject must stay empty, not Outer winner"
+        );
     }
 
     /// 0089 Mode A: soft-skip loser rows carry winner_promoted; promoted write-fail does too.

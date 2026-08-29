@@ -862,7 +862,7 @@ struct PreparedPart {
     /// MIME type for non-embedded file parts (ignored for embedded → message/rfc822).
     mime: String,
     body: AttachBody,
-    /// By-value rfc822 dump or honesty-skip residual (parsed nests set false).
+    /// Honesty residual when the rfc822 body was not reconstructed from a nested DTO.
     unparsed: bool,
 }
 
@@ -955,7 +955,8 @@ fn eml_attach_event_from_soft_fail(
         error_detail: err.to_string(),
         cloud_provider: att.cloud_provider.clone().unwrap_or_default(),
         cloud_url: att.cloud_url.clone().unwrap_or_default(),
-        message_subject: parent.subject.clone(),
+        // Always Some so nested None does not look "unset" to ledger mappers.
+        message_subject: Some(parent.subject.clone().unwrap_or_default()),
     }
 }
 
@@ -1829,10 +1830,81 @@ mod tests {
         assert_eq!(res.embedded_messages_written, 1);
         assert!(res.attachments_failed >= 1);
         assert!(res.embedded_message_unparsed);
-        assert!(res
+        let depth_ev = res
             .attachment_events
             .iter()
-            .any(|e| e.reason_code == "ATTACH_DEPTH_LIMIT"));
+            .find(|e| e.reason_code == "ATTACH_DEPTH_LIMIT")
+            .expect("ATTACH_DEPTH_LIMIT event");
+        assert_eq!(
+            depth_ev.message_subject.as_deref(),
+            Some("Nest 1"),
+            "depth-limit event must use inner parent subject"
+        );
+    }
+
+    #[test]
+    fn nested_soft_fail_none_subject_stays_empty() {
+        let nest1 = NestedCanonicalMessage {
+            subject: None,
+            sender: Some("n1@ex.com".into()),
+            body_plain: Some("level1".into()),
+            source_msg_nid: Some(0x200),
+            attachments: vec![CanonicalAttachment {
+                filename: "nested2.msg".into(),
+                size: 0,
+                mime: None,
+                data: None,
+                stream_available: false,
+                attach_nid: Some(301),
+                attach_method: Some(ATTACH_EMBEDDED_MSG),
+                is_cloud_link: false,
+                cloud_provider: None,
+                cloud_url: None,
+                cloud_permission_type: None,
+                embedded_message: Some(Box::new(NestedCanonicalMessage {
+                    subject: Some("Nest 2".into()),
+                    body_plain: Some("level2".into()),
+                    source_msg_nid: Some(0x300),
+                    ..Default::default()
+                })),
+                embedded_extract_limit: false,
+            }],
+            ..Default::default()
+        };
+        let mut msg = base_msg();
+        msg.subject = Some("Outer winner".into());
+        msg.attachments.push(CanonicalAttachment {
+            filename: "nested1.msg".into(),
+            size: 0,
+            mime: None,
+            data: None,
+            stream_available: false,
+            attach_nid: Some(201),
+            attach_method: Some(ATTACH_EMBEDDED_MSG),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
+            cloud_permission_type: None,
+            embedded_message: Some(Box::new(nest1)),
+            embedded_extract_limit: false,
+        });
+        let opts = EmlWriteOpts {
+            family_policy: FamilyPolicy::KeepAttachmentsWithParent,
+            max_embedded_depth: 1,
+        };
+        let mut src = NullAttachStreamSource;
+        let mut buf = Vec::new();
+        let res = write_canonical_eml_to(&mut buf, &msg, &mut src, &opts, 0).expect("write");
+        let depth_ev = res
+            .attachment_events
+            .iter()
+            .find(|e| e.reason_code == "ATTACH_DEPTH_LIMIT")
+            .expect("ATTACH_DEPTH_LIMIT event");
+        assert_eq!(
+            depth_ev.message_subject.as_deref(),
+            Some(""),
+            "inner None subject must stay empty, not outer winner: {depth_ev:?}"
+        );
     }
 
     /// True if any message/rfc822 part block advertises base64 CTE.
