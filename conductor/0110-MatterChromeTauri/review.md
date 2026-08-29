@@ -1,10 +1,10 @@
-# 0110-MatterChromeTauri — Review (publish prep)
+# 0110-MatterChromeTauri — Review
 
 - **Track:** `0110-MatterChromeTauri`
-- **Branch:** `track/0110-matter-chrome-tauri`
-- **Registry:** **In progress** (DoD-6 / Completed after product PR squash-merge — not yet)
-- **Ledger tx:** `08a762eb-7fb3-4fdb-829c-4c70c8b62fe8` — do **not** commit until publish
-- **Product PR:** TBD (product first; governance Completes after merge)
+- **Branch:** `track/0110-matter-chrome-tauri` (product) → `docs/0110-completed` (registry)
+- **Registry:** **Completed**
+- **Product PR:** **#111** squash-merged to `main` as `5a76f0b`
+- **Docs PR:** records this Completed registry (after product merge)
 
 ---
 
@@ -17,7 +17,7 @@
 | **DoD-3 — List + create** | **PASS** | Recents MRU-front, load+remember cap 20, missing roots retained, injectable dir; create `parent.join(validated_name)` → `<parent>/<name>/matter.db`; invalid name rejected; remember failures surfaced (shell status) without silent discard. |
 | **DoD-4 — Tokens + a11y + CSP** | **PASS** | Plex/paper tokens; no `#ec3013`; self-hosted OFL woff2; skip links + `:focus-visible`; `#matters`/`#counts`/`#main-content` focusable (`tabindex="-1"`); Windows Ctrl+K; CSP object with `'wasm-unsafe-eval'` + IPC `connect-src`; no Google Fonts. |
 | **DoD-5 — Tests + CI** | **PASS** | `cargo test -p dedupe-chrome` **18 passed**; fmt / clippy `-D warnings` (crate); workspace gates run during implement; CI `chrome-ui` (wasm + trunk 0.21.14 + host tests); deny proprietary exceptions; no production `unwrap`/`expect`; `main` returns `Result`. |
-| **DoD-6 — Recorded** | **PENDING publish** | Product PR TBD → squash-merge → then registry **Completed**, ledger commit, close `D-0110-matter-chrome`. This file is publish-prep only. |
+| **DoD-6 — Recorded** | **PASS** | Product PR **#111** / `5a76f0b`. Registry **Completed**; `D-0110-matter-chrome` closed. Residual **D-0110-deny-unic** + Owner HITL EXE (external). |
 
 ---
 
@@ -49,7 +49,7 @@
 | Item | Notes |
 |---|---|
 | **Owner HITL** | Launch **release** EXE against synthetic matter; chips match empty Desk Overview. INC* unique-pst **waived**. Codesign = D-0062 (not this track). |
-| DoD-6 governance | Registry Completed + ledger commit + CHANGELOG/deferred close after product PR merge (orchestrator Phase 4). |
+| **D-0110-deny-unic** | P3 residual — unic-* unmaintained via tauri-utils/urlpattern; denied ignores remain. |
 
 ---
 
