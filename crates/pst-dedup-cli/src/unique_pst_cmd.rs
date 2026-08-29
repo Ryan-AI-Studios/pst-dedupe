@@ -3157,17 +3157,21 @@ pub fn run_unique_pst_with_options(
                         also_eml_pack_exit = Some(crate::error::CliExit::Cancelled);
                         also_eml_pack_reasons =
                             vec![crate::export_outcome::reason::CANCELLED.to_string()];
-                        if !eml_dir.join("summary.json").is_file() {
-                            crate::unique_eml_cmd::write_eml_hard_fail_summary(
-                                eml_dir,
-                                &keep_set,
-                                outcome.summary.clone(),
-                                args.policy,
-                                effective_family,
-                                nested_extract_depth,
-                                &e,
-                            );
-                        }
+                        crate::unique_eml_cmd::write_eml_hard_fail_summary(
+                            eml_dir,
+                            &keep_set,
+                            outcome.summary.clone(),
+                            exit_err.is_none(),
+                            args.policy,
+                            effective_family,
+                            nested_extract_depth,
+                            &e,
+                        );
+                        let (eml_n, att_fail, emb, _) =
+                            crate::unique_eml_cmd::also_eml_recovered_counts(eml_dir);
+                        also_eml_eml_written = eml_n;
+                        also_eml_attach_parts_failed = att_fail;
+                        also_eml_embedded_messages_written = emb;
                         let (_q, rewrite_ok) =
                             quarantine_also_eml_after_cancel(eml_dir, stderr, &on_log);
                         if !rewrite_ok {
@@ -3183,18 +3187,23 @@ pub fn run_unique_pst_with_options(
                     } else {
                         also_eml_exit_code = crate::error::CliExit::Generic.as_u8();
                         also_eml_pack_exit = Some(crate::error::CliExit::Generic);
-                        also_eml_pack_reasons = Vec::new();
-                        if !eml_dir.join("summary.json").is_file() {
-                            crate::unique_eml_cmd::write_eml_hard_fail_summary(
-                                eml_dir,
-                                &keep_set,
-                                outcome.summary.clone(),
-                                args.policy,
-                                effective_family,
-                                nested_extract_depth,
-                                &e,
-                            );
-                        }
+                        also_eml_pack_reasons =
+                            vec![crate::export_outcome::reason::REPORT_WRITE_FAILED.to_string()];
+                        crate::unique_eml_cmd::write_eml_hard_fail_summary(
+                            eml_dir,
+                            &keep_set,
+                            outcome.summary.clone(),
+                            exit_err.is_none(),
+                            args.policy,
+                            effective_family,
+                            nested_extract_depth,
+                            &e,
+                        );
+                        let (eml_n, att_fail, emb, _) =
+                            crate::unique_eml_cmd::also_eml_recovered_counts(eml_dir);
+                        also_eml_eml_written = eml_n;
+                        also_eml_attach_parts_failed = att_fail;
+                        also_eml_embedded_messages_written = emb;
                         emit_log(
                             stderr,
                             &on_log,

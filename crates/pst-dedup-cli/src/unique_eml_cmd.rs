@@ -218,11 +218,56 @@ fn eml_summary_usable(path: &Path) -> bool {
             .is_some()
 }
 
+/// Recovered pack counters from an existing summary or on-disk `.eml` files.
+pub(crate) fn also_eml_recovered_counts(out: &Path) -> (u64, u64, u64, u64) {
+    let summary_path = out.join("summary.json");
+    if let Some(v) = fs::read_to_string(&summary_path)
+        .ok()
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+    {
+        let eml_written = v["eml_written"]
+            .as_u64()
+            .unwrap_or_else(|| count_eml_under(out));
+        let attach_failed = v["attach_parts_failed"].as_u64().unwrap_or(0);
+        let embedded = v["embedded_messages_written"].as_u64().unwrap_or(0);
+        let volumes =
+            v["volumes"].as_u64().unwrap_or_else(
+                || {
+                    if out.join("VOL001").is_dir() {
+                        1
+                    } else {
+                        0
+                    }
+                },
+            );
+        return (eml_written, attach_failed, embedded, volumes);
+    }
+    let eml_written = count_eml_under(out);
+    let volumes = if out.join("VOL001").is_dir() { 1 } else { 0 };
+    // Prefer manifest stats when present.
+    let man = out.join("manifest.json");
+    if let Some(v) = fs::read_to_string(&man)
+        .ok()
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+    {
+        let eml_written = v["stats"]["eml_written"].as_u64().unwrap_or(eml_written);
+        let attach_failed = v["stats"]["attach_parts_failed"].as_u64().unwrap_or(0);
+        let embedded = v["stats"]["embedded_messages_written"]
+            .as_u64()
+            .unwrap_or(0);
+        let volumes = v["stats"]["volumes"].as_u64().unwrap_or(volumes);
+        return (eml_written, attach_failed, embedded, volumes);
+    }
+    (eml_written, 0, 0, volumes)
+}
+
 /// Best-effort failed `{out}/summary.json` when pack write aborts with `Err`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_eml_hard_fail_summary(
     out: &Path,
     keep_set: &KeepSet,
     scan: ScanSummary,
+    scan_ok: bool,
     policy: KeepPolicy,
     family_policy: FamilyPolicy,
     max_embedded_depth: u32,
@@ -230,18 +275,22 @@ pub(crate) fn write_eml_hard_fail_summary(
 ) {
     let _ = fs::create_dir_all(out);
     let summary_path = out.join("summary.json");
+    // Do not clobber a usable summary that already carries real counts.
+    if eml_summary_usable(&summary_path) {
+        return;
+    }
     let summary_abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
-    let eml_written = count_eml_under(out);
+    let (eml_written, attach_failed, embedded, volumes) = also_eml_recovered_counts(out);
     let bytes_written = eml_written > 0 || out.join("VOL001").exists();
     let classified = crate::export_outcome::classify_export(
         crate::export_outcome::ExportOkInput {
-            scan_ok: true,
+            scan_ok,
             verify_ok: true,
             export_err_absent: false,
             export_partial: true,
             messages_written_total: eml_written,
             unique: keep_set.stats.unique,
-            attach_failed_total: 0,
+            attach_failed_total: attach_failed,
             body_soft_fail_total: 0,
             report_ok: false,
         },
@@ -268,10 +317,10 @@ pub(crate) fn write_eml_hard_fail_summary(
         keep_set_json: None,
         eml_written,
         unique: keep_set.stats.unique,
-        volumes: if out.join("VOL001").is_dir() { 1 } else { 0 },
+        volumes,
         attach_parts_written: 0,
-        embedded_messages_written: 0,
-        attach_parts_failed: 0,
+        embedded_messages_written: embedded,
+        attach_parts_failed: attach_failed,
         max_embedded_depth,
         attachment_ledger: None,
         attachment_ledger_mode: None,
@@ -376,6 +425,7 @@ pub fn write_eml_pack_from_keep_set(
     let out = input.out;
     let keep_set = input.keep_set;
     let scan = input.scan.clone();
+    let scan_ok = input.scan_ok;
     let policy = input.policy;
     let family_policy = input.family_policy;
     let max_embedded_depth = input.write_opts.max_embedded_depth;
@@ -389,6 +439,7 @@ pub fn write_eml_pack_from_keep_set(
                     out,
                     keep_set,
                     scan.clone(),
+                    scan_ok,
                     policy,
                     family_policy,
                     max_embedded_depth,
@@ -1363,6 +1414,199 @@ pub(crate) fn prepare_out_dir(out: &Path, overwrite: bool, flag_label: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dedup_engine::integrity::{compute_preflight, IntegrityThresholds, PreflightInputs};
+    use dedup_engine::keepset::{KeepEntry, KeepSetStats, MessageLocus};
+
+    #[test]
+    fn hard_fail_summary_uses_real_scan_ok_false() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let out = dir.path().join("pack");
+        fs::create_dir_all(&out).expect("mkdir");
+        // Partial pack on disk.
+        let vol = out.join("VOL001");
+        fs::create_dir_all(&vol).expect("vol");
+        fs::write(vol.join("000001_a.eml"), b"From: a\r\n\r\nbody").expect("eml");
+        let preflight = compute_preflight(&PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            1,
+            0,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        ));
+        let scan = ScanSummary {
+            schema: SCAN_INTEGRITY_SCHEMA.to_string(),
+            mode: ScanMode::BestEffort,
+            files: vec![],
+            total_messages: 1,
+            unique: 1,
+            duplicates: 0,
+            tier1_hits: 0,
+            tier2_hits: 0,
+            savings_bytes: 0,
+            skipped: 0,
+            skipped_by_reason: Default::default(),
+            recoverable_messages: 1,
+            degraded_messages: 0,
+            degraded_by_reason: Default::default(),
+            orphaned_messages: 0,
+            failed_files: 0,
+            partial_files: 0,
+            opened_files: 1,
+            duration_secs: 0.0,
+            preflight,
+            skips: vec![],
+            integrity_csv: None,
+            grouping: Default::default(),
+            page_crc_mismatches: 0,
+            block_crc_mismatches: 0,
+            block_bid_mismatches: 0,
+            distinct_bad_bids: 0,
+            distinct_bad_bids_exact: true,
+            crc_suspect_messages: 0,
+            page_reads: 0,
+            block_reads: 0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            poly_class_crc_sources: 0,
+        };
+        let keep_set = KeepSet {
+            schema: "keep_set_v1".into(),
+            policy: KeepPolicy::FirstSeen,
+            family_policy: FamilyPolicy::ParentsOnly,
+            created_from: None,
+            identity_level: None,
+            dedupe_scope: None,
+            winners: vec![KeepEntry {
+                locus: MessageLocus {
+                    source_path: r"C:\in\a.pst".into(),
+                    source_pst: "a.pst".into(),
+                    folder_path: "Inbox".into(),
+                    nid: 1,
+                    is_orphaned: false,
+                },
+                message_id_norm: None,
+                content_hash: [0u8; 32],
+                edrm_mih_hex: None,
+                integrity: dedup_engine::integrity::RecoverableIntegrity::clean(),
+                size: 1,
+                promoted_from_failure: false,
+                folder_class: None,
+                decided_by: None,
+                duplicate_source_count: 0,
+                duplicate_sources: vec![],
+                duplicate_sources_truncated: false,
+            }],
+            stats: KeepSetStats {
+                unique: 1,
+                recoverable: 1,
+                ..KeepSetStats::default()
+            },
+        };
+        write_eml_hard_fail_summary(
+            &out,
+            &keep_set,
+            scan,
+            false, // real scan_ok
+            KeepPolicy::FirstSeen,
+            FamilyPolicy::ParentsOnly,
+            3,
+            &CliError::Msg("forced hard fail".into()),
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(out.join("summary.json")).expect("summary"))
+                .expect("json");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["eml_written"].as_u64(), Some(1));
+        let reasons = v["exit_reason"].as_array().expect("reasons");
+        assert!(
+            reasons.iter().any(|r| r.as_str() == Some("SCAN_FAILED")),
+            "scan_ok=false must surface SCAN_FAILED: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn hard_fail_summary_does_not_clobber_usable_summary() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let out = dir.path().join("pack");
+        fs::create_dir_all(&out).expect("mkdir");
+        let summary = out.join("summary.json");
+        fs::write(
+            &summary,
+            r#"{"ok":false,"eml_written":7,"attach_parts_failed":2,"embedded_messages_written":3,"volumes":1,"exit_code":1}"#,
+        )
+        .expect("seed");
+        let keep_set = KeepSet {
+            schema: "keep_set_v1".into(),
+            policy: KeepPolicy::FirstSeen,
+            family_policy: FamilyPolicy::ParentsOnly,
+            created_from: None,
+            identity_level: None,
+            dedupe_scope: None,
+            winners: vec![],
+            stats: KeepSetStats::default(),
+        };
+        let scan = ScanSummary {
+            schema: SCAN_INTEGRITY_SCHEMA.to_string(),
+            mode: ScanMode::BestEffort,
+            files: vec![],
+            total_messages: 0,
+            unique: 0,
+            duplicates: 0,
+            tier1_hits: 0,
+            tier2_hits: 0,
+            savings_bytes: 0,
+            skipped: 0,
+            skipped_by_reason: Default::default(),
+            recoverable_messages: 0,
+            degraded_messages: 0,
+            degraded_by_reason: Default::default(),
+            orphaned_messages: 0,
+            failed_files: 0,
+            partial_files: 0,
+            opened_files: 0,
+            duration_secs: 0.0,
+            preflight: compute_preflight(&PreflightInputs::without_attach_probe(
+                ScanMode::BestEffort,
+                0,
+                0,
+                0,
+                0,
+                0,
+                IntegrityThresholds::default(),
+            )),
+            skips: vec![],
+            integrity_csv: None,
+            grouping: Default::default(),
+            page_crc_mismatches: 0,
+            block_crc_mismatches: 0,
+            block_bid_mismatches: 0,
+            distinct_bad_bids: 0,
+            distinct_bad_bids_exact: true,
+            crc_suspect_messages: 0,
+            page_reads: 0,
+            block_reads: 0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            poly_class_crc_sources: 0,
+        };
+        write_eml_hard_fail_summary(
+            &out,
+            &keep_set,
+            scan,
+            true,
+            KeepPolicy::FirstSeen,
+            FamilyPolicy::ParentsOnly,
+            3,
+            &CliError::Msg("should not wipe".into()),
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&summary).expect("read")).expect("json");
+        assert_eq!(v["eml_written"].as_u64(), Some(7));
+        assert_eq!(v["attach_parts_failed"].as_u64(), Some(2));
+        assert_eq!(v["embedded_messages_written"].as_u64(), Some(3));
+    }
 
     #[test]
     fn guard_rejects_input_under_out() {
