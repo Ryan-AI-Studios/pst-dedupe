@@ -4,6 +4,8 @@
 *.log
 # Root-level agent scratch only (track DoD reviews live under conductor/ and are force-added).
 /review.md
+# Local agent skills/rules (`.claude/` is a junction to `.agents/`). Force-add if a skill must be shared.
+.agents/
 .claude/
 *.html
 # Synthetic Teams HTML fixtures (track 0055) must be tracked for CI/tests.
