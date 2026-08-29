@@ -6,8 +6,10 @@
 //! ## Wire form
 //! - Headers, blank lines, MIME boundaries, and base64 lines use CRLF (`\r\n`).
 //! - Soft attach open/stream failures **skip** the part entirely (no fake body).
-//! - Embedded messages use `Content-Type: message/rfc822` with 8bit/binary raw
-//!   transfer (never base64). Full nested MAPI re-parse remains residual
+//! - Method-5 embeds with a nested DTO write reconstructed RFC 5322 inside
+//!   `message/rfc822` (8bit wrapper, never base64). Method-5 without a DTO or
+//!   past `--max-embedded-depth` soft-skips (`ATTACH_EMBEDDED_UNPARSED` /
+//!   `ATTACH_DEPTH_LIMIT`). Matter child-document extract remains residual
 //!   `D-0067-embedded-depth`.
 
 use std::fmt;
@@ -18,7 +20,10 @@ use std::path::{Path, PathBuf};
 use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::keepset::{CanonicalAttachment, CanonicalMessage, FamilyPolicy, MessageLocus};
+use crate::integrity::RecoverableIntegrity;
+use crate::keepset::{
+    CanonicalAttachment, CanonicalMessage, FamilyPolicy, MessageLocus, NestedCanonicalMessage,
+};
 use crate::util::filetime_to_unix;
 
 /// Stable JSON schema identifier for EML pack manifests.
@@ -50,7 +55,7 @@ pub const REASON_ATTACH_PART_FAILED: &str = "ATTACH_PART_FAILED";
 #[derive(Clone, Debug)]
 pub struct EmlWriteOpts {
     pub family_policy: FamilyPolicy,
-    /// Max recursive depth for nested message/rfc822 extraction (P0 residual).
+    /// Max nested method-5 rfc822 depth (clamp [1, 8] at write; default 3).
     pub max_embedded_depth: u32,
 }
 
@@ -92,7 +97,7 @@ pub struct EmlWriteResult {
     pub attachments_file_written: u64,
     pub embedded_messages_written: u64,
     pub attachments_failed: u64,
-    /// True when an embedded part was labeled message/rfc822 but not recursively parsed.
+    /// True when an embedded part was skipped unparsed or dumped as by-value rfc822.
     pub embedded_message_unparsed: bool,
     /// Soft-fail attach events (0089); length matches [`Self::attachments_failed`].
     pub attachment_events: Vec<EmlAttachEvent>,
@@ -103,6 +108,8 @@ pub struct EmlWriteResult {
 pub enum EmlWriteError {
     Io(io::Error),
     PathBudget(String),
+    /// Soft-skip attach carrying a 0073 reason (`ATTACH_DEPTH_LIMIT` / `ATTACH_EMBEDDED_UNPARSED`).
+    AttachSkipped(&'static str),
     Other(String),
 }
 
@@ -111,6 +118,7 @@ impl fmt::Display for EmlWriteError {
         match self {
             Self::Io(e) => write!(f, "eml write io: {e}"),
             Self::PathBudget(s) => write!(f, "eml path budget: {s}"),
+            Self::AttachSkipped(code) => write!(f, "eml attach skipped: {code}"),
             Self::Other(s) => write!(f, "eml write: {s}"),
         }
     }
@@ -120,7 +128,7 @@ impl std::error::Error for EmlWriteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
-            _ => None,
+            Self::PathBudget(_) | Self::AttachSkipped(_) | Self::Other(_) => None,
         }
     }
 }
@@ -610,7 +618,8 @@ fn write_canonical_eml_to<W: Write>(
     let mut result = EmlWriteResult::default();
 
     // ── Headers ────────────────────────────────────────────────────────────
-    write_headers(w, msg)?;
+    // depth > 0 ⇒ nested rfc822 body (no parent Source/Folder X-headers).
+    write_headers_mode(w, msg, depth > 0)?;
 
     let want_attaches = opts.family_policy == FamilyPolicy::KeepAttachmentsWithParent
         && !msg.attachments.is_empty();
@@ -631,9 +640,9 @@ fn write_canonical_eml_to<W: Write>(
         // If every attach fails, fall back to plain/alternative-only structure.
         let prepared = prepare_attachments(msg, attach_streams, opts, depth, &mut result)?;
         if prepared.is_empty() {
-            write_body_only_structure(w, msg, has_plain, has_html)?;
+            write_body_only_structure(w, msg, has_plain, has_html, depth)?;
         } else {
-            let boundary = make_boundary("mixed", msg.locus.nid);
+            let boundary = make_boundary("mixed", msg.locus.nid, depth);
             write_crlf_line(w, "MIME-Version: 1.0")?;
             write_crlf_line(
                 w,
@@ -641,15 +650,15 @@ fn write_canonical_eml_to<W: Write>(
             )?;
             write_crlf_blank(w)?;
             write_crlf_line(w, &format!("--{boundary}"))?;
-            write_body_part(w, msg, has_plain, has_html)?;
+            write_body_part(w, msg, has_plain, has_html, depth)?;
             for part in prepared {
                 write_crlf_line(w, &format!("--{boundary}"))?;
-                write_prepared_part(w, part, &mut result)?;
+                write_prepared_part(w, part, attach_streams, opts, &mut result)?;
             }
             write_crlf_line(w, &format!("--{boundary}--"))?;
         }
     } else {
-        write_body_only_structure(w, msg, has_plain, has_html)?;
+        write_body_only_structure(w, msg, has_plain, has_html, depth)?;
     }
 
     Ok(result)
@@ -660,9 +669,10 @@ fn write_body_only_structure<W: Write>(
     msg: &CanonicalMessage,
     has_plain: bool,
     has_html: bool,
+    depth: u32,
 ) -> Result<(), EmlWriteError> {
     if has_plain && has_html {
-        let boundary = make_boundary("alt", msg.locus.nid);
+        let boundary = make_boundary("alt", msg.locus.nid, depth);
         write_crlf_line(w, "MIME-Version: 1.0")?;
         write_crlf_line(
             w,
@@ -692,7 +702,11 @@ fn write_body_only_structure<W: Write>(
     Ok(())
 }
 
-fn write_headers<W: Write>(w: &mut W, msg: &CanonicalMessage) -> Result<(), EmlWriteError> {
+fn write_headers_mode<W: Write>(
+    w: &mut W,
+    msg: &CanonicalMessage,
+    nested: bool,
+) -> Result<(), EmlWriteError> {
     if let Some(mid) = msg.message_id.as_deref().filter(|s| !s.is_empty()) {
         let mid = sanitize_header_value(mid.trim());
         if mid.starts_with('<') && mid.ends_with('>') {
@@ -701,6 +715,7 @@ fn write_headers<W: Write>(w: &mut W, msg: &CanonicalMessage) -> Result<(), EmlW
             write_crlf_line(w, &format!("Message-ID: <{mid}>"))?;
         }
     }
+    // Always emit Subject: (empty allowed) so RFC 2046 §5.2.1 From/Subject/Date net holds.
     let subject = msg.subject.as_deref().unwrap_or("");
     write_crlf_line(w, &format!("Subject: {}", encode_header_value(subject)))?;
     if let Some(from) = msg.sender.as_deref().filter(|s| !s.is_empty()) {
@@ -719,6 +734,12 @@ fn write_headers<W: Write>(w: &mut W, msg: &CanonicalMessage) -> Result<(), EmlW
         if let Some(date) = format_date_utc_filetime(ft) {
             write_crlf_line(w, &format!("Date: {date}"))?;
         }
+    }
+    if nested {
+        if msg.locus.nid != 0 {
+            write_crlf_line(w, &format!("X-Pst-Dedupe-Nid: {:#x}", msg.locus.nid))?;
+        }
+        return Ok(());
     }
     write_crlf_line(
         w,
@@ -766,9 +787,10 @@ fn write_body_part<W: Write>(
     msg: &CanonicalMessage,
     has_plain: bool,
     has_html: bool,
+    depth: u32,
 ) -> Result<(), EmlWriteError> {
     if has_plain && has_html {
-        let boundary = make_boundary("alt", msg.locus.nid.wrapping_add(1));
+        let boundary = make_boundary("alt", msg.locus.nid.wrapping_add(1), depth);
         write_crlf_line(
             w,
             &format!("Content-Type: multipart/alternative; boundary=\"{boundary}\""),
@@ -826,6 +848,12 @@ fn write_alternative_parts<W: Write>(
 enum AttachBody {
     Memory(Vec<u8>),
     Stream(Box<dyn Read>),
+    /// Reconstructed nested RFC 5322 from method-5 `NestedCanonicalMessage`.
+    Nested {
+        msg: Box<CanonicalMessage>,
+        /// Depth passed to the recursive inner write (parent depth + 1).
+        write_depth: u32,
+    },
 }
 
 struct PreparedPart {
@@ -834,7 +862,7 @@ struct PreparedPart {
     /// MIME type for non-embedded file parts (ignored for embedded → message/rfc822).
     mime: String,
     body: AttachBody,
-    /// Embedded residual: labeled rfc822 but not recursively re-parsed as CanonicalMessage.
+    /// By-value rfc822 dump or honesty-skip residual (parsed nests set false).
     unparsed: bool,
 }
 
@@ -876,6 +904,7 @@ pub fn map_eml_attach_fail_reason(att: &CanonicalAttachment, err: &EmlWriteError
     }
     match err {
         EmlWriteError::Io(_) => "ATTACH_STREAM_OPEN_FAILED",
+        EmlWriteError::AttachSkipped(code) => code,
         EmlWriteError::Other(s) => {
             let lower = s.to_ascii_lowercase();
             if lower.contains("stream not available")
@@ -937,9 +966,10 @@ fn prepare_one_attach(
     opts: &EmlWriteOpts,
     depth: u32,
 ) -> Result<PreparedPart, EmlWriteError> {
-    let embedded = is_embedded_message(att);
+    let max_depth = opts.max_embedded_depth.clamp(1, 8);
+    let method5 = att.attach_method == Some(ATTACH_EMBEDDED_MSG);
     let filename = if att.filename.is_empty() {
-        if embedded {
+        if method5 || is_embedded_message(att) {
             "embedded.eml".to_string()
         } else {
             "attachment.bin".to_string()
@@ -948,39 +978,84 @@ fn prepare_one_attach(
         sanitize_filename_component(&att.filename)
     };
 
-    let body = open_attach_body(parent, att, attach_streams)?;
+    // Method-5: depth / DTO / honesty-skip before any stream open.
+    if method5 {
+        if att.embedded_extract_limit || depth >= max_depth {
+            return Err(EmlWriteError::AttachSkipped("ATTACH_DEPTH_LIMIT"));
+        }
+        if let Some(nested) = att.embedded_message.as_deref() {
+            let inner = nested_to_canonical(nested, &parent.locus);
+            return Ok(PreparedPart {
+                embedded: true,
+                filename,
+                mime: "message/rfc822".into(),
+                body: AttachBody::Nested {
+                    msg: Box::new(inner),
+                    write_depth: depth + 1,
+                },
+                unparsed: false,
+            });
+        }
+        return Err(EmlWriteError::AttachSkipped("ATTACH_EMBEDDED_UNPARSED"));
+    }
 
-    if embedded {
-        // Residual D-0067-embedded-depth: no full nested MAPI CanonicalMessage re-parse.
-        // Always label message/rfc822 + raw 8bit; unparsed honesty flag.
-        let _ = (opts, depth); // depth reserved for future recursive CanonicalMessage write
-        Ok(PreparedPart {
-            embedded: true,
-            filename,
-            mime: "message/rfc822".into(),
-            body,
-            unparsed: true,
-        })
-    } else {
-        let mime = att
-            .mime
-            .as_deref()
-            .filter(|m| !m.is_empty())
-            .map(sanitize_header_value)
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| "application/octet-stream".into());
-        let is_rfc822 = mime.to_ascii_lowercase().contains("message/rfc822");
-        Ok(PreparedPart {
-            embedded: is_rfc822,
-            filename,
-            mime: if is_rfc822 {
-                "message/rfc822".into()
-            } else {
-                mime
-            },
-            body,
-            unparsed: is_rfc822,
-        })
+    let body = open_attach_body(parent, att, attach_streams)?;
+    let mime = att
+        .mime
+        .as_deref()
+        .filter(|m| !m.is_empty())
+        .map(sanitize_header_value)
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "application/octet-stream".into());
+    let is_rfc822 = mime.to_ascii_lowercase().contains("message/rfc822");
+    Ok(PreparedPart {
+        embedded: is_rfc822,
+        filename,
+        mime: if is_rfc822 {
+            "message/rfc822".into()
+        } else {
+            mime
+        },
+        body,
+        unparsed: is_rfc822,
+    })
+}
+
+/// Map a nested DTO onto a synthetic [`CanonicalMessage`] for recursive MIME write.
+///
+/// Stream opens for child attaches use `winner_locus.source_path` + `nested.source_msg_nid`.
+fn nested_to_canonical(
+    nested: &NestedCanonicalMessage,
+    winner_locus: &MessageLocus,
+) -> CanonicalMessage {
+    CanonicalMessage {
+        locus: MessageLocus {
+            source_path: winner_locus.source_path.clone(),
+            source_pst: winner_locus.source_pst.clone(),
+            folder_path: String::new(),
+            nid: nested.source_msg_nid.unwrap_or(0),
+            is_orphaned: false,
+        },
+        message_id: nested.message_id.clone(),
+        subject: nested.subject.clone(),
+        sender: nested.sender.clone(),
+        display_to: nested.display_to.clone(),
+        display_cc: nested.display_cc.clone(),
+        display_bcc: nested.display_bcc.clone(),
+        recipients: nested.recipients.clone(),
+        message_flags: nested.message_flags,
+        submit_time: nested.submit_time,
+        size: None,
+        message_class: nested.message_class.clone(),
+        body_plain: nested.body_plain.clone(),
+        body_html: nested.body_html.clone(),
+        attachments: nested.attachments.clone(),
+        fidelity: RecoverableIntegrity::clean(),
+        message_id_norm: None,
+        content_hash: [0u8; 32],
+        edrm_mih_hex: None,
+        body_incomplete: nested.body_incomplete,
+        body_unavailable: nested.body_unavailable,
     }
 }
 
@@ -1008,6 +1083,8 @@ fn open_attach_body(
 fn write_prepared_part<W: Write>(
     w: &mut W,
     part: PreparedPart,
+    attach_streams: &mut dyn AttachStreamSource,
+    opts: &EmlWriteOpts,
     result: &mut EmlWriteResult,
 ) -> Result<(), EmlWriteError> {
     let filename_hdr = encode_header_value(&part.filename);
@@ -1021,11 +1098,27 @@ fn write_prepared_part<W: Write>(
         )?;
         write_crlf_line(w, "Content-Transfer-Encoding: 8bit")?;
         write_crlf_blank(w)?;
-        stream_attach_raw(w, part.body)?;
-        write_crlf_blank(w)?;
-        result.embedded_messages_written += 1;
-        if part.unparsed {
-            result.embedded_message_unparsed = true;
+        match part.body {
+            AttachBody::Nested { msg, write_depth } => {
+                let nested_res =
+                    write_canonical_eml_to(w, &msg, attach_streams, opts, write_depth)?;
+                write_crlf_blank(w)?;
+                result.embedded_messages_written += 1 + nested_res.embedded_messages_written;
+                result.attachments_file_written += nested_res.attachments_file_written;
+                result.attachments_failed += nested_res.attachments_failed;
+                result.embedded_message_unparsed |= nested_res.embedded_message_unparsed;
+                result
+                    .attachment_events
+                    .extend(nested_res.attachment_events);
+            }
+            body => {
+                stream_attach_raw(w, body)?;
+                write_crlf_blank(w)?;
+                result.embedded_messages_written += 1;
+                if part.unparsed {
+                    result.embedded_message_unparsed = true;
+                }
+            }
         }
     } else {
         let ctype = sanitize_header_value(&part.mime);
@@ -1051,6 +1144,11 @@ fn stream_attach_raw<W: Write>(w: &mut W, body: AttachBody) -> Result<(), EmlWri
         AttachBody::Stream(mut reader) => {
             io::copy(&mut reader, w)?;
         }
+        AttachBody::Nested { .. } => {
+            return Err(EmlWriteError::Other(
+                "internal: nested body passed to stream_attach_raw".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -1062,6 +1160,11 @@ fn stream_attach_base64_body<W: Write>(w: &mut W, body: AttachBody) -> Result<()
         }
         AttachBody::Stream(mut reader) => {
             stream_base64_from_reader(w, &mut *reader)?;
+        }
+        AttachBody::Nested { .. } => {
+            return Err(EmlWriteError::Other(
+                "internal: nested body passed to stream_attach_base64_body".into(),
+            ));
         }
     }
     Ok(())
@@ -1187,8 +1290,8 @@ fn is_embedded_message(att: &CanonicalAttachment) -> bool {
         .unwrap_or(false)
 }
 
-fn make_boundary(kind: &str, nid: u64) -> String {
-    format!("----=_PstDedupe_{kind}_{nid:x}_")
+fn make_boundary(kind: &str, nid: u64, depth: u32) -> String {
+    format!("----=_PstDedupe_{kind}_{nid:x}_d{depth}_")
 }
 
 fn encode_header_value(value: &str) -> String {
@@ -1475,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_message_rfc822_not_octet_stream() {
+    fn method5_without_dto_skips_no_fake_rfc822() {
         let mut msg = base_msg();
         msg.attachments.push(CanonicalAttachment {
             filename: "nested.eml".into(),
@@ -1498,19 +1601,238 @@ mod tests {
             .expect("write");
         let s = String::from_utf8_lossy(&buf);
         assert!(
-            s.contains("Content-Type: message/rfc822"),
-            "must be message/rfc822, got:\n{s}"
+            !s.contains("Content-Type: message/rfc822"),
+            "method-5 without DTO must not dump MAPI as rfc822:\n{s}"
         );
-        // Must not use base64 CTE on message/rfc822 (H2).
+        assert!(!s.contains("From: x"));
+        assert_eq!(res.embedded_messages_written, 0);
+        assert_eq!(res.attachments_failed, 1);
+        assert!(res.embedded_message_unparsed);
+        assert_eq!(
+            res.attachment_events[0].reason_code,
+            "ATTACH_EMBEDDED_UNPARSED"
+        );
+    }
+
+    #[test]
+    fn embedded_nested_dto_writes_rfc822_headers() {
+        let mut msg = base_msg();
+        msg.attachments.push(CanonicalAttachment {
+            filename: "nested.msg".into(),
+            size: 0,
+            mime: None,
+            data: None,
+            stream_available: false,
+            attach_nid: Some(200),
+            attach_method: Some(ATTACH_EMBEDDED_MSG),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
+            cloud_permission_type: None,
+            embedded_message: Some(Box::new(NestedCanonicalMessage {
+                subject: Some("Inner subject".into()),
+                sender: Some("inner@ex.com".into()),
+                body_plain: Some("inner body".into()),
+                source_msg_nid: Some(0x200),
+                ..Default::default()
+            })),
+            embedded_extract_limit: false,
+        });
+        let mut src = NullAttachStreamSource;
+        let mut buf = Vec::new();
+        let res = write_canonical_eml_to(&mut buf, &msg, &mut src, &EmlWriteOpts::default(), 0)
+            .expect("write");
+        let s = String::from_utf8_lossy(&buf);
+        assert!(
+            s.contains("Content-Type: message/rfc822"),
+            "missing rfc822 wrapper:\n{s}"
+        );
         assert!(
             !part_has_base64_cte_for_rfc822(&s),
             "message/rfc822 must not use base64 CTE:\n{s}"
         );
         assert!(s.contains("Content-Transfer-Encoding: 8bit"));
+        assert!(s.contains("Subject: Inner subject"));
+        assert!(s.contains("From: inner@ex.com"));
+        assert!(s.contains("inner body"));
+        assert_eq!(res.embedded_messages_written, 1);
+        assert!(!res.embedded_message_unparsed);
+        // Parent Source may appear on the outer message; must not appear inside rfc822 body.
+        if let Some(idx) = s.find("Content-Type: message/rfc822") {
+            let rfc822_body = &s[idx..];
+            let after_headers = rfc822_body
+                .find("\r\n\r\n")
+                .map(|i| &rfc822_body[i + 4..])
+                .unwrap_or(rfc822_body);
+            assert!(
+                !after_headers.contains("X-Pst-Dedupe-Source:"),
+                "inner message must not copy parent Source:\n{after_headers}"
+            );
+        } else {
+            panic!("no rfc822 part");
+        }
+    }
+
+    #[test]
+    fn embedded_nested_dto_child_file_base64_wrapper_8bit() {
+        let mut msg = base_msg();
+        msg.attachments.push(CanonicalAttachment {
+            filename: "nested.msg".into(),
+            size: 0,
+            mime: None,
+            data: None,
+            stream_available: false,
+            attach_nid: Some(200),
+            attach_method: Some(ATTACH_EMBEDDED_MSG),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
+            cloud_permission_type: None,
+            embedded_message: Some(Box::new(NestedCanonicalMessage {
+                subject: Some("Inner".into()),
+                sender: Some("inner@ex.com".into()),
+                body_plain: Some("inner".into()),
+                source_msg_nid: Some(0x200),
+                attachments: vec![CanonicalAttachment {
+                    filename: "note.txt".into(),
+                    size: 5,
+                    mime: Some("text/plain".into()),
+                    data: Some(b"Hello".to_vec()),
+                    stream_available: true,
+                    attach_nid: Some(300),
+                    attach_method: Some(1),
+                    is_cloud_link: false,
+                    cloud_provider: None,
+                    cloud_url: None,
+                    cloud_permission_type: None,
+                    embedded_message: None,
+                    embedded_extract_limit: false,
+                }],
+                ..Default::default()
+            })),
+            embedded_extract_limit: false,
+        });
+        let mut src = NullAttachStreamSource;
+        let mut buf = Vec::new();
+        let res = write_canonical_eml_to(&mut buf, &msg, &mut src, &EmlWriteOpts::default(), 0)
+            .expect("write");
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains("SGVsbG8="), "inner file must be base64:\n{s}");
+        assert!(
+            !part_has_base64_cte_for_rfc822(&s),
+            "outer rfc822 wrapper must stay 8bit:\n{s}"
+        );
+        assert_eq!(res.embedded_messages_written, 1);
+        assert_eq!(res.attachments_file_written, 1);
+        assert!(!res.embedded_message_unparsed);
+    }
+
+    #[test]
+    fn method1_mime_rfc822_still_dumps() {
+        let mut msg = base_msg();
+        msg.attachments.push(CanonicalAttachment {
+            filename: "attached.eml".into(),
+            size: 20,
+            mime: Some("message/rfc822".into()),
+            data: Some(b"From: x\r\n\r\nbody".to_vec()),
+            stream_available: true,
+            attach_nid: Some(200),
+            attach_method: Some(1),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
+            cloud_permission_type: None,
+            embedded_message: None,
+            embedded_extract_limit: false,
+        });
+        let mut src = NullAttachStreamSource;
+        let mut buf = Vec::new();
+        let res = write_canonical_eml_to(&mut buf, &msg, &mut src, &EmlWriteOpts::default(), 0)
+            .expect("write");
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains("Content-Type: message/rfc822"));
         assert!(s.contains("From: x"));
+        assert!(s.contains("body"));
+        assert!(
+            !part_has_base64_cte_for_rfc822(&s),
+            "method-1 rfc822 must stay 8bit:\n{s}"
+        );
         assert_eq!(res.embedded_messages_written, 1);
         assert!(res.embedded_message_unparsed);
-        assert_eq!(res.attachments_file_written, 0);
+        assert_eq!(res.attachments_failed, 0);
+        assert!(res
+            .attachment_events
+            .iter()
+            .all(|e| e.reason_code != "ATTACH_EMBEDDED_UNPARSED"));
+    }
+
+    #[test]
+    fn parent_depth_halt_at_max_1() {
+        let nest2 = NestedCanonicalMessage {
+            subject: Some("Nest 2".into()),
+            sender: Some("n2@ex.com".into()),
+            body_plain: Some("level2".into()),
+            source_msg_nid: Some(0x300),
+            ..Default::default()
+        };
+        let nest1 = NestedCanonicalMessage {
+            subject: Some("Nest 1".into()),
+            sender: Some("n1@ex.com".into()),
+            body_plain: Some("level1".into()),
+            source_msg_nid: Some(0x200),
+            attachments: vec![CanonicalAttachment {
+                filename: "nested2.msg".into(),
+                size: 0,
+                mime: None,
+                data: None,
+                stream_available: false,
+                attach_nid: Some(301),
+                attach_method: Some(ATTACH_EMBEDDED_MSG),
+                is_cloud_link: false,
+                cloud_provider: None,
+                cloud_url: None,
+                cloud_permission_type: None,
+                embedded_message: Some(Box::new(nest2)),
+                embedded_extract_limit: false,
+            }],
+            ..Default::default()
+        };
+        let mut msg = base_msg();
+        msg.attachments.push(CanonicalAttachment {
+            filename: "nested1.msg".into(),
+            size: 0,
+            mime: None,
+            data: None,
+            stream_available: false,
+            attach_nid: Some(201),
+            attach_method: Some(ATTACH_EMBEDDED_MSG),
+            is_cloud_link: false,
+            cloud_provider: None,
+            cloud_url: None,
+            cloud_permission_type: None,
+            embedded_message: Some(Box::new(nest1)),
+            embedded_extract_limit: false,
+        });
+        let opts = EmlWriteOpts {
+            family_policy: FamilyPolicy::KeepAttachmentsWithParent,
+            max_embedded_depth: 1,
+        };
+        let mut src = NullAttachStreamSource;
+        let mut buf = Vec::new();
+        let res = write_canonical_eml_to(&mut buf, &msg, &mut src, &opts, 0).expect("write");
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains("Subject: Nest 1"), "nest1 must be present:\n{s}");
+        assert!(
+            !s.contains("Subject: Nest 2"),
+            "nest2 must be depth-limited:\n{s}"
+        );
+        assert_eq!(res.embedded_messages_written, 1);
+        assert!(res.attachments_failed >= 1);
+        assert!(res.embedded_message_unparsed);
+        assert!(res
+            .attachment_events
+            .iter()
+            .any(|e| e.reason_code == "ATTACH_DEPTH_LIMIT"));
     }
 
     /// True if any message/rfc822 part block advertises base64 CTE.

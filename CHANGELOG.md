@@ -7,6 +7,12 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0106 — unique-eml nested MIME `message/rfc822`)
+
+- `unique-eml` writes reconstructed nested RFC 5322 for method-5 (`ATTACH_EMBEDDED_MSG`) extracts instead of labeling raw MAPI attach bytes as `message/rfc822`. Missing DTO / over-depth nests soft-skip with `ATTACH_EMBEDDED_UNPARSED` / `ATTACH_DEPTH_LIMIT`.
+- `unique-eml --max-embedded-depth` (default **3**, valid **1–8**; clap rejects outside that range). The same effective value reaches nested extract and `EmlWriteOpts`. `summary.json` gained always-present `max_embedded_depth` (`eml_pack_v1` / `keep_set_v1` ids **not** bumped).
+- Narrows **D-0067-embedded-depth** (unique-eml MIME shipped); does **not** close the row (matter/Relativity children, 32 MiB, hard cap 8 remain).
+
 ### Fixed (0105 — body-cloud window-edge normalize)
 
 - Body-cloud window-edge duplicate of a kept URL with trailing sentence punctuation (or an already-noted over-length URL) no longer emits a false `BODY_CLOUD_LINK_WINDOW` marker. Closes **D-0097-window-edge-normalize**.
