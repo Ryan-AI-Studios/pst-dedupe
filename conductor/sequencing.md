@@ -121,7 +121,7 @@
 | 63 | P1 Q | **0106** UniqueEmlNestedMime | ✅ Completed | unique-eml nested RFC 5322 from NestedCanonicalMessage; D-0067 unique-eml half |
 | 64 | P1 R | **0107** UniquePstAlsoEml | ✅ Completed | unique-pst `--also-eml` same keep-set unique-eml pack; D-0071-also-eml; PR #104 / `339dfa0` |
 | 65 | P1 S | **0108** PolyDegradedWinnerRisk | ✅ Completed | effective degraded_winner_rate excludes poly-only CrcSuspect on poly sources; D-0108 |
-| 66 | P2 S | **0109** AlsoEmlClassifyHonesty | 🔧 In progress | PR #104 Bugbot also-eml classify/cancel; D-0109 |
+| 66 | P2 S | **0109** AlsoEmlClassifyHonesty | ✅ Completed | PR #104 Bugbot also-eml classify/cancel; D-0109; PR #109 / `dc7c29c` |
 | 67 | P1 O | **0110** MatterChromeTauri | 📦 Proposed | Tauri 2 + Leptos matter chrome; one invoke |
 | 68 | P1 O | **0111** ReviewQueueFirstPass | 📦 Proposed | virtualized first-pass queue |
 | 69 | P0 O | **0112** ReviewWindow | 📦 Proposed | three-pane coding |
@@ -239,7 +239,7 @@
 | Order | Track | Notes |
 |---|---|---|
 | 1 | **0108** PolyDegradedWinnerRisk | **Completed** — effective degraded_winner_rate; closes D-0108-poly-degraded-winner-risk; residual D-0108-keepset-crc-retaint |
-| 2 | **0109** AlsoEmlClassifyHonesty | **In progress** — PR #104 Bugbot classify/cancel/counts; D-0109-also-eml-classify |
+| 2 | **0109** AlsoEmlClassifyHonesty | **Completed** — PR #104 Bugbot classify/cancel/counts; D-0109-also-eml-classify; PR #109 / `dc7c29c` |
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0116)
 

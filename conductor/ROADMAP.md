@@ -405,18 +405,18 @@ Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0
 |---|---|---|---|---|
 | **0107** | UniquePstAlsoEml | **Completed** | **P1 R** | Wire `unique-pst --also-eml <dir>` to a unique-eml pack from the **same keep-set** (no second scan). Closes **D-0071-also-eml**. 0106 unblocked honest nested MIME. Not frontend. Spec: `0107-UniquePstAlsoEml/`. PR #104 / `339dfa0`. |
 
-**Order:** **0108** Completed. Series S **0109** In progress. Frontend Series O **0110+**.
+**Order:** Series S **0108–0109** Completed. Frontend Series O **0110+**.
 
 ### Wave 10 — Unique-export HITL residuals (Series S)
 
-Structural INC* soak 2026-08-29 is green. Remaining honesty from that run + PR #104 Bugbot.
+Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (poly degrade + also-eml classify).
 
 | ID | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|
 | **0108** | PolyDegradedWinnerRisk | **Completed** | **P1 S** | Effective degrade rate excludes poly-only `CrcSuspect` on poly-class sources. HITL 3931/124 → ≈0.031 still advisory (stops 1.000 lie). Spec: `0108-PolyDegradedWinnerRisk/`. |
-| **0109** | AlsoEmlClassifyHonesty | **In progress** | **P2 S** | Combined also-eml `ok`/fidelity/cancel rewrite (PR #104 Bugbot). Spec: `0109-AlsoEmlClassifyHonesty/`. |
+| **0109** | AlsoEmlClassifyHonesty | **Completed** | **P2 S** | Combined also-eml `ok`/fidelity/cancel rewrite (PR #104 Bugbot). Spec: `0109-AlsoEmlClassifyHonesty/`. PR #109 / `dc7c29c`. |
 
-**Order:** **0108** Completed → **0109** In progress. No BCC. No HNBITMAPHDR.
+**Order:** Series S **0108–0109** Completed. No BCC. No HNBITMAPHDR. Frontend **0110+**.
 
 ### Wave 11 — Review chrome (Series O)
 

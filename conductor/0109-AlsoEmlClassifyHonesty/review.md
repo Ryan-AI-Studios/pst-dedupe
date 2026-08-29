@@ -1,7 +1,7 @@
 # 0109 AlsoEmlClassifyHonesty — Review
 
-**Status:** In progress (implement done; publish/PR left to orchestrator)  
-**Branch:** `track/0109-also-eml-classify`  
+**Status:** Completed  
+**Branch:** `track/0109-also-eml-classify` (merged)  
 **Closes:** `D-0109-also-eml-classify`  
 **Does not close:** `D-0067-embedded-depth`, `D-0108-keepset-crc-retaint`
 
@@ -18,7 +18,7 @@ Restore 0078 honesty for unique-pst + `--also-eml`: combined `fidelity` is worse
 | **DoD-3** Cancel counts | **PASS** | Cancel Ok uses `also_eml_recovered_counts`; recovery test asserts 7/2/3 |
 | **DoD-4** Tests | **PASS** | See test names below; existing 0078 / 0107 also-eml green |
 | **DoD-5** Docs | **PASS** | `docs/unique-pst-export.md` combined-job + allow-partial `ok=false`; CHANGELOG Unreleased; D-0109 closed |
-| **DoD-6** Recorded | **Pending publish** | This file drafted; registry stays **In progress** until orchestrator merge; ledger tx `40364b99-…` not committed here |
+| **DoD-6** Recorded | **PASS** | Registry **Completed**; ledger BUGFIX `40364b99-…` committed with product PR; this file records PR #109 / `dc7c29c` |
 
 ## Bugbot IDs closed
 
@@ -61,5 +61,10 @@ cargo clippy -p pst-dedup-cli --all-targets -- -D warnings
 
 | Field | Value |
 |---|---|
-| PR | _(orchestrator)_ |
-| Merge SHA | _(orchestrator)_ |
+| PR | [#109](https://github.com/Ryan-AI-Studios/pst-dedupe/pull/109) |
+| Merge SHA | `dc7c29c` |
+
+## Review rounds
+
+- Internal: 2 rounds → 0 open (comment hygiene + helper invariant sampling)
+- Codex (`review.codex.md`): engineering DoD-1..5 Met; initial FAIL only for pending DoD-6 publish — resolved by merge + this update
