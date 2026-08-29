@@ -420,11 +420,11 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 
 ### Wave 11 — Review chrome (Series O)
 
-Tauri 2 + Leptos. Plex/paper. Keep egui Process until **0116**. Mock at `C:\dev\dedupe-frontend` is research.
+**Next series** (Series S closed 2026-08-29). Tauri 2 + Leptos. Plex/paper. Keep egui Process until **0116**. Mock at `C:\dev\dedupe-frontend` is research (do not vendor coral). **0110 Ready — not started.**
 
 | ID | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|
-| **0110** | MatterChromeTauri | **Proposed** | **P1 O** | Matter list/home; one `matter-core` invoke. |
+| **0110** | MatterChromeTauri | **Ready** | **P1 O** | Matter list/home; one `matter_overview` (`load_case_overview`). Spec: `0110-MatterChromeTauri/`. |
 | **0111** | ReviewQueueFirstPass | **Proposed** | **P1 O** | Virtualized first-pass queue. |
 | **0112** | ReviewWindow | **Proposed** | **P0 O** | Three-pane coding; money screen. |
 | **0113** | ProduceChecklist | **Proposed** | **P1 O** | Checklist; DAT only. |
@@ -460,7 +460,7 @@ Tauri 2 + Leptos. Plex/paper. Keep egui Process until **0116**. Mock at `C:\dev\
 - Immediate FedRAMP / full SaaS ops / billing  
 - Another intelligence/plugin series without demand  
 - Image production factory, full Relativity suite, SCIM — unless production rejections or a paid requirement  
-- Rewriting Desk as web/WASM (Desk remains **native eframe/egui**)
+- Rewriting Process jobs in WASM or standing up a daemon (Process stays **egui** until **0116**; Review/Produce chrome is **Tauri 2 + Leptos** Series O)
 
 ### Series K — Clean Unique export (planned)
 

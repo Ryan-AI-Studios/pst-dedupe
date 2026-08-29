@@ -122,7 +122,7 @@
 | 64 | P1 R | **0107** UniquePstAlsoEml | ✅ Completed | unique-pst `--also-eml` same keep-set unique-eml pack; D-0071-also-eml; PR #104 / `339dfa0` |
 | 65 | P1 S | **0108** PolyDegradedWinnerRisk | ✅ Completed | effective degraded_winner_rate excludes poly-only CrcSuspect on poly sources; D-0108 |
 | 66 | P2 S | **0109** AlsoEmlClassifyHonesty | ✅ Completed | PR #104 Bugbot also-eml classify/cancel; D-0109; PR #109 / `dc7c29c` |
-| 67 | P1 O | **0110** MatterChromeTauri | 📦 Proposed | Tauri 2 + Leptos matter chrome; one invoke |
+| 67 | P1 O | **0110** MatterChromeTauri | ⬜ Ready | Tauri 2 + Leptos matter chrome; one `matter_overview` command |
 | 68 | P1 O | **0111** ReviewQueueFirstPass | 📦 Proposed | virtualized first-pass queue |
 | 69 | P0 O | **0112** ReviewWindow | 📦 Proposed | three-pane coding |
 | 70 | P1 O | **0113** ProduceChecklist | 📦 Proposed | produce checklist; DAT only |
@@ -243,9 +243,11 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0116)
 
+**Next series** after Series S. **0110 Ready — not started.**
+
 | Order | Track | Notes |
 |---|---|---|
-| 1 | **0110** MatterChromeTauri | **Proposed** — matter list/home; one invoke; Plex/paper |
+| 1 | **0110** MatterChromeTauri | **Ready** — matter list/home; `matter_overview`; Plex/paper |
 | 2 | **0111** ReviewQueueFirstPass | **Proposed** — virtualized first-pass queue |
 | 3 | **0112** ReviewWindow | **Proposed** — three-pane; Resp ⊥ Privilege |
 | 4 | **0113** ProduceChecklist | **Proposed** — checklist; DAT only; no OPT |

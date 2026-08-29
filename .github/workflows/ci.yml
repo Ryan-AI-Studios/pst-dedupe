@@ -89,16 +89,37 @@ jobs:
         # deny.toml: strict licenses (no GPL/AGPL allow), advisories, crates.io sources only.
         run: cargo deny check
 
+  # 0110 — Leptos CSR frontend (workspace-excluded); host tests stay in `test` job.
+  chrome-ui:
+    name: chrome-ui
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          workspaces: crates/dedupe-chrome/ui
+      - name: Install trunk
+        run: cargo install trunk --locked --version 0.21.14
+      - name: trunk build (dedupe-chrome-ui)
+        working-directory: crates/dedupe-chrome/ui
+        run: trunk build --release --config Trunk.toml
+      - name: cargo test -p dedupe-chrome (host)
+        run: cargo test -p dedupe-chrome
+
   # Mirrors local `ledgerful verify` steps when ledgerful is not available in CI.
   # Local pre-push runs: ledgerful verify --scope fast (which uses the same steps).
   verify-parity:
     name: verify-parity
     runs-on: windows-latest
-    needs: [fmt, clippy, test, audit, deny]
+    needs: [fmt, clippy, test, audit, deny, chrome-ui]
     timeout-minutes: 5
     steps:
       - name: Gate summary
         run: |
-          Write-Host "fmt + clippy + test + audit + deny matched track 0062 RC gates"
+          Write-Host "fmt + clippy + test + audit + deny + chrome-ui matched track 0062/0110 gates"
           Write-Host "Local pre-push additionally runs: ledgerful verify --scope fast"
           Write-Host "Local pre-commit runs: ledgerful ledger status + scripts/pre-commit.ps1"

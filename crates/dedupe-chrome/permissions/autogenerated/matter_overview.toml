@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-matter-overview"
+description = "Enables the matter_overview command without any pre-configured scope."
+commands.allow = ["matter_overview"]
+
+[[permission]]
+identifier = "deny-matter-overview"
+description = "Denies the matter_overview command without any pre-configured scope."
+commands.deny = ["matter_overview"]

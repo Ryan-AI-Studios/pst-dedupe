@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-recent-matters-list"
+description = "Enables the recent_matters_list command without any pre-configured scope."
+commands.allow = ["recent_matters_list"]
+
+[[permission]]
+identifier = "deny-recent-matters-list"
+description = "Denies the recent_matters_list command without any pre-configured scope."
+commands.deny = ["recent_matters_list"]

@@ -36,7 +36,11 @@ members = [
     "crates/matter-service",
     "crates/matter-platform",
     "crates/matter-storage",
+    "crates/dedupe-chrome",
 ]
+
+# Leptos CSR wasm frontend — host-compile excluded from workspace cargo test.
+exclude = ["crates/dedupe-chrome/ui"]
 
 # OIDC client (track 0059) — pin 4.0.x, rustls via reqwest default features in openidconnect
 # (declared on matter-service; listed here for workspace discoverability)
