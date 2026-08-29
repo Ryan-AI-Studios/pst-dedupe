@@ -58,6 +58,8 @@ allow = [
 # Workspace crates use LicenseRef-Proprietary + LICENSE file.
 exceptions = [
     { allow = ["LicenseRef-Proprietary"], crate = "dedup-engine" },
+    { allow = ["LicenseRef-Proprietary"], crate = "dedupe-chrome" },
+    { allow = ["LicenseRef-Proprietary"], crate = "dedupe-chrome-ui" },
     { allow = ["LicenseRef-Proprietary"], crate = "dedupe-desk" },
     { allow = ["LicenseRef-Proprietary"], crate = "extract-calendar" },
     { allow = ["LicenseRef-Proprietary"], crate = "extract-office" },

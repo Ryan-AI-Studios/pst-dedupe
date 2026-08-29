@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-create-matter"
+description = "Enables the create_matter command without any pre-configured scope."
+commands.allow = ["create_matter"]
+
+[[permission]]
+identifier = "deny-create-matter"
+description = "Denies the create_matter command without any pre-configured scope."
+commands.deny = ["create_matter"]

@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0110 — Matter chrome Tauri 2 + Leptos)
+
+- New `dedupe-chrome` EXE (Tauri 2 + Leptos 0.8 CSR): matter list/home with honest `matter_overview` chips from one `open_for_read` + `load_case_overview_on`, create/recents helpers, Process/Review/Produce/Admin stubs. Absorbs **D-0110-matter-chrome** (registry Completes on publish).
+
 ### Fixed (0109 — also-eml classify / cancel honesty)
 
 - Unique-pst combined `fidelity` is the worse of PST + also-eml classified fidelities (not derived from combined exit). `ok == (fidelity == complete) && !cancelled` for all unique-pst jobs, including `--allow-partial-fidelity` (exit 0 stays `ok: false` / `error.code=partial_fidelity`) and risk-gate **65** (stays `fidelity=complete`).

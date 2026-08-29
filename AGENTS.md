@@ -64,6 +64,7 @@ rust{
     "dedup-engine owns dedup hashing, index, CSV report, EML serialization"
     "pst-dedup-cli owns the CLI surface: inspect, scan, dups, JSON/CSV output"
     "pst-dedup-gui owns the egui app and background scan worker"
+    "dedupe-chrome owns Tauri 2 + Leptos matter chrome (one matter_overview; ui/ excluded from workspace host builds)"
     "pst-writer owns experimental PST writing and fixture/EML import helpers"
     "matter-core owns matter layout, SQLite metadata, CAS, audit chain, jobs/checkpoints"
     "ingest-purview owns package detect, safe ZIP expand, leaf checkpoints; call from blocking worker only"

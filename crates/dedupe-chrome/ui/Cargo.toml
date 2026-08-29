@@ -1,0 +1,38 @@
+[package]
+name = "dedupe-chrome-ui"
+version = "0.2.0-rc.1"
+edition = "2021"
+description = "Dedupe Desk — Leptos CSR matter chrome"
+license = "LicenseRef-Proprietary"
+license-file = "../../../LICENSE"
+
+# Standalone package: listed in root workspace.exclude so host cargo test
+# does not try to compile this wasm CSR crate for the host target.
+[workspace]
+
+[dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+leptos_router = { version = "0.8" }
+console_error_panic_hook = "0.1"
+console_log = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+percent-encoding = "2"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "Window",
+    "Document",
+    "HtmlElement",
+    "HtmlInputElement",
+    "KeyboardEvent",
+    "MouseEvent",
+    "Element",
+    "DomTokenList",
+]
