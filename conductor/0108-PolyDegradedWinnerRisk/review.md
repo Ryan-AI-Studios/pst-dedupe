@@ -34,7 +34,7 @@ Unique-pst `export_risk` keys advisory `degraded_winner_rate` on **`effective_de
 cargo fmt --all --check                          → pass
 cargo clippy --workspace --all-targets -- -D warnings → pass
 cargo test --workspace                           → pass
-ledgerful verify                                 → (see publish note)
+ledgerful verify                                 → pass
 ```
 
 ## Residual
@@ -48,5 +48,5 @@ ledgerful verify                                 → (see publish note)
 
 | Field | Value |
 |---|---|
-| PR | _(filled after open)_ |
-| Merge SHA | _(filled after squash-merge)_ |
+| PR | [#106](https://github.com/Ryan-AI-Studios/pst-dedupe/pull/106) |
+| Merge SHA | `cf655a66a2a62d610490c2b464334a14f1c9df9f` |
