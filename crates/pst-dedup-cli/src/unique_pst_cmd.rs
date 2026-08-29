@@ -3311,6 +3311,12 @@ pub fn run_unique_pst_with_options(
     let crc_classes =
         crate::unique_export_report::crc_source_classes_from_files(&outcome.summary.files);
     let crc_adj = crate::unique_export_report::poly_crc_risk_adjustment(&crc_classes);
+    let deg_adj = crate::unique_export_report::poly_degraded_winner_adjustment(
+        keep_set.stats.unique,
+        &keep_set.winners,
+        &outcome.summary.files,
+        crc_adj.poly_class_crc_discounted,
+    );
     let export_risk = crate::unique_export_report::compute_export_risk(
         &outcome.summary.preflight.recommendation,
         &crate::unique_export_report::ExportRiskInputs {
@@ -3326,6 +3332,8 @@ pub fn run_unique_pst_with_options(
             poly_class_crc_discounted: crc_adj.poly_class_crc_discounted,
             discount_attach_stream_crc: crc_adj.discount_attach_stream_crc,
             poly_class_crc_sources: crc_adj.poly_class_crc_sources,
+            effective_degraded_winner_rate: deg_adj.effective_degraded_winner_rate,
+            degraded_winners_poly_only: deg_adj.degraded_winners_poly_only,
         },
     );
 

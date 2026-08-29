@@ -149,7 +149,7 @@ Default keep-set grouping unites messages **across custodians** (global scope). 
 | Chronological winner | `--policy earliest_date` prefers earliest submit time (delivery fallback); missing dates rank last — disclose when used. |
 | `first_seen` honesty | Default `first_seen` is **sorted input-path order**, not chronological send time. |
 | Per-source isolation | `--dedupe-scope per-source` when cross-mailbox collapse is not authorized. |
-| Nested `.msg` deeper than 3 | If `export_attachments.csv` / histogram shows `ATTACH_DEPTH_LIMIT`, re-run with `--max-embedded-depth 8` (product ceiling). Remaining rows stay disclosed; leftover exit 64 is not a parser bug. Optional INC* HITL: `output/inc0102784-post-0101/` (operator-local; never commit). |
+| Nested `.msg` deeper than 3 | If `export_attachments.csv` / histogram shows `ATTACH_DEPTH_LIMIT`, re-run with `--max-embedded-depth 8` (product ceiling). Remaining rows stay disclosed; leftover exit 64 is not a parser bug. INC* HITL **2026-08-29:** `output/inc0102784-post-0107/` (operator-local; never commit) — depth 8 cleared `ATTACH_DEPTH_LIMIT` (exit 0; also-eml 4055/446). |
 
 Full flag table: [`unique-pst-export.md`](unique-pst-export.md).
 
@@ -194,6 +194,7 @@ Product defaults (CLI-configurable vs fixed product constants — do **not** ass
 | `block_crc_read_rate` escalate class | **≥ 0.15** on the **effective** (non-poly) rate | **Fixed product constant** (0077/0099 export-risk policy; not a CLI flag). Poly-class sources are excluded from the keyed rate; raw `block_crc_read_rate` stays on `inputs`. |
 | Dual-rate poly heuristic | page ≥ **0.50** **AND** block ≥ **0.50** | **Fixed product constant** (0077 `CRC_SUSPECT` poly heuristic; not a CLI flag). Unique-pst `export_risk` (0099) uses the same classifier — poly-class CRC alone does not elevate post evaluation. |
 | `poly_class_crc_discounted` | attest that poly sources were excluded from the keyed rate | May **co-occur** with a non-CRC `not_export_ready` reason (scan preflight, failed volume, attach fail). Vocabulary still frozen. |
+| `effective_degraded_winner_rate` | keyed degrade rate after excluding poly-only `CrcSuspect`/`AttachStreamCrc` on `poly_class_crc` sources (0108) | Raw `degraded_winner_rate` stays on `inputs`. Never discounted: non-poly degrade (`BODY_UNAVAILABLE`, attach-open, …) and `attach_fail_rate` / failed volume. INC* may stay `re_export_recommended` when non-poly degrade exceeds `max_degraded_winner_rate` (0.02) — do not raise the cap. |
 | `distinct_bad_bids` large / `exact=false` | widespread corruption **unless** `poly_class_crc` | Expected on poly-class stores; do not treat as re-export evidence when `poly_class_crc` is true. |
 | `ATTACH_STREAM_CRC` Info | warning-only attach trailer mismatch | Elevates `export_risk` **unless** `discount_attach_stream_crc` (poly-class-only job). Never discounted: `attach_fail_rate`. |
 | `export_risk` vocabulary | `ok` \| `re_export_recommended` \| `not_export_ready` | **One** fixed vocabulary (optional `--fail-on-export-risk` gates exit **65**) |

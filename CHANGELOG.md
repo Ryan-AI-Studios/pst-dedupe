@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0108 — poly degraded-winner export-risk honesty)
+
+- Unique-pst `export_risk` keys advisory `degraded_winner_rate` on **`effective_degraded_winner_rate`** when present: poly-only `CrcSuspect` / `AttachStreamCrc` on `poly_class_crc` sources are excluded (same poly discount gate as 0099). Raw `degraded_winner_rate` stays on `inputs`; body/attach and non-poly CRC still elevate. Attest: `degraded_winners_poly_only`. Closes **D-0108-poly-degraded-winner-risk**. Residual: **D-0108-keepset-crc-retaint** (keep-set still re-taints).
+
 ### Added (0107 — unique-pst `--also-eml` co-export)
 
 - `unique-pst --also-eml <dir>` writes a real unique-EML pack from the **same** keep-set winners as the unique-PST (no second scan / no `run_unique_eml`). Nested MIME follows `--max-embedded-depth`; volume defaults match unique-eml (`10000` / `VOL`).

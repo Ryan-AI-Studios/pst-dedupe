@@ -188,7 +188,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0032-01 | — | Full PDF/image geometric redaction + content burn-in | P0 is text-body regions + redacted text CAS only | **0034** / residual |
+| D-0032-01 | — | Full PDF/image geometric redaction + content burn-in | P0 is text-body regions + redacted text CAS only. Series O **0114** (`zpdf`) is the planned owner. | residual / **0114** |
 | D-0032-02 | — | Native DOCX/XLSX redaction | Text path only | **0033**+ |
 | D-0032-03 | — | Production packaging of redacted text + load file | **Closed in 0040** (`redacted_text_sha256` only when redactions; never original; synthetic EML uses redacted body) | — |
 | D-0032-04 | — | QC fail produce if stale redactions / missing artifact | **Closed in 0041** (`redacted_text_missing` error + produce `require_qc_pass`) | — |
@@ -224,7 +224,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0034-01 | — | OCR for empty **and** low-text PDFs | **Consumed in 0036**: OCR success sets `pdf_needs_ocr=0` + review `text_sha256` | — |
-| D-0034-02 | — | First-page / multi-page **raster preview** | **Locked deferred** — no pure-Rust full renderer in P0; future optional PDFium/MuPDF feature | residual |
+| D-0034-02 | — | First-page / multi-page **raster preview** | Planned **0114** via `zpdf` (MIT) + pdfium fallback. Do not bundle MuPDF/Poppler. | residual / **0114** |
 | D-0034-03 | — | PDFium / MuPDF bundled native engine | Forbidden as required P0 dep | residual optional feature |
 | D-0034-04 | — | Geometric PDF redaction burn-in | Not extract track | residual (D-0032-01) |
 | D-0034-05 | — | Multi-page interactive PDF viewer | Residual with preview engine | residual |
@@ -325,7 +325,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0040-01 | — | TIFF/PDF image productions + OPT/LFP | No image factory P0 | residual / image redaction |
+| D-0040-01 | — | TIFF/PDF image productions + OPT/LFP | No image factory P0. Series O **0115** parked until a produce needs images. | residual / **0115** parked |
 | D-0040-02 | — | CLI `produce` headless | **Closed in 0045** (`produce run` / `job run --kind produce`) | — |
 | D-0040-03 | — | Broken-family QC (orphan attach / missing parent) | **Closed in 0041** (orphan error; incomplete_parent any missing non-withheld child warn) | — |
 | D-0040-04 | — | Privilege log co-export into volume `PRIVILEGE/` | Separate 0031 export remains | residual |
@@ -623,7 +623,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0060-01 | — | CP1252 / legacy encoding DAT path | UTF-8 BOM default; fail-closed CP1252 residual (D-0040-06) | residual |
 | D-0060-02 | — | Desk produce profile dropdown | **Closed in 0064** — Solo produce dialog profile picker + required Bates start + pre-flight | **closed** |
 | D-0060-03 | — | Auto suggest next Bates (MAX prefix) | Start still explicit required | residual |
-| D-0060-04 | — | Image + OPT/LFP production profiles | D-0040-01; name_by_bates extends to images | residual |
+| D-0060-04 | — | Image + OPT/LFP production profiles | D-0040-01; name_by_bates extends to images. Owner **0115** (parked). | residual / **0115** parked |
 | D-0060-05 | — | Full Relativity load-file suite | Alias map only P0 | residual |
 | D-0060-06 | — | Firm-wide profile pack sync | Matter-local upsert is enough P0 | residual |
 | D-0060-07 | — | UK/EU/AU full protocol packs | Beyond template tags / jurisdiction_tag | residual |
@@ -882,7 +882,10 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0097-window-edge-normalize | P3 | Window-edge bare URL dedupe skips `normalize_candidate` | **Closed in 0105:** `handle_window_edge_bare` runs `normalize_candidate(full, true)` before `classify_url`; classified over-length URLs join `seen` via `note_overlength` (max-links check before that insert). Punctuated / over-length edge duplicates no longer emit false `BODY_CLOUD_LINK_WINDOW`. | **closed / 0105** |
 | D-0093-recipient-tc-multipage | P3 | Recipient TC beyond single-page HN (Strategy B budget cap) | **Closed in 0100** (PR #90, `ab1c7b0`): Strategy A row-matrix subnode + RowsPerBlock (`Floor(8176/56)=146`) + multi-block HN on the recipient-table node; shared `TableContext::load`. Production does not emit `RECIPIENT_TC_TRUNCATED`. Residual: HNBITMAPHDR (attach-table closed in **0104**; SLBLOCK NID order closed in **0103**). | **closed / 0100** |
 | D-0093-attachment-tc-page | P3 | Attachment-table TC (NID `0x671`) is single-page and uncapped | **Closed in 0104:** Strategy A (row-matrix subnode + RowsPerBlock `Floor(8176/25)=327` + multi-page HN on the attachment-table node; cell NID for filenames &gt;2048 UTF-16 bytes). Production does not emit `ATTACH_TC_TRUNCATED`. Residual: HNBITMAPHDR (`D-0100-hn-bitmap-hdr`). | **closed / 0104** |
-| D-0094-inc-resmoke | P3 | Operator re-smoke INC0102784 unique-pst after nested export | **2026-08-26 post-0098:** 4055/4055 verify; folder_tree_match true; exit 64 `ATTACH_SOFT_FAIL` only (4 depth-limit). `export_risk` poly-class lie **closed in 0099**. Recipient truncation **closed in 0100**. Depth CLI **shipped in 0101**. **HITL skipped** (no operator INC* `--max-embedded-depth 8` smoke this pass). Optional: `output/inc0102784-post-0101/` (operator-local; not CI). | residual / operator HITL |
+| D-0094-inc-resmoke | P3 | Operator re-smoke INC0102784 unique-pst after nested export | **Closed 2026-08-29 HITL.** Both split PSTs (`INC0102784.pst` 4.00 GiB + `INC0102784-2.pst` 537 MiB; one search split across files) on release `target\release\pst-dedup.exe` built from `ba04519` (0107). Flags: `--source-rank INC0102784.pst --source-rank INC0102784-2.pst --max-embedded-depth 8 --also-eml`. Wall 787 s. Exit **0**; fidelity `complete`; 4055/4055 verify; `folder_tree_match` true; QC sample 64 msgs / 312 attaches, defect=0, known_gap=51 explained. `ATTACH_DEPTH_LIMIT` **0** (was 4 at default depth 3 → exit 64). `recipient_tc_truncated*` **0**. `attachments_failed` **0** (ledger 6034× `ATTACH_STREAM_CRC` Info only). also-eml: 4055 `.eml`, 446 nested, attach_failed 0, `also_eml_exit_code` 0. Body-cloud: 3 kept `BODY_CLOUD_LINK` (`truncated=false`); `body_scan_window_capped_messages=62`; truncated CSV **0** (0097). `export_risk=re_export_recommended` (`degraded_winner_rate=1.000` — all 4055 winners CRC-degraded; `poly_class_crc_discounted`; effective_block=0; scan preflight `ok`). 0099 discounted block/attach CRC, not `degraded_winner_rate` → **D-0108-poly-degraded-winner-risk**. Operator-local: `output/inc0102784-post-0107/` (gitignored; never commit PSTs). Prior 2026-08-26 post-0098: 4055/4055; exit 64 / 4 depth-limit; HITL skipped. | **closed / HITL 2026-08-29** |
+| D-0108-poly-degraded-winner-risk | P1 | Poly-class CRC taint sets every keep-set winner `integrity.degraded` (`CrcSuspect`), so `degraded_winner_rate=1.0` elevates `export_risk` after 0099 discounted block/attach CRC | **Closed in 0108:** `effective_degraded_winner_rate` excludes poly-only `CrcSuspect`/`AttachStreamCrc` on `poly_class_crc` sources when `poly_class_crc_discounted`. Raw `degraded_winner_rate` stays on `inputs`. Never discount **non-poly** degrade. HITL shape still advisory if body-unavailable share > 0.02. | **closed / 0108** |
+| D-0108-keepset-crc-retaint | P3 | Scan poly-clears `CRC_SUSPECT` (`degraded_messages=0`); unique-pst keep-set re-taints every winner | **Updated after 0108:** export_risk now keys effective degrade rate; keep-set rows remain `CRC_SUSPECT`-tainted (do not restrip — fidelity ranking). Residual: optional later restrip policy. | residual / after **0108** |
+| D-0109-also-eml-classify | P2 | unique-pst `--also-eml` combined classify: partial-allowed → `ok`/complete; summary rewrite drops also-eml cancel 130; cancel recovery zeros also-eml attach/embedded counts | PR #104 Cursor Bugbot (3 findings) after 0107 merge. Owner **0109**. | **open / 0109** |
 | D-0098-template-nid-collision | P0 | Folder nidIndex `0x30` satellite TCs (`0x60D`/`0x60E`/`0x60F`) collide with MS-PST table templates; NBT last-wins empty template; `folders()` / unique-pst verify drop those messages (INC*: −50 in Recoverable Items/Purges) | **Closed in 0098:** `alloc_nid` skips reserved nidIndex `0x30`/`0x33`/`0x34`; `add_node_data` / NBT encode fail closed on duplicate NID | **closed / 0098** |
 | D-0100-hn-bitmap-hdr | P3 | HNBITMAPHDR pages (8, 136, 264, …) not implemented in 0100 multi-block HN | 0100/0104 fail-close if a TC heap (recipient or attachment) would land on a bitmap page. INC* 136-row class is expected &lt; 8 pages. Do not implement bitmap pages until a corpus hits the error. | residual / after **0100** |
 | D-0100-slblock-nid-order | P3 | Recipient-table SLBLOCK unsorted when cell NIDs exist | **Closed / 0103:** trailing matrix `push` + `add_subnode_leaf` NID-ascending emit-sort (fail closed on duplicates). CI asserts on-disk SLBLOCK order for long-string cell NIDs. | **closed / 0103** |

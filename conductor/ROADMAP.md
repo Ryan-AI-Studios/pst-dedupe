@@ -388,7 +388,7 @@ Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0
 | **0103** | RecipientTcSlblockNidOrder | **Completed** | **P2 P** | Trailing matrix `push` + `add_subnode_leaf` NID-ascending emit-sort; fail closed on duplicate NIDs. Closes **D-0100-slblock-nid-order**. PR **#96** `f66ae9b`. Spec: `0103-RecipientTcSlblockNidOrder/`. |
 | **0104** | AttachmentTcMultipage | **Completed** | **P2 P** | Strategy A for per-message attachment table (`0x671`): row-matrix subnode + RowsPerBlock (`Floor(8176/25)=327`) + multi-block HN. Closes **D-0093-attachment-tc-page**. HNBITMAPHDR stay fail-closed. PR **#98** `a35927c`. Spec: `0104-AttachmentTcMultipage/`. |
 
-**Order:** **0099** → **0100** → **0101** → **0102** → **0103** → **0104**. Frontend Series O (if started) uses **0108+**.
+**Order:** **0099** → **0100** → **0101** → **0102** → **0103** → **0104**. Frontend Series O uses **0110+**.
 
 ### Wave 8 — Unique-export honesty residuals (Series Q)
 
@@ -397,7 +397,7 @@ Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0
 | **0105** | BodyCloudWindowEdgeNormalize | **Completed** | **P3 Q** | Window-edge bare dedupe uses `normalize_candidate` (trailing sentence punct / unescape) before classify; over-length classified URLs join `seen`. Closes **D-0097-window-edge-normalize**. Exact-string duplicate-cut tests already exist in 0097; punctuated / over-length cases closed. Not frontend. Spec: `0105-BodyCloudWindowEdgeNormalize/`. |
 | **0106** | UniqueEmlNestedMime | **Completed** | **P1 Q** | unique-eml reconstructs RFC 5322 inside `message/rfc822` from 0094 `NestedCanonicalMessage`; method-5 without DTO is a ledgered skip (no MAPI dump). `--max-embedded-depth` on unique-eml (1–8, default 3). Narrows **D-0067-embedded-depth** (do not close — matter children remain). Not frontend. Spec: `0106-UniqueEmlNestedMime/`. |
 
-**Order:** **0105** → **0106** (Series Q **Completed**). Frontend Series O (if started) uses **0108+**. No BCC track. No HNBITMAPHDR until a corpus hits the fail-closed error.
+**Order:** **0105** → **0106** (Series Q **Completed**). Frontend Series O uses **0110+**. No BCC track. No HNBITMAPHDR until a corpus hits the fail-closed error.
 
 ### Wave 9 — Unique-export operator co-export (Series R)
 
@@ -405,7 +405,34 @@ Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0
 |---|---|---|---|---|
 | **0107** | UniquePstAlsoEml | **Completed** | **P1 R** | Wire `unique-pst --also-eml <dir>` to a unique-eml pack from the **same keep-set** (no second scan). Closes **D-0071-also-eml**. 0106 unblocked honest nested MIME. Not frontend. Spec: `0107-UniquePstAlsoEml/`. PR #104 / `339dfa0`. |
 
-**Order:** **0107** Completed. Frontend if started uses **0108+**.
+**Order:** **0108** Completed. Series S **0109** Proposed. Frontend Series O **0110+**.
+
+### Wave 10 — Unique-export HITL residuals (Series S)
+
+Structural INC* soak 2026-08-29 is green. Remaining honesty from that run + PR #104 Bugbot.
+
+| ID | Track | Status | Priority | High-level notes |
+|---|---|---|---|---|
+| **0108** | PolyDegradedWinnerRisk | **Completed** | **P1 S** | Effective degrade rate excludes poly-only `CrcSuspect` on poly-class sources. HITL 3931/124 → ≈0.031 still advisory (stops 1.000 lie). Spec: `0108-PolyDegradedWinnerRisk/`. |
+| **0109** | AlsoEmlClassifyHonesty | **Proposed** | **P2 S** | Combined also-eml `ok`/fidelity/cancel rewrite (PR #104 Bugbot). Spec: `0109-AlsoEmlClassifyHonesty/`. |
+
+**Order:** **0108** Completed → **0109** Proposed. No BCC. No HNBITMAPHDR.
+
+### Wave 11 — Review chrome (Series O)
+
+Tauri 2 + Leptos. Plex/paper. Keep egui Process until **0116**. Mock at `C:\dev\dedupe-frontend` is research.
+
+| ID | Track | Status | Priority | High-level notes |
+|---|---|---|---|---|
+| **0110** | MatterChromeTauri | **Proposed** | **P1 O** | Matter list/home; one `matter-core` invoke. |
+| **0111** | ReviewQueueFirstPass | **Proposed** | **P1 O** | Virtualized first-pass queue. |
+| **0112** | ReviewWindow | **Proposed** | **P0 O** | Three-pane coding; money screen. |
+| **0113** | ProduceChecklist | **Proposed** | **P1 O** | Checklist; DAT only. |
+| **0114** | PdfRasterRedact | **Proposed** | **P1 O** | zpdf + pdfium; after 0112. |
+| **0115** | ImageOptFactory | **Proposed — parked** | **P2 O** | TIFF/OPT only if a produce needs images. |
+| **0116** | ProcessFold | **Proposed** | **P2 O** | Fold egui Process last. |
+
+**Order:** **0110** → **0111** → **0112** → **0113**; **0114** after window; **0115** parked; **0116** last.
 
 ### What each step is for
 
@@ -454,7 +481,8 @@ Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0
 
 | Surface | Stack |
 |---|---|
-| **Dedupe Desk** | Native Windows **`eframe` / `egui`** (`dedupe-desk`) — **not WASM** |
+| **Dedupe Desk Process** | Native **`eframe` / `egui`** (`dedupe-desk`) until **0116** |
+| **Review / Produce / Matter chrome** | **Tauri 2 + Leptos** (Series O **0110+**). One EXE, no daemon, no WASM job rewrite. Plex/paper tokens. |
 | **CLI** | `pst-dedup` headless |
 | **Service** | `matter-service` HTTP (opt-in multi-user / platform) |
 
