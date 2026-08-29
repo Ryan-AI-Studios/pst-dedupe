@@ -388,15 +388,24 @@ Post-0098 INC* soak: verify counts match; handoff still not affidavit-clean. **0
 | **0103** | RecipientTcSlblockNidOrder | **Completed** | **P2 P** | Trailing matrix `push` + `add_subnode_leaf` NID-ascending emit-sort; fail closed on duplicate NIDs. Closes **D-0100-slblock-nid-order**. PR **#96** `f66ae9b`. Spec: `0103-RecipientTcSlblockNidOrder/`. |
 | **0104** | AttachmentTcMultipage | **Completed** | **P2 P** | Strategy A for per-message attachment table (`0x671`): row-matrix subnode + RowsPerBlock (`Floor(8176/25)=327`) + multi-block HN. Closes **D-0093-attachment-tc-page**. HNBITMAPHDR stay fail-closed. PR **#98** `a35927c`. Spec: `0104-AttachmentTcMultipage/`. |
 
-**Order:** **0099** → **0100** → **0101** → **0102** → **0103** → **0104**. Frontend Series O (if started) uses **0106+**.
+**Order:** **0099** → **0100** → **0101** → **0102** → **0103** → **0104**. Frontend Series O (if started) uses **0108+**.
 
 ### Wave 8 — Unique-export honesty residuals (Series Q)
 
 | ID | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|
 | **0105** | BodyCloudWindowEdgeNormalize | **Completed** | **P3 Q** | Window-edge bare dedupe uses `normalize_candidate` (trailing sentence punct / unescape) before classify; over-length classified URLs join `seen`. Closes **D-0097-window-edge-normalize**. Exact-string duplicate-cut tests already exist in 0097; punctuated / over-length cases closed. Not frontend. Spec: `0105-BodyCloudWindowEdgeNormalize/`. |
+| **0106** | UniqueEmlNestedMime | **Completed** | **P1 Q** | unique-eml reconstructs RFC 5322 inside `message/rfc822` from 0094 `NestedCanonicalMessage`; method-5 without DTO is a ledgered skip (no MAPI dump). `--max-embedded-depth` on unique-eml (1–8, default 3). Narrows **D-0067-embedded-depth** (do not close — matter children remain). Not frontend. Spec: `0106-UniqueEmlNestedMime/`. |
 
-**Order:** **0105**. Frontend Series O (if started) uses **0106+**. No BCC track. No HNBITMAPHDR until a corpus hits the fail-closed error.
+**Order:** **0105** → **0106** (Series Q **Completed**). Frontend Series O (if started) uses **0108+**. No BCC track. No HNBITMAPHDR until a corpus hits the fail-closed error.
+
+### Wave 9 — Unique-export operator co-export (Series R)
+
+| ID | Track | Status | Priority | High-level notes |
+|---|---|---|---|---|
+| **0107** | UniquePstAlsoEml | **Completed** | **P1 R** | Wire `unique-pst --also-eml <dir>` to a unique-eml pack from the **same keep-set** (no second scan). Closes **D-0071-also-eml**. 0106 unblocked honest nested MIME. Not frontend. Spec: `0107-UniquePstAlsoEml/`. PR #104 / `339dfa0`. |
+
+**Order:** **0107** Completed. Frontend if started uses **0108+**.
 
 ### What each step is for
 

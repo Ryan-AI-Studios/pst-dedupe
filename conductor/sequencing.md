@@ -118,6 +118,8 @@
 | 60 | P2 P | **0103** RecipientTcSlblockNidOrder | ✅ Completed | SLBLOCK NID order; D-0100-slblock-nid-order; PR #96 |
 | 61 | P2 P | **0104** AttachmentTcMultipage | ✅ Completed | attach-table Strategy A; D-0093-attachment-tc-page |
 | 62 | P3 Q | **0105** BodyCloudWindowEdgeNormalize | ✅ Completed | window-edge `normalize_candidate`; D-0097-window-edge-normalize |
+| 63 | P1 Q | **0106** UniqueEmlNestedMime | ✅ Completed | unique-eml nested RFC 5322 from NestedCanonicalMessage; D-0067 unique-eml half |
+| 64 | P1 R | **0107** UniquePstAlsoEml | ✅ Completed | unique-pst `--also-eml` same keep-set unique-eml pack; D-0071-also-eml; PR #104 / `339dfa0` |
 
 ## Series K spine (clean unique export)
 
@@ -208,10 +210,17 @@
 | 5 | **0103** RecipientTcSlblockNidOrder | **Completed** — trailing push + `add_subnode_leaf` emit-sort; D-0100-slblock-nid-order; PR #96 `f66ae9b` |
 | 6 | **0104** AttachmentTcMultipage | **Completed** — Strategy A attach table (`0x671`); D-0093-attachment-tc-page |
 
-**Suggested:** **0099**–**0104** **Completed**. No BCC track. Frontend Series O → **0106+**.
+**Suggested:** **0099**–**0104** **Completed**. No BCC track. Frontend Series O → **0108+**.
 
-## Series Q — Unique-export honesty residuals (0105)
+## Series Q — Unique-export honesty residuals (0105–0106)
 
 | Order | Track | Notes |
 |---|---|---|
 | 1 | **0105** BodyCloudWindowEdgeNormalize | **Completed** — window-edge bare dedupe uses `normalize_candidate`; over-length joins `seen`; D-0097-window-edge-normalize |
+| 2 | **0106** UniqueEmlNestedMime | **Completed** — unique-eml nested MIME from NestedCanonicalMessage; skip MAPI dump labeled rfc822; `--max-embedded-depth` on unique-eml; narrows D-0067 (do not close) |
+
+## Series R — Unique-export operator co-export (0107)
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0107** UniquePstAlsoEml | **Completed** — wire `unique-pst --also-eml` from the same keep-set (no second scan); closes D-0071-also-eml; PR #104 / `339dfa0`; frontend **0108+** |
