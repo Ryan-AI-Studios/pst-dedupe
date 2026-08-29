@@ -701,8 +701,8 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0067-gui-keepset | — | **Soft-closed in 0072:** GUI primary unique export is keep-set **unique-pst** wizard; legacy EML retained as secondary (“Export Unique EML (legacy scan path)”) | Full EML co-export residual: **D-0071-also-eml** | **0072** |
-| D-0067-embedded-depth | P1 | Full recursive nested MAPI extract for embedded messages | **Narrowed in 0094:** unique-pst method-5 nested `WriteMessage` export + `PidTagAttachDataObject` PtypObject + winner-only extract + child stream via `open_attach_data_from_message_node`. **0101 shipped unique-pst CLI:** `--max-embedded-depth` operator-tunable **1–8** (default **3**; clap rejects outside that range). **0106 shipped unique-eml MIME:** reconstruct RFC 5322 from `NestedCanonicalMessage`; skip MAPI dump; unique-eml `--max-embedded-depth` same 1–8/default 3. **Residual:** matter/Relativity child-document extract; 32 MiB per-nest; hard cap 8. **Do not close** this row. | **open** (unique-eml MIME shipped / 0106; residual matter children) |
+| D-0067-gui-keepset | — | **Soft-closed in 0072:** GUI primary unique export is keep-set **unique-pst** wizard; legacy EML retained as secondary (“Export Unique EML (legacy scan path)”) | Full EML co-export residual: **D-0071-also-eml** → **0107** | **0072** |
+| D-0067-embedded-depth | P1 | Full recursive nested MAPI extract for embedded messages | **Narrowed in 0094:** unique-pst method-5 nested `WriteMessage` export + `PidTagAttachDataObject` PtypObject + winner-only extract + child stream via `open_attach_data_from_message_node`. **0101 shipped unique-pst CLI:** `--max-embedded-depth` operator-tunable **1–8** (default **3**; clap rejects outside that range). **0106 shipped unique-eml MIME:** reconstruct RFC 5322 from `NestedCanonicalMessage`; skip MAPI dump; unique-eml `--max-embedded-depth` same 1–8/default 3. **Residual:** matter/Relativity child-document extract; 32 MiB per-nest; hard cap 8. **0107** is unique-pst `--also-eml` (does not close this row). **Do not close** this row. | **open** (unique-eml MIME shipped / 0106; residual matter children) |
 | D-0067-long-path | — | Windows `\\?\` long-path support when abs root already > budget | P0 truncates subject to keep abs ≤250; extreme deep roots may still fail that file | residual |
 | D-0067-cloud-attaches | — | Resolve hyperlink-only / cloud modern attachments | Not downloaded; no invented file bytes | residual |
 
@@ -745,7 +745,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0071-also-eml | — | `--also-eml` co-export unique-eml pack alongside unique-pst | Flag accepted; co-export not wired in P0 (operators can run `unique-eml` separately) | residual / optional |
+| D-0071-also-eml | — | `--also-eml` co-export unique-eml pack alongside unique-pst | **Closed in 0107** — same keep-set unique-eml pack (no second scan); combined 0078 exit; summary `also_eml_*` keys. | **closed / 0107** |
 | D-0071-operator-outlook | — | Operator Outlook / scanpst open of unique-pst multi-volume output | **Closed in 0080** — same family as D-0068-02; scanpst + attestation + per-volume first/last sampling. | **closed / 0080** |
 | D-0071-dest-nid | P3 | Optional `dest_nid` column on export_messages.csv | Writer does not surface destination NIDs to CLI today | residual polish |
 

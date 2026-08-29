@@ -64,7 +64,7 @@ Preserve-layout unique-PST trees are counsel-useful and QC-honest:
 | `--max-volume-bytes` | Soft physical-size ceiling; **off** = single volume |
 | `--overwrite` | Required to replace existing `--out` / non-empty report-dir |
 | `--verify-hash` | Full-file rehash vs report digests (default **off** for multi-GB comfort) |
-| `--also-eml <dir>` | Soft residual (accepted; co-export may be ignored — see deferred) |
+| `--also-eml <dir>` | **0107** — co-export a unique-eml pack from the **same** keep-set (no second scan). Directory required; `--overwrite` replaces a non-empty dir. Nested MIME follows `--max-embedded-depth`. BCC on EML still follows unique-eml policy (`Bcc:` from `display_bcc` when present); `--include-bcc-recipients` does not change EML headers. |
 | `--attach-ledger full\|summary-only\|off` | **0073** — attachment failure ledger (default **`full`**) |
 | `--attach-ledger-max-rows <N>` | Cap on `export_attachments.csv` rows (default **500000**); histogram never truncated |
 | `--ledger-path-mode full\|basename` | **0081** — how `source_path` is written in export CSVs (default **`full`**). Basename is handoff-only; join via `source_id` + Matter Archive (see [runbook](unique-pst-ediscovery-runbook.md) §7) |

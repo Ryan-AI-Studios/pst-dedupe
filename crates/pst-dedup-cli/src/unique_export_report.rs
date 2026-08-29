@@ -838,6 +838,18 @@ pub struct UniqueExportSummary {
     /// (window tail / max-links / url-len).
     #[serde(default)]
     pub body_cloud_link_truncated_messages: u64,
+    /// Resolved `--also-eml` path when the flag was set; JSON `null` when absent (0107).
+    pub also_eml_out: Option<String>,
+    /// Whether the also-eml co-export write actually ran (0107).
+    pub also_eml_ran: bool,
+    /// EML files written by also-eml co-export (0107).
+    pub also_eml_eml_written: u64,
+    /// Attach soft-fails recorded on the also-eml pack (0107).
+    pub also_eml_attach_parts_failed: u64,
+    /// Nested rfc822 parts written by also-eml (0107).
+    pub also_eml_embedded_messages_written: u64,
+    /// also-eml pack classify exit (`0` when not run) (0107).
+    pub also_eml_exit_code: u8,
     /// Messages whose HTML or plain body exceeded the 100k scan window (0097).
     /// Independent of whether any document-shaped candidate was dropped.
     #[serde(default)]

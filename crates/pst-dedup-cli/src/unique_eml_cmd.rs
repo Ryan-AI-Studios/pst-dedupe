@@ -9,6 +9,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::grouping_cli::{format_grouping_stats_human, grouping_context_from_cli};
 use crate::keep_set_cmd::rank_context_from_cli;
@@ -16,7 +17,8 @@ use dedup_engine::integrity::{IntegrityThresholds, ScanMode, SCAN_INTEGRITY_SCHE
 use dedup_engine::keepset::{
     finalize_with_materialize_opts, recoverable_items_hint, resolve_groups_with_grouping,
     sort_input_paths, write_keep_set_json, CanonicalMessage, DecisionCsvWriter, FamilyPolicy,
-    KeepPolicy, KeepSetProvenance, MaterializeFinalizeOpts, MessageMaterializer,
+    KeepPolicy, KeepSet, KeepSetProvenance, MaterializeFinalizeOpts, MessageMaterializer,
+    SoftSkipAttachRecord,
 };
 use dedup_engine::{
     clamp_files_per_volume, merge_pack_degraded, validate_volume_prefix, write_canonical_eml,
@@ -144,6 +146,745 @@ struct UniqueEmlSummaryOut {
     summary_path: String,
 }
 
+/// Inputs for writing an `eml_pack_v1` from an existing keep-set (unique-eml and
+/// unique-pst `--also-eml`). Callers must already have prepared `out`.
+pub struct WriteEmlPackFromKeepSetInput<'a> {
+    pub keep_set: &'a KeepSet,
+    pub paths: &'a [PathBuf],
+    pub out: &'a Path,
+    pub policy: KeepPolicy,
+    pub family_policy: FamilyPolicy,
+    pub write_opts: EmlWriteOpts,
+    pub files_per_volume: u32,
+    pub volume_prefix: String,
+    pub attach_ledger: AttachLedgerMode,
+    pub attach_ledger_max_rows: u64,
+    pub ledger_path_mode: LedgerPathMode,
+    pub soft_skip_attach_records: &'a [SoftSkipAttachRecord],
+    pub scan: ScanSummary,
+    pub scan_ok: bool,
+    pub fail_on_partial_fidelity: bool,
+    pub allow_partial_fidelity: bool,
+    /// Standalone unique-eml passes the parsed CLI gate; also-eml keeps [`RiskGate::Off`].
+    pub risk_gate: crate::export_outcome::RiskGate,
+    /// Risk level fed to classify (unique-eml historically uses Ok; also-eml locks Ok).
+    pub export_risk: dedup_engine::integrity::PreflightRecommendation,
+    pub cancel: Option<&'a AtomicBool>,
+    pub mat: &'a mut PstMaterializer,
+    pub attach_src: &'a mut PstAttachStreamSource,
+    pub manifest_json: Option<&'a Path>,
+    /// Echoed into summary.json `materialized` (promote count or winner len).
+    pub materialized_count: u64,
+}
+
+/// Result of [`write_eml_pack_from_keep_set`].
+pub struct WriteEmlPackFromKeepSetResult {
+    pub summary_json: serde_json::Value,
+    pub eml_written: u64,
+    pub attach_parts_written: u64,
+    pub attach_parts_failed: u64,
+    pub embedded_messages_written: u64,
+    pub volumes: u64,
+    pub exit: crate::error::CliExit,
+    pub exit_reasons: Vec<String>,
+    pub cancelled: bool,
+}
+
+fn eml_pack_cancel_requested(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|f| f.load(Ordering::Relaxed))
+}
+
+fn count_eml_under(dir: &Path) -> u64 {
+    let mut n = 0u64;
+    let Ok(rd) = fs::read_dir(dir) else {
+        return 0;
+    };
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.is_dir() {
+            n = n.saturating_add(count_eml_under(&p));
+        } else if p.extension().and_then(|x| x.to_str()) == Some("eml") {
+            n = n.saturating_add(1);
+        }
+    }
+    n
+}
+
+fn eml_summary_usable(path: &Path) -> bool {
+    path.is_file()
+        && fs::read_to_string(path)
+            .ok()
+            .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+            .is_some()
+}
+
+/// Recovered pack counters from an existing summary or on-disk `.eml` files.
+pub(crate) fn also_eml_recovered_counts(out: &Path) -> (u64, u64, u64, u64) {
+    let summary_path = out.join("summary.json");
+    if let Some(v) = fs::read_to_string(&summary_path)
+        .ok()
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+    {
+        let eml_written = v["eml_written"]
+            .as_u64()
+            .unwrap_or_else(|| count_eml_under(out));
+        let attach_failed = v["attach_parts_failed"].as_u64().unwrap_or(0);
+        let embedded = v["embedded_messages_written"].as_u64().unwrap_or(0);
+        let volumes =
+            v["volumes"].as_u64().unwrap_or_else(
+                || {
+                    if out.join("VOL001").is_dir() {
+                        1
+                    } else {
+                        0
+                    }
+                },
+            );
+        return (eml_written, attach_failed, embedded, volumes);
+    }
+    let eml_written = count_eml_under(out);
+    let volumes = if out.join("VOL001").is_dir() { 1 } else { 0 };
+    // Prefer manifest stats when present.
+    let man = out.join("manifest.json");
+    if let Some(v) = fs::read_to_string(&man)
+        .ok()
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+    {
+        let eml_written = v["stats"]["eml_written"].as_u64().unwrap_or(eml_written);
+        let attach_failed = v["stats"]["attach_parts_failed"].as_u64().unwrap_or(0);
+        let embedded = v["stats"]["embedded_messages_written"]
+            .as_u64()
+            .unwrap_or(0);
+        let volumes = v["stats"]["volumes"].as_u64().unwrap_or(volumes);
+        return (eml_written, attach_failed, embedded, volumes);
+    }
+    (eml_written, 0, 0, volumes)
+}
+
+/// Best-effort failed `{out}/summary.json` when pack write aborts with `Err`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_eml_hard_fail_summary(
+    out: &Path,
+    keep_set: &KeepSet,
+    scan: ScanSummary,
+    scan_ok: bool,
+    policy: KeepPolicy,
+    family_policy: FamilyPolicy,
+    max_embedded_depth: u32,
+    err: &CliError,
+) {
+    let _ = fs::create_dir_all(out);
+    let summary_path = out.join("summary.json");
+    // Do not clobber a usable summary that already carries real counts.
+    if eml_summary_usable(&summary_path) {
+        return;
+    }
+    let summary_abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
+    let (eml_written, attach_failed, embedded, volumes) = also_eml_recovered_counts(out);
+    let bytes_written = eml_written > 0 || out.join("VOL001").exists();
+    let classified = crate::export_outcome::classify_export(
+        crate::export_outcome::ExportOkInput {
+            scan_ok,
+            verify_ok: true,
+            export_err_absent: false,
+            export_partial: true,
+            messages_written_total: eml_written,
+            unique: keep_set.stats.unique,
+            attach_failed_total: attach_failed,
+            body_soft_fail_total: 0,
+            report_ok: false,
+        },
+        dedup_engine::integrity::PreflightRecommendation::Ok,
+        crate::export_outcome::RiskGate::Off,
+        true,
+        false,
+    );
+    let artifact_state = crate::export_outcome::artifact_state_for(
+        &classified,
+        bytes_written,
+        crate::export_outcome::QuarantineResult::NotAttempted,
+    );
+    let payload = UniqueEmlSummaryOut {
+        schema: keep_set.schema.clone(),
+        eml_pack_schema: EML_PACK_SCHEMA.to_string(),
+        policy: policy.as_str().to_string(),
+        family_policy: family_policy.as_str().to_string(),
+        keep_set: keep_set.clone(),
+        scan,
+        out: out.display().to_string(),
+        manifest_json: out.join("manifest.json").display().to_string(),
+        decision_csv: None,
+        keep_set_json: None,
+        eml_written,
+        unique: keep_set.stats.unique,
+        volumes,
+        attach_parts_written: 0,
+        embedded_messages_written: embedded,
+        attach_parts_failed: attach_failed,
+        max_embedded_depth,
+        attachment_ledger: None,
+        attachment_ledger_mode: None,
+        attachment_ledger_truncated: None,
+        attachment_ledger_rows_written: None,
+        attachments_failed_by_reason: None,
+        fidelity: classified.fidelity,
+        exit_code: classified.exit.as_u8(),
+        exit_reason: classified
+            .reasons
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        artifact_state,
+        summary_path: summary_abs.display().to_string(),
+    };
+    if let Ok(mut v) = serde_json::to_value(&payload) {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("ok".into(), serde_json::Value::Bool(false));
+            obj.insert(
+                "error".into(),
+                serde_json::json!({
+                    "code": "eml_pack",
+                    "message": err.to_string(),
+                }),
+            );
+        }
+        if let Ok(body) = serde_json::to_string_pretty(&v) {
+            let _ = fs::write(&summary_path, body);
+        }
+    }
+}
+
+/// Rewrite also-eml summary after cancel quarantine rename (paths + artifact_state).
+pub fn rewrite_quarantined_eml_summary(
+    dest_dir: &Path,
+    quarantine: crate::export_outcome::QuarantineResult,
+) -> Result<()> {
+    let summary_path = dest_dir.join("summary.json");
+    let body = fs::read_to_string(&summary_path).map_err(|e| {
+        CliError::Msg(format!(
+            "read quarantined summary {}: {e}",
+            summary_path.display()
+        ))
+    })?;
+    let mut v: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        CliError::Msg(format!(
+            "parse quarantined summary {}: {e}",
+            summary_path.display()
+        ))
+    })?;
+    let obj = v.as_object_mut().ok_or_else(|| {
+        CliError::Msg(format!(
+            "quarantined summary is not an object: {}",
+            summary_path.display()
+        ))
+    })?;
+    let abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
+    obj.insert(
+        "summary_path".into(),
+        serde_json::Value::String(abs.display().to_string()),
+    );
+    obj.insert(
+        "out".into(),
+        serde_json::Value::String(dest_dir.display().to_string()),
+    );
+    let state = match quarantine {
+        crate::export_outcome::QuarantineResult::Succeeded => {
+            crate::export_outcome::ArtifactState::PartialQuarantined
+        }
+        crate::export_outcome::QuarantineResult::Failed
+        | crate::export_outcome::QuarantineResult::NotAttempted => {
+            crate::export_outcome::ArtifactState::InvalidInPlace
+        }
+        crate::export_outcome::QuarantineResult::NoVolumes => {
+            crate::export_outcome::ArtifactState::Absent
+        }
+    };
+    obj.insert(
+        "artifact_state".into(),
+        serde_json::Value::String(state.as_str().to_string()),
+    );
+    let body = serde_json::to_string_pretty(&v).map_err(|e| {
+        CliError::Msg(format!(
+            "serialize quarantined summary {}: {e}",
+            summary_path.display()
+        ))
+    })?;
+    fs::write(&summary_path, body).map_err(|e| {
+        CliError::Msg(format!(
+            "write quarantined summary {}: {e}",
+            summary_path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+/// Write a unique-EML pack from an in-memory keep-set (no scan/resolve).
+pub fn write_eml_pack_from_keep_set(
+    input: WriteEmlPackFromKeepSetInput<'_>,
+) -> Result<WriteEmlPackFromKeepSetResult> {
+    let out = input.out;
+    let keep_set = input.keep_set;
+    let scan = input.scan.clone();
+    let scan_ok = input.scan_ok;
+    let policy = input.policy;
+    let family_policy = input.family_policy;
+    let max_embedded_depth = input.write_opts.max_embedded_depth;
+    let cancel = input.cancel;
+    match write_eml_pack_from_keep_set_inner(input) {
+        Ok(r) => Ok(r),
+        Err(err) => {
+            // Keep an already-usable summary (e.g. report-fail rewrite with real counts).
+            if !eml_summary_usable(&out.join("summary.json")) {
+                write_eml_hard_fail_summary(
+                    out,
+                    keep_set,
+                    scan.clone(),
+                    scan_ok,
+                    policy,
+                    family_policy,
+                    max_embedded_depth,
+                    &err,
+                );
+            }
+            // Cancel during write must not become Generic Err after late I/O failure.
+            if eml_pack_cancel_requested(cancel) {
+                let summary_json = fs::read_to_string(out.join("summary.json"))
+                    .ok()
+                    .and_then(|b| serde_json::from_str(&b).ok())
+                    .unwrap_or_else(|| {
+                        serde_json::json!({
+                            "ok": false,
+                            "exit_code": crate::error::CliExit::Cancelled.as_u8(),
+                            "artifact_state": "invalid_in_place",
+                        })
+                    });
+                return Ok(WriteEmlPackFromKeepSetResult {
+                    summary_json,
+                    eml_written: count_eml_under(out),
+                    attach_parts_written: 0,
+                    attach_parts_failed: 0,
+                    embedded_messages_written: 0,
+                    volumes: if out.join("VOL001").is_dir() { 1 } else { 0 },
+                    exit: crate::error::CliExit::Cancelled,
+                    exit_reasons: vec![crate::export_outcome::reason::CANCELLED.to_string()],
+                    cancelled: true,
+                });
+            }
+            Err(err)
+        }
+    }
+}
+
+fn write_eml_pack_from_keep_set_inner(
+    input: WriteEmlPackFromKeepSetInput<'_>,
+) -> Result<WriteEmlPackFromKeepSetResult> {
+    let nested_depth = input.write_opts.max_embedded_depth;
+    let files_per_volume = input.files_per_volume;
+    let volume_prefix = input.volume_prefix.clone();
+    let out = input.out;
+    let keep_set = input.keep_set;
+    let paths = input.paths;
+    let write_opts = input.write_opts;
+    let ledger_path_mode = input.ledger_path_mode;
+    let scan_for_summary = input.scan.clone();
+
+    let manifest_path = match input.manifest_json {
+        Some(p) => p.to_path_buf(),
+        None => out.join("manifest.json"),
+    };
+
+    let input_path_strings: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    let mut ledger_init_error: Option<String> = None;
+    let mut attach_ledger = match AttachLedgerSink::new(
+        input.attach_ledger,
+        input.attach_ledger_max_rows,
+        out,
+        &input_path_strings,
+        ledger_path_mode,
+    ) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            let msg = format!("attach ledger init failed: {e}");
+            tracing::warn!("{msg}");
+            if input.attach_ledger != AttachLedgerMode::Off {
+                ledger_init_error = Some(msg);
+            }
+            None
+        }
+    };
+
+    // Drain before write so co-export cannot silently drop Mode A ledger rows.
+    if let Some(ledger) = attach_ledger.as_mut() {
+        for w in &keep_set.winners {
+            if w.promoted_from_failure {
+                ledger.mark_promoted_winner(&w.locus.source_path, w.locus.nid);
+            }
+        }
+        for rec in input.soft_skip_attach_records {
+            let source_id = resolve_input_source_id(&rec.source_path, &input_path_strings);
+            let peer_source_id =
+                resolve_input_source_id(&rec.peer_source_path, &input_path_strings)
+                    .map(|id| id.to_string())
+                    .unwrap_or_default();
+            let row = AttachLedgerRow {
+                source_id: source_id.map(|id| id.to_string()).unwrap_or_default(),
+                source_path: format_ledger_source_path(&rec.source_path, ledger_path_mode),
+                folder_path: rec.folder_path.clone(),
+                msg_nid: rec.msg_nid,
+                attach_nid: rec.attach_nid.map(|n| n.to_string()).unwrap_or_default(),
+                attach_index: rec.attach_index,
+                filename: rec.filename.clone(),
+                size: if rec.size == 0 {
+                    String::new()
+                } else {
+                    rec.size.to_string()
+                },
+                attach_method: rec.attach_method,
+                reason_code: rec.reason_code.clone(),
+                severity: "fail".into(),
+                volume_path: String::new(),
+                volume_index: String::new(),
+                winner_promoted: true,
+                peer_source_id,
+                peer_msg_nid: rec.peer_msg_nid.to_string(),
+                message_subject: String::new(),
+                cloud_provider: rec.cloud_provider.clone(),
+                cloud_url: rec.cloud_url.clone(),
+            };
+            ledger.enqueue_soft_skip_row(row);
+        }
+    }
+
+    let mut cancelled = eml_pack_cancel_requested(input.cancel);
+    let mut pack = VolumePackWriter::new(out.to_path_buf(), files_per_volume, volume_prefix)
+        .map_err(|e| CliError::Msg(format!("volume pack: {e}")))?;
+    let mut manifest = EmlPackManifest::new(
+        input.policy.as_str(),
+        input.family_policy.as_str(),
+        files_per_volume,
+        paths.iter().map(|p| p.display().to_string()).collect(),
+    );
+    let mut write_errors: Vec<String> = Vec::new();
+
+    for entry in &keep_set.winners {
+        if eml_pack_cancel_requested(input.cancel) {
+            cancelled = true;
+            break;
+        }
+        let mut msg = match input.mat.materialize(&entry.locus) {
+            Ok(m) => m,
+            Err(e) => {
+                write_errors.push(format!("nid={:#x} re-materialize: {e}", entry.locus.nid));
+                continue;
+            }
+        };
+        msg.message_id_norm = entry.message_id_norm.clone();
+        msg.content_hash = entry.content_hash;
+        msg.edrm_mih_hex = entry.edrm_mih_hex.clone();
+        msg.fidelity = entry.integrity.clone();
+
+        if let Err(e) = materialize_nested_for_winner(input.attach_src, &mut msg, nested_depth) {
+            tracing::warn!("nested extract nid={:#x}: {e}", msg.locus.nid);
+        }
+
+        let (abs_path, relpath) = match pack.next_eml_path(&msg) {
+            Ok(v) => v,
+            Err(e) => {
+                write_errors.push(format!("nid={:#x} path: {e}", msg.locus.nid));
+                continue;
+            }
+        };
+
+        match write_canonical_eml(&abs_path, &msg, input.attach_src, &write_opts) {
+            Ok(wres) => {
+                let fidelity_reasons = msg
+                    .fidelity
+                    .degraded_reasons
+                    .iter()
+                    .map(|r| r.as_str().to_string())
+                    .collect();
+                let (degraded, degraded_reasons) =
+                    merge_pack_degraded(msg.fidelity.degraded, fidelity_reasons, &wres);
+                if degraded {
+                    manifest.stats.degraded_messages += 1;
+                }
+                manifest.stats.eml_written += 1;
+                manifest.stats.attach_parts_written += wres.attachments_file_written;
+                manifest.stats.embedded_messages_written += wres.embedded_messages_written;
+                manifest.stats.attach_parts_failed += wres.attachments_failed;
+
+                if let Some(ledger) = attach_ledger.as_mut() {
+                    let vol_path = abs_path
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    ledger.set_volume(&vol_path, pack.current_volume);
+                    for ev in &wres.attachment_events {
+                        let row = attach_ledger_row_from_eml_event(
+                            ev,
+                            &msg,
+                            &input_path_strings,
+                            ledger_path_mode,
+                            &vol_path,
+                            pack.current_volume,
+                            ledger
+                                .promoted_winner_loci
+                                .contains(&(msg.locus.source_path.clone(), msg.locus.nid)),
+                        );
+                        ledger.enqueue_soft_skip_row(row);
+                    }
+                }
+
+                let content_hash_hex = msg
+                    .content_hash
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>();
+
+                manifest.messages.push(EmlPackMessageRow {
+                    eml_relpath: relpath,
+                    source_path: msg.locus.source_path.clone(),
+                    folder: msg.locus.folder_path.clone(),
+                    nid: msg.locus.nid,
+                    message_id_norm: msg.message_id_norm.clone(),
+                    edrm_mih: msg.edrm_mih_hex.clone(),
+                    content_hash_hex,
+                    degraded,
+                    degraded_reasons,
+                    body_incomplete: msg.body_incomplete,
+                    body_unavailable: msg.body_unavailable,
+                    attachment_count: msg.attachments.len() as u64,
+                    attachments_file_written: wres.attachments_file_written,
+                    embedded_messages_written: wres.embedded_messages_written,
+                    attachments_failed: wres.attachments_failed,
+                    embedded_message_unparsed: wres.embedded_message_unparsed,
+                });
+            }
+            Err(e) => {
+                write_errors.push(format!("{}: {e}", abs_path.display()));
+                let _ = fs::remove_file(&abs_path);
+            }
+        }
+    }
+
+    if eml_pack_cancel_requested(input.cancel) {
+        cancelled = true;
+    }
+
+    manifest.stats.unique = keep_set.stats.unique;
+    manifest.stats.materialize_failed = keep_set.stats.materialize_failed;
+    manifest.stats.volumes = pack.volumes_created;
+
+    write_eml_pack_manifest(&manifest_path, &manifest)
+        .map_err(|e| CliError::Msg(format!("manifest: {e}")))?;
+
+    let count_mismatch = manifest.stats.eml_written != keep_set.stats.unique;
+    let mut pack_err = if cancelled {
+        Some("cancelled".to_string())
+    } else if count_mismatch {
+        Some(format!(
+            "eml_written ({}) != unique ({}); write_errors={:?}",
+            manifest.stats.eml_written, keep_set.stats.unique, write_errors
+        ))
+    } else if !write_errors.is_empty() {
+        Some(format!("partial eml write errors: {write_errors:?}"))
+    } else {
+        None
+    };
+
+    let mut report_ok = true;
+    if let Some(msg) = ledger_init_error.take() {
+        report_ok = false;
+        if pack_err.is_none() {
+            pack_err = Some(msg);
+        }
+    }
+    let attach_ledger_finish = match attach_ledger.take() {
+        Some(ledger) => match ledger.finish() {
+            Ok(f) => Some(f),
+            Err(e) => {
+                let msg = format!("attach ledger flush failed: {e}");
+                tracing::warn!("{msg}");
+                report_ok = false;
+                if pack_err.is_none() {
+                    pack_err = Some(msg);
+                }
+                None
+            }
+        },
+        None => None,
+    };
+
+    let attach_failed = manifest.stats.attach_parts_failed;
+    let export_ok_input = crate::export_outcome::ExportOkInput {
+        scan_ok: input.scan_ok,
+        verify_ok: true,
+        export_err_absent: write_errors.is_empty() && !cancelled,
+        export_partial: count_mismatch || !write_errors.is_empty() || cancelled,
+        messages_written_total: manifest.stats.eml_written,
+        unique: keep_set.stats.unique,
+        attach_failed_total: attach_failed,
+        body_soft_fail_total: 0,
+        report_ok,
+    };
+    let risk_gate = input.risk_gate;
+    let export_risk = input.export_risk;
+    let fail_on_partial = input.fail_on_partial_fidelity && !input.allow_partial_fidelity;
+    let mut classified = crate::export_outcome::classify_export(
+        export_ok_input,
+        export_risk,
+        risk_gate,
+        fail_on_partial,
+        cancelled,
+    );
+    let ok = classified.fidelity == crate::export_outcome::ExportFidelity::Complete && !cancelled;
+    let artifact_state = crate::export_outcome::artifact_state_for(
+        &classified,
+        manifest.stats.eml_written > 0,
+        crate::export_outcome::QuarantineResult::NotAttempted,
+    );
+
+    let (
+        attachment_ledger,
+        attachment_ledger_mode,
+        attachment_ledger_truncated,
+        attachment_ledger_rows_written,
+        attachments_failed_by_reason,
+    ) = ledger_summary_fields(input.attach_ledger, attach_ledger_finish.as_ref());
+
+    let summary_path = out.join("summary.json");
+    let summary_abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
+    let summary_path_str = summary_abs.display().to_string();
+
+    let payload = UniqueEmlSummaryOut {
+        schema: keep_set.schema.clone(),
+        eml_pack_schema: EML_PACK_SCHEMA.to_string(),
+        policy: input.policy.as_str().to_string(),
+        family_policy: input.family_policy.as_str().to_string(),
+        keep_set: keep_set.clone(),
+        scan: scan_for_summary,
+        out: out.display().to_string(),
+        manifest_json: manifest_path.display().to_string(),
+        decision_csv: None,
+        keep_set_json: None,
+        eml_written: manifest.stats.eml_written,
+        unique: manifest.stats.unique,
+        volumes: manifest.stats.volumes,
+        attach_parts_written: manifest.stats.attach_parts_written,
+        embedded_messages_written: manifest.stats.embedded_messages_written,
+        attach_parts_failed: attach_failed,
+        max_embedded_depth: nested_depth,
+        attachment_ledger,
+        attachment_ledger_mode,
+        attachment_ledger_truncated,
+        attachment_ledger_rows_written,
+        attachments_failed_by_reason,
+        fidelity: classified.fidelity,
+        exit_code: classified.exit.as_u8(),
+        exit_reason: classified
+            .reasons
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        artifact_state,
+        summary_path: summary_path_str,
+    };
+    let mut v = serde_json::to_value(&payload)?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("ok".into(), serde_json::Value::Bool(ok));
+        if let Some(msg) = pack_err.as_ref() {
+            obj.insert(
+                "error".into(),
+                serde_json::json!({
+                    "code": if cancelled { "cancelled" } else { "eml_pack" },
+                    "message": msg,
+                }),
+            );
+        }
+        obj.insert(
+            "materialized".into(),
+            serde_json::Value::from(input.materialized_count),
+        );
+    }
+
+    let summary_write_err = (|| -> std::result::Result<(), String> {
+        fs::create_dir_all(out).map_err(|e| format!("summary parent create failed: {e}"))?;
+        let body = serde_json::to_string_pretty(&v)
+            .map_err(|e| format!("summary.json serialize failed: {e}"))?;
+        fs::write(&summary_path, body).map_err(|e| format!("summary.json write failed: {e}"))?;
+        Ok(())
+    })();
+    if let Err(msg) = summary_write_err {
+        tracing::warn!(path = %summary_path.display(), "{msg}");
+        pack_err = Some(msg.clone());
+        let mut hard_input = export_ok_input;
+        hard_input.report_ok = false;
+        classified = crate::export_outcome::classify_export(
+            hard_input,
+            export_risk,
+            risk_gate,
+            fail_on_partial,
+            cancelled,
+        );
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "ok".into(),
+                serde_json::Value::Bool(
+                    classified.fidelity == crate::export_outcome::ExportFidelity::Complete
+                        && !cancelled,
+                ),
+            );
+            obj.insert(
+                "fidelity".into(),
+                serde_json::Value::String(classified.fidelity.as_str().to_string()),
+            );
+            obj.insert(
+                "exit_code".into(),
+                serde_json::Value::from(classified.exit.as_u8()),
+            );
+            obj.insert(
+                "exit_reason".into(),
+                serde_json::Value::Array(
+                    classified
+                        .reasons
+                        .iter()
+                        .map(|s| serde_json::Value::String((*s).to_string()))
+                        .collect(),
+                ),
+            );
+            obj.insert(
+                "error".into(),
+                serde_json::json!({ "code": "report", "message": msg }),
+            );
+        }
+        // Best-effort rewrite with real pack counts still in `v`; then fail closed.
+        if let Ok(body) = serde_json::to_string_pretty(&v) {
+            let _ = fs::write(&summary_path, body);
+        }
+        let _ = pack_err;
+        let _ = artifact_state;
+        return Err(CliError::Msg(msg));
+    }
+
+    let _ = pack_err;
+    let _ = artifact_state;
+    Ok(WriteEmlPackFromKeepSetResult {
+        summary_json: v,
+        eml_written: manifest.stats.eml_written,
+        attach_parts_written: manifest.stats.attach_parts_written,
+        attach_parts_failed: attach_failed,
+        embedded_messages_written: manifest.stats.embedded_messages_written,
+        volumes: manifest.stats.volumes,
+        exit: classified.exit,
+        exit_reasons: classified
+            .reasons
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        cancelled,
+    })
+}
+
 /// Run unique-eml orchestration end-to-end.
 pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
     // Phase 0: resolve + deterministic sort.
@@ -190,7 +931,7 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
     )?;
 
     // Prepare out dir: create if missing; refuse non-empty unless --overwrite.
-    prepare_out_dir(&out, args.overwrite)?;
+    prepare_out_dir(&out, args.overwrite, "--out")?;
 
     pst_reader::integrity_telemetry::set_log_limit(
         args.crc_log_limit,
@@ -289,189 +1030,7 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         }
     }
 
-    // 0089: attach ledger at pack root (`{out}/export_attachments.csv`).
-    let input_path_strings: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-    let mut ledger_init_error: Option<String> = None;
-    let mut attach_ledger = match AttachLedgerSink::new(
-        args.attach_ledger,
-        args.attach_ledger_max_rows,
-        &out,
-        &input_path_strings,
-        args.ledger_path_mode,
-    ) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            let msg = format!("attach ledger init failed: {e}");
-            tracing::warn!("{msg}");
-            if args.attach_ledger != AttachLedgerMode::Off {
-                // Operator requested ledger — fail closed (do not continue with None).
-                ledger_init_error = Some(msg);
-            }
-            None
-        }
-    };
-
-    // 0083 Mode A honesty: mark promoted winners + emit soft-skip incomplete rows.
-    // Drain soft_skip records before any consume/drop of resolved attach-skip data.
-    if let Some(ledger) = attach_ledger.as_mut() {
-        for w in &keep_set.winners {
-            if w.promoted_from_failure {
-                ledger.mark_promoted_winner(&w.locus.source_path, w.locus.nid);
-            }
-        }
-        for rec in &resolved.soft_skip_attach_records {
-            let source_id = resolve_input_source_id(&rec.source_path, &input_path_strings);
-            let peer_source_id =
-                resolve_input_source_id(&rec.peer_source_path, &input_path_strings)
-                    .map(|id| id.to_string())
-                    .unwrap_or_default();
-            let row = AttachLedgerRow {
-                source_id: source_id.map(|id| id.to_string()).unwrap_or_default(),
-                source_path: format_ledger_source_path(&rec.source_path, args.ledger_path_mode),
-                folder_path: rec.folder_path.clone(),
-                msg_nid: rec.msg_nid,
-                attach_nid: rec.attach_nid.map(|n| n.to_string()).unwrap_or_default(),
-                attach_index: rec.attach_index,
-                filename: rec.filename.clone(),
-                size: if rec.size == 0 {
-                    String::new()
-                } else {
-                    rec.size.to_string()
-                },
-                attach_method: rec.attach_method,
-                reason_code: rec.reason_code.clone(),
-                severity: "fail".into(),
-                volume_path: String::new(),
-                volume_index: String::new(),
-                winner_promoted: true,
-                peer_source_id,
-                peer_msg_nid: rec.peer_msg_nid.to_string(),
-                message_subject: String::new(),
-                cloud_provider: rec.cloud_provider.clone(),
-                cloud_url: rec.cloud_url.clone(),
-            };
-            ledger.enqueue_soft_skip_row(row);
-        }
-    }
-
-    // Phase 2c: write EMLs in keep_set.winners order (path+nid), re-materializing each
-    // winner once so export counters match keep_set.json stability without holding all bodies.
-    let mut pack = VolumePackWriter::new(out.clone(), files_per_volume, volume_prefix)
-        .map_err(|e| CliError::Msg(format!("volume pack: {e}")))?;
-    let mut manifest = EmlPackManifest::new(
-        args.policy.as_str(),
-        args.family_policy.as_str(),
-        files_per_volume,
-        paths.iter().map(|p| p.display().to_string()).collect(),
-    );
-    let mut write_errors: Vec<String> = Vec::new();
-
-    // Export only post-promotion keep_set.winners (no losers / non-exportable peers).
-    for entry in &keep_set.winners {
-        let mut msg = match mat.materialize(&entry.locus) {
-            Ok(m) => m,
-            Err(e) => {
-                // Winner already promoted; re-materialize should succeed. Soft-continue.
-                write_errors.push(format!("nid={:#x} re-materialize: {e}", entry.locus.nid));
-                continue;
-            }
-        };
-        // Carry scan keys + post-promotion fidelity from keep entry (same as finalize fill).
-        msg.message_id_norm = entry.message_id_norm.clone();
-        msg.content_hash = entry.content_hash;
-        msg.edrm_mih_hex = entry.edrm_mih_hex.clone();
-        msg.fidelity = entry.integrity.clone();
-
-        if let Err(e) = materialize_nested_for_winner(&mut attach_src, &mut msg, nested_depth) {
-            tracing::warn!("nested extract nid={:#x}: {e}", msg.locus.nid);
-        }
-
-        let (abs_path, relpath) = match pack.next_eml_path(&msg) {
-            Ok(v) => v,
-            Err(e) => {
-                write_errors.push(format!("nid={:#x} path: {e}", msg.locus.nid));
-                continue;
-            }
-        };
-
-        match write_canonical_eml(&abs_path, &msg, &mut attach_src, &write_opts) {
-            Ok(wres) => {
-                let fidelity_reasons = msg
-                    .fidelity
-                    .degraded_reasons
-                    .iter()
-                    .map(|r| r.as_str().to_string())
-                    .collect();
-                // M4: attach soft-skips must surface as degraded on the manifest row.
-                let (degraded, degraded_reasons) =
-                    merge_pack_degraded(msg.fidelity.degraded, fidelity_reasons, &wres);
-                if degraded {
-                    manifest.stats.degraded_messages += 1;
-                }
-                manifest.stats.eml_written += 1;
-                manifest.stats.attach_parts_written += wres.attachments_file_written;
-                manifest.stats.embedded_messages_written += wres.embedded_messages_written;
-                manifest.stats.attach_parts_failed += wres.attachments_failed;
-
-                if let Some(ledger) = attach_ledger.as_mut() {
-                    let vol_path = abs_path
-                        .parent()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default();
-                    ledger.set_volume(&vol_path, pack.current_volume);
-                    for ev in &wres.attachment_events {
-                        let row = attach_ledger_row_from_eml_event(
-                            ev,
-                            &msg,
-                            &input_path_strings,
-                            args.ledger_path_mode,
-                            &vol_path,
-                            pack.current_volume,
-                            ledger
-                                .promoted_winner_loci
-                                .contains(&(msg.locus.source_path.clone(), msg.locus.nid)),
-                        );
-                        ledger.enqueue_soft_skip_row(row);
-                    }
-                }
-
-                let content_hash_hex = msg
-                    .content_hash
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>();
-
-                manifest.messages.push(EmlPackMessageRow {
-                    eml_relpath: relpath,
-                    source_path: msg.locus.source_path.clone(),
-                    folder: msg.locus.folder_path.clone(),
-                    nid: msg.locus.nid,
-                    message_id_norm: msg.message_id_norm.clone(),
-                    edrm_mih: msg.edrm_mih_hex.clone(),
-                    content_hash_hex,
-                    degraded,
-                    degraded_reasons,
-                    body_incomplete: msg.body_incomplete,
-                    body_unavailable: msg.body_unavailable,
-                    attachment_count: msg.attachments.len() as u64,
-                    attachments_file_written: wres.attachments_file_written,
-                    embedded_messages_written: wres.embedded_messages_written,
-                    attachments_failed: wres.attachments_failed,
-                    embedded_message_unparsed: wres.embedded_message_unparsed,
-                });
-            }
-            Err(e) => {
-                write_errors.push(format!("{}: {e}", abs_path.display()));
-                let _ = fs::remove_file(&abs_path);
-            }
-        }
-    }
-
-    manifest.stats.unique = keep_set.stats.unique;
-    manifest.stats.materialize_failed = keep_set.stats.materialize_failed;
-    manifest.stats.volumes = pack.volumes_created;
-
-    // Phase 3: flush decision CSV + keep-set JSON + pack manifest before exit.
+    // Optional decision/keep-set artifacts (independent of pack write).
     let mut decision_csv_out: Option<String> = None;
     if let Some(path) = &decision_csv {
         let mut wtr = DecisionCsvWriter::create(path).map_err(|e| CliError::CsvWrite {
@@ -497,219 +1056,117 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         keep_set_json_out = Some(path.display().to_string());
     }
 
-    write_eml_pack_manifest(&manifest_path, &manifest)
-        .map_err(|e| CliError::Msg(format!("manifest: {e}")))?;
-
     let exit_err = evaluate_exit_policy(&outcome.summary, &opts).err();
-
-    // Success invariant: eml_written == unique (exportable post-promotion).
-    let count_mismatch = manifest.stats.eml_written != keep_set.stats.unique;
-    let mut pack_err = if count_mismatch {
-        Some(format!(
-            "eml_written ({}) != unique ({}); write_errors={:?}",
-            manifest.stats.eml_written, keep_set.stats.unique, write_errors
-        ))
-    } else if !write_errors.is_empty() {
-        Some(format!("partial eml write errors: {write_errors:?}"))
-    } else {
-        None
-    };
-
-    // Flush attach ledger before classify; init/flush errors are report hard-fail.
-    let mut report_ok = true;
-    if let Some(msg) = ledger_init_error.take() {
-        report_ok = false;
-        if pack_err.is_none() {
-            pack_err = Some(msg);
-        }
-    }
-    let attach_ledger_finish = match attach_ledger.take() {
-        Some(ledger) => match ledger.finish() {
-            Ok(f) => Some(f),
-            Err(e) => {
-                let msg = format!("attach ledger flush failed: {e}");
-                tracing::warn!("{msg}");
-                report_ok = false;
-                if pack_err.is_none() {
-                    pack_err = Some(msg);
-                }
-                None
-            }
-        },
-        None => None,
-    };
-
-    // 0078/0089: attach_parts_failed counters remain classify ground truth (ledger additive).
-    let attach_failed = manifest.stats.attach_parts_failed;
-    // Pack hard fail only when count mismatch or write errors; attach soft alone is partial.
-    let export_ok_input = crate::export_outcome::ExportOkInput {
-        scan_ok: exit_err.is_none(),
-        verify_ok: true,
-        export_err_absent: write_errors.is_empty(),
-        export_partial: count_mismatch || !write_errors.is_empty(),
-        messages_written_total: manifest.stats.eml_written,
-        unique: keep_set.stats.unique,
-        attach_failed_total: attach_failed,
-        body_soft_fail_total: 0,
-        report_ok,
-    };
     let risk_gate = args
         .fail_on_export_risk
         .as_deref()
         .and_then(crate::export_outcome::RiskGate::parse)
         .unwrap_or(crate::export_outcome::RiskGate::Off);
-    let fail_on_partial = args.fail_on_partial_fidelity && !args.allow_partial_fidelity;
-    // unique-eml has no export_risk yet — use Ok; risk gate only fires if set to ok.
-    let mut classified = crate::export_outcome::classify_export(
-        export_ok_input,
-        dedup_engine::integrity::PreflightRecommendation::Ok,
+    let pack = write_eml_pack_from_keep_set(WriteEmlPackFromKeepSetInput {
+        keep_set: &keep_set,
+        paths: &paths,
+        out: &out,
+        policy: args.policy,
+        family_policy: args.family_policy,
+        write_opts,
+        files_per_volume,
+        volume_prefix: volume_prefix.clone(),
+        attach_ledger: args.attach_ledger,
+        attach_ledger_max_rows: args.attach_ledger_max_rows,
+        ledger_path_mode: args.ledger_path_mode,
+        soft_skip_attach_records: &resolved.soft_skip_attach_records,
+        scan: outcome.summary.clone(),
+        scan_ok: exit_err.is_none(),
+        fail_on_partial_fidelity: args.fail_on_partial_fidelity,
+        allow_partial_fidelity: args.allow_partial_fidelity,
         risk_gate,
-        fail_on_partial,
-        false,
-    );
-    let ok = classified.fidelity == crate::export_outcome::ExportFidelity::Complete;
-    // Same disposition helper as unique-pst (0078): PartialRetained only for soft-fail;
-    // hard-fail with bytes → InvalidInPlace (not shippable).
-    let artifact_state = crate::export_outcome::artifact_state_for(
-        &classified,
-        manifest.stats.eml_written > 0,
-        crate::export_outcome::QuarantineResult::NotAttempted,
-    );
+        export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
+        cancel: None,
+        mat: &mut mat,
+        attach_src: &mut attach_src,
+        manifest_json: Some(&manifest_path),
+        materialized_count,
+    })?;
 
-    let (
-        attachment_ledger,
-        attachment_ledger_mode,
-        attachment_ledger_truncated,
-        attachment_ledger_rows_written,
-        attachments_failed_by_reason,
-    ) = ledger_summary_fields(args.attach_ledger, attach_ledger_finish.as_ref());
-
-    // DoD-22: write a dedicated summary.json containing fidelity/exit fields (not
-    // manifest.json, which lacks them). Path is self-locating.
+    // Stitch optional artifact paths into the on-disk/stdout summary JSON.
+    let mut v = pack.summary_json;
+    if let Some(obj) = v.as_object_mut() {
+        if let Some(p) = &decision_csv_out {
+            obj.insert("decision_csv".into(), serde_json::Value::String(p.clone()));
+        }
+        if let Some(p) = &keep_set_json_out {
+            obj.insert("keep_set_json".into(), serde_json::Value::String(p.clone()));
+        }
+        if let Some(msg) = exit_err.as_ref() {
+            if obj.get("error").is_none() {
+                obj.insert(
+                    "error".into(),
+                    serde_json::json!({
+                        "code": "scan_integrity",
+                        "message": msg,
+                    }),
+                );
+            }
+        }
+    }
     let summary_path = out.join("summary.json");
     let summary_abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
     let summary_path_str = summary_abs.display().to_string();
-
-    let payload = UniqueEmlSummaryOut {
-        schema: keep_set.schema.clone(),
-        eml_pack_schema: EML_PACK_SCHEMA.to_string(),
-        policy: args.policy.as_str().to_string(),
-        family_policy: args.family_policy.as_str().to_string(),
-        keep_set,
-        scan: outcome.summary.clone(),
-        out: out.display().to_string(),
-        manifest_json: manifest_path.display().to_string(),
-        decision_csv: decision_csv_out.clone(),
-        keep_set_json: keep_set_json_out.clone(),
-        eml_written: manifest.stats.eml_written,
-        unique: manifest.stats.unique,
-        volumes: manifest.stats.volumes,
-        attach_parts_written: manifest.stats.attach_parts_written,
-        embedded_messages_written: manifest.stats.embedded_messages_written,
-        attach_parts_failed: attach_failed,
-        max_embedded_depth: nested_depth,
-        attachment_ledger,
-        attachment_ledger_mode,
-        attachment_ledger_truncated,
-        attachment_ledger_rows_written,
-        attachments_failed_by_reason,
-        fidelity: classified.fidelity,
-        exit_code: classified.exit.as_u8(),
-        exit_reason: classified
-            .reasons
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect(),
-        artifact_state,
-        summary_path: summary_path_str.clone(),
-    };
-    let mut v = serde_json::to_value(&payload)?;
-    if let Some(obj) = v.as_object_mut() {
-        obj.insert("ok".into(), serde_json::Value::Bool(ok));
-        if let Some(msg) = exit_err.as_ref().or(pack_err.as_ref()) {
-            obj.insert(
-                "error".into(),
-                serde_json::json!({
-                    "code": if pack_err.is_some() { "eml_pack" } else { "scan_integrity" },
-                    "message": msg,
-                }),
-            );
-        }
-        obj.insert(
-            "materialized".into(),
-            serde_json::Value::from(materialized_count),
-        );
-    }
-
-    // Always write summary.json so summary_path is self-consistent with on-disk fields.
-    // Fail-closed: write failure reclassifies as report hard-fail (DoD-22).
-    let summary_write_err = (|| -> std::result::Result<(), String> {
-        fs::create_dir_all(&out).map_err(|e| format!("summary parent create failed: {e}"))?;
-        let body = serde_json::to_string_pretty(&v)
-            .map_err(|e| format!("summary.json serialize failed: {e}"))?;
-        fs::write(&summary_path, body).map_err(|e| format!("summary.json write failed: {e}"))?;
-        Ok(())
-    })();
-    if let Err(msg) = summary_write_err {
+    let mut classified_exit = pack.exit;
+    let stitch_body = serde_json::to_string_pretty(&v)
+        .map_err(|e| CliError::Msg(format!("summary.json serialize failed after stitch: {e}")))?;
+    if let Err(e) = fs::write(&summary_path, &stitch_body) {
+        let msg = format!("summary.json rewrite failed: {e}");
         tracing::warn!(path = %summary_path.display(), "{msg}");
-        pack_err = Some(msg.clone());
-        // Rebuild export input with report_ok=false and reclassify.
-        let mut hard_input = export_ok_input;
-        hard_input.report_ok = false;
-        classified = crate::export_outcome::classify_export(
-            hard_input,
-            dedup_engine::integrity::PreflightRecommendation::Ok,
-            risk_gate,
-            fail_on_partial,
-            false,
-        );
         if let Some(obj) = v.as_object_mut() {
-            obj.insert(
-                "ok".into(),
-                serde_json::Value::Bool(
-                    classified.fidelity == crate::export_outcome::ExportFidelity::Complete,
-                ),
-            );
+            obj.insert("ok".into(), serde_json::Value::Bool(false));
             obj.insert(
                 "fidelity".into(),
-                serde_json::Value::String(classified.fidelity.as_str().to_string()),
+                serde_json::Value::String(
+                    crate::export_outcome::ExportFidelity::Failed
+                        .as_str()
+                        .to_string(),
+                ),
             );
             obj.insert(
                 "exit_code".into(),
-                serde_json::Value::from(classified.exit.as_u8()),
-            );
-            obj.insert(
-                "exit_reason".into(),
-                serde_json::Value::Array(
-                    classified
-                        .reasons
-                        .iter()
-                        .map(|s| serde_json::Value::String((*s).to_string()))
-                        .collect(),
-                ),
+                serde_json::Value::from(crate::error::CliExit::Generic.as_u8()),
             );
             obj.insert(
                 "error".into(),
                 serde_json::json!({ "code": "report", "message": msg }),
             );
         }
+        if let Ok(body) = serde_json::to_string_pretty(&v) {
+            let _ = fs::write(&summary_path, body);
+        }
+        classified_exit = crate::error::CliExit::Generic;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            return Err(CliError::AlreadyEmitted {
+                message: msg,
+                exit: classified_exit,
+            });
+        }
+        let _ = writeln!(std::io::stderr(), "summary: {summary_path_str}");
+        return Err(CliError::AlreadyEmitted {
+            message: msg,
+            exit: classified_exit,
+        });
     }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&v)?);
-        if classified.exit != crate::error::CliExit::Success {
-            let msg = pack_err
-                .or(exit_err)
-                .unwrap_or_else(|| "unique-eml incomplete".into());
+        if classified_exit != crate::error::CliExit::Success {
+            let msg = exit_err.unwrap_or_else(|| "unique-eml incomplete".into());
             return Err(CliError::AlreadyEmitted {
                 message: msg,
-                exit: classified.exit,
+                exit: classified_exit,
             });
         }
         return Ok(crate::error::CliExit::Success);
     }
 
-    // Human summary.
     println!(
         "=== Unique EML pack ({EML_PACK_SCHEMA}) policy={} family={} ===",
         args.policy.as_str(),
@@ -718,44 +1175,39 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
     println!("  out:           {}", out.display());
     println!(
         "  eml_written:   {}  unique: {}  volumes: {}",
-        manifest.stats.eml_written, manifest.stats.unique, manifest.stats.volumes
+        pack.eml_written, keep_set.stats.unique, pack.volumes
     );
     println!(
         "  attach file:   {}  embedded: {}  attach failed: {}",
-        manifest.stats.attach_parts_written,
-        manifest.stats.embedded_messages_written,
-        manifest.stats.attach_parts_failed
+        pack.attach_parts_written, pack.embedded_messages_written, pack.attach_parts_failed
     );
     println!("  max_embedded_depth: {nested_depth}");
     println!(
         "  recoverable:   {}  duplicates: {}  materialize_failed: {}",
-        payload.keep_set.stats.recoverable,
-        payload.keep_set.stats.duplicates,
-        payload.keep_set.stats.materialize_failed
+        keep_set.stats.recoverable, keep_set.stats.duplicates, keep_set.stats.materialize_failed
     );
     println!(
         "  degraded winners: {}  files_per_volume: {files_per_volume}",
-        payload.keep_set.stats.degraded_winners
+        keep_set.stats.degraded_winners
     );
-    // 0075 honesty counters (always printed, including when 0).
     println!(
         "  winners_from_recoverable_items: {}",
-        payload.keep_set.stats.winners_from_recoverable_items
+        keep_set.stats.winners_from_recoverable_items
     );
     println!(
         "  winners_without_bcc_peer_had_bcc: {}",
-        payload.keep_set.stats.winners_without_bcc_peer_had_bcc
+        keep_set.stats.winners_without_bcc_peer_had_bcc
     );
     println!(
         "  groups_date_source_mixed: {}",
-        payload.keep_set.stats.groups_date_source_mixed
+        keep_set.stats.groups_date_source_mixed
     );
-    for line in format_grouping_stats_human(&payload.keep_set.stats.grouping) {
+    for line in format_grouping_stats_human(&keep_set.stats.grouping) {
         println!("{line}");
     }
     println!("  manifest:      {}", manifest_path.display());
     println!("  summary:       {summary_path_str}");
-    if payload.attachment_ledger.is_some() {
+    if args.attach_ledger == AttachLedgerMode::Full {
         println!(
             "  attach_ledger: {}",
             out.join(EXPORT_ATTACHMENTS_CSV_NAME).display()
@@ -771,10 +1223,10 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         println!("  integrity_csv: {ic}");
     }
 
-    if classified.exit != crate::error::CliExit::Success {
+    if classified_exit != crate::error::CliExit::Success {
         let _ = writeln!(std::io::stderr(), "summary: {summary_path_str}");
     }
-    Ok(classified.exit)
+    Ok(classified_exit)
 }
 
 /// Map an engine soft-fail event into a 0073 attach-ledger CSV row (0089).
@@ -919,28 +1371,27 @@ fn guard_unique_eml_paths(
     Ok(())
 }
 
-fn prepare_out_dir(out: &Path, overwrite: bool) -> Result<()> {
+pub(crate) fn prepare_out_dir(out: &Path, overwrite: bool, flag_label: &str) -> Result<()> {
     if out.exists() {
         if !out.is_dir() {
             return Err(CliError::Usage(format!(
-                "--out exists and is not a directory: {}",
+                "{flag_label} exists and is not a directory: {}",
                 out.display()
             )));
         }
         let non_empty = fs::read_dir(out)
-            .map_err(|e| CliError::Msg(format!("read --out {}: {e}", out.display())))?
+            .map_err(|e| CliError::Msg(format!("read {flag_label} {}: {e}", out.display())))?
             .next()
             .is_some();
         if non_empty && !overwrite {
             return Err(CliError::Usage(format!(
-                "--out is not empty (pass --overwrite to replace contents): {}",
+                "{flag_label} is not empty (pass --overwrite to replace contents): {}",
                 out.display()
             )));
         }
         if non_empty && overwrite {
-            // Clear contents so volume dirs and manifest are fresh.
             for entry in fs::read_dir(out)
-                .map_err(|e| CliError::Msg(format!("read --out {}: {e}", out.display())))?
+                .map_err(|e| CliError::Msg(format!("read {flag_label} {}: {e}", out.display())))?
             {
                 let entry = entry.map_err(|e| CliError::Msg(format!("read_dir entry: {e}")))?;
                 let p = entry.path();
@@ -955,7 +1406,7 @@ fn prepare_out_dir(out: &Path, overwrite: bool) -> Result<()> {
         }
     } else {
         fs::create_dir_all(out)
-            .map_err(|e| CliError::Msg(format!("create --out {}: {e}", out.display())))?;
+            .map_err(|e| CliError::Msg(format!("create {flag_label} {}: {e}", out.display())))?;
     }
     Ok(())
 }
@@ -963,6 +1414,199 @@ fn prepare_out_dir(out: &Path, overwrite: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dedup_engine::integrity::{compute_preflight, IntegrityThresholds, PreflightInputs};
+    use dedup_engine::keepset::{KeepEntry, KeepSetStats, MessageLocus};
+
+    #[test]
+    fn hard_fail_summary_uses_real_scan_ok_false() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let out = dir.path().join("pack");
+        fs::create_dir_all(&out).expect("mkdir");
+        // Partial pack on disk.
+        let vol = out.join("VOL001");
+        fs::create_dir_all(&vol).expect("vol");
+        fs::write(vol.join("000001_a.eml"), b"From: a\r\n\r\nbody").expect("eml");
+        let preflight = compute_preflight(&PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            1,
+            0,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        ));
+        let scan = ScanSummary {
+            schema: SCAN_INTEGRITY_SCHEMA.to_string(),
+            mode: ScanMode::BestEffort,
+            files: vec![],
+            total_messages: 1,
+            unique: 1,
+            duplicates: 0,
+            tier1_hits: 0,
+            tier2_hits: 0,
+            savings_bytes: 0,
+            skipped: 0,
+            skipped_by_reason: Default::default(),
+            recoverable_messages: 1,
+            degraded_messages: 0,
+            degraded_by_reason: Default::default(),
+            orphaned_messages: 0,
+            failed_files: 0,
+            partial_files: 0,
+            opened_files: 1,
+            duration_secs: 0.0,
+            preflight,
+            skips: vec![],
+            integrity_csv: None,
+            grouping: Default::default(),
+            page_crc_mismatches: 0,
+            block_crc_mismatches: 0,
+            block_bid_mismatches: 0,
+            distinct_bad_bids: 0,
+            distinct_bad_bids_exact: true,
+            crc_suspect_messages: 0,
+            page_reads: 0,
+            block_reads: 0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            poly_class_crc_sources: 0,
+        };
+        let keep_set = KeepSet {
+            schema: "keep_set_v1".into(),
+            policy: KeepPolicy::FirstSeen,
+            family_policy: FamilyPolicy::ParentsOnly,
+            created_from: None,
+            identity_level: None,
+            dedupe_scope: None,
+            winners: vec![KeepEntry {
+                locus: MessageLocus {
+                    source_path: r"C:\in\a.pst".into(),
+                    source_pst: "a.pst".into(),
+                    folder_path: "Inbox".into(),
+                    nid: 1,
+                    is_orphaned: false,
+                },
+                message_id_norm: None,
+                content_hash: [0u8; 32],
+                edrm_mih_hex: None,
+                integrity: dedup_engine::integrity::RecoverableIntegrity::clean(),
+                size: 1,
+                promoted_from_failure: false,
+                folder_class: None,
+                decided_by: None,
+                duplicate_source_count: 0,
+                duplicate_sources: vec![],
+                duplicate_sources_truncated: false,
+            }],
+            stats: KeepSetStats {
+                unique: 1,
+                recoverable: 1,
+                ..KeepSetStats::default()
+            },
+        };
+        write_eml_hard_fail_summary(
+            &out,
+            &keep_set,
+            scan,
+            false, // real scan_ok
+            KeepPolicy::FirstSeen,
+            FamilyPolicy::ParentsOnly,
+            3,
+            &CliError::Msg("forced hard fail".into()),
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(out.join("summary.json")).expect("summary"))
+                .expect("json");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["eml_written"].as_u64(), Some(1));
+        let reasons = v["exit_reason"].as_array().expect("reasons");
+        assert!(
+            reasons.iter().any(|r| r.as_str() == Some("SCAN_FAILED")),
+            "scan_ok=false must surface SCAN_FAILED: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn hard_fail_summary_does_not_clobber_usable_summary() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let out = dir.path().join("pack");
+        fs::create_dir_all(&out).expect("mkdir");
+        let summary = out.join("summary.json");
+        fs::write(
+            &summary,
+            r#"{"ok":false,"eml_written":7,"attach_parts_failed":2,"embedded_messages_written":3,"volumes":1,"exit_code":1}"#,
+        )
+        .expect("seed");
+        let keep_set = KeepSet {
+            schema: "keep_set_v1".into(),
+            policy: KeepPolicy::FirstSeen,
+            family_policy: FamilyPolicy::ParentsOnly,
+            created_from: None,
+            identity_level: None,
+            dedupe_scope: None,
+            winners: vec![],
+            stats: KeepSetStats::default(),
+        };
+        let scan = ScanSummary {
+            schema: SCAN_INTEGRITY_SCHEMA.to_string(),
+            mode: ScanMode::BestEffort,
+            files: vec![],
+            total_messages: 0,
+            unique: 0,
+            duplicates: 0,
+            tier1_hits: 0,
+            tier2_hits: 0,
+            savings_bytes: 0,
+            skipped: 0,
+            skipped_by_reason: Default::default(),
+            recoverable_messages: 0,
+            degraded_messages: 0,
+            degraded_by_reason: Default::default(),
+            orphaned_messages: 0,
+            failed_files: 0,
+            partial_files: 0,
+            opened_files: 0,
+            duration_secs: 0.0,
+            preflight: compute_preflight(&PreflightInputs::without_attach_probe(
+                ScanMode::BestEffort,
+                0,
+                0,
+                0,
+                0,
+                0,
+                IntegrityThresholds::default(),
+            )),
+            skips: vec![],
+            integrity_csv: None,
+            grouping: Default::default(),
+            page_crc_mismatches: 0,
+            block_crc_mismatches: 0,
+            block_bid_mismatches: 0,
+            distinct_bad_bids: 0,
+            distinct_bad_bids_exact: true,
+            crc_suspect_messages: 0,
+            page_reads: 0,
+            block_reads: 0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            poly_class_crc_sources: 0,
+        };
+        write_eml_hard_fail_summary(
+            &out,
+            &keep_set,
+            scan,
+            true,
+            KeepPolicy::FirstSeen,
+            FamilyPolicy::ParentsOnly,
+            3,
+            &CliError::Msg("should not wipe".into()),
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&summary).expect("read")).expect("json");
+        assert_eq!(v["eml_written"].as_u64(), Some(7));
+        assert_eq!(v["attach_parts_failed"].as_u64(), Some(2));
+        assert_eq!(v["embedded_messages_written"].as_u64(), Some(3));
+    }
 
     #[test]
     fn guard_rejects_input_under_out() {
