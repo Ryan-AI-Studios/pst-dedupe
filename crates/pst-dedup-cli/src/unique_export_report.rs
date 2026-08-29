@@ -452,7 +452,88 @@ pub fn poly_crc_risk_adjustment(sources: &[CrcSourceClass]) -> PolyCrcRiskAdjust
     }
 }
 
-/// Inputs for post-export risk evaluation (0077 / 0099).
+/// Post-export degrade-rate adjustment: thresholds key on **effective** (non-poly) rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DegradedWinnerRiskAdjustment {
+    /// Rate thresholds use when `Some`. `None` → raw (fail closed).
+    pub effective_degraded_winner_rate: Option<f64>,
+    /// Winners excluded as poly-only CRC degrade on a poly-class source.
+    pub degraded_winners_poly_only: u64,
+}
+
+fn is_poly_only_degraded(integrity: &dedup_engine::integrity::RecoverableIntegrity) -> bool {
+    use dedup_engine::integrity::IntegrityReason;
+    if !integrity.degraded || integrity.degraded_reasons.is_empty() {
+        return false;
+    }
+    integrity.degraded_reasons.iter().all(|r| {
+        matches!(
+            r,
+            IntegrityReason::CrcSuspect | IntegrityReason::AttachStreamCrc
+        )
+    })
+}
+
+fn file_stats_for_source<'a>(
+    source_path: &str,
+    files: &'a [crate::scan::FileScanStats],
+) -> Option<&'a crate::scan::FileScanStats> {
+    let key = dedup_engine::keepset::path_compare_key(Path::new(source_path));
+    files.iter().find(|f| {
+        f.path == source_path || dedup_engine::keepset::path_compare_key(Path::new(&f.path)) == key
+    })
+}
+
+/// Effective (non-poly) degraded-winner rate (0108).
+///
+/// Excludes winners whose *only* degrade reasons are poly CRC (`CrcSuspect` /
+/// `AttachStreamCrc`) and whose source is `poly_class_crc`, and only when
+/// `poly_class_crc_discounted`. Empty-reasons-but-degraded and any other reason
+/// (including `CrcMismatch`) count. Unmatched / non-poly sources fail closed.
+pub fn poly_degraded_winner_adjustment(
+    unique: u64,
+    winners: &[dedup_engine::keepset::KeepEntry],
+    files: &[crate::scan::FileScanStats],
+    poly_class_crc_discounted: bool,
+) -> DegradedWinnerRiskAdjustment {
+    if !poly_class_crc_discounted {
+        return DegradedWinnerRiskAdjustment {
+            effective_degraded_winner_rate: None,
+            degraded_winners_poly_only: 0,
+        };
+    }
+    if unique == 0 {
+        return DegradedWinnerRiskAdjustment {
+            effective_degraded_winner_rate: Some(0.0),
+            degraded_winners_poly_only: 0,
+        };
+    }
+
+    let mut real_degraded = 0u64;
+    let mut poly_only = 0u64;
+    for w in winners {
+        if !w.integrity.degraded {
+            continue;
+        }
+        if is_poly_only_degraded(&w.integrity) {
+            if let Some(f) = file_stats_for_source(&w.locus.source_path, files) {
+                if f.poly_class_crc {
+                    poly_only = poly_only.saturating_add(1);
+                    continue;
+                }
+            }
+        }
+        real_degraded = real_degraded.saturating_add(1);
+    }
+
+    let effective = (real_degraded as f64 / unique as f64).clamp(0.0, 1.0);
+    DegradedWinnerRiskAdjustment {
+        effective_degraded_winner_rate: Some(effective),
+        degraded_winners_poly_only: poly_only,
+    }
+}
+
+/// Inputs for post-export risk evaluation (0077 / 0099 / 0108).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExportRiskInputs {
     pub attach_fail_rate: f64,
@@ -478,6 +559,12 @@ pub struct ExportRiskInputs {
     /// Telemetry copy of scan `poly_class_crc_sources`.
     #[serde(default)]
     pub poly_class_crc_sources: u64,
+    /// Degrade-rate thresholds use when `Some` (non-poly degrade). `None` → raw.
+    #[serde(default)]
+    pub effective_degraded_winner_rate: Option<f64>,
+    /// Telemetry: winners excluded as poly-only CRC degrade on poly-class sources.
+    #[serde(default)]
+    pub degraded_winners_poly_only: u64,
 }
 
 impl Default for ExportRiskInputs {
@@ -495,6 +582,8 @@ impl Default for ExportRiskInputs {
             poly_class_crc_discounted: false,
             discount_attach_stream_crc: false,
             poly_class_crc_sources: 0,
+            effective_degraded_winner_rate: None,
+            degraded_winners_poly_only: 0,
         }
     }
 }
@@ -629,12 +718,26 @@ pub fn compute_export_risk_with_thresholds(
                 thresholds.max_block_crc_read_rate,
             ));
         }
-        if inputs.degraded_winner_rate > thresholds.max_degraded_winner_rate {
+        // 0108: key on effective (non-poly) degrade when present; else raw.
+        // Emit only in the Ok branch (match live raw — no degrade-rate reasons
+        // in the catastrophic else).
+        let keyed_degraded_winner_rate = inputs
+            .effective_degraded_winner_rate
+            .unwrap_or(inputs.degraded_winner_rate);
+        let using_effective_degraded = inputs.effective_degraded_winner_rate.is_some();
+        if keyed_degraded_winner_rate > thresholds.max_degraded_winner_rate {
             post = PreflightRecommendation::ReExportRecommended;
-            reasons.push(format!(
-                "degraded_winner_rate={:.3}>{}",
-                inputs.degraded_winner_rate, thresholds.max_degraded_winner_rate
-            ));
+            if using_effective_degraded {
+                reasons.push(format!(
+                    "effective_degraded_winner_rate={:.3}>{}",
+                    keyed_degraded_winner_rate, thresholds.max_degraded_winner_rate
+                ));
+            } else {
+                reasons.push(format!(
+                    "degraded_winner_rate={:.3}>{}",
+                    keyed_degraded_winner_rate, thresholds.max_degraded_winner_rate
+                ));
+            }
         }
         // Final attach stream CRC is warning-only (not attach_fail_rate) but still
         // elevates export_risk so operators re-export rather than trust the bytes.
@@ -2676,7 +2779,10 @@ mod tests {
             poly_class(100, 100, 100, 100),
             poly_class(100, 100, 100, 100),
         ];
-        let inputs = inputs_from_sources(1.0, 6014, &sources);
+        let mut inputs = inputs_from_sources(1.0, 6014, &sources);
+        // 0108: raw degrade rate still 1.0 on inputs; effective excludes poly CRC.
+        inputs.degraded_winner_rate = 1.0;
+        inputs.effective_degraded_winner_rate = Some(0.0);
         let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
         assert_eq!(risk.level, PreflightRecommendation::Ok);
         assert!(
@@ -2698,13 +2804,31 @@ mod tests {
             !risk
                 .reasons
                 .iter()
+                .any(|r| r.starts_with("degraded_winner_rate=")),
+            "must not emit raw degraded_winner_rate lie; reasons={:?}",
+            risk.reasons
+        );
+        assert!(
+            !risk
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("effective_degraded_winner_rate=")),
+            "effective 0.0 must not elevate; reasons={:?}",
+            risk.reasons
+        );
+        assert!(
+            !risk
+                .reasons
+                .iter()
                 .any(|r| r.starts_with("attach_stream_crc_events=")),
             "reasons={:?}",
             risk.reasons
         );
         assert_eq!(risk.inputs.block_crc_read_rate, 1.0);
+        assert_eq!(risk.inputs.degraded_winner_rate, 1.0);
         assert_eq!(risk.inputs.attach_stream_crc_events, 6014);
         assert_eq!(risk.inputs.effective_block_crc_read_rate, Some(0.0));
+        assert_eq!(risk.inputs.effective_degraded_winner_rate, Some(0.0));
     }
 
     #[test]
@@ -2977,6 +3101,358 @@ mod tests {
                     risk.reasons
                 );
             }
+        }
+    }
+
+    fn keep_winner(
+        source_path: &str,
+        reasons: Vec<dedup_engine::integrity::IntegrityReason>,
+    ) -> dedup_engine::keepset::KeepEntry {
+        use dedup_engine::integrity::RecoverableIntegrity;
+        use dedup_engine::keepset::{KeepEntry, MessageLocus};
+        let integrity = if reasons.is_empty() {
+            RecoverableIntegrity::clean()
+        } else {
+            RecoverableIntegrity::with_degraded(reasons, false)
+        };
+        KeepEntry {
+            locus: MessageLocus {
+                source_path: source_path.into(),
+                source_pst: "x.pst".into(),
+                folder_path: "Inbox".into(),
+                nid: 1,
+                is_orphaned: false,
+            },
+            message_id_norm: None,
+            content_hash: [0u8; 32],
+            edrm_mih_hex: None,
+            integrity,
+            size: 1,
+            promoted_from_failure: false,
+            folder_class: None,
+            decided_by: None,
+            duplicate_source_count: 0,
+            duplicate_sources: vec![],
+            duplicate_sources_truncated: false,
+        }
+    }
+
+    fn file_stats_at(path: &str, poly: bool) -> crate::scan::FileScanStats {
+        let mut s = file_stats(poly, 100, 100, 100, 100);
+        s.path = path.into();
+        s.name = Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string());
+        s
+    }
+
+    #[test]
+    fn export_risk_poly_crc_suspect_only_ok() {
+        use dedup_engine::integrity::IntegrityReason;
+        let poly_path = r"\\?\C:\evidence\poly.pst";
+        let files = [file_stats_at(poly_path, true)];
+        let winners = vec![
+            keep_winner(poly_path, vec![IntegrityReason::CrcSuspect]),
+            keep_winner(poly_path, vec![IntegrityReason::CrcSuspect]),
+            keep_winner(poly_path, vec![IntegrityReason::CrcSuspect]),
+        ];
+        let adj = poly_degraded_winner_adjustment(3, &winners, &files, true);
+        assert_eq!(adj.effective_degraded_winner_rate, Some(0.0));
+        assert_eq!(adj.degraded_winners_poly_only, 3);
+        assert_eq!(
+            winners[0].integrity.degraded_reasons.as_slice(),
+            &[IntegrityReason::CrcSuspect]
+        );
+
+        let mut inputs = inputs_from_sources(1.0, 0, &[poly_class(100, 100, 100, 100)]);
+        inputs.degraded_winner_rate = 1.0;
+        inputs.effective_degraded_winner_rate = adj.effective_degraded_winner_rate;
+        inputs.degraded_winners_poly_only = adj.degraded_winners_poly_only;
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::Ok);
+        assert!(
+            !risk
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("degraded_winner_rate=")
+                    || r.starts_with("effective_degraded_winner_rate=")),
+            "reasons={:?}",
+            risk.reasons
+        );
+        assert!(risk
+            .reasons
+            .iter()
+            .any(|r| r == "poly_class_crc_discounted"));
+    }
+
+    #[test]
+    fn export_risk_poly_attach_stream_crc_only() {
+        use dedup_engine::integrity::IntegrityReason;
+        let poly_path = r"\\?\C:\evidence\poly.pst";
+        let loc_path = r"\\?\C:\evidence\local.pst";
+        let files = [
+            file_stats_at(poly_path, true),
+            file_stats_at(loc_path, false),
+        ];
+        let winners = vec![
+            keep_winner(poly_path, vec![IntegrityReason::AttachStreamCrc]),
+            keep_winner(loc_path, vec![IntegrityReason::AttachStreamCrc]),
+        ];
+        let adj = poly_degraded_winner_adjustment(2, &winners, &files, true);
+        assert_eq!(adj.degraded_winners_poly_only, 1);
+        assert_eq!(adj.effective_degraded_winner_rate, Some(0.5));
+        assert_eq!(
+            winners[0].integrity.degraded_reasons.as_slice(),
+            &[IntegrityReason::AttachStreamCrc]
+        );
+        assert_eq!(
+            winners[1].integrity.degraded_reasons.as_slice(),
+            &[IntegrityReason::AttachStreamCrc]
+        );
+        assert!(files[0].poly_class_crc);
+        assert!(!files[1].poly_class_crc);
+
+        let mut inputs = inputs_from_sources(
+            1.0,
+            0,
+            &[poly_class(100, 100, 100, 100), localized(0, 100, 0, 100)],
+        );
+        inputs.degraded_winner_rate = 1.0;
+        inputs.effective_degraded_winner_rate = adj.effective_degraded_winner_rate;
+        inputs.degraded_winners_poly_only = adj.degraded_winners_poly_only;
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::ReExportRecommended);
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r == "effective_degraded_winner_rate=0.500>0.02"),
+            "reasons={:?}",
+            risk.reasons
+        );
+        assert!(
+            !risk
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("degraded_winner_rate=")),
+            "reasons={:?}",
+            risk.reasons
+        );
+    }
+
+    #[test]
+    fn export_risk_poly_crc_mismatch_fail_closed() {
+        use dedup_engine::integrity::IntegrityReason;
+        let poly_path = r"\\?\C:\evidence\poly.pst";
+        let files = [file_stats_at(poly_path, true)];
+        let winners = vec![keep_winner(poly_path, vec![IntegrityReason::CrcMismatch])];
+        assert_eq!(
+            winners[0].integrity.degraded_reasons.as_slice(),
+            &[IntegrityReason::CrcMismatch]
+        );
+        let adj = poly_degraded_winner_adjustment(1, &winners, &files, true);
+        assert_eq!(adj.degraded_winners_poly_only, 0);
+        assert_eq!(adj.effective_degraded_winner_rate, Some(1.0));
+
+        let mut inputs = inputs_from_sources(1.0, 0, &[poly_class(100, 100, 100, 100)]);
+        inputs.degraded_winner_rate = 1.0;
+        inputs.effective_degraded_winner_rate = adj.effective_degraded_winner_rate;
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::ReExportRecommended);
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r == "effective_degraded_winner_rate=1.000>0.02"),
+            "reasons={:?}",
+            risk.reasons
+        );
+    }
+
+    #[test]
+    fn poly_degraded_unique_zero() {
+        let discounted = poly_degraded_winner_adjustment(0, &[], &[], true);
+        assert_eq!(discounted.effective_degraded_winner_rate, Some(0.0));
+        assert_eq!(discounted.degraded_winners_poly_only, 0);
+
+        let closed = poly_degraded_winner_adjustment(0, &[], &[], false);
+        assert_eq!(closed.effective_degraded_winner_rate, None);
+        assert_eq!(closed.degraded_winners_poly_only, 0);
+    }
+
+    #[test]
+    fn export_risk_poly_plus_body_unavailable_advisory() {
+        use dedup_engine::integrity::IntegrityReason;
+        let poly_path = r"\\?\C:\evidence\poly.pst";
+        let files = [file_stats_at(poly_path, true)];
+        let mut winners = Vec::new();
+        for _ in 0..39 {
+            winners.push(keep_winner(poly_path, vec![IntegrityReason::CrcSuspect]));
+        }
+        for _ in 0..2 {
+            winners.push(keep_winner(
+                poly_path,
+                vec![
+                    IntegrityReason::BodyUnavailable,
+                    IntegrityReason::CrcSuspect,
+                ],
+            ));
+        }
+        assert_eq!(winners.len(), 41);
+        assert_eq!(
+            winners[39].integrity.degraded_reasons.as_slice(),
+            &[
+                IntegrityReason::BodyUnavailable,
+                IntegrityReason::CrcSuspect
+            ]
+        );
+        let adj = poly_degraded_winner_adjustment(41, &winners, &files, true);
+        assert_eq!(adj.degraded_winners_poly_only, 39);
+        assert_eq!(adj.effective_degraded_winner_rate, Some(2.0 / 41.0));
+
+        let mut inputs = inputs_from_sources(1.0, 0, &[poly_class(100, 100, 100, 100)]);
+        inputs.degraded_winner_rate = 1.0;
+        inputs.effective_degraded_winner_rate = adj.effective_degraded_winner_rate;
+        inputs.degraded_winners_poly_only = adj.degraded_winners_poly_only;
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::ReExportRecommended);
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r == "effective_degraded_winner_rate=0.049>0.02"),
+            "reasons={:?}",
+            risk.reasons
+        );
+        assert!(
+            !risk
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("degraded_winner_rate=")),
+            "reasons={:?}",
+            risk.reasons
+        );
+        assert_eq!(risk.inputs.degraded_winner_rate, 1.0);
+        assert!(risk
+            .reasons
+            .iter()
+            .any(|r| r == "poly_class_crc_discounted"));
+    }
+
+    #[test]
+    fn export_risk_localized_crc_suspect_still_raw() {
+        use dedup_engine::integrity::IntegrityReason;
+        let loc_path = r"C:\evidence\local.pst";
+        let files = [file_stats_at(loc_path, false)];
+        let winners = vec![keep_winner(loc_path, vec![IntegrityReason::CrcSuspect])];
+        let adj = poly_degraded_winner_adjustment(1, &winners, &files, false);
+        assert_eq!(adj.effective_degraded_winner_rate, None);
+        assert_eq!(adj.degraded_winners_poly_only, 0);
+
+        let mut inputs = inputs_from_sources(0.0, 0, &[localized(0, 100, 0, 100)]);
+        inputs.degraded_winner_rate = 1.0;
+        inputs.effective_degraded_winner_rate = None;
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::ReExportRecommended);
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r == "degraded_winner_rate=1.000>0.02"),
+            "reasons={:?}",
+            risk.reasons
+        );
+        assert!(
+            !risk
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("effective_degraded_winner_rate=")),
+            "reasons={:?}",
+            risk.reasons
+        );
+    }
+
+    #[test]
+    fn export_risk_mixed_poly_plus_localized_crc_counts() {
+        use dedup_engine::integrity::IntegrityReason;
+        let poly_path = r"\\?\C:\evidence\poly.pst";
+        let loc_path = r"\\?\C:\evidence\local.pst";
+        let files = [
+            file_stats_at(poly_path, true),
+            file_stats_at(loc_path, false),
+        ];
+        let winners = vec![
+            keep_winner(poly_path, vec![IntegrityReason::CrcSuspect]),
+            keep_winner(loc_path, vec![IntegrityReason::CrcSuspect]),
+        ];
+        assert!(files[0].poly_class_crc);
+        assert!(!files[1].poly_class_crc);
+        let adj = poly_degraded_winner_adjustment(2, &winners, &files, true);
+        assert_eq!(adj.degraded_winners_poly_only, 1);
+        assert_eq!(adj.effective_degraded_winner_rate, Some(0.5));
+
+        let mut inputs = inputs_from_sources(
+            1.0,
+            0,
+            &[poly_class(100, 100, 100, 100), localized(0, 100, 0, 100)],
+        );
+        inputs.degraded_winner_rate = 1.0;
+        inputs.effective_degraded_winner_rate = adj.effective_degraded_winner_rate;
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(risk.level, PreflightRecommendation::ReExportRecommended);
+        assert!(
+            risk.reasons
+                .iter()
+                .any(|r| r == "effective_degraded_winner_rate=0.500>0.02"),
+            "reasons={:?}",
+            risk.reasons
+        );
+    }
+
+    #[test]
+    fn poly_degraded_unmapped_source_fail_closed() {
+        use dedup_engine::integrity::IntegrityReason;
+        let files = [file_stats_at(r"\\?\C:\evidence\poly.pst", true)];
+        let winners = vec![keep_winner(
+            r"\\?\C:\evidence\other.pst",
+            vec![IntegrityReason::CrcSuspect],
+        )];
+        assert_eq!(winners[0].locus.source_path, r"\\?\C:\evidence\other.pst");
+        let adj = poly_degraded_winner_adjustment(1, &winners, &files, true);
+        assert_eq!(adj.degraded_winners_poly_only, 0);
+        assert_eq!(adj.effective_degraded_winner_rate, Some(1.0));
+    }
+
+    #[test]
+    fn poly_degraded_path_match() {
+        use dedup_engine::integrity::IntegrityReason;
+        // Exact byte-identical \\?\ path.
+        let unc = r"\\?\C:\Evidence\Poly.pst";
+        let files_exact = [file_stats_at(unc, true)];
+        let winners_exact = vec![keep_winner(unc, vec![IntegrityReason::CrcSuspect])];
+        assert_eq!(winners_exact[0].locus.source_path, files_exact[0].path);
+        let adj_exact = poly_degraded_winner_adjustment(1, &winners_exact, &files_exact, true);
+        assert_eq!(adj_exact.degraded_winners_poly_only, 1);
+        assert_eq!(adj_exact.effective_degraded_winner_rate, Some(0.0));
+
+        // Compare-key case-differ (Windows lowercase only).
+        let files_case = [file_stats_at(r"C:\Foo.pst", true)];
+        let winners_case = vec![keep_winner(
+            r"c:\foo.pst",
+            vec![IntegrityReason::CrcSuspect],
+        )];
+        assert_ne!(winners_case[0].locus.source_path, files_case[0].path);
+        #[cfg(windows)]
+        {
+            let adj_case = poly_degraded_winner_adjustment(1, &winners_case, &files_case, true);
+            assert_eq!(adj_case.degraded_winners_poly_only, 1);
+            assert_eq!(adj_case.effective_degraded_winner_rate, Some(0.0));
+        }
+        #[cfg(not(windows))]
+        {
+            let adj_case = poly_degraded_winner_adjustment(1, &winners_case, &files_case, true);
+            assert_eq!(
+                adj_case.degraded_winners_poly_only, 0,
+                "non-Windows path_compare_key is case-sensitive"
+            );
+            assert_eq!(adj_case.effective_degraded_winner_rate, Some(1.0));
         }
     }
 

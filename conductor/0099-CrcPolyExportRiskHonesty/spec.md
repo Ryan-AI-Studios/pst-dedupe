@@ -200,7 +200,7 @@ Keep raw fields. Add (all `#[serde(default)]`):
 
 - `block_crc_read_rate` for advisory/catastrophic: use `effective_block_crc_read_rate` if `Some`, else raw (old callers / cancel path).
 - `attach_stream_crc_events > 0` advisory: skip when `discount_attach_stream_crc`.
-- `attach_fail_rate`, `failed_volume_index`, `partial+failed_volume`, `degraded_winner_rate`: **never** discounted.
+- `attach_fail_rate`, `failed_volume_index`, `partial+failed_volume`: **never** discounted. `degraded_winner_rate`: never discount **non-poly** degrade (0108 keys poly-only `CrcSuspect`/`AttachStreamCrc` via `effective_degraded_winner_rate`).
 
 When a CRC threshold is skipped because of poly discount, **do not** emit `block_crc_read_rate=1.000>0.15` from the raw rate. That reason is the current lie. Emit the closed reason `poly_class_crc_discounted` instead (and keep raw numbers on `inputs`).
 

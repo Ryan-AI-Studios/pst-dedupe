@@ -120,6 +120,15 @@
 | 62 | P3 Q | **0105** BodyCloudWindowEdgeNormalize | ✅ Completed | window-edge `normalize_candidate`; D-0097-window-edge-normalize |
 | 63 | P1 Q | **0106** UniqueEmlNestedMime | ✅ Completed | unique-eml nested RFC 5322 from NestedCanonicalMessage; D-0067 unique-eml half |
 | 64 | P1 R | **0107** UniquePstAlsoEml | ✅ Completed | unique-pst `--also-eml` same keep-set unique-eml pack; D-0071-also-eml; PR #104 / `339dfa0` |
+| 65 | P1 S | **0108** PolyDegradedWinnerRisk | ✅ Completed | effective degraded_winner_rate excludes poly-only CrcSuspect on poly sources; D-0108 |
+| 66 | P2 S | **0109** AlsoEmlClassifyHonesty | 📦 Proposed | PR #104 Bugbot also-eml classify/cancel; D-0109 |
+| 67 | P1 O | **0110** MatterChromeTauri | 📦 Proposed | Tauri 2 + Leptos matter chrome; one invoke |
+| 68 | P1 O | **0111** ReviewQueueFirstPass | 📦 Proposed | virtualized first-pass queue |
+| 69 | P0 O | **0112** ReviewWindow | 📦 Proposed | three-pane coding |
+| 70 | P1 O | **0113** ProduceChecklist | 📦 Proposed | produce checklist; DAT only |
+| 71 | P1 O | **0114** PdfRasterRedact | 📦 Proposed | zpdf raster/redact after 0112 |
+| 72 | P2 O | **0115** ImageOptFactory | 📦 Proposed — parked | TIFF/OPT if a produce needs images |
+| 73 | P2 O | **0116** ProcessFold | 📦 Proposed | fold egui Process into Tauri last |
 
 ## Series K spine (clean unique export)
 
@@ -210,7 +219,7 @@
 | 5 | **0103** RecipientTcSlblockNidOrder | **Completed** — trailing push + `add_subnode_leaf` emit-sort; D-0100-slblock-nid-order; PR #96 `f66ae9b` |
 | 6 | **0104** AttachmentTcMultipage | **Completed** — Strategy A attach table (`0x671`); D-0093-attachment-tc-page |
 
-**Suggested:** **0099**–**0104** **Completed**. No BCC track. Frontend Series O → **0108+**.
+**Suggested:** **0099**–**0104** **Completed**. No BCC track. Frontend Series O → **0110+**.
 
 ## Series Q — Unique-export honesty residuals (0105–0106)
 
@@ -223,4 +232,23 @@
 
 | Order | Track | Notes |
 |---|---|---|
-| 1 | **0107** UniquePstAlsoEml | **Completed** — wire `unique-pst --also-eml` from the same keep-set (no second scan); closes D-0071-also-eml; PR #104 / `339dfa0`; frontend **0108+** |
+| 1 | **0107** UniquePstAlsoEml | **Completed** — wire `unique-pst --also-eml` from the same keep-set (no second scan); closes D-0071-also-eml; PR #104 / `339dfa0`; Series S **0108–0109**; frontend **0110+** |
+
+## Series S — Unique-export HITL residuals (0108–0109)
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0108** PolyDegradedWinnerRisk | **Completed** — effective degraded_winner_rate; closes D-0108-poly-degraded-winner-risk; residual D-0108-keepset-crc-retaint |
+| 2 | **0109** AlsoEmlClassifyHonesty | **Proposed** — PR #104 Bugbot classify/cancel/counts; D-0109-also-eml-classify |
+
+## Series O — Review chrome Tauri 2 + Leptos (0110–0116)
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0110** MatterChromeTauri | **Proposed** — matter list/home; one invoke; Plex/paper |
+| 2 | **0111** ReviewQueueFirstPass | **Proposed** — virtualized first-pass queue |
+| 3 | **0112** ReviewWindow | **Proposed** — three-pane; Resp ⊥ Privilege |
+| 4 | **0113** ProduceChecklist | **Proposed** — checklist; DAT only; no OPT |
+| 5 | **0114** PdfRasterRedact | **Proposed** — zpdf + pdfium fallback; after window |
+| 6 | **0115** ImageOptFactory | **Proposed — parked** — TIFF/OPT if a produce needs images |
+| 7 | **0116** ProcessFold | **Proposed** — swallow egui Process last |

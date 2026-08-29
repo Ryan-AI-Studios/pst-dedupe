@@ -246,37 +246,64 @@ Ranked for affidavit-grade unique-PST: CRC class first, then full recipient TCs,
 | [0101-EmbeddedDepthFlag](0101-EmbeddedDepthFlag/spec.md) | **Completed** | Wire `--max-embedded-depth` (clap reject outside 1–8, default 3) on unique-pst. Same value to materialize + writer. CI: 4@3 vs 4@4 and 8@7 vs 8@8. Narrows unique-pst half of **D-0067-embedded-depth** (row stays open). Identity hash depth stays 3. PR **#92** `4bbf620`. HITL INC* at depth 8 skipped. |
 | [0102-ExportOracleInputsAttest](0102-ExportOracleInputsAttest/spec.md) | **Completed** | Recursive oracle `"inputs"` strip deleted `export_risk.inputs` so 0099 attest pointers never compared. Removed `"inputs"` from `SUMMARY_ALLOWLIST_KEYS`; blank job-level `/inputs` at root only. Closes **D-0099-oracle-inputs-attest**. |
 | [0103-RecipientTcSlblockNidOrder](0103-RecipientTcSlblockNidOrder/spec.md) | **Completed** | Trailing matrix `push` + `add_subnode_leaf` NID-ascending emit-sort (fail closed on duplicates). Closes **D-0100-slblock-nid-order**. PR **#96** `f66ae9b`. |
-| [0104-AttachmentTcMultipage](0104-AttachmentTcMultipage/spec.md) | **Completed** | Strategy A for per-message attachment table (`0x671`): row-matrix subnode + RowsPerBlock + multi-block HN. Closes **D-0093-attachment-tc-page**. HNBITMAPHDR stay fail-closed. PR **#98** `a35927c`. Frontend stays **0108+**. |
+| [0104-AttachmentTcMultipage](0104-AttachmentTcMultipage/spec.md) | **Completed** | Strategy A for per-message attachment table (`0x671`): row-matrix subnode + RowsPerBlock + multi-block HN. Closes **D-0093-attachment-tc-page**. HNBITMAPHDR stay fail-closed. PR **#98** `a35927c`. Frontend Series O starts **0110+**. |
 
 **Suggested order:** **0099** → **0100** → **0101** → **0102** → **0103** → **0104**.
 
 ## Series Q — Unique-export honesty residuals (post-0104)
 
-Series P closed. **0105–0106 Completed.** **No BCC track.** Frontend Series O, if started, uses **0108+**.
+Series P closed. **0105–0106 Completed.** **No BCC track.** Frontend Series O, if started, uses **0110+**.
 
 | Track | Status | Summary |
 |---|---|---|
 | [0105-BodyCloudWindowEdgeNormalize](0105-BodyCloudWindowEdgeNormalize/spec.md) | **Completed** | Window-edge bare dedupe runs `normalize_candidate` before classify; over-length URLs join `seen`. Closes **D-0097-window-edge-normalize**. Not frontend. |
 | [0106-UniqueEmlNestedMime](0106-UniqueEmlNestedMime/spec.md) | **Completed** | unique-eml reconstructs RFC 5322 inside `message/rfc822` from 0094 `NestedCanonicalMessage`; skip MAPI dump; `--max-embedded-depth` 1–8 default 3. Narrows **D-0067-embedded-depth** (do not close). Not frontend. |
 
-**Suggested order:** Series Q **0105–0106 Completed**. Frontend if started uses **0108+**.
+**Suggested order:** Series Q **0105–0106 Completed**. Frontend Series O uses **0110+**.
 
 ## Series R — Unique-export operator co-export (post-0106)
 
-Series Q closed. unique-eml nested MIME is honest (0106), so `unique-pst --also-eml` can write the same keep-set as EML. **No BCC track.** Frontend Series O, if started, uses **0108+**.
+Series Q closed. unique-eml nested MIME is honest (0106), so `unique-pst --also-eml` can write the same keep-set as EML. **No BCC track.** Frontend Series O uses **0110+**.
 
 | Track | Status | Summary |
 |---|---|---|
 | [0107-UniquePstAlsoEml](0107-UniquePstAlsoEml/spec.md) | **Completed** | Wire `unique-pst --also-eml` to a unique-eml pack from the **same** keep-set (no second scan). Closes **D-0071-also-eml**. Not frontend. PR [#104](https://github.com/Ryan-AI-Studios/pst-dedupe/pull/104) / `339dfa0`. |
 
-**Suggested order:** **0107** Completed. Frontend if started uses **0108+**.
+**Suggested order:** **0108** Completed. Series S **0109** Proposed. Frontend Series O **0110+**.
+
+## Series S — Unique-export HITL residuals (post-0107)
+
+Structural INC* HITL **2026-08-29** is green (4055/4055, depth 8, also-eml). Remaining honesty: poly CRC still inflates `degraded_winner_rate`; PR #104 Bugbot on also-eml classify. **No BCC track.** Frontend **0110+**.
+
+| Track | Status | Summary |
+|---|---|---|
+| [0108-PolyDegradedWinnerRisk](0108-PolyDegradedWinnerRisk/spec.md) | **Completed** | Effective `degraded_winner_rate` excludes poly-only `CrcSuspect`/`AttachStreamCrc` on poly-class sources. HITL: 3931 CRC-only vs 124 also `BODY_UNAVAILABLE` → effective ≈ 0.031 (still advisory; stops the 1.000 lie). Closes **D-0108-poly-degraded-winner-risk**. Not frontend. |
+| [0109-AlsoEmlClassifyHonesty](0109-AlsoEmlClassifyHonesty/spec.md) | **Proposed — placeholder** | Combined also-eml fidelity/ok/cancel rewrite honesty (PR #104 Bugbot). Closes **D-0109-also-eml-classify**. Not frontend. |
+
+**Suggested order:** **0108** Completed → **0109** Proposed. Expand **0109** with `/plan-track 109` before Implement.
+
+## Series O — Review chrome (Tauri 2 + Leptos)
+
+After Series S (or in parallel with mock-only work). **Stack lock:** Tauri 2 + Leptos, Plex/paper/cool chrome, keep egui Process until **0116**. One pipeline. No daemon. Image/OPT **0115** parked until a produce needs images.
+
+| Track | Status | Summary |
+|---|---|---|
+| [0110-MatterChromeTauri](0110-MatterChromeTauri/spec.md) | **Proposed — placeholder** | Matter list + home + four workspace tabs. **One** invoke: `matter-core` overview counts. |
+| [0111-ReviewQueueFirstPass](0111-ReviewQueueFirstPass/spec.md) | **Proposed — placeholder** | Virtualized first-pass queue; lead/QC is a second view. |
+| [0112-ReviewWindow](0112-ReviewWindow/spec.md) | **Proposed — placeholder** | Three-pane coding; Responsiveness ⊥ Privilege; Native/Text; Image stub. |
+| [0113-ProduceChecklist](0113-ProduceChecklist/spec.md) | **Proposed — placeholder** | Mock checklist wired to `matter-qc` + `matter-produce`. DAT only. No OPT. |
+| [0114-PdfRasterRedact](0114-PdfRasterRedact/spec.md) | **Proposed — placeholder** | `zpdf` raster + geometric redact; pdfium fallback. Feeds **D-0032-01** / **D-0034-02**. |
+| [0115-ImageOptFactory](0115-ImageOptFactory/spec.md) | **Proposed — parked** | TIFF G4 + OPT. Only if a produce needs images. **D-0040-01**. |
+| [0116-ProcessFold](0116-ProcessFold/spec.md) | **Proposed — placeholder** | Swallow egui Process into the same Tauri window. Still one pipeline. |
+
+**Suggested order:** **0110** → **0111** → **0112** → **0113**; **0114** after window; **0115** parked; **0116** last. Do not skip to raster/OPT first.
 
 ## Notes
 
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099–0104 Completed**. **Series Q 0105–0106 Completed** (window-edge + unique-eml nested MIME). **Series R 0107 Completed** (`unique-pst --also-eml` co-export; PR #104 / `339dfa0`). Frontend if started uses **0108+**.
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099–0104 Completed**. **Series Q 0105–0106 Completed** (window-edge + unique-eml nested MIME). **Series R 0107 Completed** (`unique-pst --also-eml` co-export; PR #104 / `339dfa0`). **Series S 0108 Completed / 0109 Proposed** (poly degrade risk + also-eml classify). **Series O 0110–0116 Proposed** (Tauri 2 + Leptos chrome; 0115 parked).
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).

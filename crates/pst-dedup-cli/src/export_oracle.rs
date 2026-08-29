@@ -17,12 +17,14 @@
 //! (pre-instrumentation) pack without `phase_timings` / `messages_materialized`
 //! / etc. still compares equal to a HEAD pack when **measurement** product
 //! semantics match. That equalization does **not** cover `export_risk.inputs`
-//! attest fields (0099): a **pre-0099** pack that omits
+//! attest fields (0099/0108): a **pre-0099** pack that omits
 //! `effective_block_crc_read_rate` / `poly_class_crc_discounted` /
-//! `discount_attach_stream_crc` / `poly_class_crc_sources` **must mismatch**
-//! HEAD — intended. Operator gate: build a **post-0099** parent binary, set
-//! `PST_DEDUPE_BASELINE_BIN`, run [`compare_export_packs`]. Optional CI: see
-//! `unique_pst` integration test. Parent-oracle results are also recorded in
+//! `discount_attach_stream_crc` / `poly_class_crc_sources`, or a **pre-0108**
+//! pack that omits `effective_degraded_winner_rate` /
+//! `degraded_winners_poly_only`, **must mismatch** HEAD — intended. Operator
+//! gate: build a **post-0108** parent binary, set `PST_DEDUPE_BASELINE_BIN`,
+//! run [`compare_export_packs`]. Optional CI: see `unique_pst` integration
+//! test. Parent-oracle results are also recorded in
 //! `conductor/0079-MaterializeWritePerformance/baseline.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -250,6 +252,8 @@ fn compare_integrity_counters(a: &Value, b: &Value, mismatches: &mut Vec<String>
         "/export_risk/inputs/poly_class_crc_discounted",
         "/export_risk/inputs/discount_attach_stream_crc",
         "/export_risk/inputs/poly_class_crc_sources",
+        "/export_risk/inputs/effective_degraded_winner_rate",
+        "/export_risk/inputs/degraded_winners_poly_only",
     ];
     for p in paths {
         let va = a.pointer(p);
@@ -839,7 +843,9 @@ mod tests {
                     "effective_block_crc_read_rate": effective,
                     "poly_class_crc_discounted": discounted,
                     "discount_attach_stream_crc": true,
-                    "poly_class_crc_sources": 2
+                    "poly_class_crc_sources": 2,
+                    "effective_degraded_winner_rate": 0.0,
+                    "degraded_winners_poly_only": 0
                 }
             },
             "export": { "messages_written_total": 1, "attachments_failed": 0 },
@@ -863,6 +869,12 @@ mod tests {
         let before_sources = v
             .pointer("/export_risk/inputs/poly_class_crc_sources")
             .cloned();
+        let before_deg = v
+            .pointer("/export_risk/inputs/effective_degraded_winner_rate")
+            .cloned();
+        let before_poly_only = v
+            .pointer("/export_risk/inputs/degraded_winners_poly_only")
+            .cloned();
         normalize_summary_for_oracle(&mut v);
         assert_eq!(
             v.pointer("/export_risk/inputs/effective_block_crc_read_rate"),
@@ -879,6 +891,14 @@ mod tests {
         assert_eq!(
             v.pointer("/export_risk/inputs/poly_class_crc_sources"),
             before_sources.as_ref()
+        );
+        assert_eq!(
+            v.pointer("/export_risk/inputs/effective_degraded_winner_rate"),
+            before_deg.as_ref()
+        );
+        assert_eq!(
+            v.pointer("/export_risk/inputs/degraded_winners_poly_only"),
+            before_poly_only.as_ref()
         );
         assert_eq!(v.pointer("/inputs"), Some(&json!([])));
     }
@@ -980,6 +1000,68 @@ mod tests {
                 .iter()
                 .any(|m| m.contains("/export_risk/inputs/effective_block_crc_read_rate")),
             "pre-0099 parent omitting attest keys must mismatch; got {mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn attest_effective_degraded_winner_rate_mismatch() {
+        let mut a = attest_summary(0.0, true, &["C:/a.pst"]);
+        let mut b = attest_summary(0.0, true, &["C:/a.pst"]);
+        if let Some(v) = b.pointer_mut("/export_risk/inputs/effective_degraded_winner_rate") {
+            *v = json!(0.031);
+        }
+        normalize_summary_for_oracle(&mut a);
+        normalize_summary_for_oracle(&mut b);
+        let mut mismatches = Vec::new();
+        compare_integrity_counters(&a, &b, &mut mismatches);
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("/export_risk/inputs/effective_degraded_winner_rate")),
+            "expected effective_degraded_winner_rate pointer mismatch; got {mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn attest_degraded_winners_poly_only_mismatch() {
+        let mut a = attest_summary(0.0, true, &["C:/a.pst"]);
+        let mut b = attest_summary(0.0, true, &["C:/a.pst"]);
+        if let Some(v) = b.pointer_mut("/export_risk/inputs/degraded_winners_poly_only") {
+            *v = json!(3931);
+        }
+        normalize_summary_for_oracle(&mut a);
+        normalize_summary_for_oracle(&mut b);
+        let mut mismatches = Vec::new();
+        compare_integrity_counters(&a, &b, &mut mismatches);
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("/export_risk/inputs/degraded_winners_poly_only")),
+            "expected degraded_winners_poly_only pointer mismatch; got {mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn allowlist_does_not_strip_0108_degrade_keys() {
+        assert!(
+            !SUMMARY_ALLOWLIST_KEYS.contains(&"effective_degraded_winner_rate"),
+            "0108 keys must not be allowlisted"
+        );
+        assert!(
+            !SUMMARY_ALLOWLIST_KEYS.contains(&"degraded_winners_poly_only"),
+            "0108 keys must not be allowlisted"
+        );
+        let mut v = attest_summary(0.0, true, &["C:/a.pst"]);
+        v["export_risk"]["inputs"]["effective_degraded_winner_rate"] = json!(0.031);
+        v["export_risk"]["inputs"]["degraded_winners_poly_only"] = json!(3931);
+        normalize_summary_for_oracle(&mut v);
+        assert_eq!(
+            v.pointer("/export_risk/inputs/effective_degraded_winner_rate"),
+            Some(&json!(0.031))
+        );
+        assert_eq!(
+            v.pointer("/export_risk/inputs/degraded_winners_poly_only"),
+            Some(&json!(3931))
         );
     }
 }

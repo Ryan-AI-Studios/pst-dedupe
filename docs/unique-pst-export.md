@@ -303,6 +303,7 @@ Scan and unique-pst report page/block CRC and BID mismatch counters **per source
 | `block_crc_read_rate` ≥ 0.15 | the medium is failing, not the mailbox — **unless** that rate is poly-class noise excluded via `effective_block_crc_read_rate` | `export_risk = not_export_ready` when the **effective** (non-poly) rate crosses 0.15 |
 | `poly_class_crc` / `poly_class_crc_discounted` | computed≠stored is the store’s CRC (aspose / Permute-class), not a bad image | raw counters stay on `inputs` for the affidavit; post-export CRC gates do not elevate |
 | `ATTACH_STREAM_CRC` Info on a poly-class-only job | same trailer mismatch as pages/blocks | does **not** elevate `export_risk` after 0099 (`discount_attach_stream_crc`) |
+| Keep-set `CRC_SUSPECT` on poly-class winners | materialize re-taints winners even when scan cleared poly false-positives | alone does **not** elevate `export_risk` after 0108 when `effective_degraded_winner_rate` is used; raw `degraded_winner_rate` stays on `inputs`; body/attach degrade still keys the effective rate (`max_degraded_winner_rate=0.02` unchanged) |
 | `attach_fail_rate` over threshold | attachment payloads unreadable | re-export; the 0073 ledger names which |
 | `export_risk = not_export_ready` | failed volume, catastrophic **effective** rate, attach fail, or scan already said so | do not hand off |
 
