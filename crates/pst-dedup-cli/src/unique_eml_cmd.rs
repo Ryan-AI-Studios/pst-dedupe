@@ -194,6 +194,30 @@ fn eml_pack_cancel_requested(cancel: Option<&AtomicBool>) -> bool {
     cancel.is_some_and(|f| f.load(Ordering::Relaxed))
 }
 
+fn count_eml_under(dir: &Path) -> u64 {
+    let mut n = 0u64;
+    let Ok(rd) = fs::read_dir(dir) else {
+        return 0;
+    };
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.is_dir() {
+            n = n.saturating_add(count_eml_under(&p));
+        } else if p.extension().and_then(|x| x.to_str()) == Some("eml") {
+            n = n.saturating_add(1);
+        }
+    }
+    n
+}
+
+fn eml_summary_usable(path: &Path) -> bool {
+    path.is_file()
+        && fs::read_to_string(path)
+            .ok()
+            .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+            .is_some()
+}
+
 /// Best-effort failed `{out}/summary.json` when pack write aborts with `Err`.
 pub(crate) fn write_eml_hard_fail_summary(
     out: &Path,
@@ -207,23 +231,15 @@ pub(crate) fn write_eml_hard_fail_summary(
     let _ = fs::create_dir_all(out);
     let summary_path = out.join("summary.json");
     let summary_abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
-    let bytes_written = out
-        .join("VOL001")
-        .exists()
-        .then_some(true)
-        .or_else(|| {
-            fs::read_dir(out)
-                .ok()
-                .map(|rd| rd.filter_map(|e| e.ok()).any(|_| true))
-        })
-        .unwrap_or(false);
+    let eml_written = count_eml_under(out);
+    let bytes_written = eml_written > 0 || out.join("VOL001").exists();
     let classified = crate::export_outcome::classify_export(
         crate::export_outcome::ExportOkInput {
             scan_ok: true,
             verify_ok: true,
             export_err_absent: false,
             export_partial: true,
-            messages_written_total: 0,
+            messages_written_total: eml_written,
             unique: keep_set.stats.unique,
             attach_failed_total: 0,
             body_soft_fail_total: 0,
@@ -250,9 +266,9 @@ pub(crate) fn write_eml_hard_fail_summary(
         manifest_json: out.join("manifest.json").display().to_string(),
         decision_csv: None,
         keep_set_json: None,
-        eml_written: 0,
+        eml_written,
         unique: keep_set.stats.unique,
-        volumes: 0,
+        volumes: if out.join("VOL001").is_dir() { 1 } else { 0 },
         attach_parts_written: 0,
         embedded_messages_written: 0,
         attach_parts_failed: 0,
@@ -293,17 +309,26 @@ pub(crate) fn write_eml_hard_fail_summary(
 pub fn rewrite_quarantined_eml_summary(
     dest_dir: &Path,
     quarantine: crate::export_outcome::QuarantineResult,
-) {
+) -> Result<()> {
     let summary_path = dest_dir.join("summary.json");
-    let Ok(body) = fs::read_to_string(&summary_path) else {
-        return;
-    };
-    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&body) else {
-        return;
-    };
-    let Some(obj) = v.as_object_mut() else {
-        return;
-    };
+    let body = fs::read_to_string(&summary_path).map_err(|e| {
+        CliError::Msg(format!(
+            "read quarantined summary {}: {e}",
+            summary_path.display()
+        ))
+    })?;
+    let mut v: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        CliError::Msg(format!(
+            "parse quarantined summary {}: {e}",
+            summary_path.display()
+        ))
+    })?;
+    let obj = v.as_object_mut().ok_or_else(|| {
+        CliError::Msg(format!(
+            "quarantined summary is not an object: {}",
+            summary_path.display()
+        ))
+    })?;
     let abs = std::path::absolute(&summary_path).unwrap_or_else(|_| summary_path.clone());
     obj.insert(
         "summary_path".into(),
@@ -329,9 +354,19 @@ pub fn rewrite_quarantined_eml_summary(
         "artifact_state".into(),
         serde_json::Value::String(state.as_str().to_string()),
     );
-    if let Ok(body) = serde_json::to_string_pretty(&v) {
-        let _ = fs::write(&summary_path, body);
-    }
+    let body = serde_json::to_string_pretty(&v).map_err(|e| {
+        CliError::Msg(format!(
+            "serialize quarantined summary {}: {e}",
+            summary_path.display()
+        ))
+    })?;
+    fs::write(&summary_path, body).map_err(|e| {
+        CliError::Msg(format!(
+            "write quarantined summary {}: {e}",
+            summary_path.display()
+        ))
+    })?;
+    Ok(())
 }
 
 /// Write a unique-EML pack from an in-memory keep-set (no scan/resolve).
@@ -347,15 +382,18 @@ pub fn write_eml_pack_from_keep_set(
     match write_eml_pack_from_keep_set_inner(input) {
         Ok(r) => Ok(r),
         Err(err) => {
-            write_eml_hard_fail_summary(
-                out,
-                keep_set,
-                scan,
-                policy,
-                family_policy,
-                max_embedded_depth,
-                &err,
-            );
+            // Keep an already-usable summary (e.g. report-fail rewrite with real counts).
+            if !eml_summary_usable(&out.join("summary.json")) {
+                write_eml_hard_fail_summary(
+                    out,
+                    keep_set,
+                    scan,
+                    policy,
+                    family_policy,
+                    max_embedded_depth,
+                    &err,
+                );
+            }
             Err(err)
         }
     }
@@ -743,10 +781,13 @@ fn write_eml_pack_from_keep_set_inner(
                 serde_json::json!({ "code": "report", "message": msg }),
             );
         }
-        let _ = fs::write(
-            &summary_path,
-            serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()),
-        );
+        // Best-effort rewrite with real pack counts still in `v`; then fail closed.
+        if let Ok(body) = serde_json::to_string_pretty(&v) {
+            let _ = fs::write(&summary_path, body);
+        }
+        let _ = pack_err;
+        let _ = artifact_state;
+        return Err(CliError::Msg(msg));
     }
 
     let _ = pack_err;

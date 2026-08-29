@@ -3,7 +3,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use assert_cmd::cargo::cargo_bin;
 use dedup_engine::integrity::{RecoverableIntegrity, ScanMode};
@@ -224,6 +225,55 @@ fn aspose_also_eml_count_and_manifest() {
         serde_json::from_str(&fs::read_to_string(&man_path).expect("man")).expect("man json");
     assert_eq!(man["schema"].as_str(), Some("eml_pack_v1"));
     assert_eq!(count_eml_files(&also), eml_written);
+}
+
+#[test]
+fn also_eml_parent_of_out_is_usage_error_before_clear() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let also = dir.path().join("case");
+    fs::create_dir_all(&also).expect("mkdir also");
+    let marker = also.join("must_survive.txt");
+    fs::write(&marker, b"keep").expect("seed");
+    let out = also.join("unique.pst");
+    let report = dir.path().join("report");
+
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--also-eml",
+            also.to_str().expect("utf8"),
+            "--overwrite",
+            "--qc-level",
+            "off",
+            "--json",
+        ])
+        .output()
+        .expect("run");
+    assert!(!result.status.success(), "parent also-eml must fail");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        combined.contains("--also-eml"),
+        "usage must name --also-eml: {combined}"
+    );
+    assert!(
+        marker.is_file(),
+        "overwrite clear must not run when also-eml parents --out"
+    );
+    assert!(!out.exists(), "no PST write on guard failure");
 }
 
 #[test]
@@ -747,6 +797,192 @@ fn helper_hard_fail_writes_summary_json() {
 }
 
 #[test]
+fn cancel_during_pst_write_skips_also_eml() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+    let also = dir.path().join("also_eml");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_c = Arc::clone(&cancel);
+
+    let mut args = tiny_cli_args(sample, out.clone(), report.clone());
+    args.also_eml = Some(also.clone());
+    args.no_attachments = true;
+    args.qc_level = pst_dedup_cli::unique_pst_qc::QcLevel::Off;
+
+    let outcome = run_unique_pst_with_options(
+        args,
+        UniquePstRunOptions {
+            cancel: Some(cancel),
+            stderr_progress: false,
+            on_progress: Some(Box::new(move |p| {
+                if p.stage == "write" {
+                    cancel_c.store(true, Ordering::SeqCst);
+                }
+            })),
+            on_log: None,
+        },
+    )
+    .expect("structured outcome");
+    assert!(outcome.cancelled, "cancel at write must cancel");
+    assert_eq!(outcome.exit.as_u8(), 130);
+    let summary = fs::read_to_string(report.join("summary.json")).expect("summary");
+    let v: serde_json::Value = serde_json::from_str(&summary).expect("json");
+    assert_eq!(v["also_eml_ran"], false);
+    assert_eq!(v["also_eml_exit_code"], 0);
+    // Prepared empty also-eml dir may remain; must not contain a finished pack.
+    assert!(
+        !also.join("manifest.json").is_file(),
+        "also-eml must be skipped (no pack manifest)"
+    );
+    let eml_n = count_eml_files(&also);
+    assert_eq!(eml_n, 0, "no EML files when also-eml skipped");
+}
+
+#[test]
+fn summary_write_failure_returns_err() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    write_unicode_pst(
+        &src,
+        vec![base_msg("<sw@ex.com>", "Summary write")],
+        &[],
+        &WritePstOpts::default(),
+    )
+    .expect("write");
+    let mut pst = pst_reader::PstFile::open(&src).expect("open");
+    let nid = pst
+        .folders()
+        .expect("folders")
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("nid")
+        .0;
+    let src_display = src.display().to_string();
+    let keep_set = KeepSet {
+        schema: "keep_set_v1".into(),
+        policy: KeepPolicy::FirstSeen,
+        family_policy: FamilyPolicy::ParentsOnly,
+        created_from: None,
+        identity_level: None,
+        dedupe_scope: None,
+        winners: vec![KeepEntry {
+            locus: MessageLocus {
+                source_path: src_display,
+                source_pst: "src.pst".into(),
+                folder_path: "Inbox".into(),
+                nid,
+                is_orphaned: false,
+            },
+            message_id_norm: Some("<sw@ex.com>".into()),
+            content_hash: [0u8; 32],
+            edrm_mih_hex: None,
+            integrity: RecoverableIntegrity::clean(),
+            size: 10,
+            promoted_from_failure: false,
+            folder_class: None,
+            decided_by: None,
+            duplicate_source_count: 0,
+            duplicate_sources: vec![],
+            duplicate_sources_truncated: false,
+        }],
+        stats: KeepSetStats {
+            unique: 1,
+            recoverable: 1,
+            ..KeepSetStats::default()
+        },
+    };
+    let pack_out = dir.path().join("pack");
+    fs::create_dir_all(&pack_out).expect("mkdir");
+    // Block summary.json as a directory so the final write fails closed.
+    fs::create_dir_all(pack_out.join("summary.json")).expect("summary as dir");
+    let mut mat = PstMaterializer::new(FamilyPolicy::ParentsOnly);
+    let mut attach_src = PstAttachStreamSource::new();
+    let preflight = dedup_engine::integrity::compute_preflight(
+        &dedup_engine::integrity::PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            1,
+            0,
+            0,
+            0,
+            1,
+            dedup_engine::integrity::IntegrityThresholds::default(),
+        ),
+    );
+    let scan = pst_dedup_cli::scan::ScanSummary {
+        schema: "scan_integrity_v1".into(),
+        mode: ScanMode::BestEffort,
+        files: vec![],
+        total_messages: 1,
+        unique: 1,
+        duplicates: 0,
+        tier1_hits: 0,
+        tier2_hits: 0,
+        savings_bytes: 0,
+        skipped: 0,
+        skipped_by_reason: Default::default(),
+        recoverable_messages: 1,
+        degraded_messages: 0,
+        degraded_by_reason: Default::default(),
+        orphaned_messages: 0,
+        failed_files: 0,
+        partial_files: 0,
+        opened_files: 1,
+        duration_secs: 0.0,
+        preflight,
+        skips: vec![],
+        integrity_csv: None,
+        grouping: Default::default(),
+        page_crc_mismatches: 0,
+        block_crc_mismatches: 0,
+        block_bid_mismatches: 0,
+        distinct_bad_bids: 0,
+        distinct_bad_bids_exact: true,
+        crc_suspect_messages: 0,
+        page_reads: 0,
+        block_reads: 0,
+        block_crc_rate: 0.0,
+        block_crc_read_rate: 0.0,
+        poly_class_crc_sources: 0,
+    };
+    let result = write_eml_pack_from_keep_set(WriteEmlPackFromKeepSetInput {
+        keep_set: &keep_set,
+        paths: std::slice::from_ref(&src),
+        out: &pack_out,
+        policy: KeepPolicy::FirstSeen,
+        family_policy: FamilyPolicy::ParentsOnly,
+        write_opts: dedup_engine::EmlWriteOpts {
+            family_policy: FamilyPolicy::ParentsOnly,
+            max_embedded_depth: 3,
+        },
+        files_per_volume: 10_000,
+        volume_prefix: "VOL".into(),
+        attach_ledger: AttachLedgerMode::Off,
+        attach_ledger_max_rows: 500_000,
+        ledger_path_mode: LedgerPathMode::Full,
+        soft_skip_attach_records: &[],
+        scan,
+        scan_ok: true,
+        fail_on_partial_fidelity: false,
+        allow_partial_fidelity: true,
+        risk_gate: pst_dedup_cli::export_outcome::RiskGate::Off,
+        export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
+        cancel: None,
+        mat: &mut mat,
+        attach_src: &mut attach_src,
+        manifest_json: None,
+        materialized_count: 1,
+    });
+    assert!(result.is_err(), "summary write failure must return Err");
+}
+
+#[test]
 fn rewrite_quarantined_summary_sets_partial_quarantined() {
     use pst_dedup_cli::export_outcome::{ArtifactState, QuarantineResult};
     use pst_dedup_cli::unique_eml_cmd::rewrite_quarantined_eml_summary;
@@ -766,7 +1002,7 @@ fn rewrite_quarantined_summary_sets_partial_quarantined() {
         }"#,
     )
     .expect("seed");
-    rewrite_quarantined_eml_summary(&dest, QuarantineResult::Succeeded);
+    rewrite_quarantined_eml_summary(&dest, QuarantineResult::Succeeded).expect("rewrite");
     let v: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&summary_path).expect("read")).expect("json");
     assert_eq!(

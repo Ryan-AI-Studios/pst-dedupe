@@ -3089,7 +3089,15 @@ pub fn run_unique_pst_with_options(
                         // Quarantine also-eml dir only — never PST volumes / report-dir.
                         let (q, dest) = quarantine_also_eml_dir(eml_dir);
                         if let Some(dest) = dest.as_ref() {
-                            crate::unique_eml_cmd::rewrite_quarantined_eml_summary(dest, q);
+                            if let Err(e) =
+                                crate::unique_eml_cmd::rewrite_quarantined_eml_summary(dest, q)
+                            {
+                                emit_log(
+                                    stderr,
+                                    &on_log,
+                                    &format!("warning: also-eml quarantine summary rewrite: {e}"),
+                                );
+                            }
                         }
                         emit_log(
                             stderr,
@@ -3948,6 +3956,14 @@ fn guard_unique_pst_paths(
                 eml.display()
             )));
         }
+        // Overwrite clear of also-eml must not delete --out (or sit as its parent).
+        if is_same_or_under_resolved(out, eml) || is_same_or_under(out, eml) {
+            return Err(CliError::Usage(format!(
+                "refusing --also-eml that contains or is a parent of --out: also_eml={} out={}",
+                eml.display(),
+                out.display()
+            )));
+        }
         if paths_equal_resolved(eml, report_dir) || paths_equal(eml, report_dir) {
             return Err(CliError::Usage(format!(
                 "refusing --also-eml equal to --report-dir: {}",
@@ -3968,12 +3984,12 @@ fn guard_unique_pst_paths(
                 eml.display()
             )));
         }
-        // Overwrite clear of also-eml must not delete planned PST volume siblings.
-        for vol_idx in 2u32..=MAX_VOLUME_SIBLING_INDEX {
+        // Overwrite clear of also-eml must not delete planned PST volumes (incl. primary).
+        for vol_idx in 1u32..=MAX_VOLUME_SIBLING_INDEX {
             let vol = volume_path_for(out, vol_idx);
             if is_same_or_under_resolved(&vol, eml) || is_same_or_under(&vol, eml) {
                 return Err(CliError::Usage(format!(
-                    "refusing --also-eml that would contain PST volume sibling {}: also_eml={}",
+                    "refusing --also-eml that would contain PST volume {}: also_eml={}",
                     vol.display(),
                     eml.display()
                 )));
@@ -4244,6 +4260,21 @@ mod tests {
             .unwrap_err();
         assert!(
             err.to_string().to_ascii_lowercase().contains("also-eml"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn guard_rejects_also_eml_parent_of_out() {
+        let inputs = vec![PathBuf::from(r"C:\data\mail.pst")];
+        let out = PathBuf::from(r"C:\case\unique.pst");
+        let report = PathBuf::from(r"C:\case_report");
+        let also = PathBuf::from(r"C:\case");
+        let err = guard_unique_pst_paths(&inputs, &out, &report, None, None, None, Some(&also))
+            .unwrap_err();
+        let msg = err.to_string().to_ascii_lowercase();
+        assert!(
+            msg.contains("also-eml") && (msg.contains("parent") || msg.contains("contain")),
             "{err}"
         );
     }
