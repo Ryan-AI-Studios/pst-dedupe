@@ -242,6 +242,39 @@ pub fn classify_export(
     }
 }
 
+/// 0078 integer precedence rank (higher = worse). Not raw `u8` of [`CliExit`].
+fn cli_exit_precedence_rank(exit: CliExit) -> u8 {
+    match exit {
+        CliExit::Cancelled => 5,
+        CliExit::Generic => 4,
+        CliExit::ExportRiskBlocked => 3,
+        CliExit::PartialFidelity => 2,
+        CliExit::Success => 0,
+        // Treat other application codes as hard-fail class for merge.
+        CliExit::Usage | CliExit::Busy | CliExit::JobFailed | CliExit::MatterIo => 4,
+    }
+}
+
+/// Worse of two exits by 0078 precedence: `130 > 1 > 65 > 64 > 0`.
+pub fn worse_cli_exit(a: CliExit, b: CliExit) -> CliExit {
+    if cli_exit_precedence_rank(a) >= cli_exit_precedence_rank(b) {
+        a
+    } else {
+        b
+    }
+}
+
+/// Merge exit-reason codes worst-first without duplicates (stable within each side).
+pub fn merge_exit_reasons(primary: &[String], secondary: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in primary.iter().chain(secondary.iter()) {
+        if !out.iter().any(|x| x == s) {
+            out.push(s.clone());
+        }
+    }
+    out
+}
+
 /// Whether automation may **retry** this unique-export outcome (0082 D-0078-retryable).
 ///
 /// `true` only for clearly transient classes:

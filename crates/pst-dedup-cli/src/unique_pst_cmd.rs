@@ -145,7 +145,9 @@ pub struct UniquePstClapArgs {
     /// Full-file rehash of completed volumes vs report digests (default off).
     #[arg(long)]
     pub verify_hash: bool,
-    /// Optional co-export unique-eml pack directory (soft residual; may be ignored).
+    /// Co-export a unique-eml pack from the same keep-set into this directory.
+    /// Requires a directory path. `--overwrite` replaces a non-empty dir. Nested
+    /// MIME depth follows `--max-embedded-depth`.
     #[arg(long)]
     pub also_eml: Option<PathBuf>,
     #[arg(long)]
@@ -306,7 +308,7 @@ pub struct UniquePstCliArgs {
     pub max_volume_bytes: Option<u64>,
     pub overwrite: bool,
     pub verify_hash: bool,
-    /// Soft: optional co-export unique-eml pack (residual if unused).
+    /// Optional co-export unique-eml pack directory (same keep-set; 0107).
     pub also_eml: Option<PathBuf>,
     pub no_tier2: bool,
     pub no_attachments: bool,
@@ -946,6 +948,27 @@ struct CancelledSummaryCtx<'a> {
     promote_on_attach_fail: bool,
     /// Effective extract/write depth (clamped 1–8; 0101). Do not hardcode 3.
     max_embedded_depth: u32,
+    /// Resolved `--also-eml` path when set (ran=false on early cancel).
+    also_eml_out: Option<String>,
+}
+
+/// Rename an also-eml pack directory after cancel (PST volumes untouched).
+fn quarantine_also_eml_dir(dir: &Path) -> crate::export_outcome::QuarantineResult {
+    use crate::export_outcome::QuarantineResult;
+    if !dir.exists() {
+        return QuarantineResult::NoVolumes;
+    }
+    let stamp = quarantine_utc_stamp();
+    let parent = dir.parent().unwrap_or_else(|| Path::new("."));
+    let name = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "also_eml".to_string());
+    let dest = parent.join(format!("{name}.cancelled-{stamp}.partial"));
+    match fs::rename(dir, &dest) {
+        Ok(()) => QuarantineResult::Succeeded,
+        Err(_) => QuarantineResult::Failed,
+    }
 }
 
 /// Quarantine written volumes after cancel: rename each volume to
@@ -1234,6 +1257,12 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
         messages_with_body_cloud_links: 0,
         body_cloud_links_total: 0,
         body_cloud_link_truncated_messages: 0,
+        also_eml_out: ctx.also_eml_out.clone(),
+        also_eml_ran: false,
+        also_eml_eml_written: 0,
+        also_eml_attach_parts_failed: 0,
+        also_eml_embedded_messages_written: 0,
+        also_eml_exit_code: 0,
         body_scan_window_capped_messages: 0,
         store_record_key_mode: "deterministic".to_string(),
     };
@@ -1385,22 +1414,10 @@ pub fn run_unique_pst_with_options(
         None => None,
     };
 
-    if let Some(eml) = &args.also_eml {
-        let _ = resolve_cli_path_maybe_missing(eml)?;
-        // Soft residual: co-export not implemented in this track.
-        tracing::warn!(
-            path = %eml.display(),
-            "--also-eml is accepted but not implemented (D-0071-also-eml residual); ignoring"
-        );
-        emit_log(
-            stderr,
-            &on_log,
-            &format!(
-                "warning: --also-eml is accepted but not implemented (D-0071-also-eml residual); ignoring {}",
-                eml.display()
-            ),
-        );
-    }
+    let also_eml_dir = match &args.also_eml {
+        Some(eml) => Some(resolve_cli_path_maybe_missing(eml)?.into_std_path_buf()),
+        None => None,
+    };
 
     guard_unique_pst_paths(
         &paths,
@@ -1409,6 +1426,7 @@ pub fn run_unique_pst_with_options(
         decision_csv.as_deref(),
         keep_set_json.as_deref(),
         integrity_csv.as_deref(),
+        also_eml_dir.as_deref(),
     )?;
 
     // Refuse existing primary out without --overwrite.
@@ -1420,6 +1438,10 @@ pub fn run_unique_pst_with_options(
     }
 
     prepare_report_dir(&report_dir, args.overwrite)?;
+    // Prepare also-eml before scan so non-empty-without-overwrite fails cheaply.
+    if let Some(eml_dir) = also_eml_dir.as_ref() {
+        crate::unique_eml_cmd::prepare_out_dir(eml_dir, args.overwrite)?;
+    }
 
     // Remove stale primary out if overwrite.
     if out.exists() && args.overwrite {
@@ -1482,6 +1504,7 @@ pub fn run_unique_pst_with_options(
             artifact_state,
             promote_on_attach_fail: args.promote_on_attach_fail,
             max_embedded_depth: nested_extract_depth,
+            also_eml_out: also_eml_dir.as_ref().map(|p| p.display().to_string()),
         });
         return Ok(cancelled_outcome(
             report_dir,
@@ -1664,6 +1687,7 @@ pub fn run_unique_pst_with_options(
                 artifact_state,
                 promote_on_attach_fail: args.promote_on_attach_fail,
                 max_embedded_depth: nested_extract_depth,
+                also_eml_out: also_eml_dir.as_ref().map(|p| p.display().to_string()),
             });
             return Ok(cancelled_outcome(
                 report_dir,
@@ -1743,6 +1767,7 @@ pub fn run_unique_pst_with_options(
                 artifact_state,
                 promote_on_attach_fail: args.promote_on_attach_fail,
                 max_embedded_depth: nested_extract_depth,
+                also_eml_out: also_eml_dir.as_ref().map(|p| p.display().to_string()),
             });
             return Ok(cancelled_outcome(
                 report_dir,
@@ -2992,6 +3017,105 @@ pub fn run_unique_pst_with_options(
         ))
     };
 
+    // ── 0107: also-eml co-export from the same keep-set (skip if PST cancelled) ─
+    let also_eml_out_str = also_eml_dir.as_ref().map(|p| p.display().to_string());
+    let mut also_eml_ran = false;
+    let mut also_eml_eml_written = 0u64;
+    let mut also_eml_attach_parts_failed = 0u64;
+    let mut also_eml_embedded_messages_written = 0u64;
+    let mut also_eml_exit_code = 0u8;
+    let mut also_eml_pack_exit: Option<crate::error::CliExit> = None;
+    let mut also_eml_pack_reasons: Vec<String> = Vec::new();
+    let mut also_eml_cancelled = false;
+    if let Some(eml_dir) = also_eml_dir.as_ref() {
+        if !cancelled {
+            emit_log(stderr, &on_log, "stage=also_eml");
+            emit_stage_progress(
+                &on_progress,
+                "also_eml",
+                volume_index,
+                messages_written_total,
+                messages_written_total,
+                0,
+                winners_total,
+            );
+            let eml_family = effective_family;
+            let eml_write_opts = dedup_engine::EmlWriteOpts {
+                family_policy: eml_family,
+                max_embedded_depth: nested_extract_depth,
+            };
+            let cancel_flag = cancel.as_deref();
+            match crate::unique_eml_cmd::write_eml_pack_from_keep_set(
+                crate::unique_eml_cmd::WriteEmlPackFromKeepSetInput {
+                    keep_set: &keep_set,
+                    paths: &paths,
+                    out: eml_dir,
+                    policy: args.policy,
+                    family_policy: eml_family,
+                    write_opts: eml_write_opts,
+                    files_per_volume: dedup_engine::clamp_files_per_volume(10_000),
+                    volume_prefix: "VOL".to_string(),
+                    attach_ledger: args.attach_ledger,
+                    attach_ledger_max_rows: args.attach_ledger_max_rows,
+                    ledger_path_mode: args.ledger_path_mode,
+                    soft_skip_attach_records: &resolved.soft_skip_attach_records,
+                    scan: outcome.summary.clone(),
+                    scan_ok: exit_err.is_none(),
+                    fail_on_partial_fidelity: args.fail_on_partial_fidelity,
+                    allow_partial_fidelity: args.allow_partial_fidelity,
+                    cancel: cancel_flag,
+                    mat: &mut mat,
+                    attach_src: &mut attach_src,
+                    manifest_json: None,
+                    materialized_count: keep_set.stats.unique,
+                },
+            ) {
+                Ok(pack) => {
+                    also_eml_ran = true;
+                    also_eml_eml_written = pack.eml_written;
+                    also_eml_attach_parts_failed = pack.attach_parts_failed;
+                    also_eml_embedded_messages_written = pack.embedded_messages_written;
+                    also_eml_exit_code = pack.exit.as_u8();
+                    also_eml_pack_exit = Some(pack.exit);
+                    also_eml_pack_reasons = pack.exit_reasons;
+                    also_eml_cancelled = pack.cancelled;
+                    if pack.cancelled {
+                        // Quarantine also-eml dir only — never PST volumes / report-dir.
+                        let q = quarantine_also_eml_dir(eml_dir);
+                        emit_log(
+                            stderr,
+                            &on_log,
+                            &format!("also-eml cancel quarantine: {q:?}"),
+                        );
+                    }
+                    emit_log(
+                        stderr,
+                        &on_log,
+                        &format!(
+                            "also-eml out={} eml_written={} attach_failed={} embedded={} exit={}",
+                            eml_dir.display(),
+                            pack.eml_written,
+                            pack.attach_parts_failed,
+                            pack.embedded_messages_written,
+                            pack.exit.as_u8()
+                        ),
+                    );
+                }
+                Err(e) => {
+                    also_eml_ran = true;
+                    also_eml_exit_code = crate::error::CliExit::Generic.as_u8();
+                    also_eml_pack_exit = Some(crate::error::CliExit::Generic);
+                    also_eml_pack_reasons = vec!["COUNT_MISMATCH".to_string()];
+                    emit_log(
+                        stderr,
+                        &on_log,
+                        &format!("warning: also-eml hard-fail (PST kept): {e}"),
+                    );
+                }
+            }
+        }
+    }
+
     // ── 0078: cancel quarantine before classify (D7) ────────────────────────
     let mut quarantine = crate::export_outcome::QuarantineResult::NotAttempted;
     if cancelled {
@@ -3106,7 +3230,7 @@ pub fn run_unique_pst_with_options(
         },
     );
 
-    let classified = crate::export_outcome::classify_export(
+    let mut classified = crate::export_outcome::classify_export(
         export_ok_input,
         export_risk.level,
         risk_gate,
@@ -3117,11 +3241,83 @@ pub fn run_unique_pst_with_options(
         messages_written_total > 0 || volumes.iter().any(|v| v.bytes > 0) || out.exists();
     let artifact_state =
         crate::export_outcome::artifact_state_for(&classified, bytes_written, quarantine);
-    // ok retained: complete fidelity only (non-cancelled success path).
-    let ok = classified.fidelity == crate::export_outcome::ExportFidelity::Complete && !cancelled;
 
-    let summary_error = if !ok || cancelled {
-        let (code, message) = if cancelled {
+    // Combined exit: 0078 precedence over PST + also-eml (not raw u8 max).
+    let mut combined_exit = classified.exit;
+    let mut combined_reason_strings: Vec<String> = classified
+        .reasons
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let process_cancelled = cancelled || also_eml_cancelled;
+    if also_eml_cancelled {
+        combined_exit = crate::error::CliExit::Cancelled;
+        combined_reason_strings = vec![crate::export_outcome::reason::CANCELLED.to_string()];
+    } else if let Some(eml_exit) = also_eml_pack_exit {
+        let pst_exit = classified.exit;
+        combined_exit = crate::export_outcome::worse_cli_exit(pst_exit, eml_exit);
+        if crate::export_outcome::worse_cli_exit(eml_exit, pst_exit) == eml_exit
+            && eml_exit != pst_exit
+        {
+            combined_reason_strings = crate::export_outcome::merge_exit_reasons(
+                &also_eml_pack_reasons,
+                &combined_reason_strings,
+            );
+        } else {
+            combined_reason_strings = crate::export_outcome::merge_exit_reasons(
+                &combined_reason_strings,
+                &also_eml_pack_reasons,
+            );
+        }
+    }
+    classified.exit = combined_exit;
+    // Map merged String reasons back to &'static for outcome; unknown codes dropped.
+    let combined_static_reasons: Vec<&'static str> = combined_reason_strings
+        .iter()
+        .filter_map(|s| match s.as_str() {
+            crate::export_outcome::reason::ATTACH_SOFT_FAIL => {
+                Some(crate::export_outcome::reason::ATTACH_SOFT_FAIL)
+            }
+            crate::export_outcome::reason::BODY_SOFT_FAIL => {
+                Some(crate::export_outcome::reason::BODY_SOFT_FAIL)
+            }
+            crate::export_outcome::reason::COUNT_MISMATCH => {
+                Some(crate::export_outcome::reason::COUNT_MISMATCH)
+            }
+            crate::export_outcome::reason::VERIFY_FAILED => {
+                Some(crate::export_outcome::reason::VERIFY_FAILED)
+            }
+            crate::export_outcome::reason::REPORT_WRITE_FAILED => {
+                Some(crate::export_outcome::reason::REPORT_WRITE_FAILED)
+            }
+            crate::export_outcome::reason::SCAN_FAILED => {
+                Some(crate::export_outcome::reason::SCAN_FAILED)
+            }
+            crate::export_outcome::reason::RISK_GATE => {
+                Some(crate::export_outcome::reason::RISK_GATE)
+            }
+            crate::export_outcome::reason::CANCELLED => {
+                Some(crate::export_outcome::reason::CANCELLED)
+            }
+            _ => None,
+        })
+        .collect();
+    classified.reasons = combined_static_reasons;
+    if also_eml_ran || also_eml_cancelled {
+        classified.fidelity = match combined_exit {
+            crate::error::CliExit::Success => crate::export_outcome::ExportFidelity::Complete,
+            crate::error::CliExit::PartialFidelity => {
+                crate::export_outcome::ExportFidelity::Partial
+            }
+            _ => crate::export_outcome::ExportFidelity::Failed,
+        };
+    }
+
+    // ok follows combined exit (true only when combined is 0).
+    let ok = combined_exit == crate::error::CliExit::Success && !process_cancelled;
+
+    let summary_error = if !ok || process_cancelled {
+        let (code, message) = if process_cancelled {
             ("cancelled", "cancelled".to_string())
         } else if let Some(msg) = export_err.as_ref() {
             // Prefer writer/disk typed code (write_io) when the write phase failed.
@@ -3132,6 +3328,8 @@ pub fn run_unique_pst_with_options(
             ("verification", msg.clone())
         } else if let Some(msg) = exit_err.as_ref() {
             ("scan_integrity", msg.clone())
+        } else if also_eml_ran && also_eml_exit_code != 0 {
+            ("also_eml", "also-eml co-export incomplete".to_string())
         } else if classified.fidelity == crate::export_outcome::ExportFidelity::Partial {
             (
                 "partial_fidelity",
@@ -3155,8 +3353,8 @@ pub fn run_unique_pst_with_options(
         .filter(|p| p.sent_message_with_no_recipients)
         .count() as u64;
     let retryable = crate::export_outcome::summary_is_retryable(
-        classified.exit,
-        cancelled,
+        combined_exit,
+        process_cancelled,
         &classified.reasons,
         summary_error.as_ref().map(|e| e.code.as_str()),
     );
@@ -3210,6 +3408,12 @@ pub fn run_unique_pst_with_options(
         messages_with_body_cloud_links,
         body_cloud_links_total,
         body_cloud_link_truncated_messages,
+        also_eml_out: also_eml_out_str.clone(),
+        also_eml_ran,
+        also_eml_eml_written,
+        also_eml_attach_parts_failed,
+        also_eml_embedded_messages_written,
+        also_eml_exit_code,
         body_scan_window_capped_messages,
         store_record_key_mode: match write_opts_base.store_record_key_mode {
             StoreRecordKeyMode::Deterministic => "deterministic".to_string(),
@@ -3226,7 +3430,6 @@ pub fn run_unique_pst_with_options(
         emit_log(stderr, &on_log, &format!("warning: {msg}"));
         summary_write_failed = Some(msg);
     }
-    let mut classified = classified;
     let mut ok = ok;
     let mut summary_error = summary_error;
     if summary_write_failed.is_some() {
@@ -3275,7 +3478,7 @@ pub fn run_unique_pst_with_options(
 
     let structured = UniquePstOutcome {
         ok,
-        cancelled,
+        cancelled: process_cancelled,
         report_dir: report_dir.clone(),
         summary_path: summary_path.clone(),
         out: out.clone(),
@@ -3287,7 +3490,7 @@ pub fn run_unique_pst_with_options(
             .as_ref()
             .map(|e| e.message.clone())
             .or_else(|| {
-                if cancelled {
+                if process_cancelled {
                     Some("cancelled".into())
                 } else if !ok {
                     Some("unique-pst failed".into())
@@ -3306,7 +3509,7 @@ pub fn run_unique_pst_with_options(
         stderr,
         &on_log,
         &format!(
-            "stage=done ok={ok} cancelled={cancelled} exit={} messages_written={messages_written_total}",
+            "stage=done ok={ok} cancelled={process_cancelled} exit={} messages_written={messages_written_total}",
             classified.exit.as_u8()
         ),
     );
@@ -3365,8 +3568,13 @@ pub fn run_unique_pst_with_options(
             attach_written_total, attach_failed_total
         );
         println!("  max_embedded_depth: {nested_extract_depth}");
+        if let Some(p) = &also_eml_out_str {
+            println!(
+                "  also_eml:         {p}  ran={also_eml_ran}  eml_written={also_eml_eml_written}  attach_failed={also_eml_attach_parts_failed}  embedded={also_eml_embedded_messages_written}  exit={also_eml_exit_code}"
+            );
+        }
         println!(
-            "  partial:          {}  ok: {ok}  cancelled: {cancelled}",
+            "  partial:          {}  ok: {ok}  cancelled: {process_cancelled}",
             summary.export.partial
         );
         println!(
@@ -3630,6 +3838,7 @@ fn guard_unique_pst_paths(
     decision_csv: Option<&Path>,
     keep_set_json: Option<&Path>,
     integrity_csv: Option<&Path>,
+    also_eml: Option<&Path>,
 ) -> Result<()> {
     for input in inputs {
         if paths_equal_resolved(out, input) || paths_equal(out, input) {
@@ -3677,6 +3886,84 @@ fn guard_unique_pst_paths(
                 return Err(CliError::Usage(format!(
                     "refusing multi-volume path equal to an input PST: {}",
                     vol.display()
+                )));
+            }
+        }
+        if let Some(eml) = also_eml {
+            if paths_equal_resolved(eml, input) || paths_equal(eml, input) {
+                return Err(CliError::Usage(format!(
+                    "refusing --also-eml equal to an input PST: {}",
+                    eml.display()
+                )));
+            }
+            if is_same_or_under_resolved(input, eml) || is_same_or_under(input, eml) {
+                return Err(CliError::Usage(format!(
+                    "refusing --also-eml that contains an input PST: also_eml={} input={}",
+                    eml.display(),
+                    input.display()
+                )));
+            }
+            if is_same_or_under_resolved(eml, input) || is_same_or_under(eml, input) {
+                return Err(CliError::Usage(format!(
+                    "refusing --also-eml nested under an input PST: also_eml={} input={}",
+                    eml.display(),
+                    input.display()
+                )));
+            }
+        }
+    }
+    if let Some(eml) = also_eml {
+        if eml.exists() && eml.is_file() {
+            return Err(CliError::Usage(format!(
+                "--also-eml exists and is not a directory: {}",
+                eml.display()
+            )));
+        }
+        if paths_equal_resolved(eml, out) || paths_equal(eml, out) {
+            return Err(CliError::Usage(format!(
+                "refusing --also-eml equal to --out: {}",
+                eml.display()
+            )));
+        }
+        if paths_equal_resolved(eml, report_dir) || paths_equal(eml, report_dir) {
+            return Err(CliError::Usage(format!(
+                "refusing --also-eml equal to --report-dir: {}",
+                eml.display()
+            )));
+        }
+        if is_same_or_under_resolved(eml, report_dir) || is_same_or_under(eml, report_dir) {
+            return Err(CliError::Usage(format!(
+                "refusing --also-eml under --report-dir: also_eml={} report_dir={}",
+                eml.display(),
+                report_dir.display()
+            )));
+        }
+        if is_same_or_under_resolved(report_dir, eml) || is_same_or_under(report_dir, eml) {
+            return Err(CliError::Usage(format!(
+                "refusing --report-dir under --also-eml: report_dir={} also_eml={}",
+                report_dir.display(),
+                eml.display()
+            )));
+        }
+        // Overwrite clear of also-eml must not delete planned PST volume siblings.
+        for vol_idx in 2u32..=MAX_VOLUME_SIBLING_INDEX {
+            let vol = volume_path_for(out, vol_idx);
+            if is_same_or_under_resolved(&vol, eml) || is_same_or_under(&vol, eml) {
+                return Err(CliError::Usage(format!(
+                    "refusing --also-eml that would contain PST volume sibling {}: also_eml={}",
+                    vol.display(),
+                    eml.display()
+                )));
+            }
+        }
+        for art in [decision_csv, keep_set_json, integrity_csv]
+            .into_iter()
+            .flatten()
+        {
+            if paths_equal_resolved(eml, art) || paths_equal(eml, art) {
+                return Err(CliError::Usage(format!(
+                    "refusing --also-eml equal to report artifact: {}",
+                    art.display()
                 )));
             }
         }
@@ -3904,7 +4191,7 @@ mod tests {
         let inputs = vec![PathBuf::from(r"C:\data\mail.pst")];
         let out = PathBuf::from(r"C:\data\mail.pst");
         let report = PathBuf::from(r"C:\data\mail_report");
-        assert!(guard_unique_pst_paths(&inputs, &out, &report, None, None, None).is_err());
+        assert!(guard_unique_pst_paths(&inputs, &out, &report, None, None, None, None).is_err());
     }
 
     #[test]
@@ -3912,7 +4199,7 @@ mod tests {
         let inputs = vec![PathBuf::from(r"C:\data\pack\mail.pst")];
         let out = PathBuf::from(r"C:\data\unique.pst");
         let report = PathBuf::from(r"C:\data\pack");
-        assert!(guard_unique_pst_paths(&inputs, &out, &report, None, None, None).is_err());
+        assert!(guard_unique_pst_paths(&inputs, &out, &report, None, None, None, None).is_err());
     }
 
     #[test]
@@ -3921,7 +4208,21 @@ mod tests {
         let out = PathBuf::from(r"C:\export\unique.pst");
         let report = PathBuf::from(r"C:\export\unique_report");
         let dec = PathBuf::from(r"C:\export\unique_report\decisions.csv");
-        guard_unique_pst_paths(&inputs, &out, &report, Some(&dec), None, None).expect("ok");
+        guard_unique_pst_paths(&inputs, &out, &report, Some(&dec), None, None, None).expect("ok");
+    }
+
+    #[test]
+    fn guard_rejects_also_eml_equal_out() {
+        let inputs = vec![PathBuf::from(r"C:\data\mail.pst")];
+        let out = PathBuf::from(r"C:\export\unique.pst");
+        let report = PathBuf::from(r"C:\export\unique_report");
+        let also = PathBuf::from(r"C:\export\unique.pst");
+        let err = guard_unique_pst_paths(&inputs, &out, &report, None, None, None, Some(&also))
+            .unwrap_err();
+        assert!(
+            err.to_string().to_ascii_lowercase().contains("also-eml"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3930,7 +4231,8 @@ mod tests {
         let inputs = vec![PathBuf::from(r"C:\export\unique_vol003.pst")];
         let out = PathBuf::from(r"C:\export\unique.pst");
         let report = PathBuf::from(r"C:\export\unique_report");
-        let err = guard_unique_pst_paths(&inputs, &out, &report, None, None, None).unwrap_err();
+        let err =
+            guard_unique_pst_paths(&inputs, &out, &report, None, None, None, None).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("multi-volume") || msg.contains("vol003") || msg.contains("input"),
@@ -4131,8 +4433,7 @@ mod tests {
             max_volume_bytes: None,
             overwrite: false,
             verify_hash: false,
-            // Forces a production warning through on_log (D-0071 residual).
-            also_eml: Some(also_eml),
+            also_eml: Some(also_eml.clone()),
             no_tier2: false,
             no_attachments: true,
             json: false,
@@ -4203,15 +4504,32 @@ mod tests {
         assert!(
             log_lines
                 .iter()
-                .any(|l| l.contains("warning") && l.contains("also-eml")),
-            "expected also-eml warning via on_log: {log_lines:?}"
+                .any(|l| l.contains("stage=also_eml") || l.contains("also-eml out=")),
+            "expected also-eml stage log: {log_lines:?}"
+        );
+        assert!(
+            !log_lines.iter().any(|l| l.contains("not implemented")),
+            "unimplemented also-eml warning must be gone: {log_lines:?}"
+        );
+        let vol = also_eml.join("VOL001");
+        let eml_count = fs::read_dir(&vol)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("eml"))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert!(
+            eml_count > 0,
+            "also-eml dir must contain .eml under VOL001: {}",
+            also_eml.display()
         );
         let ticks = progress.lock().unwrap_or_else(|e| e.into_inner());
         assert!(
             ticks
                 .iter()
-                .any(|t| t.stage == "scan" || t.stage == "write" || t.stage == "done"),
-            "expected progress stages: {:?}",
+                .any(|t| t.stage == "also_eml" || t.stage == "done"),
+            "expected also_eml or done progress: {:?}",
             ticks.iter().map(|t| t.stage.as_str()).collect::<Vec<_>>()
         );
     }

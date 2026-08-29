@@ -16,6 +16,8 @@ mail clients. This is the Series K **interim** path while production PST write
   --json
 ```
 
+`unique-pst --also-eml <dir>` writes the same unique-EML pack layout from the unique-pst keep-set (no second scan).
+
 | Flag | Notes |
 |---|---|
 | `--out` | Pack root (required). Refuses non-empty dirs unless `--overwrite`. |

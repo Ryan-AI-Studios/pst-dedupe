@@ -7,6 +7,12 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0107 — unique-pst `--also-eml` co-export)
+
+- `unique-pst --also-eml <dir>` writes a real unique-EML pack from the **same** keep-set winners as the unique-PST (no second scan / no `run_unique_eml`). Nested MIME follows `--max-embedded-depth`; volume defaults match unique-eml (`10000` / `VOL`).
+- `UniqueExportSummary` always serializes `also_eml_out` / `also_eml_ran` / `also_eml_eml_written` / `also_eml_attach_parts_failed` / `also_eml_embedded_messages_written` / `also_eml_exit_code` (flag-absent `also_eml_out` is JSON `null`). Combined process exit uses 0078 precedence (`130 > 1 > 65 > 64 > 0`).
+- Closes **D-0071-also-eml**. Does **not** close **D-0067-embedded-depth**.
+
 ### Added (0106 — unique-eml nested MIME `message/rfc822`)
 
 - `unique-eml` writes reconstructed nested RFC 5322 for method-5 (`ATTACH_EMBEDDED_MSG`) extracts instead of labeling raw MAPI attach bytes as `message/rfc822`. Missing DTO / over-depth nests soft-skip with `ATTACH_EMBEDDED_UNPARSED` / `ATTACH_DEPTH_LIMIT`.

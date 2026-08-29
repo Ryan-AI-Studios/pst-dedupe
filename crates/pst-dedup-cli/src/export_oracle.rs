@@ -54,6 +54,8 @@ const SUMMARY_ALLOWLIST_KEYS: &[&str] = &[
     "report_dir",
     "decision_csv",
     "keep_set_json",
+    // Path-ish also-eml dir (0107). Counts / also_eml_ran must attest — not listed.
+    "also_eml_out",
     // Volume digests change with store record key (D10).
     "sha256_hex",
     "md5_hex",
