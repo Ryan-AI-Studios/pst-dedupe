@@ -9,7 +9,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** `docs/unique-pst-export.md` + this track. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-08-29); do **not** chase it at execute.
 - **Cross-repo contract:** n/a
-- **Status:** In progress
+- **Status:** Completed
 - **Depends on:** 0107 (Completed — `--also-eml` co-export; PR **#104** / `339dfa0`)
 - **Spec authored:** 2026-08-29 (placeholder → Ready)
 - **Series:** S (Unique-export HITL residuals, post-0107)
