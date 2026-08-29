@@ -50,9 +50,9 @@
 
 | Item | Value |
 |---|---|
-| PR | _(filled after open)_ |
-| Merge SHA | _(filled after squash-merge)_ |
-| CI note | _(filled after green)_ |
+| PR | [#102](https://github.com/Ryan-AI-Studios/pst-dedupe/pull/102) |
+| Merge SHA | `55de823` |
+| CI note | Required checks + verify-parity green first pass. |
 
 ## Notes
 
