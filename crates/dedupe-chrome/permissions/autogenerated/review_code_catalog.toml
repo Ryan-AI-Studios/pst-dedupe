@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-review-code-catalog"
+description = "Enables the review_code_catalog command without any pre-configured scope."
+commands.allow = ["review_code_catalog"]
+
+[[permission]]
+identifier = "deny-review-code-catalog"
+description = "Denies the review_code_catalog command without any pre-configured scope."
+commands.deny = ["review_code_catalog"]

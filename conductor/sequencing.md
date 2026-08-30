@@ -123,7 +123,7 @@
 | 65 | P1 S | **0108** PolyDegradedWinnerRisk | ✅ Completed | effective degraded_winner_rate excludes poly-only CrcSuspect on poly sources; D-0108 |
 | 66 | P2 S | **0109** AlsoEmlClassifyHonesty | ✅ Completed | PR #104 Bugbot also-eml classify/cancel; D-0109; PR #109 / `dc7c29c` |
 | 67 | P1 O | **0110** MatterChromeTauri | ✅ Completed | Tauri 2 + Leptos matter chrome; one `matter_overview`; PR **#111** `5a76f0b` |
-| 68 | P1 O | **0111** ReviewQueueFirstPass | 📦 Proposed | virtualized first-pass queue |
+| 68 | P1 O | **0111** ReviewQueueFirstPass | 📋 Ready | virtualized first-pass queue; Unreviewed default; coding ≠ withhold |
 | 69 | P0 O | **0112** ReviewWindow | 📦 Proposed | three-pane coding |
 | 70 | P1 O | **0113** ProduceChecklist | 📦 Proposed | produce checklist; DAT only |
 | 71 | P1 O | **0114** PdfRasterRedact | 📦 Proposed | zpdf raster/redact after 0112 |
@@ -243,12 +243,12 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0116)
 
-**Series O** after Series S. **0110 Completed** (PR **#111** / `5a76f0b`).
+**Series O** after Series S. **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Ready — not started.**
 
 | Order | Track | Notes |
 |---|---|---|
 | 1 | **0110** MatterChromeTauri | **Completed** — matter list/home; `matter_overview`; Plex/paper; PR **#111** `5a76f0b` |
-| 2 | **0111** ReviewQueueFirstPass | **Proposed** — virtualized first-pass queue |
+| 2 | **0111** ReviewQueueFirstPass | **Ready** — virtualized first-pass queue; Unreviewed chip; lead/QC toggle |
 | 3 | **0112** ReviewWindow | **Proposed** — three-pane; Resp ⊥ Privilege |
 | 4 | **0113** ProduceChecklist | **Proposed** — checklist; DAT only; no OPT |
 | 5 | **0114** PdfRasterRedact | **Proposed** — zpdf + pdfium fallback; after window |

@@ -29,6 +29,13 @@ impl CommandError {
             message: message.into(),
         }
     }
+
+    pub fn fts_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            kind: "fts_unavailable".into(),
+            message: message.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for CommandError {

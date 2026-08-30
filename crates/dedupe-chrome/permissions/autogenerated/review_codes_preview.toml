@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-review-codes-preview"
+description = "Enables the review_codes_preview command without any pre-configured scope."
+commands.allow = ["review_codes_preview"]
+
+[[permission]]
+identifier = "deny-review-codes-preview"
+description = "Denies the review_codes_preview command without any pre-configured scope."
+commands.deny = ["review_codes_preview"]

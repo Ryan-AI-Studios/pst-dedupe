@@ -33,6 +33,7 @@ features = [
     "HtmlInputElement",
     "KeyboardEvent",
     "MouseEvent",
+    "Event",
     "Element",
     "DomTokenList",
 ]

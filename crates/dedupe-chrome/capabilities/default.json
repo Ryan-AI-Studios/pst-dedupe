@@ -9,6 +9,12 @@
     "allow-matter-overview",
     "allow-create-matter",
     "allow-recent-matters-list",
-    "allow-recent-matters-remember"
+    "allow-recent-matters-remember",
+    "allow-review-queue-page",
+    "allow-review-code-catalog",
+    "allow-saved-searches-list",
+    "allow-saved-search-upsert",
+    "allow-review-codes-preview",
+    "allow-review-apply-codes"
   ]
 }

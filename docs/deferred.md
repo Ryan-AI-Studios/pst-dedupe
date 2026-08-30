@@ -917,7 +917,7 @@ Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs a
 |---|---|---|---|---|
 | D-0110-matter-chrome | — | Tauri 2 + Leptos matter list/home + one `load_case_overview` invoke | **Closed in 0110** (PR **#111** / `5a76f0b`) | — |
 | D-0110-deny-unic | P3 | Unmaintained `unic-*` via `tauri-utils`/`urlpattern` (RUSTSEC-2025-0081, 0075, 0080, 0100, 0098) | Ignored in `deny.toml` for Windows Tauri 2 (`dedupe-chrome`); no safe crates.io upgrade | residual / upstream |
-| D-0111-first-pass-queue | — | Virtualized first-pass queue; saved search as queue | Mock queue is lead/QC — not the default. Do not mount 60k DOM rows | **0111** Proposed |
+| D-0111-first-pass-queue | — | Virtualized first-pass queue; saved search as queue | **Absorbed in 0111** (Implement; registry Completes on publish). | **0111** |
 | D-0112-review-window | — | Three-pane coding; Responsiveness ⊥ Privilege | Mock has no `/review/:docId`. Image stub until 0114 | **0112** Proposed |
 | D-0113-produce-checklist | — | Produce wizard + blockers/warnings; DAT only | No fake OPT. Privilege-in-set hard block | **0113** Proposed |
 | D-0032-01 | — | Geometric PDF redaction + burn-in | Already owned | **0114** |

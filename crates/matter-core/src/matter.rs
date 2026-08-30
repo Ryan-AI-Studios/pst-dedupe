@@ -4083,6 +4083,43 @@ impl Matter {
         Ok(out)
     }
 
+    /// Count items per `family_id` for this matter (chunked IN-list).
+    ///
+    /// `ids` are family ids. Missing ids are omitted from the map (caller treats
+    /// absent as unknown). Null `family_id` on a row is never counted here.
+    pub fn family_sizes(&self, ids: &[String]) -> Result<HashMap<String, u64>> {
+        let mut out: HashMap<String, u64> = HashMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        const CHUNK: usize = 500;
+        for chunk in ids.chunks(CHUNK) {
+            let placeholders: String = (1..=chunk.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT family_id, COUNT(*) FROM items \
+                 WHERE matter_id = ?{mat} AND family_id IN ({placeholders}) \
+                 GROUP BY family_id",
+                mat = chunk.len() + 1
+            );
+            let mut params: Vec<Value> = chunk.iter().map(|id| Value::Text(id.clone())).collect();
+            params.push(Value::Text(self.matter_id.clone()));
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(params), |row| {
+                let family_id: String = row.get(0)?;
+                let n: i64 = row.get(1)?;
+                Ok((family_id, n as u64))
+            })?;
+            for row in rows {
+                let (family_id, n) = row?;
+                out.insert(family_id, n);
+            }
+        }
+        Ok(out)
+    }
+
     /// Clear all FTS bookkeeping columns for this matter (full rebuild prep).
     pub fn clear_fts_fields(&self) -> Result<u64> {
         let matter_id = self.matter_id.clone();
