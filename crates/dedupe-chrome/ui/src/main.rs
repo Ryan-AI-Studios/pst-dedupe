@@ -2,6 +2,7 @@ mod app;
 mod invoke;
 mod pages;
 mod path_id;
+mod queue_window;
 
 use app::App;
 

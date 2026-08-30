@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-saved-search-upsert"
+description = "Enables the saved_search_upsert command without any pre-configured scope."
+commands.allow = ["saved_search_upsert"]
+
+[[permission]]
+identifier = "deny-saved-search-upsert"
+description = "Denies the saved_search_upsert command without any pre-configured scope."
+commands.deny = ["saved_search_upsert"]

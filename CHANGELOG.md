@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0111 — First-pass review queue)
+
+- `dedupe-chrome` virtualized first-pass review queue on `/matters/:id/review`: SQL pages ≤500, DOM `visible_range` (32px / overscan 8), Unreviewed default chip, Lead/QC extras toggle, saved-search chips, privilege-change preview before bulk tag, and `/matters/:id/review/:docId` stub for **0112**. Host adds `Matter::family_sizes` plus six blocking commands (`review_queue_page`, `review_code_catalog`, `saved_searches_list`, `saved_search_upsert`, `review_codes_preview`, `review_apply_codes`). Absorbs **D-0111-first-pass-queue**.
+
 ### Added (0110 — Matter chrome Tauri 2 + Leptos)
 
 - New `dedupe-chrome` EXE (Tauri 2 + Leptos 0.8 CSR): matter list/home with honest `matter_overview` chips from one `open_for_read` + `load_case_overview_on`, create/recents helpers, Process/Review/Produce/Admin stubs. Absorbs **D-0110-matter-chrome** (registry Completes on publish).

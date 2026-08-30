@@ -7,7 +7,9 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::MouseEvent;
 
-use crate::pages::{AdminStub, MatterHome, MattersList, ProcessStub, ProduceStub, ReviewStub};
+use crate::pages::{
+    AdminStub, MatterHome, MattersList, ProcessStub, ProduceStub, ReviewDocStub, ReviewQueue,
+};
 
 static CTRL_K_ONCE: Once = Once::new();
 
@@ -106,6 +108,15 @@ pub fn App() -> impl IntoView {
                 >
                     "Skip to counts"
                 </a>
+                <a
+                    href="#queue"
+                    on:click=move |ev: MouseEvent| {
+                        ev.prevent_default();
+                        focus_skip_target("queue");
+                    }
+                >
+                    "Skip to queue"
+                </a>
             </div>
             <header class="top-bar">
                 <div class="brand">"Dedupe Desk"</div>
@@ -133,7 +144,8 @@ pub fn App() -> impl IntoView {
                         <Route path=path!("/matters") view=MattersList />
                         <Route path=path!("/matters/:id") view=MatterHome />
                         <Route path=path!("/matters/:id/process") view=ProcessStub />
-                        <Route path=path!("/matters/:id/review") view=ReviewStub />
+                        <Route path=path!("/matters/:id/review") view=ReviewQueue />
+                        <Route path=path!("/matters/:id/review/:docId") view=ReviewDocStub />
                         <Route path=path!("/matters/:id/produce") view=ProduceStub />
                         <Route path=path!("/matters/:id/admin") view=AdminStub />
                     </Routes>
