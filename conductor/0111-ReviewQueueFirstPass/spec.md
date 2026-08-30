@@ -11,7 +11,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes `E-Discovery — ideal frontend` + `E-Discovery — recommended stack`. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-08-29); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is research only (density, not the 13-col lead/QC default, not coral).
-- **Status:** Ready — not started
+- **Status:** Completed (PR **#113** / `3c4ca65`)
 - **Depends on:** **0110 Completed** (PR **#111** / `5a76f0b`) · Desk review list **0026–0029** (`list_review_thin` / `FilterSpec` / `compose_keyword_filter`) · coding **0027** (`apply_codes` / `seed_default_codes`) · privilege **0031** (`list_item_privilege`) · `matter-core` schema **v39**
 - **Spec authored:** 2026-08-29 (placeholder → Ready)
 - **Series:** O (Review chrome) — second track
