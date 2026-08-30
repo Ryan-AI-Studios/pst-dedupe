@@ -232,6 +232,7 @@ fn export_csv_two_items_headers() {
             scope: SCOPE_REVIEW_CORPUS.into(),
             path: out.clone(),
             filter_ids: None,
+            control_numbers: None,
         })
         .expect("export");
     assert_eq!(result.row_count, 2);
@@ -348,6 +349,7 @@ fn attachment_inheritance_on_export() {
             scope: SCOPE_ENTIRE_MATTER.into(),
             path: out.clone(),
             filter_ids: None,
+            control_numbers: None,
         })
         .expect("export");
     assert_eq!(result.row_count, 1);
@@ -442,6 +444,7 @@ fn attachment_empty_subject_prefers_item_title_over_parent() {
             scope: SCOPE_ENTIRE_MATTER.into(),
             path: out.clone(),
             filter_ids: None,
+            control_numbers: None,
         })
         .expect("export");
 
@@ -514,6 +517,7 @@ fn attachment_empty_subject_and_title_inherits_parent_subject() {
             scope: SCOPE_ENTIRE_MATTER.into(),
             path: out.clone(),
             filter_ids: None,
+            control_numbers: None,
         })
         .expect("export");
 
@@ -540,6 +544,7 @@ fn blank_description_warns() {
             scope: SCOPE_REVIEW_CORPUS.into(),
             path: out,
             filter_ids: None,
+            control_numbers: None,
         })
         .expect("export");
     assert_eq!(result.row_count, 1);
@@ -580,6 +585,7 @@ fn include_on_log_zero_and_cleared_omitted() {
             scope: SCOPE_ENTIRE_MATTER.into(),
             path: out.clone(),
             filter_ids: None,
+            control_numbers: None,
         })
         .expect("export");
     assert_eq!(result.row_count, 1);
@@ -631,6 +637,7 @@ fn review_corpus_scope_excludes_non_review() {
             scope: SCOPE_REVIEW_CORPUS.into(),
             path: out.clone(),
             filter_ids: None,
+            control_numbers: None,
         })
         .expect("export");
     assert_eq!(result.row_count, 1);
@@ -785,6 +792,7 @@ fn withhold_zero_asserted_still_on_log() {
             scope: SCOPE_REVIEW_CORPUS.into(),
             path: out.clone(),
             filter_ids: None,
+            control_numbers: None,
         })
         .expect("export");
     assert_eq!(result.row_count, 1);
@@ -818,6 +826,7 @@ fn notes_body_not_in_csv_by_default() {
             scope: SCOPE_REVIEW_CORPUS.into(),
             path: out.clone(),
             filter_ids: None,
+            control_numbers: None,
         })
         .expect("export");
     let text = std::fs::read_to_string(out.as_std_path()).expect("read");
@@ -873,4 +882,88 @@ fn filter_presets_withheld_and_incomplete() {
         .expect("incomplete");
     assert_eq!(count2, 1);
     assert_eq!(rows2[0].id, incomplete.id);
+}
+
+#[test]
+fn control_numbers_map_fills_bates_and_parent_unmapped_stays_item_id() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-priv-bates-map");
+    let matter = Matter::create(&root, "Priv").expect("create");
+    let family = matter.insert_family("").expect("family");
+    let parent = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::PARENT.into()),
+            family_id: Some(family.id.clone()),
+            subject: Some("ParentMail".into()),
+            path: Some("parent.eml".into()),
+            in_review: Some(1),
+            from_addr: Some("lawyer@firm.com".into()),
+            ..Default::default()
+        })
+        .expect("parent");
+    let mapped = matter
+        .insert_item(ItemInput {
+            status: item_status::EXTRACTED.into(),
+            role: Some(item_role::ATTACHMENT.into()),
+            family_id: Some(family.id),
+            parent_item_id: Some(parent.id.clone()),
+            subject: Some("MappedChild".into()),
+            path: Some("mapped.eml".into()),
+            in_review: Some(1),
+            ..Default::default()
+        })
+        .expect("mapped");
+    let unmapped = insert_item(&matter, "UnmappedWithheld");
+
+    for (id, desc) in [
+        (mapped.id.as_str(), "mapped withheld"),
+        (unmapped.id.as_str(), "unmapped withheld"),
+    ] {
+        matter
+            .upsert_item_privilege(UpsertItemPrivilegeInput {
+                item_id: id.into(),
+                basis: "attorney_client".into(),
+                description: desc.into(),
+                status: "asserted".into(),
+                withhold: true,
+                include_on_log: true,
+                actor: "map".into(),
+                expected_version: None,
+            })
+            .expect("upsert");
+    }
+
+    let mut map = std::collections::HashMap::new();
+    map.insert(mapped.id.clone(), "PROD000001".into());
+    map.insert(parent.id.clone(), "PROD000000".into());
+
+    let out = root.join("exports").join("mapped.csv");
+    matter
+        .export_privilege_log(PrivilegeLogExportParams {
+            scope: SCOPE_REVIEW_CORPUS.into(),
+            path: out.clone(),
+            filter_ids: None,
+            control_numbers: Some(map),
+        })
+        .expect("export");
+    let text = std::fs::read_to_string(out.as_std_path()).expect("read");
+    assert!(
+        text.contains("PROD000001"),
+        "mapped ControlNumber should be Bates: {text}"
+    );
+    assert!(
+        !text
+            .lines()
+            .any(|l| l.starts_with(&format!("{},", mapped.id))),
+        "mapped row must not use raw item_id as ControlNumber: {text}"
+    );
+    assert!(
+        text.contains(&unmapped.id),
+        "unmapped withheld row stays item_id: {text}"
+    );
+    assert!(
+        text.contains("PROD000000"),
+        "ParentControlNumber uses map for produced parent: {text}"
+    );
 }

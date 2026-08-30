@@ -104,10 +104,9 @@ pub fn MatterHome() -> impl IntoView {
                                 <span class="label">"Custodians"</span>
                                 <span class="value">{custodian_value}</span>
                             </div>
-                            <div class="chip" title="Produce checklist ships in track 0113">
+                            <div class="chip" title="Distinct items in complete production volumes">
                                 <span class="label">"Produced"</span>
-                                <span class="value">"—"</span>
-                                <span class="label">"0113"</span>
+                                <span class="value">{ov.produced}</span>
                             </div>
                         </div>
                         <div class="cta-row">

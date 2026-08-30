@@ -20,6 +20,9 @@
     "allow-review-document-body",
     "allow-review-window-apply",
     "allow-review-upsert-note",
-    "allow-review-upsert-privilege"
+    "allow-review-upsert-privilege",
+    "allow-produce-page",
+    "allow-produce-qc-run",
+    "allow-produce-start"
   ]
 }

@@ -179,6 +179,10 @@ pub struct PrivilegeLogExportParams {
     pub path: Utf8PathBuf,
     /// Optional explicit item id filter (intersected with eligibility + scope).
     pub filter_ids: Option<Vec<String>>,
+    /// Optional `item_id → Bates` map. When set, **ControlNumber** uses the map
+    /// for that row’s id, else `item_id`. **ParentControlNumber** uses the map
+    /// for `parent_item_id` when present, else the raw parent id.
+    pub control_numbers: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Result of a privilege log export.
@@ -891,6 +895,51 @@ impl Matter {
         })
     }
 
+    /// Count eligible privilege-log rows with a blank description (read-only).
+    ///
+    /// Same eligibility as [`Self::export_privilege_log`]: `include_on_log=1` and
+    /// status ∈ asserted/under_review/partial_redaction. Does **not** write a file
+    /// or append audit.
+    pub fn count_privilege_log_blank_descriptions(
+        &self,
+        scope: &str,
+        filter_ids: Option<&[String]>,
+    ) -> Result<u64> {
+        let scope = scope.trim();
+        if scope != SCOPE_REVIEW_CORPUS && scope != SCOPE_ENTIRE_MATTER {
+            return Err(Error::Other(format!(
+                "invalid privilege log scope '{scope}'; expected \
+                 '{SCOPE_REVIEW_CORPUS}' or '{SCOPE_ENTIRE_MATTER}'"
+            )));
+        }
+        let mut sql = String::from(
+            "SELECT COUNT(*) \
+             FROM item_privilege p \
+             INNER JOIN items i ON i.id = p.item_id AND i.matter_id = p.matter_id \
+             WHERE p.matter_id = ?1 \
+               AND p.include_on_log = 1 \
+               AND p.status IN ('asserted', 'under_review', 'partial_redaction') \
+               AND TRIM(COALESCE(p.description, '')) = ''",
+        );
+        let mut bind: Vec<Value> = vec![Value::Text(self.id().to_string())];
+        if scope == SCOPE_REVIEW_CORPUS {
+            sql.push_str(" AND i.in_review = 1");
+        }
+        if let Some(ids) = filter_ids {
+            if !ids.is_empty() {
+                let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+                sql.push_str(&format!(" AND i.id IN ({ph})"));
+                for id in ids {
+                    bind.push(Value::Text(id.clone()));
+                }
+            }
+        }
+        let n: i64 = self
+            .connection()
+            .query_row(&sql, params_from_iter(bind), |row| row.get(0))?;
+        Ok(n as u64)
+    }
+
     /// Export standard privilege log CSV (UTF-8, RFC4180, header row).
     ///
     /// Eligibility: `include_on_log=1` AND status ∈ asserted/under_review/partial_redaction.
@@ -1082,9 +1131,25 @@ impl Matter {
             }
             let has_code = has_priv_code.contains(&row.id);
 
+            let control_number = params
+                .control_numbers
+                .as_ref()
+                .and_then(|m| m.get(&row.id))
+                .cloned()
+                .unwrap_or_else(|| row.id.clone());
+            let parent_control = match row.parent_item_id.as_ref() {
+                Some(pid) => params
+                    .control_numbers
+                    .as_ref()
+                    .and_then(|m| m.get(pid))
+                    .cloned()
+                    .unwrap_or_else(|| pid.clone()),
+                None => String::new(),
+            };
+
             let fields = [
-                row.id.as_str(),
-                row.parent_item_id.as_deref().unwrap_or(""),
+                control_number.as_str(),
+                parent_control.as_str(),
                 row.family_id.as_deref().unwrap_or(""),
                 custodian.as_str(),
                 doc_date.as_str(),

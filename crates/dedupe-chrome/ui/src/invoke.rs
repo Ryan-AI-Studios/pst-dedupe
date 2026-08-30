@@ -77,6 +77,7 @@ pub struct MatterOverview {
     pub custodians: u64,
     pub custodians_plus: bool,
     pub other_custodians_item_count: u64,
+    pub produced: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -305,4 +306,117 @@ pub struct ReviewUpsertPrivilegeArgs {
     pub basis: String,
     pub withhold: Option<bool>,
     pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct ProductionSetThin {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub produced_ok_count: u64,
+    pub bates_prefix: String,
+    pub next_seq: u64,
+    pub output_root: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct ProductionProfileThin {
+    pub slug: String,
+    pub name: String,
+    pub qc_pack_id: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct QcGateDto {
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct ChromeQcFinding {
+    pub item_id: Option<String>,
+    pub rule_id: String,
+    pub severity: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct ChromeExtra {
+    pub kind: String,
+    pub severity: String,
+    pub item_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct WarningOverride {
+    pub recorded_by: String,
+    pub reason: String,
+    pub rule_id: String,
+    pub item_id: Option<String>,
+    pub qc_run_id: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct ProducePageResponse {
+    pub sets: Vec<ProductionSetThin>,
+    pub default_count: u64,
+    pub default_filter_json: String,
+    pub qc_gate: QcGateDto,
+    pub next_seq_hint: Option<u64>,
+    pub produced_count: u64,
+    pub profiles: Vec<ProductionProfileThin>,
+    pub bates_prefix: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProduceQcRunArgs {
+    pub root: String,
+    pub filter_json: Option<String>,
+    pub item_ids: Option<Vec<String>>,
+    pub production_profile: Option<String>,
+    pub source_entire_corpus: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct ProduceQcRun {
+    pub ordered_ids: Vec<String>,
+    pub pack_id: String,
+    pub scope: String,
+    pub findings: Vec<ChromeQcFinding>,
+    pub extras: Vec<ChromeExtra>,
+    pub error_count: u64,
+    pub warn_count: u64,
+    pub passed: bool,
+    pub qc_run_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProduceStartArgs {
+    pub root: String,
+    pub filter_json: Option<String>,
+    pub item_ids: Option<Vec<String>>,
+    pub production_profile: Option<String>,
+    pub source_entire_corpus: Option<bool>,
+    pub bates_prefix: Option<String>,
+    pub bates_start: Option<u64>,
+    pub warning_overrides: Option<Vec<WarningOverride>>,
+    pub log_format: Option<String>,
+    pub last_findings: Option<Vec<ChromeQcFinding>>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct ProduceStart {
+    pub ok: bool,
+    pub blockers: Vec<ChromeExtra>,
+    pub ordered_ids: Vec<String>,
+    pub pack_id: String,
+    pub scope: String,
+    pub fail_if_withheld: bool,
+    pub require_qc_pass: bool,
+    pub produce_params: serde_json::Value,
+    pub output_root: Option<String>,
+    pub produced_count: u64,
+    pub production_set_id: Option<String>,
+    pub privilege_log_path: Option<String>,
 }

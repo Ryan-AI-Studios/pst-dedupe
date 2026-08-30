@@ -837,7 +837,7 @@ pub fn ReviewQueue() -> impl IntoView {
                                                         }}
                                                     </span>
                                                     <span role="gridcell">{if conf { "C" } else { "—" }}</span>
-                                                    <span role="gridcell" title="Produce is 0113">"— · 0113"</span>
+                                                    <span role="gridcell">"—"</span>
                                                 </Show>
                                             </div>
                                         }

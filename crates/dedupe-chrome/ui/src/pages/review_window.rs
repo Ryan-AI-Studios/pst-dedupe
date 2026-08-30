@@ -593,6 +593,16 @@ pub fn ReviewWindow() -> impl IntoView {
                     let truncated = d.family_truncated;
                     let apply_enabled = d.apply_to_family_enabled;
                     let headers = d.clone();
+                    let bates_disp = if headers.bates_note.is_empty() {
+                        headers.bates.clone()
+                    } else {
+                        format!("{} ({})", headers.bates, headers.bates_note)
+                    };
+                    let produced_copy = if headers.bates == "—" || headers.bates.is_empty() {
+                        "Not produced.".to_string()
+                    } else {
+                        headers.bates.clone()
+                    };
                     view! {
                         <div class="review-window">
                             <aside class="review-pane family-card" id="family-card" tabindex="-1">
@@ -660,7 +670,7 @@ pub fn ReviewWindow() -> impl IntoView {
                                     <dt>"Sent"</dt><dd>{headers.sent_at.clone().unwrap_or_else(|| "—".into())}</dd>
                                     <dt>"Received"</dt><dd>{headers.received_at.clone().unwrap_or_else(|| "—".into())}</dd>
                                     <dt>"Control#"</dt><dd>{headers.control_number.clone()}</dd>
-                                    <dt>"Bates"</dt><dd>{format!("{} ({})", headers.bates, headers.bates_note)}</dd>
+                                    <dt>"Bates"</dt><dd>{bates_disp}</dd>
                                 </dl>
                                 <div class="find-row">
                                     <input
@@ -685,7 +695,7 @@ pub fn ReviewWindow() -> impl IntoView {
                                     <p class="empty" id="document" tabindex="-1">"No raster yet (0114)."</p>
                                 </Show>
                                 <Show when=move || pane.get() == "produced">
-                                    <p class="empty" id="document" tabindex="-1">"— · 0113"</p>
+                                    <p class="empty" id="document" tabindex="-1">{produced_copy.clone()}</p>
                                 </Show>
                                 <Show when=move || pane.get() == "native" || pane.get() == "text">
                                     {move || body.get().map(|b| {

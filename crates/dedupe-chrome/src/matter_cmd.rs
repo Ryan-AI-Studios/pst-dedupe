@@ -25,6 +25,7 @@ pub struct MatterOverviewResponse {
     pub custodians: u64,
     pub custodians_plus: bool,
     pub other_custodians_item_count: u64,
+    pub produced: u64,
 }
 
 /// Map root `metadata` failures: only true absence is `not_found`.
@@ -63,6 +64,9 @@ fn load_overview_at(root: &Utf8Path) -> Result<MatterOverviewResponse, CommandEr
         .map_err(|e| CommandError::failed(e.to_string()))?;
     let ov = load_case_overview_on(&matter, &OverviewOptions::default())
         .map_err(|e| CommandError::failed(e.to_string()))?;
+    let produced = matter
+        .count_produced_items()
+        .map_err(|e| CommandError::failed(e.to_string()))?;
     Ok(MatterOverviewResponse {
         name: info.name,
         matter_id: info.id,
@@ -77,6 +81,7 @@ fn load_overview_at(root: &Utf8Path) -> Result<MatterOverviewResponse, CommandEr
         custodians: ov.by_custodian.len() as u64,
         custodians_plus: ov.other_custodians_count > 0,
         other_custodians_item_count: ov.other_custodians_count,
+        produced,
     })
 }
 
@@ -105,6 +110,7 @@ mod tests {
         assert_eq!(resp.withhold, 0);
         assert_eq!(resp.custodians, 0);
         assert!(!resp.custodians_plus);
+        assert_eq!(resp.produced, 0);
         assert_eq!(resp.schema_version, SCHEMA_VERSION);
         assert_eq!(SCHEMA_VERSION, 39);
         assert!(!resp.generated_at.is_empty());

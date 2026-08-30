@@ -1736,8 +1736,11 @@ name = "dedupe-chrome"
 version = "0.2.0-rc.1"
 dependencies = [
  "camino",
+ "csv",
  "dirs",
  "matter-core",
+ "matter-produce",
+ "matter-qc",
  "matter-search",
  "percent-encoding",
  "serde",
