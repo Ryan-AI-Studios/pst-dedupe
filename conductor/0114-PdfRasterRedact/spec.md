@@ -12,7 +12,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes `E-Discovery — ideal frontend` Image tab + produce Burn. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-08-30); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is research only (density, not tokens, not pdf.js).
-- **Status:** Ready — not started
+- **Status:** Completed
 - **Depends on:** **0112 Completed** (PR **#115** / `81a3aad`; Image tab stub) · **0113 Completed** (PR **#117** / `f192b2d`; Burn step copy names this track) · redaction **0032** (`item_redactions` + `redacted_text_sha256`) · PDF extract **0034** (`extract-pdf` detect/caps; no raster) · produce **0040** (`resolve_native` copies original `native_sha256`) · QC **0041** · `matter-core` schema **v39** (this track bumps **v40**)
 - **Spec authored:** 2026-08-30 (placeholder → Ready)
 - **Series:** O (Review chrome) — fifth track
@@ -458,7 +458,7 @@ cargo check -p dedupe-desk
 | **0111** | Virtualized first-pass queue | **Completed** (PR **#113** / `3c4ca65`) |
 | **0112** | Three-pane review window | **Completed** (PR **#115** / `81a3aad`) |
 | **0113** | Produce checklist; DAT only | **Completed** (PR **#117** / `f192b2d`) |
-| **0114** | zpdf raster + geometric redact | **Ready — not started** |
+| **0114** | zpdf raster + geometric redact | **Completed** (PR **#119** / `5ed53bf`) |
 | **0115** | TIFF G4 + OPT | **Parked** |
 | **0116** | Fold egui Process | Proposed |
 | **0117** | Queue virtualization residuals (PR #113) | Proposed |

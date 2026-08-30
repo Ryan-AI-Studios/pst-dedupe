@@ -115,7 +115,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 |---|---|---|---|---|
 | D-0026-01 | P3 | Large corpus (>50k `in_review`) loads first 500 rows only; no page/window nav | Documented threshold; API supports limit/offset; rare for MVP corpora (Codex F-006) | scale polish / **0028** filters |
 | D-0026-02 | P3 | Full GUI smoke for Review list/keyboard/body path | Automated tempfile list+body + unit tests; operator smoke local | operator / polish |
-| D-0026-03 | — | HTML browser engine / image render in body pane | P0: plain text + block-aware strip only | later |
+| D-0026-03 | — | HTML browser engine / image render in body pane | Image tab raster **closed in 0114** (PR **#119** / `5ed53bf`). HTML browser engine residual; P0 body remains plain text + block-aware strip | residual (HTML engine) |
 | D-0026-04 | — | Multi review-set switcher in Review UI | Default set only; schema multi-set exists | D-0025-01 / later |
 | D-0026-05 | — | Persist `last_review_item_id` across app sessions | In-session restore by id after list refresh only | optional polish |
 | D-0025-01 | — | Multiple concurrent review sets | Unchanged; 0026 default set only | later |
@@ -158,7 +158,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0030-01 | — | Image/PDF box markups & burn-in redaction | **Text path closed in 0032**. Geometric boxes + PDF burn owned by **0114** Ready | residual / **0114** Ready |
+| D-0030-01 | — | Image/PDF box markups & burn-in redaction | **Geometric boxes + PDF burn closed in 0114** (PR **#119** / `5ed53bf`). Text path closed in 0032. TIFF G4 stays **0115**. | residual / **0115** TIFF |
 | D-0030-02 | — | Notes in production load file | **Closed in 0040** (default exclude; residual opt-in) | residual opt-in |
 | D-0030-03 | — | Privilege log narrative from notes | **Partial complete in 0031**: optional “draft from note” confirm only; never auto-export notes | — |
 | D-0030-04 | — | Case-wide persistent keyword highlight sets | User highlights only; FTS paint optional | residual |
@@ -188,17 +188,17 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0032-01 | — | Full PDF/image geometric redaction + content burn-in | P0 is text-body regions + redacted text CAS only. Series O **0114** Ready (`zpdf` CPU + rewrite burn; jpeg/png paint-burn). TIFF G4 stays **0115**. | residual / **0114** Ready |
+| D-0032-01 | — | Full PDF/image geometric redaction + content burn-in | **Closed in 0114** (PR **#119** / `5ed53bf`) for PDF content-stream burn + jpeg/png paint-burn. TIFF G4 stays **0115**. | residual / **0115** TIFF |
 | D-0032-02 | — | Native DOCX/XLSX redaction | Text path only | **0033**+ |
 | D-0032-03 | — | Production packaging of redacted text + load file | **Closed in 0040** (`redacted_text_sha256` only when redactions; never original; synthetic EML uses redacted body) | — |
 | D-0032-04 | — | QC fail produce if stale redactions / missing artifact | **Closed in 0041** (`redacted_text_missing` error + produce `require_qc_pass`) | — |
 | D-0032-05 | — | AI suggested redaction ranges | Human-only P0 | Series G |
 | D-0032-06 | — | Metadata header field redaction | Body display text only | residual |
-| D-0032-07 | — | Inverse / full-page redaction tools | Relativity-style | residual |
+| D-0032-07 | — | Inverse / full-page redaction tools | `source=full_page` **shipped in 0114**. Inverse redact declined / residual | residual (inverse) |
 | D-0032-08 | P3 | Full GUI smoke for redact mode / regenerate | Automated API + unit; operator smoke | operator / polish |
 | D-0032-09 | — | Fixed-width blackout tokens matching span length | P0 fixed `[REDACTED]` token | residual |
-| D-0032-10 | — | MuPDF / `redactor` crate PDF path | License + native deps review before core Desk | residual / **0034** |
-| D-0032-11 | — | Redact-all-instances of same string in one document | P0 current selection only | residual |
+| D-0032-10 | — | MuPDF / `redactor` crate PDF path | **Declined in 0114** — zpdf 0.13.0 MIT CPU instead of MuPDF | — |
+| D-0032-11 | — | Redact-all-instances of same string in one document | From-hits all spans of the quote **shipped in 0114**. Manual multi-string still residual | residual (manual multi-string) |
 | D-0032-12 | — | Metadata field redaction + body→metadata match suggestions | Everlaw-style; load-file field redact with **0040** | residual / **0040** |
 | D-0032-13 | — | Stamp text inside produce blackout token | P0 fixed `[REDACTED]`; `label` is UI/list metadata | residual |
 | D-0032-14 | P3 | Privilege hook not same-transaction as redaction create | Region commits then public upsert; rare partial state if hook fails; happy path tested | polish |
@@ -224,9 +224,9 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0034-01 | — | OCR for empty **and** low-text PDFs | **Consumed in 0036**: OCR success sets `pdf_needs_ocr=0` + review `text_sha256` | — |
-| D-0034-02 | — | First-page / multi-page **raster preview** | **0114** Ready: zpdf CPU visible page + prev/next. Full Acrobat chrome remains **D-0034-05**. Do not bundle MuPDF/Poppler. | residual / **0114** Ready |
-| D-0034-03 | — | PDFium / MuPDF bundled native engine | Forbidden as required P0 dep | residual optional feature |
-| D-0034-04 | — | Geometric PDF redaction burn-in | Not extract track; **0114** Ready will close as duplicate of D-0032-01 | residual (D-0032-01 / **0114**) |
+| D-0034-02 | — | First-page / multi-page **raster preview** | **Closed in 0114** (PR **#119** / `5ed53bf`): zpdf CPU visible page + prev/next. Full Acrobat chrome remains **D-0034-05**. | — |
+| D-0034-03 | — | PDFium / MuPDF bundled native engine | Forbidden as required P0. Optional sidecar residual **D-0114-pdfium-sidecar** | residual optional feature |
+| D-0034-04 | — | Geometric PDF redaction burn-in | **Closed in 0114** as duplicate of D-0032-01 (PR **#119** / `5ed53bf`) | — |
 | D-0034-05 | — | Multi-page interactive PDF viewer | Residual with preview engine | residual |
 | D-0034-06 | — | Password recovery / owner-password bypass | Encrypted → fail closed | never |
 | D-0034-07 | — | Adversarial glyph/font extract hardening | Document best-effort extract ≠ visual | residual |
@@ -918,13 +918,16 @@ Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs a
 | D-0110-matter-chrome | — | Tauri 2 + Leptos matter list/home + one `load_case_overview` invoke | **Closed in 0110** (PR **#111** / `5a76f0b`) | — |
 | D-0110-deny-unic | P3 | Unmaintained `unic-*` via `tauri-utils`/`urlpattern` (RUSTSEC-2025-0081, 0075, 0080, 0100, 0098) | Ignored in `deny.toml` for Windows Tauri 2 (`dedupe-chrome`); no safe crates.io upgrade | residual / upstream |
 | D-0111-first-pass-queue | — | Virtualized first-pass queue; saved search as queue | **Closed in 0111** (PR **#113** / `3c4ca65`) | — |
-| D-0112-review-window | — | Three-pane coding; Responsiveness ⊥ Privilege | **Closed in 0112** (PR **#115** / `81a3aad`). Image raster remains **0114**. | — |
+| D-0112-review-window | — | Three-pane coding; Responsiveness ⊥ Privilege | **Closed in 0112** (PR **#115** / `81a3aad`). Image raster **closed in 0114** (PR **#119** / `5ed53bf`). | — |
 | D-0117-queue-virtualization | P3 | PR #113 Bugbot: queue header inside spacer; empty page shown as vacant corpus; arrow keys leave `visible_range` | Valid; queue.rs only. Do not steal into 0112/0113. | **0117** Proposed |
 | D-0113-produce-checklist | — | Produce wizard + blockers/warnings; DAT only | **Closed in 0113** (PR **#117** / `f192b2d`). No fake OPT. Privilege-in-set hard block. | — |
 | D-0113-long-job | P3 | Chrome produce/QC uses blocking `join_worker` (no process-runner cancel/progress) | DoD fixture is small. Multi-GB cancel/progress stays **0116**. | residual / **0116** |
 | D-0118-review-window-async | P3 | PR #115 Bugbot: stale document/body fetch overwrites current item; post-save codes/notes snapshot; unused path_id `#[test]` | Valid; review_window.rs / path_id.rs. Do not steal into 0113. | **0118** Proposed |
-| D-0032-01 | — | Geometric PDF redaction + burn-in | **0114** Ready — close on Implement (PDF + jpeg/png; TIFF → 0115) | **0114** Ready |
-| D-0034-02 | — | PDF raster preview | **0114** Ready — close on Implement (page nav; not D-0034-05) | **0114** Ready |
+| D-0032-01 | — | Geometric PDF redaction + burn-in | **Closed in 0114** (PR **#119** / `5ed53bf`). PDF + jpeg/png; TIFF G4 stays **0115**. | residual / **0115** TIFF |
+| D-0034-02 | — | PDF raster preview | **Closed in 0114** (PR **#119** / `5ed53bf`). Visible page + prev/next; not D-0034-05. | — |
+| D-0034-04 | — | Geometric PDF redaction burn-in | **Closed in 0114** as duplicate of D-0032-01 (PR **#119** / `5ed53bf`) | — |
+| D-0114-pdfium-sidecar | P3 | Optional `pdfium.dll` sidecar next to the EXE | zpdf CPU is the required path; `pdfium-fallback` did not ship | residual |
+| D-0114-xform-text | P3 | Form XObject nested text may under-redact | zpdf does not descend Form XObjects; intersecting placement drops the whole XObject | residual |
 | D-0040-01 | — | TIFF/OPT image factory | Parked until a produce needs images | **0115** parked |
 | D-0060-04 | — | Image + OPT/LFP production profiles | Same park | **0115** parked |
 | D-0116-process-fold | — | Swallow egui Process into the Tauri window | Last Series O track; still one pipeline | **0116** Proposed |
