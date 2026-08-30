@@ -11,7 +11,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes `E-Discovery — ideal frontend` + `E-Discovery — recommended stack`. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-08-30); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is research only (density, not tokens, **no** `/review/:docId`).
-- **Status:** In Progress
+- **Status:** Completed
 - **Depends on:** **0111 Completed** (PR **#113** / `3c4ca65`) · **0110 Completed** (PR **#111** / `5a76f0b`) · coding **0027** (`apply_codes` / `seed_default_codes` / `list_item_codes`) · privilege **0031** (`upsert_item_privilege` / `privilege_basis`) · notes **0030** (`upsert_note`) · body **0026** (`text_sha256` / `html_sha256` CAS) · `matter-core` schema **v39**
 - **Spec authored:** 2026-08-30 (placeholder → Ready)
 - **Series:** O (Review chrome) — third track
@@ -498,7 +498,7 @@ cargo check -p dedupe-desk
 |---|---|---|
 | **0110** | Matter chrome + one overview command | **Completed** (PR **#111** / `5a76f0b`) |
 | **0111** | Virtualized first-pass queue | **Completed** (PR **#113** / `3c4ca65`) |
-| **0112** | Three-pane review window | **Ready — not started** |
+| **0112** | Three-pane review window | **Completed** (PR **#115** / `81a3aad`) |
 | **0113** | Produce checklist; DAT only | Proposed |
 | **0114** | zpdf raster + geometric redact | Proposed |
 | **0115** | TIFF G4 + OPT | **Parked** |
