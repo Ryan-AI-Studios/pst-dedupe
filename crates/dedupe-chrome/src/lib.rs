@@ -13,6 +13,7 @@ mod params;
 #[allow(dead_code)] // Host mirror of UI encode helpers; covered by unit tests in CI.
 mod path_id;
 mod privilege_cmd;
+mod produce;
 mod queue;
 #[allow(dead_code)] // Pure helper mirrored in UI; exercised by unit tests in CI.
 mod queue_window;
@@ -32,6 +33,10 @@ use error::CommandError;
 use matter_cmd::{matter_overview_blocking, MatterOverviewResponse};
 use notes::{review_upsert_note_blocking, ReviewUpsertNoteArgs};
 use privilege_cmd::{review_upsert_privilege_blocking, ReviewUpsertPrivilegeArgs};
+use produce::{
+    produce_page_blocking, produce_qc_run_blocking, produce_start_blocking, ProduceQcRunArgs,
+    ProduceStartArgs,
+};
 use queue::{review_queue_page_blocking, ReviewQueuePageArgs};
 use recents::{
     production_recents_dir, recent_matters_list_in, recent_matters_remember_in, RecentMatter,
@@ -280,6 +285,69 @@ fn review_upsert_note(
 }
 
 #[tauri::command]
+fn produce_page(root: String) -> Result<produce::ProducePageResponse, CommandError> {
+    join_worker(
+        "produce_page",
+        std::thread::spawn(move || produce_page_blocking(&root)),
+    )
+}
+
+#[tauri::command]
+fn produce_qc_run(
+    root: String,
+    filter_json: Option<String>,
+    item_ids: Option<Vec<String>>,
+    production_profile: Option<String>,
+    source_entire_corpus: Option<bool>,
+) -> Result<produce::ProduceQcRunResponse, CommandError> {
+    join_worker(
+        "produce_qc_run",
+        std::thread::spawn(move || {
+            produce_qc_run_blocking(ProduceQcRunArgs {
+                root,
+                filter_json,
+                item_ids,
+                production_profile,
+                source_entire_corpus,
+            })
+        }),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+fn produce_start(
+    root: String,
+    filter_json: Option<String>,
+    item_ids: Option<Vec<String>>,
+    production_profile: Option<String>,
+    source_entire_corpus: Option<bool>,
+    bates_prefix: Option<String>,
+    bates_start: Option<u64>,
+    warning_overrides: Option<Vec<produce::WarningOverride>>,
+    log_format: Option<String>,
+    last_findings: Option<Vec<produce::ChromeQcFinding>>,
+) -> Result<produce::ProduceStartResponse, CommandError> {
+    join_worker(
+        "produce_start",
+        std::thread::spawn(move || {
+            produce_start_blocking(ProduceStartArgs {
+                root,
+                filter_json,
+                item_ids,
+                production_profile,
+                source_entire_corpus,
+                bates_prefix,
+                bates_start,
+                warning_overrides,
+                log_format,
+                last_findings,
+            })
+        }),
+    )
+}
+
+#[tauri::command]
 fn review_upsert_privilege(
     root: String,
     item_id: String,
@@ -320,7 +388,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             review_document_body,
             review_window_apply,
             review_upsert_note,
-            review_upsert_privilege
+            review_upsert_privilege,
+            produce_page,
+            produce_qc_run,
+            produce_start
         ])
         .run(tauri::generate_context!())
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })

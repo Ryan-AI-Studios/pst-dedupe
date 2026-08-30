@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0113 — Produce checklist)
+
+- `dedupe-chrome` five-step DAT-only produce wizard on `/matters/:id/produce` (Set / Number / Format / Burn / Pre-flight): default set is responsive AND NOT withheld with family-together locked, privilege-in-set is a hard block, Finalize calls `matter-qc` then `matter-produce` with `fail_if_withheld=true` and `require_qc_pass=true`, and a successful volume is `DATA/load.dat` + `NATIVES/` + `TEXT/` + `privilege-log.csv` (no OPT). Absorbs **D-0113-produce-checklist**.
+
 ### Added (0112 — Review window)
 
 - `dedupe-chrome` three-pane review window on `/matters/:id/review/:docId`: related family card, Native/Text CAS viewer (2 MiB prefix + block-aware HTML strip), coding pane (`--coding-pane`) with Responsiveness radios orthogonal to Privilege+type. Host adds `Matter::review_neighbors` / `family_members_thin`, catalog read-first, and `review_window_apply` (apply then privilege upsert). Absorbs **D-0112-review-window**.

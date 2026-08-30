@@ -210,11 +210,12 @@ pub use matter::{
     DedupRoleCounts, DedupRoleUpdate, DedupeCandidate, FamilyMemberThin, FamilyMembersThin,
     FtsCandidate, FtsFieldUpdate, Item, ItemCodeInfo, ItemFamily, ItemHighlight, ItemInput,
     ItemNote, ItemUpdate, Matter, MatterInfo, NearDupCandidate, NearDupFieldUpdate,
-    PromoteCandidate, PromoteFieldUpdate, ResolvedHighlight, ReviewListRow, ReviewNeighbors,
-    ReviewSet, SavedSearch, SavedSearchInput, Source, ThreadCandidate, ThreadFieldUpdate,
-    UpsertNoteInput, DB_FILE, DEFAULT_REVIEW_SET_NAME, EXPORTS_DIR, FAMILY_KIND_EMAIL_ATTACHMENTS,
-    HIGHLIGHT_CONTEXT_CHARS, HIGHLIGHT_DEFAULT_COLOR, HIGHLIGHT_QUOTE_MAX_BYTES, INDEX_DIR,
-    LOGS_DIR, MATTER_LOCK_FILE, NOTE_BODY_MAX_BYTES, WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
+    ProductionSetThin, PromoteCandidate, PromoteFieldUpdate, ResolvedHighlight, ReviewListRow,
+    ReviewNeighbors, ReviewSet, SavedSearch, SavedSearchInput, Source, ThreadCandidate,
+    ThreadFieldUpdate, UpsertNoteInput, DB_FILE, DEFAULT_REVIEW_SET_NAME, EXPORTS_DIR,
+    FAMILY_KIND_EMAIL_ATTACHMENTS, HIGHLIGHT_CONTEXT_CHARS, HIGHLIGHT_DEFAULT_COLOR,
+    HIGHLIGHT_QUOTE_MAX_BYTES, INDEX_DIR, LOGS_DIR, MATTER_LOCK_FILE, NOTE_BODY_MAX_BYTES,
+    WORKSPACE_DIR, WORKSPACE_TEMP_DIR,
 };
 pub use multi_user::{
     hash_secret, hash_token, require_role, verify_secret, BatchCheckout, BatchItemRow,

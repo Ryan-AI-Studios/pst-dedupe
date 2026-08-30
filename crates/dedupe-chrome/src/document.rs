@@ -115,6 +115,13 @@ pub fn review_document_blocking(
         Some(n) => n.to_string(),
         None => "—".into(),
     };
+    let (bates, bates_note) = match matter
+        .latest_control_number(&args.item_id)
+        .map_err(map_core)?
+    {
+        Some(cn) => (cn, "from production".to_string()),
+        None => ("—".into(), String::new()),
+    };
 
     Ok(ReviewDocumentResponse {
         item_id: item.id,
@@ -142,8 +149,8 @@ pub fn review_document_blocking(
         total,
         neighbors_error,
         control_number,
-        bates: "—".into(),
-        bates_note: "0113".into(),
+        bates,
+        bates_note,
         prediction: PredictionSlot { present: false },
     })
 }
@@ -286,7 +293,7 @@ mod tests {
         assert!(doc.apply_to_family_enabled);
         assert_eq!(doc.control_number, "1");
         assert_eq!(doc.bates, "—");
-        assert_eq!(doc.bates_note, "0113");
+        assert_eq!(doc.bates_note, "");
         assert!(!doc.control_number.contains("ACME"));
         assert!(!doc.bates.contains("ACME0002"));
         assert!(!doc.prediction.present);

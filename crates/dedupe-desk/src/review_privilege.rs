@@ -254,6 +254,7 @@ pub fn export_privilege_log_blocking(
             scope: scope.into(),
             path: path.to_path_buf(),
             filter_ids: None,
+            control_numbers: None,
         })
         .map_err(|e| e.to_string())
 }

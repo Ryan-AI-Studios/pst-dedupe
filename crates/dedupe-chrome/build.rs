@@ -16,6 +16,9 @@ fn main() {
             "review_window_apply",
             "review_upsert_note",
             "review_upsert_privilege",
+            "produce_page",
+            "produce_qc_run",
+            "produce_start",
         ]));
     if let Err(e) = tauri_build::try_build(attrs) {
         panic!("tauri-build failed: {e}");

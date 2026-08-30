@@ -20,7 +20,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 matter-core = { path = "../matter-core" }
 matter-search = { path = "../matter-search" }
+matter-produce = { path = "../matter-produce" }
+matter-qc = { path = "../matter-qc" }
 camino = { workspace = true }
+csv = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { version = "2", features = [] }

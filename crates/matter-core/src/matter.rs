@@ -677,6 +677,21 @@ pub struct ReviewSet {
     pub created_by: Option<String>,
 }
 
+/// Thin production-set row for chrome Produce (track 0113).
+///
+/// `produced_ok_count` is items with `status='ok'` on this set (not DISTINCT
+/// across sets). Paths may appear in `output_root`; never mail bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductionSetThin {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub produced_ok_count: u64,
+    pub bates_prefix: String,
+    pub next_seq: u64,
+    pub output_root: Option<String>,
+}
+
 /// Thin review-list row for the desk Review surface (0026).
 ///
 /// Intentionally excludes body text and large participant JSON so list loads
@@ -3983,6 +3998,193 @@ impl Matter {
         let mut stmt = self.conn.prepare(&compiled.list_sql)?;
         let rows = stmt.query_map(params_from_iter(params), map_review_list_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    /// Ids matching a metadata [`FilterSpec`] (same WHERE / ORDER BY as thin list).
+    ///
+    /// Selects `id` only. Family expand (when requested) still applies after hits.
+    pub fn list_item_ids_filtered(&self, spec: &FilterSpec) -> Result<Vec<String>> {
+        let compiled = self.compile_filter_for_matter(spec)?;
+        let sql = strip_limit_offset(&compiled.list_sql);
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params_from_iter(compiled.params.iter().cloned()), |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Reorder `ids` so families stay together in **first-occurrence** input order.
+    ///
+    /// Does **not** sort on raw `family_id` strings. Within a family: parent
+    /// (`parent_item_id` IS NULL) first, then children by `review_order` NULLS LAST,
+    /// then `id`. Unknown ids are dropped. Null `family_id` is its own group at
+    /// first occurrence.
+    pub fn order_ids_family_together(&self, ids: &[String]) -> Result<Vec<String>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        struct Meta {
+            family_id: Option<String>,
+            parent_item_id: Option<String>,
+            review_order: Option<i64>,
+        }
+        let mut meta: HashMap<String, Meta> = HashMap::new();
+        const CHUNK: usize = 400;
+        for chunk in ids.chunks(CHUNK) {
+            let placeholders: String = (2..=chunk.len() + 1)
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT id, family_id, parent_item_id, review_order FROM items \
+                 WHERE matter_id = ?1 AND id IN ({placeholders})"
+            );
+            let mut params: Vec<Value> = vec![Value::Text(self.matter_id.clone())];
+            params.extend(chunk.iter().map(|id| Value::Text(id.clone())));
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(params), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, family_id, parent_item_id, review_order) = row?;
+                meta.insert(
+                    id,
+                    Meta {
+                        family_id,
+                        parent_item_id,
+                        review_order,
+                    },
+                );
+            }
+        }
+
+        let mut remaining: HashSet<String> = meta.keys().cloned().collect();
+        let mut out = Vec::new();
+        for id in ids {
+            if !remaining.contains(id) {
+                continue;
+            }
+            let group_family = meta.get(id).and_then(|m| m.family_id.clone());
+            let mut group: Vec<String> = if let Some(ref fid) = group_family {
+                meta.iter()
+                    .filter(|(oid, om)| {
+                        remaining.contains(*oid) && om.family_id.as_ref() == Some(fid)
+                    })
+                    .map(|(oid, _)| oid.clone())
+                    .collect()
+            } else {
+                vec![id.clone()]
+            };
+            group.sort_by(|a, b| {
+                let ma = meta.get(a);
+                let mb = meta.get(b);
+                let a_parent = ma.and_then(|m| m.parent_item_id.as_ref()).is_none();
+                let b_parent = mb.and_then(|m| m.parent_item_id.as_ref()).is_none();
+                match (a_parent, b_parent) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => {
+                        let ao = ma.and_then(|m| m.review_order);
+                        let bo = mb.and_then(|m| m.review_order);
+                        match (ao, bo) {
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),
+                            (None, None) => a.cmp(b),
+                        }
+                    }
+                }
+            });
+            for gid in &group {
+                remaining.remove(gid);
+            }
+            out.extend(group);
+        }
+        Ok(out)
+    }
+
+    /// Distinct produced items in complete volumes (excludes `failed` / `partial`).
+    pub fn count_produced_items(&self) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT pi.item_id) \
+             FROM production_items pi \
+             INNER JOIN production_sets ps ON ps.id = pi.production_set_id \
+             WHERE ps.matter_id = ?1 \
+               AND pi.status = 'ok' \
+               AND ps.status IN ('complete', 'complete_with_errors')",
+            params![self.matter_id],
+            |row| row.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Thin production-set rows for this matter (latest first).
+    pub fn list_production_sets_thin(&self) -> Result<Vec<ProductionSetThin>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ps.id, ps.name, ps.status, ps.bates_prefix, ps.next_seq, ps.output_root, \
+                    (SELECT COUNT(*) FROM production_items pi \
+                     WHERE pi.production_set_id = ps.id AND pi.status = 'ok') \
+             FROM production_sets ps \
+             WHERE ps.matter_id = ?1 \
+             ORDER BY ps.created_at DESC, ps.id DESC",
+        )?;
+        let rows = stmt.query_map(params![self.matter_id], |row| {
+            let next_seq: i64 = row.get(4)?;
+            Ok(ProductionSetThin {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                status: row.get(2)?,
+                bates_prefix: row.get(3)?,
+                next_seq: if next_seq < 0 { 0 } else { next_seq as u64 },
+                output_root: row.get(5)?,
+                produced_ok_count: {
+                    let n: i64 = row.get(6)?;
+                    if n < 0 {
+                        0
+                    } else {
+                        n as u64
+                    }
+                },
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Latest Bates/control number for `item_id` from a complete volume.
+    ///
+    /// Skips empty / `SKIP_*` control numbers and `failed` sets. Tie-break
+    /// `produced_at DESC`, then `ps.id DESC`.
+    pub fn latest_control_number(&self, item_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pi.control_number \
+             FROM production_items pi \
+             INNER JOIN production_sets ps ON ps.id = pi.production_set_id \
+             WHERE ps.matter_id = ?1 \
+               AND pi.item_id = ?2 \
+               AND pi.status = 'ok' \
+               AND ps.status IN ('complete', 'complete_with_errors') \
+               AND pi.control_number IS NOT NULL \
+               AND TRIM(pi.control_number) != '' \
+               AND pi.control_number NOT LIKE 'SKIP_%' \
+             ORDER BY pi.produced_at DESC, ps.id DESC \
+             LIMIT 1",
+        )?;
+        stmt.query_row(params![self.matter_id, item_id], |row| row.get(0))
+            .optional()
             .map_err(Error::from)
     }
 

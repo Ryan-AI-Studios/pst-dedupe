@@ -141,6 +141,33 @@ impl FilterSpec {
         }
     }
 
+    /// Produce default: `code any_of [responsive]` AND `privilege_withhold eq false`.
+    ///
+    /// Caller sets [`FilterSpec::include_family`]. Scope remains `review_corpus`.
+    pub fn preset_produce_responsive() -> Self {
+        Self {
+            conditions: vec![
+                FilterCondition {
+                    field: "code".into(),
+                    op: "any_of".into(),
+                    value: None,
+                    values: Some(vec!["responsive".into()]),
+                    start: None,
+                    end: None,
+                },
+                FilterCondition {
+                    field: "privilege_withhold".into(),
+                    op: "eq".into(),
+                    value: Some(serde_json::Value::Bool(false)),
+                    values: None,
+                    start: None,
+                    end: None,
+                },
+            ],
+            ..Self::default()
+        }
+    }
+
     /// Quick chip: items with at least one note (track 0030).
     pub fn preset_has_notes() -> Self {
         Self {
@@ -1493,6 +1520,26 @@ fn i64_value(cond: &FilterCondition, field: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preset_produce_responsive_conditions() {
+        let spec = FilterSpec::preset_produce_responsive();
+        assert_eq!(spec.scope, SCOPE_REVIEW_CORPUS);
+        assert!(
+            !spec.include_family,
+            "caller sets include_family; preset leaves it false"
+        );
+        assert_eq!(spec.conditions.len(), 2);
+        assert_eq!(spec.conditions[0].field, "code");
+        assert_eq!(spec.conditions[0].op, "any_of");
+        assert_eq!(spec.conditions[0].values, Some(vec!["responsive".into()]));
+        assert_eq!(spec.conditions[1].field, "privilege_withhold");
+        assert_eq!(spec.conditions[1].op, "eq");
+        assert_eq!(
+            spec.conditions[1].value,
+            Some(serde_json::Value::Bool(false))
+        );
+    }
 
     #[test]
     fn filter_spec_serde_roundtrip() {
