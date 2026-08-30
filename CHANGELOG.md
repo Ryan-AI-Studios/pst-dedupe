@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0112 — Review window)
+
+- `dedupe-chrome` three-pane review window on `/matters/:id/review/:docId`: related family card, Native/Text CAS viewer (2 MiB prefix + block-aware HTML strip), coding pane (`--coding-pane`) with Responsiveness radios orthogonal to Privilege+type. Host adds `Matter::review_neighbors` / `family_members_thin`, catalog read-first, and `review_window_apply` (apply then privilege upsert). Absorbs **D-0112-review-window**.
+
 ### Added (0111 — First-pass review queue)
 
 - `dedupe-chrome` virtualized first-pass review queue on `/matters/:id/review`: SQL pages ≤500, DOM `visible_range` (32px / overscan 8), Unreviewed default chip, Lead/QC extras toggle, saved-search chips, privilege-change preview before bulk tag, and `/matters/:id/review/:docId` stub for **0112**. Host adds `Matter::family_sizes` plus six blocking commands (`review_queue_page`, `review_code_catalog`, `saved_searches_list`, `saved_search_upsert`, `review_codes_preview`, `review_apply_codes`). Absorbs **D-0111-first-pass-queue**.

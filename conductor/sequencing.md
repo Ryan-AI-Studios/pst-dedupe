@@ -124,7 +124,8 @@
 | 66 | P2 S | **0109** AlsoEmlClassifyHonesty | ✅ Completed | PR #104 Bugbot also-eml classify/cancel; D-0109; PR #109 / `dc7c29c` |
 | 67 | P1 O | **0110** MatterChromeTauri | ✅ Completed | Tauri 2 + Leptos matter chrome; one `matter_overview`; PR **#111** `5a76f0b` |
 | 68 | P1 O | **0111** ReviewQueueFirstPass | ✅ Completed | virtualized first-pass queue; PR **#113** / `3c4ca65` |
-| 69 | P0 O | **0112** ReviewWindow | 📦 Proposed | three-pane coding |
+| 69 | P0 O | **0112** ReviewWindow | 🔄 In progress | three-pane coding; Resp ⊥ Privilege |
+| 69b | P3 O | **0117** QueueVirtualizationResiduals | 📦 Proposed | PR #113 queue Bugbot (not 0112) |
 | 70 | P1 O | **0113** ProduceChecklist | 📦 Proposed | produce checklist; DAT only |
 | 71 | P1 O | **0114** PdfRasterRedact | 📦 Proposed | zpdf raster/redact after 0112 |
 | 72 | P2 O | **0115** ImageOptFactory | 📦 Proposed — parked | TIFF/OPT if a produce needs images |
@@ -241,16 +242,17 @@
 | 1 | **0108** PolyDegradedWinnerRisk | **Completed** — effective degraded_winner_rate; closes D-0108-poly-degraded-winner-risk; residual D-0108-keepset-crc-retaint |
 | 2 | **0109** AlsoEmlClassifyHonesty | **Completed** — PR #104 Bugbot classify/cancel/counts; D-0109-also-eml-classify; PR #109 / `dc7c29c` |
 
-## Series O — Review chrome Tauri 2 + Leptos (0110–0116)
+## Series O — Review chrome Tauri 2 + Leptos (0110–0117)
 
-**Series O** after Series S. **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Completed** (PR **#113** / `3c4ca65`).
+**Series O** after Series S. **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Completed** (PR **#113** / `3c4ca65`). **0112 Ready**.
 
 | Order | Track | Notes |
 |---|---|---|
 | 1 | **0110** MatterChromeTauri | **Completed** — matter list/home; `matter_overview`; Plex/paper; PR **#111** `5a76f0b` |
 | 2 | **0111** ReviewQueueFirstPass | **Completed** — virtualized first-pass queue; PR **#113** `3c4ca65` |
-| 3 | **0112** ReviewWindow | **Proposed** — three-pane; Resp ⊥ Privilege |
+| 3 | **0112** ReviewWindow | **In Progress** — three-pane; Resp ⊥ Privilege |
 | 4 | **0113** ProduceChecklist | **Proposed** — checklist; DAT only; no OPT |
 | 5 | **0114** PdfRasterRedact | **Proposed** — zpdf + pdfium fallback; after window |
 | 6 | **0115** ImageOptFactory | **Proposed — parked** — TIFF/OPT if a produce needs images |
 | 7 | **0116** ProcessFold | **Proposed** — swallow egui Process last |
+| 8 | **0117** QueueVirtualizationResiduals | **Proposed** — PR #113 queue Bugbot; not the 0112 window |

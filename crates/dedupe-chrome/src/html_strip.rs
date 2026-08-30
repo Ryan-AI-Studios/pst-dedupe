@@ -1,4 +1,4 @@
-// mirror of crates/dedupe-chrome/src/html_strip.rs; update both
+// mirror of crates/dedupe-desk/src/html_strip.rs; update both
 //! Block-aware HTML → plain text for **review display**.
 //!
 //! # Why not `logical_hash::strip_html_tags_minimal`?

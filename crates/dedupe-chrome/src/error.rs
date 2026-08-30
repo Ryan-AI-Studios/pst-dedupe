@@ -45,3 +45,12 @@ impl std::fmt::Display for CommandError {
 }
 
 impl std::error::Error for CommandError {}
+
+pub(crate) fn map_core(err: matter_core::Error) -> CommandError {
+    match err {
+        matter_core::Error::ItemNotFound(id) => {
+            CommandError::not_found(format!("item not found: {id}"))
+        }
+        other => CommandError::failed(other.to_string()),
+    }
+}

@@ -145,6 +145,34 @@ pub struct ItemFamily {
     pub created_at: String,
 }
 
+/// Thin family-card row (track 0112). Not a full [`Item`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyMemberThin {
+    pub id: String,
+    pub parent_item_id: Option<String>,
+    pub subject: Option<String>,
+    pub role: Option<String>,
+}
+
+/// Capped family-card listing from [`Matter::family_members_thin`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyMembersThin {
+    pub members: Vec<FamilyMemberThin>,
+    pub truncated: bool,
+}
+
+/// Prev/next document in the current review filter (track 0112).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewNeighbors {
+    pub prev_id: Option<String>,
+    pub next_id: Option<String>,
+    /// 1-based slot of the anchor's sort key among filtered rows (`0` only when
+    /// the filtered set is empty). Never zeroed solely because the anchor left
+    /// the filter.
+    pub position: u64,
+    pub total: u64,
+}
+
 /// Normalized item row (schema v2–v7: P0 + dedupe + thread + near-dup + cull + promote).
 ///
 /// `PartialEq` only (not `Eq`) because `near_dup_similarity` is `f64`.
@@ -2648,6 +2676,40 @@ impl Matter {
         Ok(out)
     }
 
+    /// Thin family-card rows (id / parent / subject / role) with a SQL LIMIT.
+    ///
+    /// Fetches `limit + 1` rows to detect truncation and returns at most `limit`.
+    /// Does **not** call [`Self::get_family`] or [`Self::list_family_members`]:
+    /// an orphan `family_id` (no `item_families` row) still lists matching items.
+    pub fn family_members_thin(&self, family_id: &str, limit: u64) -> Result<FamilyMembersThin> {
+        let fetch = limit.saturating_add(1);
+        let fetch_i = i64::try_from(fetch).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_item_id, subject, role FROM items \
+             WHERE family_id = ?1 AND matter_id = ?2 \
+             ORDER BY imported_at ASC, id ASC \
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![family_id, self.matter_id, fetch_i], |row| {
+            Ok(FamilyMemberThin {
+                id: row.get(0)?,
+                parent_item_id: row.get(1)?,
+                subject: row.get(2)?,
+                role: row.get(3)?,
+            })
+        })?;
+        let mut members = Vec::new();
+        for row in rows {
+            members.push(row?);
+        }
+        let truncated = (members.len() as u64) > limit;
+        if truncated {
+            let keep = usize::try_from(limit).unwrap_or(members.len());
+            members.truncate(keep);
+        }
+        Ok(FamilyMembersThin { members, truncated })
+    }
+
     /// Set `family_id`, `role`, and `parent_item_id` together.
     ///
     /// When `parent_item_id` is set, the parent must exist, share this matter,
@@ -4118,6 +4180,117 @@ impl Matter {
             }
         }
         Ok(out)
+    }
+
+    /// Prev/next/position of `anchor_id` in the same filter order as the review list.
+    ///
+    /// Compares the **anchor's sort key** even when the anchor no longer matches
+    /// `spec` (e.g. Unreviewed after coding Responsive). Does not fetch the full
+    /// id list into memory.
+    ///
+    /// `fts_ids`: when `Some`, intersect like [`Self::list_items_filtered_thin_in_ids`].
+    /// Missing anchor → [`Error::ItemNotFound`].
+    pub fn review_neighbors(
+        &self,
+        anchor_id: &str,
+        spec: &FilterSpec,
+        fts_ids: Option<&[String]>,
+    ) -> Result<ReviewNeighbors> {
+        let anchor = self.get_item(anchor_id)?;
+        if let Some(ids) = fts_ids {
+            if ids.is_empty() {
+                return Ok(ReviewNeighbors {
+                    prev_id: None,
+                    next_id: None,
+                    position: 0,
+                    total: 0,
+                });
+            }
+            return self
+                .with_fts_hit_temp(ids, || self.review_neighbors_compiled(&anchor, spec, true));
+        }
+        self.review_neighbors_compiled(&anchor, spec, false)
+    }
+
+    fn review_neighbors_compiled(
+        &self,
+        anchor: &Item,
+        spec: &FilterSpec,
+        fts: bool,
+    ) -> Result<ReviewNeighbors> {
+        let compiled = if fts {
+            self.compile_filter_intersect_hits(spec)?
+        } else {
+            self.compile_filter_for_matter(spec)?
+        };
+        let total: u64 = {
+            let n: i64 = self.conn.query_row(
+                &compiled.count_sql,
+                params_from_iter(compiled.params.iter().cloned()),
+                |row| row.get(0),
+            )?;
+            n as u64
+        };
+
+        let alias = if spec.include_family { "out" } else { "i" };
+        let tuple = sort_key_tuple_sql(alias);
+        let lt_pred = format!("{tuple} < ({})", sort_key_placeholders());
+        let gt_pred = format!("{tuple} > ({})", sort_key_placeholders());
+        let key_params = sort_key_bind_values(anchor);
+
+        let base = strip_limit_offset(&compiled.list_sql);
+        let before_sql = {
+            let injected = inject_and_before_order_by(base, &lt_pred)?;
+            let ordered = replace_order_by(&injected, &sort_key_order_sql(alias, false))?;
+            format!("SELECT COUNT(*) FROM ({ordered})")
+        };
+        let mut before_params = compiled.params.clone();
+        before_params.extend(key_params.iter().cloned());
+        let before: i64 =
+            self.conn
+                .query_row(&before_sql, params_from_iter(before_params), |row| {
+                    row.get(0)
+                })?;
+        let position = if total == 0 {
+            0
+        } else {
+            (before as u64).saturating_add(1)
+        };
+
+        let prev_sql = {
+            let injected = inject_and_before_order_by(base, &lt_pred)?;
+            let ordered = replace_order_by(&injected, &sort_key_order_sql(alias, true))?;
+            format!("{ordered} LIMIT 1")
+        };
+        let mut prev_params = compiled.params.clone();
+        prev_params.extend(key_params.iter().cloned());
+        let prev_id: Option<String> = self
+            .conn
+            .query_row(&prev_sql, params_from_iter(prev_params), |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()?;
+
+        let next_sql = {
+            let injected = inject_and_before_order_by(base, &gt_pred)?;
+            let ordered = replace_order_by(&injected, &sort_key_order_sql(alias, false))?;
+            format!("{ordered} LIMIT 1")
+        };
+        let mut next_params = compiled.params.clone();
+        next_params.extend(key_params.iter().cloned());
+        let next_id: Option<String> = self
+            .conn
+            .query_row(&next_sql, params_from_iter(next_params), |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()?;
+
+        Ok(ReviewNeighbors {
+            prev_id,
+            next_id,
+            position,
+            total,
+        })
     }
 
     /// Clear all FTS bookkeeping columns for this matter (full rebuild prep).
@@ -6120,6 +6293,73 @@ fn extract_where_clause(sql: &str) -> Option<String> {
         .or_else(|| rest_upper.find(" LIMIT "))
         .unwrap_or(rest.len());
     Some(rest[..end].trim().to_string())
+}
+
+fn strip_limit_offset(sql: &str) -> &str {
+    sql.strip_suffix(" LIMIT ? OFFSET ?").unwrap_or(sql)
+}
+
+fn inject_and_before_order_by(sql: &str, extra: &str) -> Result<String> {
+    if let Some(idx) = sql.find(" ORDER BY ") {
+        Ok(format!("{} AND ({extra}){}", &sql[..idx], &sql[idx..]))
+    } else {
+        Err(Error::Other(
+            "filter SQL missing ORDER BY (cannot inject sort-key predicate)".into(),
+        ))
+    }
+}
+
+fn replace_order_by(sql: &str, new_order: &str) -> Result<String> {
+    let Some(idx) = sql.find(" ORDER BY ") else {
+        return Err(Error::Other(
+            "filter SQL missing ORDER BY (cannot replace sort)".into(),
+        ));
+    };
+    Ok(format!("{} ORDER BY {new_order}", &sql[..idx]))
+}
+
+fn sort_key_tuple_sql(alias: &str) -> String {
+    format!(
+        "(CASE WHEN {a}.review_order IS NULL THEN 1 ELSE 0 END, \
+          COALESCE({a}.review_order, 0), \
+          {a}.imported_at, \
+          CASE WHEN {a}.path IS NULL THEN 0 ELSE 1 END, \
+          COALESCE({a}.path, ''), \
+          {a}.id)",
+        a = alias
+    )
+}
+
+fn sort_key_order_sql(alias: &str, desc: bool) -> String {
+    let dir = if desc { "DESC" } else { "ASC" };
+    format!(
+        "CASE WHEN {a}.review_order IS NULL THEN 1 ELSE 0 END {dir}, \
+         COALESCE({a}.review_order, 0) {dir}, \
+         {a}.imported_at {dir}, \
+         CASE WHEN {a}.path IS NULL THEN 0 ELSE 1 END {dir}, \
+         COALESCE({a}.path, '') {dir}, \
+         {a}.id {dir}",
+        a = alias
+    )
+}
+
+fn sort_key_placeholders() -> &'static str {
+    "?, ?, ?, ?, ?, ?"
+}
+
+fn sort_key_bind_values(item: &Item) -> Vec<Value> {
+    let ro_null = if item.review_order.is_none() { 1i64 } else { 0 };
+    let ro = item.review_order.unwrap_or(0);
+    let path_present = if item.path.is_none() { 0i64 } else { 1 };
+    let path = item.path.clone().unwrap_or_default();
+    vec![
+        Value::Integer(ro_null),
+        Value::Integer(ro),
+        Value::Text(item.imported_at.clone()),
+        Value::Integer(path_present),
+        Value::Text(path),
+        Value::Text(item.id.clone()),
+    ]
 }
 
 fn map_dedupe_candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DedupeCandidate> {

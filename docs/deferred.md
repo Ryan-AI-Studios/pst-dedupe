@@ -909,7 +909,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0063-04 | P3 | `openidconnect::ClientSecret` / bare `String` retains IdP client secret until client Drop; no zeroize API | **P3 residual** (dependency limitation; not a product control gap). Mitigated: `CoreClient` constructed only inside a tight exchange+verify block; route zeroizes local secret after `finish_authorization`. Heap residue only during exchange until allocator reuse. Full zeroize requires upstream `openidconnect` support. | residual / upstream |
 | D-0063-05 | P3 | Desk UI passphrase widgets are plain `String` (egui TextEdit) | Cleared after submit; heap residue residual. Production service/CLI unlock paths zeroize. Full zeroizing widgets would need egui field redesign. | residual polish |
 
-## Series O — Review chrome placeholders (0110–0116, minted/refreshed 2026-08-29)
+## Series O — Review chrome placeholders (0110–0117, minted/refreshed 2026-08-29; 0117 2026-08-30)
 
 Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs already occupied — do not remint. Expand with `/plan-track`, do not implement from this table.
 
@@ -918,7 +918,8 @@ Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs a
 | D-0110-matter-chrome | — | Tauri 2 + Leptos matter list/home + one `load_case_overview` invoke | **Closed in 0110** (PR **#111** / `5a76f0b`) | — |
 | D-0110-deny-unic | P3 | Unmaintained `unic-*` via `tauri-utils`/`urlpattern` (RUSTSEC-2025-0081, 0075, 0080, 0100, 0098) | Ignored in `deny.toml` for Windows Tauri 2 (`dedupe-chrome`); no safe crates.io upgrade | residual / upstream |
 | D-0111-first-pass-queue | — | Virtualized first-pass queue; saved search as queue | **Closed in 0111** (PR **#113** / `3c4ca65`) | — |
-| D-0112-review-window | — | Three-pane coding; Responsiveness ⊥ Privilege | Mock has no `/review/:docId`. Image stub until 0114 | **0112** Proposed |
+| D-0112-review-window | — | Three-pane coding; Responsiveness ⊥ Privilege | Mock has no `/review/:docId`. Image stub until 0114. Catalog write-lock (PR #113) folded into Ready spec. | **0112** Ready |
+| D-0117-queue-virtualization | P3 | PR #113 Bugbot: queue header inside spacer; empty page shown as vacant corpus; arrow keys leave `visible_range` | Valid; queue.rs only. Do not steal into 0112. | **0117** Proposed |
 | D-0113-produce-checklist | — | Produce wizard + blockers/warnings; DAT only | No fake OPT. Privilege-in-set hard block | **0113** Proposed |
 | D-0032-01 | — | Geometric PDF redaction + burn-in | Already owned | **0114** |
 | D-0034-02 | — | PDF raster preview | Already owned | **0114** |
@@ -926,7 +927,7 @@ Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs a
 | D-0060-04 | — | Image + OPT/LFP production profiles | Same park | **0115** parked |
 | D-0116-process-fold | — | Swallow egui Process into the Tauri window | Last Series O track; still one pipeline | **0116** Proposed |
 
-**Not minted (v1.1 / never as next IDs):** local AI first-pass job, clawback packet, LFP default, native spreadsheet redact, legal hold, TAR-as-primary, cluster wheel, StoryBuilder, auto-privilege, BCC-default, `D-0108-keepset-crc-retaint`, `D-0067-embedded-depth` matter children. Mock `tokens.css` retune stays in `C:\dev\dedupe-frontend`. Next free ID **0117**.
+**Not minted (v1.1 / never as next IDs):** local AI first-pass job, clawback packet, LFP default, native spreadsheet redact, legal hold, TAR-as-primary, cluster wheel, StoryBuilder, auto-privilege, BCC-default, `D-0108-keepset-crc-retaint`, `D-0067-embedded-depth` matter children. Mock `tokens.css` retune stays in `C:\dev\dedupe-frontend`. Next free ID **0118**.
 
 ## Hygiene
 

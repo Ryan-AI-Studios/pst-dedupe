@@ -1,27 +1,37 @@
 //! Dedupe Desk chrome host — Tauri 2 commands over matter-core overview + review queue.
 
+mod body;
 mod codes;
 mod create;
+mod document;
 mod error;
+mod html_strip;
 mod matter_cmd;
+mod notes;
 mod open_root;
 mod params;
 #[allow(dead_code)] // Host mirror of UI encode helpers; covered by unit tests in CI.
 mod path_id;
+mod privilege_cmd;
 mod queue;
 #[allow(dead_code)] // Pure helper mirrored in UI; exercised by unit tests in CI.
 mod queue_window;
 mod recents;
 mod saved;
 
+use body::{review_document_body_blocking, ReviewDocumentBodyArgs};
 use camino::Utf8PathBuf;
 use codes::{
     review_apply_codes_blocking, review_code_catalog_blocking, review_codes_preview_blocking,
-    ReviewApplyCodesArgs, ReviewCodesPreviewArgs, RootOnlyArgs,
+    review_window_apply_blocking, ReviewApplyCodesArgs, ReviewCodesPreviewArgs,
+    ReviewWindowApplyArgs, RootOnlyArgs,
 };
 use create::create_matter_under;
+use document::{review_document_blocking, ReviewDocumentArgs};
 use error::CommandError;
 use matter_cmd::{matter_overview_blocking, MatterOverviewResponse};
+use notes::{review_upsert_note_blocking, ReviewUpsertNoteArgs};
+use privilege_cmd::{review_upsert_privilege_blocking, ReviewUpsertPrivilegeArgs};
 use queue::{review_queue_page_blocking, ReviewQueuePageArgs};
 use recents::{
     production_recents_dir, recent_matters_list_in, recent_matters_remember_in, RecentMatter,
@@ -180,6 +190,117 @@ fn review_apply_codes(
     )
 }
 
+#[tauri::command]
+fn review_document(
+    root: String,
+    item_id: String,
+    filter_json: Option<String>,
+    keyword: Option<String>,
+) -> Result<document::ReviewDocumentResponse, CommandError> {
+    join_worker(
+        "review_document",
+        std::thread::spawn(move || {
+            review_document_blocking(ReviewDocumentArgs {
+                root,
+                item_id,
+                filter_json,
+                keyword,
+            })
+        }),
+    )
+}
+
+#[tauri::command]
+fn review_document_body(
+    root: String,
+    item_id: String,
+    pane: String,
+) -> Result<body::ReviewDocumentBodyResponse, CommandError> {
+    join_worker(
+        "review_document_body",
+        std::thread::spawn(move || {
+            review_document_body_blocking(ReviewDocumentBodyArgs {
+                root,
+                item_id,
+                pane,
+            })
+        }),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+fn review_window_apply(
+    root: String,
+    item_ids: Vec<String>,
+    add_code_ids: Vec<String>,
+    remove_code_ids: Vec<String>,
+    propagate_family: Option<bool>,
+    privilege_basis: Option<String>,
+    withhold: Option<bool>,
+    include_on_log: Option<bool>,
+    privilege_description: Option<String>,
+) -> Result<matter_core::ApplyCodesResult, CommandError> {
+    join_worker(
+        "review_window_apply",
+        std::thread::spawn(move || {
+            review_window_apply_blocking(ReviewWindowApplyArgs {
+                root,
+                item_ids,
+                add_code_ids,
+                remove_code_ids,
+                propagate_family,
+                privilege_basis,
+                withhold,
+                include_on_log,
+                privilege_description,
+            })
+        }),
+    )
+}
+
+#[tauri::command]
+fn review_upsert_note(
+    root: String,
+    item_id: String,
+    body: String,
+    id: Option<String>,
+) -> Result<matter_core::ItemNote, CommandError> {
+    join_worker(
+        "review_upsert_note",
+        std::thread::spawn(move || {
+            review_upsert_note_blocking(ReviewUpsertNoteArgs {
+                root,
+                item_id,
+                body,
+                id,
+            })
+        }),
+    )
+}
+
+#[tauri::command]
+fn review_upsert_privilege(
+    root: String,
+    item_id: String,
+    basis: String,
+    withhold: Option<bool>,
+    description: Option<String>,
+) -> Result<matter_core::ItemPrivilege, CommandError> {
+    join_worker(
+        "review_upsert_privilege",
+        std::thread::spawn(move || {
+            review_upsert_privilege_blocking(ReviewUpsertPrivilegeArgs {
+                root,
+                item_id,
+                basis,
+                withhold,
+                description,
+            })
+        }),
+    )
+}
+
 /// Launch the Tauri app. Returns `Err` instead of panicking on run failure.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     tauri::Builder::default()
@@ -194,7 +315,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             saved_searches_list,
             saved_search_upsert,
             review_codes_preview,
-            review_apply_codes
+            review_apply_codes,
+            review_document,
+            review_document_body,
+            review_window_apply,
+            review_upsert_note,
+            review_upsert_privilege
         ])
         .run(tauri::generate_context!())
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })

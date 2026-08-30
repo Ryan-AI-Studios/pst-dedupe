@@ -4,7 +4,7 @@ mod list;
 mod process;
 mod produce;
 mod queue;
-mod review_doc_stub;
+mod review_window;
 
 pub use admin::AdminStub;
 pub use home::MatterHome;
@@ -12,4 +12,4 @@ pub use list::MattersList;
 pub use process::ProcessStub;
 pub use produce::ProduceStub;
 pub use queue::ReviewQueue;
-pub use review_doc_stub::ReviewDocStub;
+pub use review_window::ReviewWindow;

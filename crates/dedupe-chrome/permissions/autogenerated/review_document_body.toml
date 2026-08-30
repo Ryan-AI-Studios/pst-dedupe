@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-review-document-body"
+description = "Enables the review_document_body command without any pre-configured scope."
+commands.allow = ["review_document_body"]
+
+[[permission]]
+identifier = "deny-review-document-body"
+description = "Denies the review_document_body command without any pre-configured scope."
+commands.deny = ["review_document_body"]
