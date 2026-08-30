@@ -94,6 +94,7 @@ exceptions = [
     { allow = ["LicenseRef-Proprietary"], crate = "matter-storage" },
     { allow = ["LicenseRef-Proprietary"], crate = "matter-thread" },
     { allow = ["LicenseRef-Proprietary"], crate = "ocr-plugin" },
+    { allow = ["LicenseRef-Proprietary"], crate = "pdf-raster" },
     { allow = ["LicenseRef-Proprietary"], crate = "process-runner" },
     { allow = ["LicenseRef-Proprietary"], crate = "pst-dedup-cli" },
     { allow = ["LicenseRef-Proprietary"], crate = "pst-dedup-gui" },

@@ -367,6 +367,14 @@ pub struct ProducePageResponse {
     pub produced_count: u64,
     pub profiles: Vec<ProductionProfileThin>,
     pub bates_prefix: String,
+    #[serde(default)]
+    pub need_burn: u64,
+    #[serde(default)]
+    pub burned_fresh: u64,
+    #[serde(default)]
+    pub unmapped_text: u64,
+    #[serde(default)]
+    pub ordered_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -389,6 +397,12 @@ pub struct ProduceQcRun {
     pub warn_count: u64,
     pub passed: bool,
     pub qc_run_id: String,
+    #[serde(default)]
+    pub need_burn: u64,
+    #[serde(default)]
+    pub burned_fresh: u64,
+    #[serde(default)]
+    pub unmapped_text: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -419,4 +433,128 @@ pub struct ProduceStart {
     pub produced_count: u64,
     pub production_set_id: Option<String>,
     pub privilege_log_path: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewRasterPageArgs {
+    pub root: String,
+    pub item_id: String,
+    pub page_index: Option<u32>,
+    pub dpi: Option<u32>,
+    pub generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct BoxF {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct ReviewRasterPage {
+    pub item_id: String,
+    pub generation: u64,
+    pub png_base64: String,
+    pub page_index: u32,
+    pub page_count: u32,
+    pub media_box: BoxF,
+    pub crop_box: BoxF,
+    pub rotate: i32,
+    pub width: u32,
+    pub height: u32,
+    pub native_width: u32,
+    pub native_height: u32,
+    pub kind: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewGeomListArgs {
+    pub root: String,
+    pub item_id: String,
+    pub generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct GeomDto {
+    pub id: String,
+    pub item_id: String,
+    pub page_index: i64,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub reason: String,
+    pub label: Option<String>,
+    pub status: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct ReviewGeomList {
+    pub item_id: String,
+    pub generation: u64,
+    pub boxes: Vec<GeomDto>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewGeomUpsertArgs {
+    pub root: String,
+    pub item_id: String,
+    pub page_index: u32,
+    pub px: f64,
+    pub py: f64,
+    pub pw: f64,
+    pub ph: f64,
+    pub raster_width: f64,
+    pub raster_height: f64,
+    pub reason: Option<String>,
+    pub label: Option<String>,
+    pub source: Option<String>,
+    pub generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewGeomDeleteArgs {
+    pub root: String,
+    pub geom_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewGeomFromHitsArgs {
+    pub root: String,
+    pub item_id: String,
+    pub query: Option<String>,
+    pub reason: Option<String>,
+    pub generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct ReviewGeomFromHits {
+    pub item_id: String,
+    pub generation: u64,
+    pub inserted: u64,
+    pub hit_count: u64,
+    pub unmapped: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewBurnNativeArgs {
+    pub root: String,
+    pub item_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProduceBurnSetArgs {
+    pub root: String,
+    pub item_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct ProduceBurnSet {
+    pub burned: u64,
+    pub skipped: u64,
+    pub errors: Vec<String>,
 }

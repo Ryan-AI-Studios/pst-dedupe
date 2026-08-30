@@ -5,7 +5,10 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use dedup_engine::exporter::{export_eml, EmlMessage};
-use matter_core::{join_addrs_json, path_basename, Item, Matter};
+use matter_core::{
+    burn_required_pdf_known, burned_native_fresh, item_is_pdf_native, join_addrs_json,
+    path_basename, Item, Matter,
+};
 use sha2::{Digest, Sha256};
 
 use crate::error::{ProduceError, Result};
@@ -202,6 +205,32 @@ pub fn load_body_for_eml(
 /// When generating synthetic EML, `eml_body` is used when `Some` (already-resolved
 /// production text, including redacted). When `None`, body is loaded via
 /// [`load_body_for_eml`] (fail-closed for redactions).
+fn sniff_payload_ext_mime(bytes: &[u8]) -> (String, String) {
+    let mut i = 0usize;
+    if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
+        i = 3;
+    }
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n') {
+        i += 1;
+    }
+    let rest = &bytes[i..];
+    if rest.len() >= 5 && rest.starts_with(b"%PDF-") {
+        return ("pdf".into(), "application/pdf".into());
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
+        return ("jpg".into(), "image/jpeg".into());
+    }
+    if bytes.len() >= 4
+        && bytes[0] == 0x89
+        && bytes[1] == 0x50
+        && bytes[2] == 0x4E
+        && bytes[3] == 0x47
+    {
+        return ("png".into(), "image/png".into());
+    }
+    (String::new(), String::new())
+}
+
 pub fn resolve_native(
     matter: &Matter,
     item: &Item,
@@ -210,6 +239,46 @@ pub fn resolve_native(
     control: &str,
     eml_body: Option<String>,
 ) -> Result<std::result::Result<NativeArtifact, String>> {
+    let fingerprint = matter.geom_burn_fingerprint(&item.id)?;
+    let is_pdf = item_is_pdf_native(matter, item)?;
+    if burn_required_pdf_known(item, &fingerprint, is_pdf) {
+        if !burned_native_fresh(item, &fingerprint) {
+            return Ok(Err("burned_native_missing".into()));
+        }
+        let Some(sha) = item
+            .burned_native_sha256
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(Err("burned_native_missing".into()));
+        };
+        let tmp_name = format!("{control}.bin");
+        let dest = natives_dir.join(&tmp_name);
+        let mut art = copy_cas_native(matter, sha, &dest)?;
+        let sniffed = fs::read(&dest)?;
+        let (sniff_ext, sniff_mime) = sniff_payload_ext_mime(&sniffed);
+        let ext = if sniff_ext.is_empty() {
+            extension_from_item(item)
+        } else {
+            sniff_ext
+        };
+        let final_path = natives_dir.join(format!("{control}.{ext}"));
+        if final_path != dest {
+            fs::rename(&dest, &final_path)?;
+            art.abs_path = final_path.display().to_string();
+        }
+        art.file_ext = ext;
+        art.mime_type = if sniff_mime.is_empty() {
+            item.mime_type
+                .clone()
+                .unwrap_or_else(|| guess_mime(&art.file_ext).to_string())
+        } else {
+            sniff_mime
+        };
+        return Ok(Ok(art));
+    }
+
     if let Some(sha) = item
         .native_sha256
         .as_deref()

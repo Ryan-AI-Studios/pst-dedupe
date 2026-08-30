@@ -6,13 +6,15 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 use wasm_bindgen::JsCast;
-use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement, KeyboardEvent};
+use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement, KeyboardEvent, MouseEvent};
 
 use crate::invoke::{
-    tauri_invoke, CodeCatalogEntry, FamilyMemberThin, ItemCodeInfo, ReviewCodesPreview,
-    ReviewCodesPreviewArgs, ReviewDocument, ReviewDocumentArgs, ReviewDocumentBody,
-    ReviewDocumentBodyArgs, ReviewUpsertNoteArgs, ReviewUpsertPrivilegeArgs, ReviewWindowApplyArgs,
-    RootArgs,
+    tauri_invoke, CodeCatalogEntry, FamilyMemberThin, GeomDto, ItemCodeInfo, ReviewBurnNativeArgs,
+    ReviewCodesPreview, ReviewCodesPreviewArgs, ReviewDocument, ReviewDocumentArgs,
+    ReviewDocumentBody, ReviewDocumentBodyArgs, ReviewGeomDeleteArgs, ReviewGeomFromHits,
+    ReviewGeomFromHitsArgs, ReviewGeomList, ReviewGeomListArgs, ReviewGeomUpsertArgs,
+    ReviewRasterPage, ReviewRasterPageArgs, ReviewUpsertNoteArgs, ReviewUpsertPrivilegeArgs,
+    ReviewWindowApplyArgs, RootArgs,
 };
 use crate::path_id::{encode_matter_id, matter_home_href_from_param, review_doc_href};
 
@@ -93,6 +95,126 @@ fn shortcut_gated(ev: &KeyboardEvent) -> bool {
         || (tag == "input" && el.get_attribute("type").unwrap_or_default() == "search")
 }
 
+fn visual_size(crop_w: f64, crop_h: f64, rotate: i32) -> (f64, f64) {
+    let r = ((rotate % 360) + 360) % 360;
+    if r == 90 || r == 270 {
+        (crop_h, crop_w)
+    } else {
+        (crop_w, crop_h)
+    }
+}
+
+fn user_to_visual(ux: f64, uy: f64, crop_x: f64, crop_y: f64, crop_w: f64, crop_h: f64, rotate: i32) -> (f64, f64) {
+    let rx = ux - crop_x;
+    let ry = uy - crop_y;
+    let r = ((rotate % 360) + 360) % 360;
+    match r {
+        90 => (ry, crop_w - rx),
+        180 => (crop_w - rx, crop_h - ry),
+        270 => (crop_h - ry, rx),
+        _ => (rx, ry),
+    }
+}
+
+/// Map a CSS-pixel point on the displayed `<img>` to raster pixels.
+fn css_point_to_raster(
+    css_x: f64,
+    css_y: f64,
+    display_w: f64,
+    display_h: f64,
+    raster_w: f64,
+    raster_h: f64,
+) -> (f64, f64) {
+    if display_w <= 0.0 || display_h <= 0.0 {
+        return (css_x, css_y);
+    }
+    (css_x * raster_w / display_w, css_y * raster_h / display_h)
+}
+
+fn event_to_raster(ev: &MouseEvent, raster_w: f64, raster_h: f64) -> Option<(f64, f64)> {
+    let el = ev
+        .current_target()?
+        .dyn_into::<web_sys::Element>()
+        .ok()?;
+    let dw = f64::from(el.client_width());
+    let dh = f64::from(el.client_height());
+    Some(css_point_to_raster(
+        f64::from(ev.offset_x()),
+        f64::from(ev.offset_y()),
+        dw,
+        dh,
+        raster_w,
+        raster_h,
+    ))
+}
+
+/// Overlay box as **percent of the displayed image** so CSS `max-width` scaling
+/// does not desync the hatch from the visible token.
+fn geom_to_overlay_pct(g: &GeomDto, raster: &ReviewRasterPage) -> (f64, f64, f64, f64) {
+    let rw = raster.width as f64;
+    let rh = raster.height as f64;
+    if rw <= 0.0 || rh <= 0.0 {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    let (x, y, w, h) = if raster.kind == "pdf" {
+        let (vis_w, vis_h) = visual_size(raster.crop_box.w, raster.crop_box.h, raster.rotate);
+        if vis_w <= 0.0 || vis_h <= 0.0 {
+            return (0.0, 0.0, 0.0, 0.0);
+        }
+        let sx = rw / vis_w;
+        let sy = rh / vis_h;
+        let corners = [
+            (g.x, g.y),
+            (g.x + g.w, g.y),
+            (g.x, g.y + g.h),
+            (g.x + g.w, g.y + g.h),
+        ];
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        for (ux, uy) in corners {
+            let (vx, vy) = user_to_visual(
+                ux,
+                uy,
+                raster.crop_box.x,
+                raster.crop_box.y,
+                raster.crop_box.w,
+                raster.crop_box.h,
+                raster.rotate,
+            );
+            xs.push(vx * sx);
+            ys.push((vis_h - vy) * sy);
+        }
+        let x0 = xs.iter().copied().fold(f64::INFINITY, f64::min);
+        let x1 = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let y0 = ys.iter().copied().fold(f64::INFINITY, f64::min);
+        let y1 = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        (x0, y0, (x1 - x0).abs(), (y1 - y0).abs())
+    } else {
+        // JPEG/PNG boxes are native pixel space (y-down). Overlay is % of the displayed (maybe capped) image.
+        let nw = f64::from(raster.native_width.max(1));
+        let nh = f64::from(raster.native_height.max(1));
+        return (
+            g.x / nw * 100.0,
+            g.y / nh * 100.0,
+            g.w / nw * 100.0,
+            g.h / nh * 100.0,
+        );
+    };
+    (x / rw * 100.0, y / rh * 100.0, w / rw * 100.0, h / rh * 100.0)
+}
+
+#[cfg(test)]
+mod overlay_scale_tests {
+    use super::css_point_to_raster;
+
+    #[test]
+    fn displayed_scale_maps_midpoint_to_raster() {
+        let (x, y) = css_point_to_raster(200.0, 130.0, 400.0, 520.0, 1275.0, 1650.0);
+        assert!((x - 637.5).abs() < 0.01);
+        assert!((y - 412.5).abs() < 0.01);
+    }
+}
+
 fn window_find(query: &str) {
     let Some(win) = web_sys::window() else {
         return;
@@ -132,6 +254,15 @@ pub fn ReviewWindow() -> impl IntoView {
     let pending_conf = RwSignal::new(false);
     let find_q = RwSignal::new(String::new());
     let saving = RwSignal::new(false);
+    let raster_generation = RwSignal::new(0u64);
+    let raster_page_index = RwSignal::new(0u32);
+    let raster = RwSignal::new(Option::<ReviewRasterPage>::None);
+    let raster_error = RwSignal::new(Option::<String>::None);
+    let geoms = RwSignal::new(Vec::<GeomDto>::new());
+    let drawing = RwSignal::new(false);
+    let drag_origin = RwSignal::new(Option::<(f64, f64)>::None);
+    let drag_now = RwSignal::new(Option::<(f64, f64)>::None);
+    let selected_geom = RwSignal::new(Option::<String>::None);
 
     let home =
         move || params.with(|p| matter_home_href_from_param(&p.get("id").unwrap_or_default()));
@@ -235,6 +366,81 @@ pub fn ReviewWindow() -> impl IntoView {
             {
                 Ok(b) => body.set(Some(b)),
                 Err(e) => error.set(Some(format!("Body: {e}"))),
+            }
+        });
+    });
+
+    Effect::new(move |_| {
+        let id = doc_id.get();
+        raster_page_index.set(0);
+        raster.set(None);
+        geoms.set(Vec::new());
+        selected_geom.set(None);
+        raster_error.set(None);
+        let _ = id;
+    });
+
+    Effect::new(move |_| {
+        let root = root_sig.get();
+        let id = doc_id.get();
+        let pane_now = pane.get();
+        let page = raster_page_index.get();
+        if root.is_empty() || id.is_empty() || pane_now != "image" {
+            return;
+        }
+        let gen = raster_generation.get_untracked() + 1;
+        raster_generation.set(gen);
+        raster.set(None);
+        geoms.set(Vec::new());
+        selected_geom.set(None);
+        raster_error.set(None);
+        leptos::task::spawn_local(async move {
+            match tauri_invoke::<ReviewRasterPage, _>(
+                "review_raster_page",
+                &ReviewRasterPageArgs {
+                    root: root.clone(),
+                    item_id: id.clone(),
+                    page_index: Some(page),
+                    dpi: Some(150),
+                    generation: Some(gen),
+                },
+            )
+            .await
+            {
+                Ok(r) => {
+                    if r.item_id == doc_id.get_untracked() && r.generation == raster_generation.get_untracked() {
+                        raster.set(Some(r));
+                    }
+                }
+                Err(e) => {
+                    if id == doc_id.get_untracked() && gen == raster_generation.get_untracked() {
+                        raster.set(None);
+                        raster_error.set(Some(e));
+                    }
+                }
+            }
+            match tauri_invoke::<ReviewGeomList, _>(
+                "review_geom_list",
+                &ReviewGeomListArgs {
+                    root,
+                    item_id: id,
+                    generation: Some(gen),
+                },
+            )
+            .await
+            {
+                Ok(g) => {
+                    if g.item_id == doc_id.get_untracked()
+                        && g.generation == raster_generation.get_untracked()
+                    {
+                        geoms.set(g.boxes);
+                    }
+                }
+                Err(e) => {
+                    if gen == raster_generation.get_untracked() {
+                        raster_error.set(Some(e));
+                    }
+                }
             }
         });
     });
@@ -458,6 +664,13 @@ pub fn ReviewWindow() -> impl IntoView {
             tabindex="-1"
             on:keydown=move |ev: KeyboardEvent| {
                 if ev.key() == "Escape" {
+                    if drawing.get() || drag_origin.get().is_some() {
+                        ev.prevent_default();
+                        drawing.set(false);
+                        drag_origin.set(None);
+                        drag_now.set(None);
+                        return;
+                    }
                     if help_open.get() {
                         ev.prevent_default();
                         help_open.set(false);
@@ -545,6 +758,61 @@ pub fn ReviewWindow() -> impl IntoView {
                         }
                     }
                     "r" | "R" => { ev.prevent_default(); pane.set("image".into()); }
+                    "," | "PageUp" if pane.get() == "image" => {
+                        ev.prevent_default();
+                        raster_page_index.update(|p| {
+                            if *p > 0 {
+                                *p -= 1;
+                            }
+                        });
+                    }
+                    "." | "PageDown" if pane.get() == "image" => {
+                        ev.prevent_default();
+                        if let Some(r) = raster.get() {
+                            raster_page_index.update(|p| {
+                                if *p + 1 < r.page_count {
+                                    *p += 1;
+                                }
+                            });
+                        }
+                    }
+                    "Delete" | "Backspace" if pane.get() == "image" => {
+                        if let Some(gid) = selected_geom.get() {
+                            ev.prevent_default();
+                            let root = root_sig.get();
+                            leptos::task::spawn_local(async move {
+                                if let Err(e) = tauri_invoke::<(), _>(
+                                    "review_geom_delete",
+                                    &ReviewGeomDeleteArgs {
+                                        root: root.clone(),
+                                        geom_id: gid,
+                                    },
+                                )
+                                .await
+                                {
+                                    error.set(Some(e));
+                                    return;
+                                }
+                                if let Ok(g) = tauri_invoke::<ReviewGeomList, _>(
+                                    "review_geom_list",
+                                    &ReviewGeomListArgs {
+                                        root,
+                                        item_id: doc_id.get_untracked(),
+                                        generation: Some(raster_generation.get_untracked()),
+                                    },
+                                )
+                                .await
+                                {
+                                    if g.item_id == doc_id.get_untracked()
+                                        && g.generation == raster_generation.get_untracked()
+                                    {
+                                        geoms.set(g.boxes);
+                                    }
+                                }
+                            });
+                            selected_geom.set(None);
+                        }
+                    }
                     "v" | "V" => { ev.prevent_default(); v_pending.set(true); }
                     "f" | "F" => { ev.prevent_default(); focus_id("family-card"); }
                     "?" => { ev.prevent_default(); help_open.update(|v| *v = !*v); }
@@ -574,7 +842,8 @@ pub fn ReviewWindow() -> impl IntoView {
                         <li>"d — Ditto · Shift+d ditto + next"</li>
                         <li>"Enter — Save & Next"</li>
                         <li>"[ ] — previous / next document"</li>
-                        <li>"r — Image tab (0114 stub)"</li>
+                        <li>"r — Image tab"</li>
+                        <li>", . or PageUp/PageDown — previous / next page (Image)"</li>
                         <li>"v then n / t / i — Native / Text / Image"</li>
                         <li>"f — family card"</li>
                         <li>"/ — find in document"</li>
@@ -692,7 +961,295 @@ pub fn ReviewWindow() -> impl IntoView {
                                     />
                                 </div>
                                 <Show when=move || pane.get() == "image">
-                                    <p class="empty" id="document" tabindex="-1">"No raster yet (0114)."</p>
+                                    {move || {
+                                        let err = raster_error.get();
+                                        if let Some(e) = err {
+                                            let copy = if e.contains("pdf_encrypted") || e.starts_with("pdf_encrypted") {
+                                                "pdf_encrypted".to_string()
+                                            } else if e.contains("unsupported_kind") || e.contains("Not a page image") {
+                                                "Not a page image (TIFF/OPT is 0115).".to_string()
+                                            } else {
+                                                e
+                                            };
+                                            return view! { <p class="empty" id="document" tabindex="-1">{copy}</p> }.into_any();
+                                        }
+                                        let Some(r) = raster.get() else {
+                                            return view! { <p class="empty" id="document" tabindex="-1">"Loading page…"</p> }.into_any();
+                                        };
+                                        let src = format!("data:image/png;base64,{}", r.png_base64);
+                                        let page_label = format!("Page {} / {}", r.page_index + 1, r.page_count);
+                                        let truncated = r.truncated;
+                                        let boxes = geoms.get();
+                                        let rw = r.width as f64;
+                                        let rh = r.height as f64;
+                                        let overlays: Vec<_> = boxes
+                                            .iter()
+                                            .filter(|g| g.page_index as u32 == r.page_index && g.status == "active")
+                                            .cloned()
+                                            .collect();
+                                        let drag = drag_origin.get().zip(drag_now.get());
+                                        let r_for_up = r.clone();
+                                        view! {
+                                            <div class="image-stage" id="document" tabindex="-1">
+                                                <Show when=move || truncated>
+                                                    <p class="empty" role="status">"Preview capped at 4096 px long side."</p>
+                                                </Show>
+                                                <div class="image-toolbar">
+                                                    <button on:click=move |_| {
+                                                        raster_page_index.update(|p| if *p > 0 { *p -= 1; });
+                                                    }>"Prev"</button>
+                                                    <span>{page_label}</span>
+                                                    <button on:click=move |_| {
+                                                        raster_page_index.update(|p| {
+                                                            if let Some(rr) = raster.get() {
+                                                                if *p + 1 < rr.page_count { *p += 1; }
+                                                            }
+                                                        });
+                                                    }>"Next"</button>
+                                                    <button on:click=move |_| {
+                                                        if let Some(rr) = raster.get() {
+                                                            let root = root_sig.get();
+                                                            let id = doc_id.get();
+                                                            let gen = raster_generation.get();
+                                                            leptos::task::spawn_local(async move {
+                                                                if let Err(e) = tauri_invoke::<serde_json::Value, _>(
+                                                                    "review_geom_upsert",
+                                                                    &ReviewGeomUpsertArgs {
+                                                                        root: root.clone(),
+                                                                        item_id: id.clone(),
+                                                                        page_index: rr.page_index,
+                                                                        px: 0.0,
+                                                                        py: 0.0,
+                                                                        pw: rr.width as f64,
+                                                                        ph: rr.height as f64,
+                                                                        raster_width: rr.width as f64,
+                                                                        raster_height: rr.height as f64,
+                                                                        reason: Some("privilege".into()),
+                                                                        label: None,
+                                                                        source: Some("full_page".into()),
+                                                                        generation: Some(gen),
+                                                                    },
+                                                                ).await {
+                                                                    error.set(Some(e));
+                                                                    return;
+                                                                }
+                                                                if let Ok(g) = tauri_invoke::<ReviewGeomList, _>(
+                                                                    "review_geom_list",
+                                                                    &ReviewGeomListArgs {
+                                                                        root,
+                                                                        item_id: id,
+                                                                        generation: Some(gen),
+                                                                    },
+                                                                ).await {
+                                                                    if g.item_id == doc_id.get_untracked()
+                                                                        && g.generation == raster_generation.get_untracked()
+                                                                    {
+                                                                        geoms.set(g.boxes);
+                                                                    }
+                                                                }
+                                                            });
+                                                        }
+                                                    }>"Full page"</button>
+                                                    <button on:click=move |_| {
+                                                        let root = root_sig.get();
+                                                        let id = doc_id.get();
+                                                        leptos::task::spawn_local(async move {
+                                                            match tauri_invoke::<serde_json::Value, _>(
+                                                                "review_burn_native",
+                                                                &ReviewBurnNativeArgs {
+                                                                    root,
+                                                                    item_id: id,
+                                                                },
+                                                            )
+                                                            .await
+                                                            {
+                                                                Ok(_) => status.set(Some(
+                                                                    "Burned native written.".into(),
+                                                                )),
+                                                                Err(e) => error.set(Some(e)),
+                                                            }
+                                                        });
+                                                    }>"Burn"</button>
+                                                    <button on:click=move |_| {
+                                                        let root = root_sig.get();
+                                                        let id = doc_id.get();
+                                                        let q = find_q.get();
+                                                        let gen = raster_generation.get();
+                                                        leptos::task::spawn_local(async move {
+                                                            match tauri_invoke::<ReviewGeomFromHits, _>(
+                                                                "review_geom_from_hits",
+                                                                &ReviewGeomFromHitsArgs {
+                                                                    root: root.clone(),
+                                                                    item_id: id.clone(),
+                                                                    query: if q.trim().is_empty() { None } else { Some(q) },
+                                                                    reason: Some("privilege".into()),
+                                                                    generation: Some(gen),
+                                                                },
+                                                            ).await {
+                                                                Ok(h) => {
+                                                                    if h.hit_count == 0 || h.unmapped {
+                                                                        status.set(Some("No hits mapped; draw boxes or withhold.".into()));
+                                                                    }
+                                                                    if let Ok(g) = tauri_invoke::<ReviewGeomList, _>(
+                                                                        "review_geom_list",
+                                                                        &ReviewGeomListArgs { root, item_id: id, generation: Some(gen) },
+                                                                    ).await {
+                                                                        if g.item_id == doc_id.get_untracked()
+                                                                            && g.generation == raster_generation.get_untracked()
+                                                                        {
+                                                                            geoms.set(g.boxes);
+                                                                        }
+                                                                    }
+                                                                }
+                                                                Err(e) => error.set(Some(e)),
+                                                            }
+                                                        });
+                                                    }>"From hits"</button>
+                                                </div>
+                                                <div class="image-frame"
+                                                    on:mousedown=move |ev: MouseEvent| {
+                                                        drawing.set(true);
+                                                        drag_origin.set(Some((ev.offset_x() as f64, ev.offset_y() as f64)));
+                                                        drag_now.set(Some((ev.offset_x() as f64, ev.offset_y() as f64)));
+                                                    }
+                                                    on:mousemove=move |ev: MouseEvent| {
+                                                        if drawing.get() {
+                                                            drag_now.set(Some((ev.offset_x() as f64, ev.offset_y() as f64)));
+                                                        }
+                                                    }
+                                                    on:mouseup=move |ev: MouseEvent| {
+                                                        if !drawing.get() { return; }
+                                                        drawing.set(false);
+                                                        let Some((x0, y0)) = drag_origin.get() else { return; };
+                                                        let x1 = ev.offset_x() as f64;
+                                                        let y1 = ev.offset_y() as f64;
+                                                        drag_origin.set(None);
+                                                        drag_now.set(None);
+                                                        let (dw, dh) = ev
+                                                            .current_target()
+                                                            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                                                            .map(|el| {
+                                                                (f64::from(el.client_width()), f64::from(el.client_height()))
+                                                            })
+                                                            .unwrap_or((rw, rh));
+                                                        let (ox, oy) = css_point_to_raster(x0, y0, dw, dh, rw, rh);
+                                                        let (cx, cy) = event_to_raster(&ev, rw, rh)
+                                                            .unwrap_or_else(|| css_point_to_raster(x1, y1, dw, dh, rw, rh));
+                                                        let px = ox.min(cx);
+                                                        let py = oy.min(cy);
+                                                        let pw = (cx - ox).abs();
+                                                        let ph = (cy - oy).abs();
+                                                        if pw < 2.0 || ph < 2.0 { return; }
+                                                        let rr = r_for_up.clone();
+                                                        let root = root_sig.get();
+                                                        let id = doc_id.get();
+                                                        let gen = raster_generation.get();
+                                                        leptos::task::spawn_local(async move {
+                                                            if let Err(e) = tauri_invoke::<serde_json::Value, _>(
+                                                                "review_geom_upsert",
+                                                                &ReviewGeomUpsertArgs {
+                                                                    root: root.clone(),
+                                                                    item_id: id.clone(),
+                                                                    page_index: rr.page_index,
+                                                                    px,
+                                                                    py,
+                                                                    pw,
+                                                                    ph,
+                                                                    raster_width: rw,
+                                                                    raster_height: rh,
+                                                                    reason: Some("privilege".into()),
+                                                                    label: None,
+                                                                    source: Some("draw".into()),
+                                                                    generation: Some(gen),
+                                                                },
+                                                            ).await {
+                                                                error.set(Some(e));
+                                                                return;
+                                                            }
+                                                            if let Ok(g) = tauri_invoke::<ReviewGeomList, _>(
+                                                                "review_geom_list",
+                                                                &ReviewGeomListArgs { root, item_id: id, generation: Some(gen) },
+                                                            ).await {
+                                                                if g.item_id == doc_id.get_untracked()
+                                                                    && g.generation == raster_generation.get_untracked()
+                                                                {
+                                                                    geoms.set(g.boxes);
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                >
+                                                    <img src=src alt="Page raster" class="page-raster" />
+                                                    {overlays.into_iter().map(|g| {
+                                                        let (x, y, w, h) = geom_to_overlay_pct(&g, &r);
+                                                        let gid = g.id.clone();
+                                                        let selected = selected_geom.get().as_deref() == Some(gid.as_str());
+                                                        let style = format!(
+                                                            "left:{x}%;top:{y}%;width:{w}%;height:{h}%;"
+                                                        );
+                                                        view! {
+                                                            <div
+                                                                class=if selected { "geom-overlay selected" } else { "geom-overlay" }
+                                                                style=style
+                                                                on:mousedown=move |ev: MouseEvent| {
+                                                                    ev.stop_propagation();
+                                                                    selected_geom.set(Some(gid.clone()));
+                                                                }
+                                                            ></div>
+                                                        }
+                                                    }).collect_view()}
+                                                    {drag.map(|((x0,y0),(x1,y1))| {
+                                                        let x = x0.min(x1);
+                                                        let y = y0.min(y1);
+                                                        let w = (x1-x0).abs();
+                                                        let h = (y1-y0).abs();
+                                                        let style = format!("left:{x}px;top:{y}px;width:{w}px;height:{h}px;");
+                                                        view! { <div class="geom-overlay draft" style=style></div> }
+                                                    })}
+                                                </div>
+                                                <ul class="geom-list">
+                                                    {boxes.into_iter().map(|g| {
+                                                        let gid = g.id.clone();
+                                                        let gid_del = g.id.clone();
+                                                        let label = format!("{} p{} {:.0},{:.0}", g.reason, g.page_index + 1, g.x, g.y);
+                                                        view! {
+                                                            <li>
+                                                                <button on:click=move |_| selected_geom.set(Some(gid.clone()))>{label}</button>
+                                                                <button on:click=move |_| {
+                                                                    let root = root_sig.get();
+                                                                    let id = gid_del.clone();
+                                                                    leptos::task::spawn_local(async move {
+                                                                        if let Err(e) = tauri_invoke::<(), _>(
+                                                                            "review_geom_delete",
+                                                                            &ReviewGeomDeleteArgs { root: root.clone(), geom_id: id },
+                                                                        ).await {
+                                                                            error.set(Some(e));
+                                                                            return;
+                                                                        }
+                                                                        if let Ok(list) = tauri_invoke::<ReviewGeomList, _>(
+                                                                            "review_geom_list",
+                                                                            &ReviewGeomListArgs {
+                                                                                root,
+                                                                                item_id: doc_id.get_untracked(),
+                                                                                generation: Some(raster_generation.get_untracked()),
+                                                                            },
+                                                                        ).await {
+                                                                            if list.item_id == doc_id.get_untracked()
+                                                                                && list.generation
+                                                                                    == raster_generation.get_untracked()
+                                                                            {
+                                                                                geoms.set(list.boxes);
+                                                                            }
+                                                                        }
+                                                                    });
+                                                                }>"Delete"</button>
+                                                            </li>
+                                                        }
+                                                    }).collect_view()}
+                                                </ul>
+                                            </div>
+                                        }.into_any()
+                                    }}
                                 </Show>
                                 <Show when=move || pane.get() == "produced">
                                     <p class="empty" id="document" tabindex="-1">{produced_copy.clone()}</p>

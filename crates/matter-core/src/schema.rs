@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 39;
+pub const SCHEMA_VERSION: u32 = 40;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -53,6 +53,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (37, MIGRATION_V37),
     (38, MIGRATION_V38),
     (39, MIGRATION_V39),
+    (40, MIGRATION_V40),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -1283,6 +1284,42 @@ ALTER TABLE production_sets ADD COLUMN profile_slug TEXT;
 const MIGRATION_V39: &str = r#"
 ALTER TABLE matters ADD COLUMN storage_backend_json TEXT;
 ALTER TABLE matters ADD COLUMN job_backend_kind TEXT NOT NULL DEFAULT 'local';
+"#;
+
+/// Schema v40: geometric PDF/image redaction drafts + burned-native bookkeeping (track 0114).
+///
+/// `item_geom_redactions` stores PDF user-space (y-up) rects; original `native_sha256`
+/// CAS is never rewritten. Burned natives live under a separate digest.
+const MIGRATION_V40: &str = r#"
+CREATE TABLE item_geom_redactions (
+    id TEXT PRIMARY KEY NOT NULL,
+    item_id TEXT NOT NULL,
+    matter_id TEXT NOT NULL,
+    page_index INTEGER NOT NULL,
+    x REAL NOT NULL,
+    y REAL NOT NULL,
+    w REAL NOT NULL,
+    h REAL NOT NULL,
+    reason TEXT NOT NULL,
+    label TEXT,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT
+);
+
+CREATE INDEX idx_item_geom_redactions_item_page
+  ON item_geom_redactions(item_id, page_index);
+
+CREATE INDEX idx_item_geom_redactions_matter_status
+  ON item_geom_redactions(matter_id, status);
+
+ALTER TABLE items ADD COLUMN geom_redaction_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE items ADD COLUMN burned_native_sha256 TEXT;
+ALTER TABLE items ADD COLUMN burned_native_at TEXT;
+ALTER TABLE items ADD COLUMN burned_source_digest TEXT;
+ALTER TABLE items ADD COLUMN raster_engine TEXT;
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -5283,6 +5320,91 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v38'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    /// v39 → v40 adds geometric redaction table + burned-native item columns (track 0114).
+    #[test]
+    fn migrate_v39_to_v40_geom() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        for &(target, sql) in MIGRATIONS {
+            if target > 39 {
+                break;
+            }
+            conn.execute_batch(sql).expect("sql");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        assert_eq!(read_schema_version(&conn).expect("read"), 39);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v39', 'V39 Matter', '2020-01-01T00:00:00Z', 39, '/tmp/v39')",
+            [],
+        )
+        .expect("matter");
+        conn.execute(
+            "INSERT INTO items (id, matter_id, status, imported_at) \
+             VALUES ('it_v39', 'mat_v39', 'extracted', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("item");
+
+        let v = migrate(&conn).expect("migrate v39 to v40");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
+
+        let has_table: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='item_geom_redactions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table");
+        assert!(has_table);
+
+        for col in [
+            "geom_redaction_count",
+            "burned_native_sha256",
+            "burned_native_at",
+            "burned_source_digest",
+            "raster_engine",
+        ] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected items column {col}");
+        }
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT geom_redaction_count FROM items WHERE id = 'it_v39'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 0);
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v39'",
                 [],
                 |row| row.get(0),
             )

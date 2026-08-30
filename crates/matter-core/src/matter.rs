@@ -397,6 +397,16 @@ pub struct Item {
     pub teams_extract_method: Option<String>,
     pub teams_extracted_at: Option<String>,
     pub teams_extract_error: Option<String>,
+    // --- schema v40 (geometric burn / raster) ---
+    /// Denormalized count of **active** `item_geom_redactions` rows.
+    pub geom_redaction_count: i64,
+    /// CAS digest of last successful burned native (NULL when stale/absent).
+    pub burned_native_sha256: Option<String>,
+    pub burned_native_at: Option<String>,
+    /// Fingerprint of native + active geom + 0032 text state + engine pin.
+    pub burned_source_digest: Option<String>,
+    /// Raster/burn engine id (`zpdf`).
+    pub raster_engine: Option<String>,
 }
 
 /// Input for inserting an item row. New P0 fields are optional (null-safe).
@@ -2298,6 +2308,10 @@ impl Matter {
         let source_id = apply_opt2(update.source_id, current.source_id);
         let family_id = apply_opt2(update.family_id, current.family_id);
         let path = apply_opt2(update.path, current.path);
+        let native_sha256_changed = match &update.native_sha256 {
+            Some(new) => new.as_ref() != current.native_sha256.as_ref(),
+            None => false,
+        };
         let native_sha256 = apply_opt2(update.native_sha256, current.native_sha256);
         let logical_hash = apply_opt2(update.logical_hash, current.logical_hash);
         let message_id = apply_opt2(update.message_id, current.message_id);
@@ -2460,8 +2474,13 @@ impl Matter {
                 cal_busy_status = ?72, cal_is_recurring = ?73, cal_recurrence_id = ?74, \
                 cal_uid = ?75, cal_extract_method = ?76, \
                 conversation_id = ?77, chat_type = ?78, team_name = ?79, channel_name = ?80, \
-                chat_export_format = ?81, conversation_bucket_date = ?82 \
-             WHERE id = ?83",
+                chat_export_format = ?81, conversation_bucket_date = ?82, \
+                burned_native_sha256 = CASE WHEN ?83 THEN NULL ELSE burned_native_sha256 END, \
+                burned_native_at = CASE WHEN ?83 THEN NULL ELSE burned_native_at END, \
+                burned_source_digest = CASE WHEN ?83 THEN NULL ELSE burned_source_digest END, \
+                raster_engine = CASE WHEN ?83 THEN NULL ELSE raster_engine END, \
+                geom_redaction_count = CASE WHEN ?83 THEN 0 ELSE geom_redaction_count END \
+             WHERE id = ?84",
             params![
                 source_id,
                 family_id,
@@ -2545,9 +2564,17 @@ impl Matter {
                 channel_name,
                 chat_export_format,
                 conversation_bucket_date,
+                native_sha256_changed,
                 item_id,
             ],
         )?;
+        if native_sha256_changed {
+            self.conn.execute(
+                "UPDATE item_geom_redactions SET status = 'stale', updated_at = ?1 \
+                 WHERE item_id = ?2 AND matter_id = ?3 AND status = 'active'",
+                params![now_rfc3339(), item_id, self.matter_id],
+            )?;
+        }
 
         if old_parent != parent_item_id {
             if let Some(ref old) = old_parent {
@@ -6178,7 +6205,9 @@ const ITEM_COLUMNS: &str =
     transcript_native_sha256, transcript_at, transcript_job_id, transcript_error, \
     conversation_id, chat_type, team_name, channel_name, chat_export_format, \
     conversation_bucket_date, teams_extract_status, teams_extract_method, \
-    teams_extracted_at, teams_extract_error";
+    teams_extracted_at, teams_extract_error, \
+    geom_redaction_count, burned_native_sha256, burned_native_at, \
+    burned_source_digest, raster_engine";
 
 fn item_select_sql(suffix: &str) -> String {
     format!("SELECT {ITEM_COLUMNS} FROM items {suffix}")
@@ -6341,6 +6370,11 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         teams_extract_method: row.get(152)?,
         teams_extracted_at: row.get(153)?,
         teams_extract_error: row.get(154)?,
+        geom_redaction_count: row.get::<_, Option<i64>>(155)?.unwrap_or(0),
+        burned_native_sha256: row.get(156)?,
+        burned_native_at: row.get(157)?,
+        burned_source_digest: row.get(158)?,
+        raster_engine: row.get(159)?,
     })
 }
 

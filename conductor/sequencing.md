@@ -127,10 +127,11 @@
 | 69 | P0 O | **0112** ReviewWindow | ✅ Completed | three-pane coding; Resp ⊥ Privilege; PR **#115** `81a3aad` |
 | 69b | P3 O | **0117** QueueVirtualizationResiduals | 📦 Proposed | PR #113 queue Bugbot (not 0112) |
 | 70 | P1 O | **0113** ProduceChecklist | ✅ Completed | produce checklist; DAT only; PR **#117** / `f192b2d` |
-| 71 | P1 O | **0114** PdfRasterRedact | 📦 Proposed | zpdf raster/redact after 0112 |
+| 71 | P1 O | **0114** PdfRasterRedact | ⬜ Ready | zpdf CPU raster + geometric burn; schema v40 |
 | 72 | P2 O | **0115** ImageOptFactory | 📦 Proposed — parked | TIFF/OPT if a produce needs images |
 | 73 | P2 O | **0116** ProcessFold | 📦 Proposed | fold egui Process into Tauri last |
 | 74 | P3 O | **0118** ReviewWindowAsyncResiduals | 📦 Proposed | PR #115 window Bugbot (not 0113) |
+| 75 | P3 O | **0119** ProduceChecklistResiduals | 📦 Proposed | PR #117 produce Bugbot (not 0114) |
 
 ## Series K spine (clean unique export)
 
@@ -243,9 +244,9 @@
 | 1 | **0108** PolyDegradedWinnerRisk | **Completed** — effective degraded_winner_rate; closes D-0108-poly-degraded-winner-risk; residual D-0108-keepset-crc-retaint |
 | 2 | **0109** AlsoEmlClassifyHonesty | **Completed** — PR #104 Bugbot classify/cancel/counts; D-0109-also-eml-classify; PR #109 / `dc7c29c` |
 
-## Series O — Review chrome Tauri 2 + Leptos (0110–0117)
+## Series O — Review chrome Tauri 2 + Leptos (0110–0119)
 
-**Series O** after Series S. **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Completed** (PR **#113** / `3c4ca65`). **0112 Completed** (PR **#115** / `81a3aad`).
+**Series O** after Series S. **0110–0113 Completed**. **0114 Ready**. **0119** Proposed (PR #117 produce Bugbot).
 
 | Order | Track | Notes |
 |---|---|---|
@@ -253,7 +254,9 @@
 | 2 | **0111** ReviewQueueFirstPass | **Completed** — virtualized first-pass queue; PR **#113** `3c4ca65` |
 | 3 | **0112** ReviewWindow | **Completed** — three-pane; Resp ⊥ Privilege; PR **#115** `81a3aad` |
 | 4 | **0113** ProduceChecklist | **Completed** — checklist; DAT only; no OPT; PR **#117** / `f192b2d` |
-| 5 | **0114** PdfRasterRedact | **Proposed** — zpdf + pdfium fallback; after window |
+| 5 | **0114** PdfRasterRedact | **Ready** — zpdf CPU raster + geometric burn; schema v40 |
 | 6 | **0115** ImageOptFactory | **Proposed — parked** — TIFF/OPT if a produce needs images |
 | 7 | **0116** ProcessFold | **Proposed** — swallow egui Process last |
 | 8 | **0117** QueueVirtualizationResiduals | **Proposed** — PR #113 queue Bugbot; not the 0112 window |
+| 9 | **0118** ReviewWindowAsyncResiduals | **Proposed** — PR #115 window Bugbot; not produce |
+| 10 | **0119** ProduceChecklistResiduals | **Proposed** — PR #117 produce Bugbot; not raster |

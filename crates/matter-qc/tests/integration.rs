@@ -5,15 +5,16 @@
 use std::fs;
 
 use matter_core::{
-    item_role, item_status, CreateRedactionInput, ItemInput, Matter, UpsertItemPrivilegeInput,
-    FAMILY_KIND_EMAIL_ATTACHMENTS, SCHEMA_VERSION,
+    geom_source, item_role, item_status, CreateGeomRedactionInput, CreateRedactionInput, ItemInput,
+    Matter, UpsertItemPrivilegeInput, FAMILY_KIND_EMAIL_ATTACHMENTS, SCHEMA_VERSION,
 };
 use matter_qc::{
     evaluate_candidates_with_cancel, resolve_rules, run_production_qc, QcError, QcOutcome,
     QcParams, QcRuleConfig, QcSeverity, JOB_KIND_QC, RULE_BROKEN_FAMILY_INCOMPLETE_PARENT,
-    RULE_BROKEN_FAMILY_ORPHAN_CHILD, RULE_EMPTY_SELECTION, RULE_MISSING_NATIVE, RULE_MISSING_TEXT,
-    RULE_ONLY_WITHHELD, RULE_PDF_NEEDS_OCR, RULE_REDACTED_TEXT_MISSING,
-    RULE_WITHHELD_FAMILY_MEMBER, RULE_WITHHELD_IN_SELECTION, RULE_ZERO_SIZE,
+    RULE_BROKEN_FAMILY_ORPHAN_CHILD, RULE_BURNED_NATIVE_MISSING, RULE_EMPTY_SELECTION,
+    RULE_MISSING_NATIVE, RULE_MISSING_TEXT, RULE_ONLY_WITHHELD, RULE_PDF_NEEDS_OCR,
+    RULE_REDACTED_TEXT_MISSING, RULE_TEXT_REDACT_UNMAPPED_ON_PDF, RULE_WITHHELD_FAMILY_MEMBER,
+    RULE_WITHHELD_IN_SELECTION, RULE_ZERO_SIZE,
 };
 
 fn utf8_tempdir() -> (tempfile::TempDir, camino::Utf8PathBuf) {
@@ -134,7 +135,7 @@ fn insert_child(
 #[test]
 fn schema_v21_qc_runs_table() {
     let (_tmp, matter) = temp_matter("schema-v21");
-    assert_eq!(SCHEMA_VERSION, 39);
+    assert_eq!(SCHEMA_VERSION, 40);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     let has: bool = matter
         .connection()
@@ -712,4 +713,81 @@ fn cancel_pause_resume_checkpoint() {
         .expect("qc_runs after full success");
     assert_eq!(run.candidate_count, N);
     assert!(run.passed);
+}
+
+#[test]
+fn burned_native_missing_error() {
+    let (_tmp, matter) = temp_matter("qc-burn-miss");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let native = put_native(&matter, b"%PDF-1.4 SECRET_TOKEN_0114");
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("s.pdf".into()),
+            native_sha256: Some(native),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            size_bytes: Some(10),
+            ..Default::default()
+        },
+    );
+    matter
+        .create_geom_redaction(CreateGeomRedactionInput {
+            item_id: id.clone(),
+            page_index: 0,
+            x: 1.0,
+            y: 2.0,
+            w: 3.0,
+            h: 4.0,
+            reason: "privilege".into(),
+            label: None,
+            source: geom_source::DRAW.into(),
+            actor: "t".into(),
+        })
+        .expect("geom");
+    let r = run_qc(&matter, &job.id, &QcParams::default());
+    assert!(!r.passed);
+    let f = findings_of(&r, RULE_BURNED_NATIVE_MISSING);
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].severity, QcSeverity::Error);
+    assert_eq!(f[0].item_id.as_deref(), Some(id.as_str()));
+}
+
+#[test]
+fn text_redact_unmapped_on_pdf_error() {
+    let (_tmp, matter) = temp_matter("qc-unmap");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let body = "Alpha SECRET beta";
+    let text_sha = put_text(&matter, body);
+    let native = put_native(&matter, b"%PDF-1.4 SECRET");
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("s.pdf".into()),
+            native_sha256: Some(native),
+            text_sha256: Some(text_sha.clone()),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            size_bytes: Some(10),
+            ..Default::default()
+        },
+    );
+    matter
+        .create_redaction(CreateRedactionInput {
+            item_id: id.clone(),
+            start_utf8: 6,
+            end_utf8: 12,
+            exact_quote: "SECRET".into(),
+            display_body: body.into(),
+            body_digest: text_sha,
+            reason: "confidential".into(),
+            label: None,
+            actor: "t".into(),
+        })
+        .expect("redaction");
+    let r = run_qc(&matter, &job.id, &QcParams::default());
+    assert!(!r.passed);
+    let f = findings_of(&r, RULE_TEXT_REDACT_UNMAPPED_ON_PDF);
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].severity, QcSeverity::Error);
 }

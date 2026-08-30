@@ -23,6 +23,13 @@
     "allow-review-upsert-privilege",
     "allow-produce-page",
     "allow-produce-qc-run",
-    "allow-produce-start"
+    "allow-produce-start",
+    "allow-review-raster-page",
+    "allow-review-geom-list",
+    "allow-review-geom-upsert",
+    "allow-review-geom-delete",
+    "allow-review-geom-from-hits",
+    "allow-review-burn-native",
+    "allow-produce-burn-set"
   ]
 }

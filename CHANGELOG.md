@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0114 — PDF raster + geometric burn)
+
+- zpdf 0.13.0 MIT CPU raster (`cpu-render`) for the chrome Image tab, schema v40 geometric drafts (`item_geom_redactions` + burned-native bookkeeping), content-stream burn then `rewrite_pdf` (incremental-only write is not the produce artifact), and JPEG/PNG paint-burn with matching codec. Absorbs **D-0032-01** / **D-0034-02**. Pin: `zpdf = "0.13.0"`.
+
 ### Added (0113 — Produce checklist)
 
 - `dedupe-chrome` five-step DAT-only produce wizard on `/matters/:id/produce` (Set / Number / Format / Burn / Pre-flight): default set is responsive AND NOT withheld with family-together locked, privilege-in-set is a hard block, Finalize calls `matter-qc` then `matter-produce` with `fail_if_withheld=true` and `require_qc_pass=true`, and a successful volume is `DATA/load.dat` + `NATIVES/` + `TEXT/` + `privilege-log.csv` (no OPT). Absorbs **D-0113-produce-checklist**.

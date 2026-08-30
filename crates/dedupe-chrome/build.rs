@@ -19,6 +19,13 @@ fn main() {
             "produce_page",
             "produce_qc_run",
             "produce_start",
+            "review_raster_page",
+            "review_geom_list",
+            "review_geom_upsert",
+            "review_geom_delete",
+            "review_geom_from_hits",
+            "review_burn_native",
+            "produce_burn_set",
         ]));
     if let Err(e) = tauri_build::try_build(attrs) {
         panic!("tauri-build failed: {e}");

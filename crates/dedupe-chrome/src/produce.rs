@@ -73,6 +73,10 @@ pub struct ProducePageResponse {
     pub produced_count: u64,
     pub profiles: Vec<ProductionProfileThin>,
     pub bates_prefix: String,
+    pub need_burn: u64,
+    pub burned_fresh: u64,
+    pub unmapped_text: u64,
+    pub ordered_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -86,6 +90,9 @@ pub struct ProduceQcRunResponse {
     pub warn_count: u64,
     pub passed: bool,
     pub qc_run_id: String,
+    pub need_burn: u64,
+    pub burned_fresh: u64,
+    pub unmapped_text: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -231,6 +238,50 @@ fn extra_blocker(kind: &str, item_id: Option<String>, message: impl Into<String>
     }
 }
 
+fn extra_warning(kind: &str, item_id: Option<String>, message: impl Into<String>) -> ChromeExtra {
+    ChromeExtra {
+        kind: kind.into(),
+        severity: "warning".into(),
+        item_id,
+        message: message.into(),
+    }
+}
+
+fn pdf_raster_failed_warnings(
+    matter: &Matter,
+    ids: &[String],
+) -> Result<Vec<ChromeExtra>, CommandError> {
+    let mut extras = Vec::new();
+    for id in ids {
+        let item = matter.get_item(id).map_err(map_core)?;
+        if !matter_core::item_looks_like_pdf(&item) {
+            continue;
+        }
+        let Some(sha) = item
+            .native_sha256
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            extras.push(extra_warning(
+                "pdf_raster_failed",
+                Some(id.clone()),
+                "Image tab cannot raster: PDF has no native CAS",
+            ));
+            continue;
+        };
+        let head = matter.read_cas_prefix(sha, 64).map_err(map_core)?;
+        if !matter_core::bytes_look_like_pdf(&head) {
+            extras.push(extra_warning(
+                "pdf_raster_failed",
+                Some(id.clone()),
+                "Image tab cannot raster: native is not a PDF",
+            ));
+        }
+    }
+    Ok(extras)
+}
+
 fn uncoded_blockers(matter: &Matter, ids: &[String]) -> Result<Vec<ChromeExtra>, CommandError> {
     let codes = matter.list_item_codes(ids).map_err(map_core)?;
     let mut extras = Vec::new();
@@ -309,6 +360,7 @@ fn chrome_extras(
         return Ok(extras);
     }
     extras.extend(uncoded_blockers(matter, ids)?);
+    extras.extend(pdf_raster_failed_warnings(matter, ids)?);
     if let Some(blank) = privilege_log_blank_blocker(matter, spec, ids)? {
         extras.push(blank);
     }
@@ -542,6 +594,8 @@ pub fn produce_page_blocking(root: &str) -> Result<ProducePageResponse, CommandE
             qc_pack_id: matter_core::normalize_qc_pack_id(&p.body.qc.pack_id),
         })
         .collect();
+    let (need_burn, burned_fresh, unmapped_text) =
+        crate::raster::burn_counts_for_ids(&matter, &ordered)?;
     Ok(ProducePageResponse {
         sets,
         default_count,
@@ -551,6 +605,10 @@ pub fn produce_page_blocking(root: &str) -> Result<ProducePageResponse, CommandE
         produced_count,
         profiles,
         bates_prefix: DEFAULT_BATES_PREFIX.into(),
+        need_burn,
+        burned_fresh,
+        unmapped_text,
+        ordered_ids: ordered,
     })
 }
 
@@ -577,6 +635,9 @@ pub fn produce_qc_run_blocking(
             warn_count: 0,
             passed: false,
             qc_run_id: String::new(),
+            need_burn: 0,
+            burned_fresh: 0,
+            unmapped_text: 0,
         });
     }
 
@@ -616,6 +677,8 @@ pub fn produce_qc_run_blocking(
     let gate =
         check_qc_gate_for_pack(&matter, SCOPE_ITEM_IDS, &ordered, &pack_id).map_err(map_core)?;
     let extras = chrome_extras(&matter, &spec, &ordered, gate.as_ref())?;
+    let (need_burn, burned_fresh, unmapped_text) =
+        crate::raster::burn_counts_for_ids(&matter, &ordered)?;
     Ok(ProduceQcRunResponse {
         ordered_ids: ordered,
         pack_id,
@@ -626,6 +689,9 @@ pub fn produce_qc_run_blocking(
         warn_count,
         passed,
         qc_run_id,
+        need_burn,
+        burned_fresh,
+        unmapped_text,
     })
 }
 

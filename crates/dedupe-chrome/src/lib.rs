@@ -17,6 +17,7 @@ mod produce;
 mod queue;
 #[allow(dead_code)] // Pure helper mirrored in UI; exercised by unit tests in CI.
 mod queue_window;
+mod raster;
 mod recents;
 mod saved;
 
@@ -38,6 +39,12 @@ use produce::{
     ProduceStartArgs,
 };
 use queue::{review_queue_page_blocking, ReviewQueuePageArgs};
+use raster::{
+    produce_burn_set_blocking, review_burn_native_blocking, review_geom_delete_blocking,
+    review_geom_from_hits_blocking, review_geom_list_blocking, review_geom_upsert_blocking,
+    review_raster_page_blocking, ProduceBurnSetArgs, ReviewBurnNativeArgs, ReviewGeomDeleteArgs,
+    ReviewGeomFromHitsArgs, ReviewGeomListArgs, ReviewGeomUpsertArgs, ReviewRasterPageArgs,
+};
 use recents::{
     production_recents_dir, recent_matters_list_in, recent_matters_remember_in, RecentMatter,
 };
@@ -285,6 +292,143 @@ fn review_upsert_note(
 }
 
 #[tauri::command]
+fn review_raster_page(
+    root: String,
+    item_id: String,
+    page_index: Option<u32>,
+    dpi: Option<u32>,
+    generation: Option<u64>,
+) -> Result<raster::ReviewRasterPageResponse, CommandError> {
+    join_worker(
+        "review_raster_page",
+        std::thread::spawn(move || {
+            review_raster_page_blocking(ReviewRasterPageArgs {
+                root,
+                item_id,
+                page_index,
+                dpi,
+                generation,
+            })
+        }),
+    )
+}
+
+#[tauri::command]
+fn review_geom_list(
+    root: String,
+    item_id: String,
+    generation: Option<u64>,
+) -> Result<raster::ReviewGeomListResponse, CommandError> {
+    join_worker(
+        "review_geom_list",
+        std::thread::spawn(move || {
+            review_geom_list_blocking(ReviewGeomListArgs {
+                root,
+                item_id,
+                generation,
+            })
+        }),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+fn review_geom_upsert(
+    root: String,
+    item_id: String,
+    page_index: u32,
+    px: f64,
+    py: f64,
+    pw: f64,
+    ph: f64,
+    raster_width: f64,
+    raster_height: f64,
+    reason: Option<String>,
+    label: Option<String>,
+    source: Option<String>,
+    generation: Option<u64>,
+) -> Result<raster::ReviewGeomUpsertResponse, CommandError> {
+    join_worker(
+        "review_geom_upsert",
+        std::thread::spawn(move || {
+            review_geom_upsert_blocking(ReviewGeomUpsertArgs {
+                root,
+                item_id,
+                page_index,
+                px,
+                py,
+                pw,
+                ph,
+                raster_width,
+                raster_height,
+                reason,
+                label,
+                source,
+                generation,
+            })
+        }),
+    )
+}
+
+#[tauri::command]
+fn review_geom_delete(root: String, geom_id: String) -> Result<(), CommandError> {
+    join_worker(
+        "review_geom_delete",
+        std::thread::spawn(move || {
+            review_geom_delete_blocking(ReviewGeomDeleteArgs { root, geom_id })
+        }),
+    )
+}
+
+#[tauri::command]
+fn review_geom_from_hits(
+    root: String,
+    item_id: String,
+    query: Option<String>,
+    reason: Option<String>,
+    generation: Option<u64>,
+) -> Result<raster::ReviewGeomFromHitsResponse, CommandError> {
+    join_worker(
+        "review_geom_from_hits",
+        std::thread::spawn(move || {
+            review_geom_from_hits_blocking(ReviewGeomFromHitsArgs {
+                root,
+                item_id,
+                query,
+                reason,
+                generation,
+            })
+        }),
+    )
+}
+
+#[tauri::command]
+fn review_burn_native(
+    root: String,
+    item_id: String,
+) -> Result<raster::ReviewBurnNativeResponse, CommandError> {
+    join_worker(
+        "review_burn_native",
+        std::thread::spawn(move || {
+            review_burn_native_blocking(ReviewBurnNativeArgs { root, item_id })
+        }),
+    )
+}
+
+#[tauri::command]
+fn produce_burn_set(
+    root: String,
+    item_ids: Option<Vec<String>>,
+) -> Result<raster::ProduceBurnSetResponse, CommandError> {
+    join_worker(
+        "produce_burn_set",
+        std::thread::spawn(move || {
+            produce_burn_set_blocking(ProduceBurnSetArgs { root, item_ids })
+        }),
+    )
+}
+
+#[tauri::command]
 fn produce_page(root: String) -> Result<produce::ProducePageResponse, CommandError> {
     join_worker(
         "produce_page",
@@ -391,7 +535,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             review_upsert_privilege,
             produce_page,
             produce_qc_run,
-            produce_start
+            produce_start,
+            review_raster_page,
+            review_geom_list,
+            review_geom_upsert,
+            review_geom_delete,
+            review_geom_from_hits,
+            review_burn_native,
+            produce_burn_set
         ])
         .run(tauri::generate_context!())
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })

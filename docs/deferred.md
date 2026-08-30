@@ -158,7 +158,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0030-01 | — | Image/PDF box markups & burn-in redaction | **Text path closed in 0032** (regions + true redacted CAS). Full PDF/image geometric burn-in still deferred | **0034** |
+| D-0030-01 | — | Image/PDF box markups & burn-in redaction | **Text path closed in 0032**. Geometric boxes + PDF burn owned by **0114** Ready | residual / **0114** Ready |
 | D-0030-02 | — | Notes in production load file | **Closed in 0040** (default exclude; residual opt-in) | residual opt-in |
 | D-0030-03 | — | Privilege log narrative from notes | **Partial complete in 0031**: optional “draft from note” confirm only; never auto-export notes | — |
 | D-0030-04 | — | Case-wide persistent keyword highlight sets | User highlights only; FTS paint optional | residual |
@@ -188,7 +188,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0032-01 | — | Full PDF/image geometric redaction + content burn-in | P0 is text-body regions + redacted text CAS only. Series O **0114** (`zpdf`) is the planned owner. | residual / **0114** |
+| D-0032-01 | — | Full PDF/image geometric redaction + content burn-in | P0 is text-body regions + redacted text CAS only. Series O **0114** Ready (`zpdf` CPU + rewrite burn; jpeg/png paint-burn). TIFF G4 stays **0115**. | residual / **0114** Ready |
 | D-0032-02 | — | Native DOCX/XLSX redaction | Text path only | **0033**+ |
 | D-0032-03 | — | Production packaging of redacted text + load file | **Closed in 0040** (`redacted_text_sha256` only when redactions; never original; synthetic EML uses redacted body) | — |
 | D-0032-04 | — | QC fail produce if stale redactions / missing artifact | **Closed in 0041** (`redacted_text_missing` error + produce `require_qc_pass`) | — |
@@ -224,9 +224,9 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0034-01 | — | OCR for empty **and** low-text PDFs | **Consumed in 0036**: OCR success sets `pdf_needs_ocr=0` + review `text_sha256` | — |
-| D-0034-02 | — | First-page / multi-page **raster preview** | Planned **0114** via `zpdf` (MIT) + pdfium fallback. Do not bundle MuPDF/Poppler. | residual / **0114** |
+| D-0034-02 | — | First-page / multi-page **raster preview** | **0114** Ready: zpdf CPU visible page + prev/next. Full Acrobat chrome remains **D-0034-05**. Do not bundle MuPDF/Poppler. | residual / **0114** Ready |
 | D-0034-03 | — | PDFium / MuPDF bundled native engine | Forbidden as required P0 dep | residual optional feature |
-| D-0034-04 | — | Geometric PDF redaction burn-in | Not extract track | residual (D-0032-01) |
+| D-0034-04 | — | Geometric PDF redaction burn-in | Not extract track; **0114** Ready will close as duplicate of D-0032-01 | residual (D-0032-01 / **0114**) |
 | D-0034-05 | — | Multi-page interactive PDF viewer | Residual with preview engine | residual |
 | D-0034-06 | — | Password recovery / owner-password bypass | Encrypted → fail closed | never |
 | D-0034-07 | — | Adversarial glyph/font extract hardening | Document best-effort extract ≠ visual | residual |
@@ -909,7 +909,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0063-04 | P3 | `openidconnect::ClientSecret` / bare `String` retains IdP client secret until client Drop; no zeroize API | **P3 residual** (dependency limitation; not a product control gap). Mitigated: `CoreClient` constructed only inside a tight exchange+verify block; route zeroizes local secret after `finish_authorization`. Heap residue only during exchange until allocator reuse. Full zeroize requires upstream `openidconnect` support. | residual / upstream |
 | D-0063-05 | P3 | Desk UI passphrase widgets are plain `String` (egui TextEdit) | Cleared after submit; heap residue residual. Production service/CLI unlock paths zeroize. Full zeroizing widgets would need egui field redesign. | residual polish |
 
-## Series O — Review chrome placeholders (0110–0118, minted/refreshed 2026-08-29; 0117 2026-08-30; 0118 2026-08-30)
+## Series O — Review chrome placeholders (0110–0119, minted/refreshed 2026-08-29; 0117/0118 2026-08-30; 0119 2026-08-30)
 
 Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs already occupied — do not remint. Expand with `/plan-track`, do not implement from this table.
 
@@ -923,15 +923,16 @@ Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs a
 | D-0113-produce-checklist | — | Produce wizard + blockers/warnings; DAT only | **Closed in 0113** (PR **#117** / `f192b2d`). No fake OPT. Privilege-in-set hard block. | — |
 | D-0113-long-job | P3 | Chrome produce/QC uses blocking `join_worker` (no process-runner cancel/progress) | DoD fixture is small. Multi-GB cancel/progress stays **0116**. | residual / **0116** |
 | D-0118-review-window-async | P3 | PR #115 Bugbot: stale document/body fetch overwrites current item; post-save codes/notes snapshot; unused path_id `#[test]` | Valid; review_window.rs / path_id.rs. Do not steal into 0113. | **0118** Proposed |
-| D-0032-01 | — | Geometric PDF redaction + burn-in | Already owned | **0114** |
-| D-0034-02 | — | PDF raster preview | Already owned | **0114** |
+| D-0032-01 | — | Geometric PDF redaction + burn-in | **0114** Ready — close on Implement (PDF + jpeg/png; TIFF → 0115) | **0114** Ready |
+| D-0034-02 | — | PDF raster preview | **0114** Ready — close on Implement (page nav; not D-0034-05) | **0114** Ready |
 | D-0040-01 | — | TIFF/OPT image factory | Parked until a produce needs images | **0115** parked |
 | D-0060-04 | — | Image + OPT/LFP production profiles | Same park | **0115** parked |
 | D-0116-process-fold | — | Swallow egui Process into the Tauri window | Last Series O track; still one pipeline | **0116** Proposed |
 | D-0031-09 | — | Court e-file / load-file Bates on privilege log | Chrome 0113 volume log joins Bates when `production_items` exist; Desk/CLI still item_id | residual (Desk/CLI) |
 | D-0040-04 | — | Privilege log co-export into volume `PRIVILEGE/` | Chrome 0113 writes `privilege-log.csv` at volume root; folder layout residual | residual (`PRIVILEGE/` folder) |
+| D-0119-produce-checklist-residuals | P3 | PR #117 Bugbot: Finalize re-arm / colliding Bates; empty `filter_ids` dumps privilege log; QC state survives matter change | Valid; produce.rs + privilege.rs. Do not steal into 0114. | **0119** Proposed |
 
-**Not minted (v1.1 / never as next IDs):** local AI first-pass job, clawback packet, LFP default, native spreadsheet redact, legal hold, TAR-as-primary, cluster wheel, StoryBuilder, auto-privilege, BCC-default, `D-0108-keepset-crc-retaint`, `D-0067-embedded-depth` matter children. Mock `tokens.css` retune stays in `C:\dev\dedupe-frontend`. Next free ID **0119**.
+**Not minted (v1.1 / never as next IDs):** local AI first-pass job, clawback packet, LFP default, native spreadsheet redact, legal hold, TAR-as-primary, cluster wheel, StoryBuilder, auto-privilege, BCC-default, `D-0108-keepset-crc-retaint`, `D-0067-embedded-depth` matter children. Mock `tokens.css` retune stays in `C:\dev\dedupe-frontend`. Next free ID **0120**.
 
 ## Hygiene
 
