@@ -124,7 +124,7 @@
 | 66 | P2 S | **0109** AlsoEmlClassifyHonesty | ✅ Completed | PR #104 Bugbot also-eml classify/cancel; D-0109; PR #109 / `dc7c29c` |
 | 67 | P1 O | **0110** MatterChromeTauri | ✅ Completed | Tauri 2 + Leptos matter chrome; one `matter_overview`; PR **#111** `5a76f0b` |
 | 68 | P1 O | **0111** ReviewQueueFirstPass | ✅ Completed | virtualized first-pass queue; PR **#113** / `3c4ca65` |
-| 69 | P0 O | **0112** ReviewWindow | 🔄 In progress | three-pane coding; Resp ⊥ Privilege |
+| 69 | P0 O | **0112** ReviewWindow | ✅ Completed | three-pane coding; Resp ⊥ Privilege; PR **#115** `81a3aad` |
 | 69b | P3 O | **0117** QueueVirtualizationResiduals | 📦 Proposed | PR #113 queue Bugbot (not 0112) |
 | 70 | P1 O | **0113** ProduceChecklist | 📦 Proposed | produce checklist; DAT only |
 | 71 | P1 O | **0114** PdfRasterRedact | 📦 Proposed | zpdf raster/redact after 0112 |
@@ -244,13 +244,13 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0117)
 
-**Series O** after Series S. **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Completed** (PR **#113** / `3c4ca65`). **0112 Ready**.
+**Series O** after Series S. **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Completed** (PR **#113** / `3c4ca65`). **0112 Completed** (PR **#115** / `81a3aad`).
 
 | Order | Track | Notes |
 |---|---|---|
 | 1 | **0110** MatterChromeTauri | **Completed** — matter list/home; `matter_overview`; Plex/paper; PR **#111** `5a76f0b` |
 | 2 | **0111** ReviewQueueFirstPass | **Completed** — virtualized first-pass queue; PR **#113** `3c4ca65` |
-| 3 | **0112** ReviewWindow | **In Progress** — three-pane; Resp ⊥ Privilege |
+| 3 | **0112** ReviewWindow | **Completed** — three-pane; Resp ⊥ Privilege; PR **#115** `81a3aad` |
 | 4 | **0113** ProduceChecklist | **Proposed** — checklist; DAT only; no OPT |
 | 5 | **0114** PdfRasterRedact | **Proposed** — zpdf + pdfium fallback; after window |
 | 6 | **0115** ImageOptFactory | **Proposed — parked** — TIFF/OPT if a produce needs images |

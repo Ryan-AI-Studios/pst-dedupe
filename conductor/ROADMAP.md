@@ -420,13 +420,13 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 
 ### Wave 11 — Review chrome (Series O)
 
-**Series O** (Series S closed 2026-08-29). Tauri 2 + Leptos. Plex/paper. Keep egui Process until **0116**. Mock at `C:\dev\dedupe-frontend` is research (do not vendor coral). **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Completed** (PR **#113** / `3c4ca65`). **0112 Ready**.
+**Series O** (Series S closed 2026-08-29). Tauri 2 + Leptos. Plex/paper. Keep egui Process until **0116**. Mock at `C:\dev\dedupe-frontend` is research (do not vendor coral). **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Completed** (PR **#113** / `3c4ca65`). **0112 Completed** (PR **#115** / `81a3aad`).
 
 | ID | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|
 | **0110** | MatterChromeTauri | **Completed** | **P1 O** | Matter list/home; one `matter_overview` (`load_case_overview`). PR **#111** `5a76f0b`. Spec: `0110-MatterChromeTauri/`. |
 | **0111** | ReviewQueueFirstPass | **Completed** | **P1 O** | Virtualized first-pass queue; Unreviewed default; lead/QC toggle. PR **#113** `3c4ca65`. Spec: `0111-ReviewQueueFirstPass/`. |
-| **0112** | ReviewWindow | **In Progress** | **P0 O** | Three-pane coding; money screen. Spec: `0112-ReviewWindow/`. |
+| **0112** | ReviewWindow | **Completed** | **P0 O** | Three-pane coding; money screen. PR **#115** `81a3aad`. Spec: `0112-ReviewWindow/`. |
 | **0113** | ProduceChecklist | **Proposed** | **P1 O** | Checklist; DAT only. |
 | **0114** | PdfRasterRedact | **Proposed** | **P1 O** | zpdf + pdfium; after 0112. |
 | **0115** | ImageOptFactory | **Proposed — parked** | **P2 O** | TIFF/OPT only if a produce needs images. |
