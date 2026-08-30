@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v39**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v40**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //!   (local default; opt-in cloud via `matter-storage` / track 0061)
 //! - Append-only audit log with integrity hash chain
@@ -59,6 +59,9 @@
 //!   and `job_backend_kind` (default local); CAS local by default; on open, cloud kinds
 //!   activate `BlobStore` via `open_blob_store` (**fail closed** without `cloud-s3`);
 //!   encryption uses `put_at_digest`; no secrets in DB; SQLite host-local; remote workers HTTP-only
+//! - **Geometric PDF/image redaction** (schema v40 / track 0114): `item_geom_redactions`
+//!   and burned-native bookkeeping (`geom_redaction_count`, `burned_native_sha256`,
+//!   `burned_source_digest`); original native CAS is never rewritten
 //!
 //! ## Layout
 //!
@@ -105,6 +108,7 @@ pub mod entity;
 pub mod error;
 pub mod filter;
 pub mod gap;
+pub mod geom_redaction;
 pub mod item_errors;
 pub mod jobs;
 pub mod lang;
@@ -187,6 +191,12 @@ pub use gap::{
     normalize_custodian_name, normalize_source_label, CustodianInventoryRow, ExpectedCustodian,
     ExpectedSource, GapExpectedDoc, GapExpectedDocInput, GapImportRecord, GapRunRecord,
     ImportExpectedCustodiansResult, InsertGapImportInput, InsertGapRunInput,
+};
+pub use geom_redaction::{
+    burn_required, burn_required_pdf_known, burned_native_fresh, bytes_look_like_pdf,
+    compute_burn_fingerprint, geom_source, item_is_pdf_native, item_looks_like_pdf,
+    CreateGeomRedactionInput, ItemGeomRedaction, SetBurnedNativeInput, RASTER_ENGINE_PIN,
+    RASTER_ENGINE_ZPDF,
 };
 pub use item_errors::{ItemError, ItemErrorInput};
 pub use jobs::{Job, JobCheckpoint, JobState};

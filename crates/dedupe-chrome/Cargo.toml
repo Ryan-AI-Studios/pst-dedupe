@@ -22,6 +22,9 @@ matter-core = { path = "../matter-core" }
 matter-search = { path = "../matter-search" }
 matter-produce = { path = "../matter-produce" }
 matter-qc = { path = "../matter-qc" }
+pdf-raster = { path = "../pdf-raster" }
+extract-pdf = { path = "../extract-pdf" }
+base64 = { workspace = true }
 camino = { workspace = true }
 csv = { workspace = true }
 serde = { workspace = true }

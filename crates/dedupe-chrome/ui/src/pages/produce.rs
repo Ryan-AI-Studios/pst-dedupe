@@ -7,8 +7,9 @@ use wasm_bindgen::JsCast;
 use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
 
 use crate::invoke::{
-    tauri_invoke, ChromeExtra, ChromeQcFinding, ProducePageResponse, ProduceQcRun, ProduceQcRunArgs,
-    ProduceStart, ProduceStartArgs, ProductionSetThin, RootArgs, WarningOverride,
+    tauri_invoke, ChromeExtra, ChromeQcFinding, ProduceBurnSet, ProduceBurnSetArgs,
+    ProducePageResponse, ProduceQcRun, ProduceQcRunArgs, ProduceStart, ProduceStartArgs,
+    ProductionSetThin, RootArgs, WarningOverride,
 };
 use crate::path_id::{matter_home_href_from_param, review_doc_href};
 
@@ -364,7 +365,68 @@ pub fn ProducePage() -> impl IntoView {
                                 <Show when=move || step.get() == 4>
                                     <div class="produce-step">
                                         <h2>"Burn"</h2>
-                                        <p>"Only CAS redacted text is packaged. Geometric PDF burn is 0114. Highlights never burn."</p>
+                                        {move || {
+                                            let p = page.get();
+                                            let q = qc.get();
+                                            let need = q
+                                                .as_ref()
+                                                .map(|r| r.need_burn)
+                                                .or_else(|| p.as_ref().map(|x| x.need_burn))
+                                                .unwrap_or(0);
+                                            let fresh = q
+                                                .as_ref()
+                                                .map(|r| r.burned_fresh)
+                                                .or_else(|| p.as_ref().map(|x| x.burned_fresh))
+                                                .unwrap_or(0);
+                                            let unmapped = q
+                                                .as_ref()
+                                                .map(|r| r.unmapped_text)
+                                                .or_else(|| p.as_ref().map(|x| x.unmapped_text))
+                                                .unwrap_or(0);
+                                            view! {
+                                                <p>{format!("Need burn: {need} · Burned fresh: {fresh} · Unmapped text: {unmapped}")}</p>
+                                            }
+                                        }}
+                                        <p>"Highlights never burn. Draft overlays are not the produced native."</p>
+                                        <button
+                                            on:click=move |_| {
+                                                let root = root_sig.get();
+                                                let ids = qc
+                                                    .get()
+                                                    .map(|r| r.ordered_ids)
+                                                    .filter(|v| !v.is_empty())
+                                                    .unwrap_or_default();
+                                                if ids.is_empty() {
+                                                    error.set(Some(
+                                                        "Run QC first so Burn uses the current selected set.".into(),
+                                                    ));
+                                                    return;
+                                                }
+                                                leptos::task::spawn_local(async move {
+                                                    match tauri_invoke::<ProduceBurnSet, _>(
+                                                        "produce_burn_set",
+                                                        &ProduceBurnSetArgs {
+                                                            root: root.clone(),
+                                                            item_ids: Some(ids),
+                                                        },
+                                                    ).await {
+                                                        Ok(r) => {
+                                                            if !r.errors.is_empty() {
+                                                                error.set(Some(r.errors.join("; ")));
+                                                            }
+                                                            match tauri_invoke::<ProducePageResponse, _>(
+                                                                "produce_page",
+                                                                &RootArgs { root },
+                                                            ).await {
+                                                                Ok(resp) => page.set(Some(resp)),
+                                                                Err(e) => error.set(Some(e)),
+                                                            }
+                                                        }
+                                                        Err(e) => error.set(Some(e)),
+                                                    }
+                                                });
+                                            }
+                                        >"Burn selected set"</button>
                                     </div>
                                 </Show>
 
@@ -385,9 +447,11 @@ pub fn ProducePage() -> impl IntoView {
                                                     key=|e: &ChromeExtra| format!("{}:{}", e.kind, e.item_id.clone().unwrap_or_default())
                                                     children=move |e| {
                                                         let href = e.item_id.as_ref().map(|id| review_doc_href(&root_sig.get(), id, None, None));
+                                                        let is_block = e.severity == "blocker";
                                                         view! {
-                                                            <div class="card blocker">
+                                                            <div class=if is_block { "card blocker" } else { "card warn" }>
                                                                 <strong>{e.kind}</strong>
+                                                                <span class="empty">{e.severity.clone()}</span>
                                                                 <p>{e.message}</p>
                                                                 {href.map(|h| view! { <A href=h>"Open in review"</A> })}
                                                             </div>

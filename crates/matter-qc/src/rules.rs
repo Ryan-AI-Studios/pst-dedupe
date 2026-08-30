@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use matter_core::{Item, Matter};
+use matter_core::{
+    burn_required_pdf_known, burned_native_fresh, item_looks_like_pdf, Item, Matter,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -17,6 +19,8 @@ pub const RULE_BROKEN_FAMILY_INCOMPLETE_PARENT: &str = "broken_family_incomplete
 pub const RULE_WITHHELD_IN_SELECTION: &str = "withheld_in_selection";
 pub const RULE_WITHHELD_FAMILY_MEMBER: &str = "withheld_family_member";
 pub const RULE_REDACTED_TEXT_MISSING: &str = "redacted_text_missing";
+pub const RULE_BURNED_NATIVE_MISSING: &str = "burned_native_missing";
+pub const RULE_TEXT_REDACT_UNMAPPED_ON_PDF: &str = "text_redact_unmapped_on_pdf";
 pub const RULE_MISSING_NATIVE: &str = "missing_native";
 pub const RULE_MISSING_TEXT: &str = "missing_text";
 pub const RULE_PDF_NEEDS_OCR: &str = "pdf_needs_ocr";
@@ -253,6 +257,36 @@ pub fn evaluate_one_item(
             severity: rules.severity(RULE_REDACTED_TEXT_MISSING),
             item_id: Some(id.into()),
             message: "redaction without redacted text artifact".into(),
+        });
+    }
+
+    // burned native missing / stale fingerprint
+    if rules.is_enabled(RULE_BURNED_NATIVE_MISSING) {
+        let fp = matter.geom_burn_fingerprint(id)?;
+        let is_pdf = matter_core::item_is_pdf_native(matter, item)?;
+        if burn_required_pdf_known(item, &fp, is_pdf) && !burned_native_fresh(item, &fp) {
+            findings.push(QcFinding {
+                rule_id: RULE_BURNED_NATIVE_MISSING.into(),
+                severity: rules.severity(RULE_BURNED_NATIVE_MISSING),
+                item_id: Some(id.into()),
+                message: "burn required without fresh burned native".into(),
+            });
+        }
+    }
+
+    // PDF text redaction with no geometric mapping
+    let is_pdf = item_looks_like_pdf(item)
+        || (item.redaction_count > 0 && matter_core::item_is_pdf_native(matter, item)?);
+    if rules.is_enabled(RULE_TEXT_REDACT_UNMAPPED_ON_PDF)
+        && is_pdf
+        && item.redaction_count > 0
+        && item.geom_redaction_count == 0
+    {
+        findings.push(QcFinding {
+            rule_id: RULE_TEXT_REDACT_UNMAPPED_ON_PDF.into(),
+            severity: rules.severity(RULE_TEXT_REDACT_UNMAPPED_ON_PDF),
+            item_id: Some(id.into()),
+            message: "pdf text redaction with no geometric boxes".into(),
         });
     }
 

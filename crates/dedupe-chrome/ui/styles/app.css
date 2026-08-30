@@ -701,3 +701,62 @@ button.secondary {
   color: var(--muted);
   font-style: italic;
 }
+
+.image-stage {
+  position: relative;
+}
+
+.image-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.image-frame {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  line-height: 0;
+}
+
+.page-raster {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.geom-overlay {
+  position: absolute;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(155, 44, 44, 0.32),
+    rgba(155, 44, 44, 0.32) 4px,
+    rgba(155, 44, 44, 0.08) 4px,
+    rgba(155, 44, 44, 0.08) 8px
+  );
+  outline: 1px solid #9b2c2c;
+  pointer-events: auto;
+}
+
+.geom-overlay.selected {
+  outline-width: 2px;
+}
+
+.geom-overlay.draft {
+  pointer-events: none;
+}
+
+.geom-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
+.geom-list li {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}

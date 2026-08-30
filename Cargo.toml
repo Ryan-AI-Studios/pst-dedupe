@@ -21,6 +21,7 @@ members = [
     "crates/matter-search",
     "crates/extract-office",
     "crates/extract-pdf",
+    "crates/pdf-raster",
     "crates/ocr-plugin",
     "crates/stt-plugin",
     "crates/file-category",

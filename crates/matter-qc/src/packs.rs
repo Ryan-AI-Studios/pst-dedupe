@@ -12,10 +12,11 @@ use matter_core::{
 
 use crate::params::{QcRuleConfig, QcSeverity, PROFILE_DEFAULT_PRODUCTION_QC_V1};
 use crate::rules::{
-    RULE_BROKEN_FAMILY_INCOMPLETE_PARENT, RULE_BROKEN_FAMILY_ORPHAN_CHILD, RULE_EMPTY_SELECTION,
-    RULE_ITEM_STATUS_ERROR, RULE_MISSING_NATIVE, RULE_MISSING_TEXT, RULE_ONLY_WITHHELD,
-    RULE_PDF_NEEDS_OCR, RULE_REDACTED_TEXT_MISSING, RULE_WITHHELD_FAMILY_MEMBER,
-    RULE_WITHHELD_IN_SELECTION, RULE_ZERO_SIZE,
+    RULE_BROKEN_FAMILY_INCOMPLETE_PARENT, RULE_BROKEN_FAMILY_ORPHAN_CHILD,
+    RULE_BURNED_NATIVE_MISSING, RULE_EMPTY_SELECTION, RULE_ITEM_STATUS_ERROR, RULE_MISSING_NATIVE,
+    RULE_MISSING_TEXT, RULE_ONLY_WITHHELD, RULE_PDF_NEEDS_OCR, RULE_REDACTED_TEXT_MISSING,
+    RULE_TEXT_REDACT_UNMAPPED_ON_PDF, RULE_WITHHELD_FAMILY_MEMBER, RULE_WITHHELD_IN_SELECTION,
+    RULE_ZERO_SIZE,
 };
 
 /// Re-export pack id constants for callers that depend on matter-qc only.
@@ -46,6 +47,14 @@ pub fn pack_default_v1() -> Vec<QcRuleConfig> {
         },
         QcRuleConfig {
             id: RULE_REDACTED_TEXT_MISSING.into(),
+            severity: QcSeverity::Error,
+        },
+        QcRuleConfig {
+            id: RULE_BURNED_NATIVE_MISSING.into(),
+            severity: QcSeverity::Error,
+        },
+        QcRuleConfig {
+            id: RULE_TEXT_REDACT_UNMAPPED_ON_PDF.into(),
             severity: QcSeverity::Error,
         },
         QcRuleConfig {

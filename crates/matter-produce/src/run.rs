@@ -857,6 +857,9 @@ fn produce_one_item_inner(
             (Some(art), Some(rel), ext, mime, size, sha)
         }
         Err(reason) => {
+            if reason == "burned_native_missing" {
+                return Ok(ProducedOne::Error { message: reason });
+            }
             if text_art.is_none() {
                 return Ok(ProducedOne::Skipped { reason });
             }

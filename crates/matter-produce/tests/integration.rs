@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use matter_core::{
-    item_role, item_status, CreateRedactionInput, ItemInput, Matter, UpsertItemPrivilegeInput,
-    UpsertNoteInput, REDACTED_TOKEN, SCHEMA_VERSION,
+    geom_source, item_role, item_status, CreateGeomRedactionInput, CreateRedactionInput, ItemInput,
+    Matter, SetBurnedNativeInput, UpsertItemPrivilegeInput, UpsertNoteInput, REDACTED_TOKEN,
+    SCHEMA_VERSION,
 };
 use matter_produce::{
     encode_dat_field, format_utc_datetime, run_produce, ProduceOutcome, ProduceParams, DAT_FIELDS,
@@ -98,7 +99,7 @@ fn sha256_file(path: &std::path::Path) -> String {
 #[test]
 fn schema_v20_production_tables() {
     let (_tmp, matter) = temp_matter("schema-v20");
-    assert_eq!(SCHEMA_VERSION, 39);
+    assert_eq!(SCHEMA_VERSION, 40);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     for table in ["production_sets", "production_items"] {
         let has: bool = matter
@@ -2101,7 +2102,7 @@ fn qc_expand_false_produce_expand_true_is_stale() {
 #[test]
 fn schema_v38_production_profiles_table() {
     let (_tmp, matter) = temp_matter("schema-v38");
-    assert_eq!(SCHEMA_VERSION, 39);
+    assert_eq!(SCHEMA_VERSION, 40);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     let has: bool = matter
         .connection()
@@ -2371,14 +2372,16 @@ fn ghost_text_ban_for_profile(profile: Option<&str>) {
     let original = "Alpha SECRET original privilege phrase XYZ beta";
     let n = put_native(&matter, b"native");
     let t_orig = put_text(&matter, original);
+    // Non-PDF: 0114 fail-closes PDF + text redaction without a burned native.
+    // This test is about TEXT isolation, not geometric burn.
     let item_id = insert_review_item(
         &matter,
         ItemInput {
-            path: Some("docs/priv.pdf".into()),
+            path: Some("docs/priv.txt".into()),
             native_sha256: Some(n),
             text_sha256: Some(t_orig.clone()),
             file_category: Some("document".into()),
-            mime_type: Some("application/pdf".into()),
+            mime_type: Some("text/plain".into()),
             ..Default::default()
         },
     );
@@ -2515,6 +2518,206 @@ fn profile_slug_stored_on_production_set() {
         )
         .expect("slug");
     assert_eq!(slug.as_deref(), Some(BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1));
+}
+
+fn make_geom(matter: &Matter, item_id: &str) {
+    matter
+        .create_geom_redaction(CreateGeomRedactionInput {
+            item_id: item_id.to_string(),
+            page_index: 0,
+            x: 10.0,
+            y: 20.0,
+            w: 30.0,
+            h: 40.0,
+            reason: "privilege".into(),
+            label: None,
+            source: geom_source::DRAW.into(),
+            actor: "tester".into(),
+        })
+        .expect("geom");
+}
+
+#[test]
+fn geom_without_burn_fail_closed() {
+    let (_tmp, matter) = temp_matter("geom-noburn");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let orig = put_native(&matter, b"%PDF-1.4 SECRET_TOKEN_0114");
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("secret.pdf".into()),
+            native_sha256: Some(orig.clone()),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    make_geom(&matter, &id);
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("NoBurn".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(s.error_count, 1);
+    assert_eq!(s.produced_count, 0);
+    let natives = camino::Utf8Path::new(&s.output_root).join("NATIVES");
+    if natives.as_std_path().exists() {
+        let entries: Vec<_> = fs::read_dir(natives.as_std_path())
+            .expect("dir")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "must not copy original native without burn"
+        );
+    }
+}
+
+#[test]
+fn burn_then_produce_copies_burned_not_original() {
+    let (_tmp, matter) = temp_matter("geom-burned");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let orig = put_native(&matter, b"%PDF-1.4 SECRET_TOKEN_0114 orig");
+    let burned_bytes = b"%PDF-1.4 burned-native-0114";
+    let burned = put_native(&matter, burned_bytes);
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("secret.pdf".into()),
+            native_sha256: Some(orig.clone()),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    make_geom(&matter, &id);
+    matter
+        .set_burned_native(SetBurnedNativeInput {
+            item_id: id.clone(),
+            burned_native_sha256: burned.clone(),
+            expected_fingerprint: matter.geom_burn_fingerprint(&id).expect("fp"),
+            actor: "tester".into(),
+        })
+        .expect("set burned");
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("Burned".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(s.error_count, 0);
+    assert_eq!(s.produced_count, 1);
+    let native_path = camino::Utf8Path::new(&s.output_root)
+        .join("NATIVES")
+        .join("PROD000001.pdf");
+    let disk = fs::read(native_path.as_std_path()).expect("read burned native");
+    assert_eq!(disk, burned_bytes);
+    assert_ne!(disk.as_slice(), b"%PDF-1.4 SECRET_TOKEN_0114 orig");
+    assert_eq!(sha256_file(native_path.as_std_path()), burned);
+}
+
+#[test]
+fn post_burn_text_redaction_stale_refuses() {
+    let (_tmp, matter) = temp_matter("geom-stale");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let body = "Alpha SECOND_TOKEN beta";
+    let text = put_text(&matter, body);
+    let orig = put_native(&matter, b"%PDF-1.4 SECRET_TOKEN_0114");
+    let burned = put_native(&matter, b"%PDF-1.4 burned");
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("secret.pdf".into()),
+            native_sha256: Some(orig),
+            text_sha256: Some(text.clone()),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    make_geom(&matter, &id);
+    matter
+        .set_burned_native(SetBurnedNativeInput {
+            item_id: id.clone(),
+            burned_native_sha256: burned,
+            expected_fingerprint: matter.geom_burn_fingerprint(&id).expect("fp"),
+            actor: "tester".into(),
+        })
+        .expect("set burned");
+    matter
+        .create_redaction(CreateRedactionInput {
+            item_id: id,
+            start_utf8: 6,
+            end_utf8: 18,
+            exact_quote: "SECOND_TOKEN".into(),
+            display_body: body.into(),
+            body_digest: text,
+            reason: "confidential".into(),
+            label: None,
+            actor: "tester".into(),
+        })
+        .expect("second token");
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("Stale".into()),
+            ..Default::default()
+        },
+    );
+    assert!(s.error_count >= 1);
+    assert_eq!(s.produced_count, 0);
+}
+
+#[test]
+fn jpeg_burn_writes_jpg_magic() {
+    let (_tmp, matter) = temp_matter("jpeg-burn");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let jpeg = [0xFFu8, 0xD8, 0xFF, 0xD9, b'J', b'P', b'E', b'G'];
+    let jpeg_burned = [0xFFu8, 0xD8, 0xFF, 0xD9, b'B', b'U', b'R', b'N'];
+    let orig = put_native(&matter, &jpeg);
+    let burned = put_native(&matter, &jpeg_burned);
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("pic.jpg".into()),
+            native_sha256: Some(orig),
+            mime_type: Some("image/jpeg".into()),
+            file_category: Some("image".into()),
+            ..Default::default()
+        },
+    );
+    make_geom(&matter, &id);
+    matter
+        .set_burned_native(SetBurnedNativeInput {
+            item_id: id.clone(),
+            burned_native_sha256: burned,
+            expected_fingerprint: matter.geom_burn_fingerprint(&id).expect("fp"),
+            actor: "tester".into(),
+        })
+        .expect("set burned");
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("JpegBurn".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(s.produced_count, 1);
+    let path = camino::Utf8Path::new(&s.output_root)
+        .join("NATIVES")
+        .join("PROD000001.jpg");
+    let disk = fs::read(path.as_std_path()).expect("jpg");
+    assert_eq!(disk[0], 0xFF);
+    assert_eq!(disk[1], 0xD8);
+    let dat = dat_text(&s.output_root);
+    assert!(dat.contains("NATIVES\\PROD000001.jpg") || dat.contains(".jpg"));
 }
 
 #[test]

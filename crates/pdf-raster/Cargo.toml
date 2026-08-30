@@ -1,0 +1,19 @@
+[package]
+name = "pdf-raster"
+version = "0.2.0-rc.1"
+edition = "2021"
+description = "zpdf CPU raster + geometric PDF/image burn (track 0114)"
+license = "LicenseRef-Proprietary"
+license-file = "../../LICENSE"
+
+[dependencies]
+zpdf = "0.13.0"
+zpdf-writer = "0.13.0"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+thiserror = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+extract-pdf = { path = "../extract-pdf" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
