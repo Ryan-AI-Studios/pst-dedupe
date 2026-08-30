@@ -284,14 +284,14 @@ Structural INC* HITL **2026-08-29** is green (4055/4055, depth 8, also-eml). **0
 
 ## Series O — Review chrome (Tauri 2 + Leptos)
 
-**Timing (2026-08-29):** unique-export Series S is closed. **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Ready — not started.** 0112–0116 stay Proposed (0115 parked). Do not remint IDs. Do not vendor `C:\dev\dedupe-frontend`.
+**Timing (2026-08-29):** unique-export Series S is closed. **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Completed** (PR **#113** / `3c4ca65`). 0112–0116 stay Proposed (0115 parked). Do not remint IDs. Do not vendor `C:\dev\dedupe-frontend`.
 
 **Stack lock:** Tauri 2 + Leptos, Plex/paper/cool chrome, keep egui Process until **0116**. One pipeline. No daemon. Image/OPT **0115** parked until a produce needs images. Search builder folds into **0111** (no 0117). No BCC-default track.
 
 | Track | Status | Summary |
 |---|---|---|
 | [0110-MatterChromeTauri](0110-MatterChromeTauri/spec.md) | **Completed** | Tauri 2 + Leptos matter list/home; one `matter_overview` (`load_case_overview`). Plex/paper. egui Process stays. Closes **D-0110-matter-chrome**. Residual **D-0110-deny-unic**. PR **#111** `5a76f0b`. |
-| [0111-ReviewQueueFirstPass](0111-ReviewQueueFirstPass/spec.md) | **In Progress** | Virtualized first-pass queue; Unreviewed default; lead/QC toggle. Saved search as queue. Privilege column is coding, not WITHHOLD. |
+| [0111-ReviewQueueFirstPass](0111-ReviewQueueFirstPass/spec.md) | **Completed** | Virtualized first-pass queue; Unreviewed default; lead/QC toggle. Saved search as queue. Privilege column is coding, not WITHHOLD. Closes **D-0111-first-pass-queue**. PR **#113** `3c4ca65`. |
 | [0112-ReviewWindow](0112-ReviewWindow/spec.md) | **Proposed — placeholder** | Three-pane coding; Responsiveness ⊥ Privilege; Native/Text; Image stub. |
 | [0113-ProduceChecklist](0113-ProduceChecklist/spec.md) | **Proposed — placeholder** | Mock checklist wired to `matter-qc` + `matter-produce`. DAT only. No OPT. |
 | [0114-PdfRasterRedact](0114-PdfRasterRedact/spec.md) | **Proposed — placeholder** | `zpdf` raster + geometric redact; pdfium fallback. Feeds **D-0032-01** / **D-0034-02**. |
@@ -305,7 +305,7 @@ Structural INC* HITL **2026-08-29** is green (4055/4055, depth 8, also-eml). **0
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099–0104 Completed**. **Series Q 0105–0106 Completed** (window-edge + unique-eml nested MIME). **Series R 0107 Completed** (`unique-pst --also-eml` co-export; PR #104 / `339dfa0`). **Series S 0108–0109 Completed** (poly degrade risk + also-eml classify). **Series O 0110 Completed** (Tauri 2 + Leptos chrome; PR **#111** / `5a76f0b`); **0111 Ready**; **0112–0116 Proposed** (0115 parked).
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099–0104 Completed**. **Series Q 0105–0106 Completed** (window-edge + unique-eml nested MIME). **Series R 0107 Completed** (`unique-pst --also-eml` co-export; PR #104 / `339dfa0`). **Series S 0108–0109 Completed** (poly degrade risk + also-eml classify). **Series O 0110–0111 Completed** (Tauri chrome + first-pass queue; PRs **#111** / **#113**); **0112–0116 Proposed** (0115 parked).
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).

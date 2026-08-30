@@ -121,7 +121,7 @@ pst-dedup/                      (Cargo workspace)
 │   │   ├── nav.rs / params.rs  pure helpers (unit tested)
 │   │   └── settings.rs         recent matter paths (JSON under APPDATA)
 │   │
-│   ├── dedupe-chrome/          Tauri 2 + Leptos matter chrome (0110)
+│   ├── dedupe-chrome/          Tauri 2 + Leptos matter chrome (0110 list/home; 0111 first-pass queue)
 │   │   ├── src/                Host: matter_overview / create / recents
 │   │   ├── ui/                 Leptos CSR (workspace exclude; Trunk 1420)
 │   │   └── tauri.conf.json     com.dedupe.desk.chrome · CSP wasm-unsafe-eval
