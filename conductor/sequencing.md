@@ -127,7 +127,7 @@
 | 69 | P0 O | **0112** ReviewWindow | ✅ Completed | three-pane coding; Resp ⊥ Privilege; PR **#115** `81a3aad` |
 | 69b | P3 O | **0117** QueueVirtualizationResiduals | 📦 Proposed | PR #113 queue Bugbot (not 0112) |
 | 70 | P1 O | **0113** ProduceChecklist | ✅ Completed | produce checklist; DAT only; PR **#117** / `f192b2d` |
-| 71 | P1 O | **0114** PdfRasterRedact | ⬜ Ready | zpdf CPU raster + geometric burn; schema v40 |
+| 71 | P1 O | **0114** PdfRasterRedact | ✅ Completed | zpdf CPU raster + geometric burn; schema v40; PR **#119** / `5ed53bf` |
 | 72 | P2 O | **0115** ImageOptFactory | 📦 Proposed — parked | TIFF/OPT if a produce needs images |
 | 73 | P2 O | **0116** ProcessFold | 📦 Proposed | fold egui Process into Tauri last |
 | 74 | P3 O | **0118** ReviewWindowAsyncResiduals | 📦 Proposed | PR #115 window Bugbot (not 0113) |
@@ -246,7 +246,7 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0119)
 
-**Series O** after Series S. **0110–0113 Completed**. **0114 Ready**. **0119** Proposed (PR #117 produce Bugbot).
+**Series O** after Series S. **0110–0114 Completed**. **0119** Proposed (PR #117 produce Bugbot).
 
 | Order | Track | Notes |
 |---|---|---|
@@ -254,7 +254,7 @@
 | 2 | **0111** ReviewQueueFirstPass | **Completed** — virtualized first-pass queue; PR **#113** `3c4ca65` |
 | 3 | **0112** ReviewWindow | **Completed** — three-pane; Resp ⊥ Privilege; PR **#115** `81a3aad` |
 | 4 | **0113** ProduceChecklist | **Completed** — checklist; DAT only; no OPT; PR **#117** / `f192b2d` |
-| 5 | **0114** PdfRasterRedact | **Ready** — zpdf CPU raster + geometric burn; schema v40 |
+| 5 | **0114** PdfRasterRedact | **Completed** — zpdf CPU raster + geometric burn; schema v40; PR **#119** / `5ed53bf` |
 | 6 | **0115** ImageOptFactory | **Proposed — parked** — TIFF/OPT if a produce needs images |
 | 7 | **0116** ProcessFold | **Proposed** — swallow egui Process last |
 | 8 | **0117** QueueVirtualizationResiduals | **Proposed** — PR #113 queue Bugbot; not the 0112 window |
