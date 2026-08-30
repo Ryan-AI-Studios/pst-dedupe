@@ -13,7 +13,7 @@ use crate::invoke::{
     ReviewCodesPreviewArgs, ReviewQueuePage, ReviewQueuePageArgs, RootArgs, SavedSearchDto,
     SavedSearchUpsertArgs,
 };
-use crate::path_id::{encode_matter_id, matter_home_href_from_param};
+use crate::path_id::{encode_matter_id, matter_home_href_from_param, review_doc_href};
 use crate::queue_window::{visible_range, OVERSCAN, ROW_HEIGHT};
 
 const PAGE_LIMIT: u64 = 500;
@@ -47,8 +47,8 @@ fn format_date(d: &Option<String>) -> String {
 
 /// Checkbox is authoritative: always write `include_family` true or false.
 fn with_include_family(filter_json: &str, include_family: bool) -> Result<String, String> {
-    let mut v: serde_json::Value = serde_json::from_str(filter_json)
-        .map_err(|e| format!("invalid filter_json: {e}"))?;
+    let mut v: serde_json::Value =
+        serde_json::from_str(filter_json).map_err(|e| format!("invalid filter_json: {e}"))?;
     v["include_family"] = serde_json::Value::Bool(include_family);
     serde_json::to_string(&v).map_err(|e| format!("filter_json serialize failed: {e}"))
 }
@@ -217,21 +217,14 @@ pub fn ReviewQueue() -> impl IntoView {
         loading.set(true);
         error.set(None);
         let chip_for_total = active_chip.get_untracked();
-        let record_saved_total = saved
-            .get_untracked()
-            .iter()
-            .any(|s| s.id == chip_for_total);
+        let record_saved_total = saved.get_untracked().iter().any(|s| s.id == chip_for_total);
         leptos::task::spawn_local(async move {
             let result = tauri_invoke::<ReviewQueuePage, _>(
                 "review_queue_page",
                 &ReviewQueuePageArgs {
                     root,
                     filter_json: Some(fam_filter),
-                    keyword: if kw.trim().is_empty() {
-                        None
-                    } else {
-                        Some(kw)
-                    },
+                    keyword: if kw.trim().is_empty() { None } else { Some(kw) },
                     limit: Some(PAGE_LIMIT),
                     offset: Some(off),
                     extras: Some(ex),
@@ -311,10 +304,13 @@ pub fn ReviewQueue() -> impl IntoView {
                             let i = current_idx.get();
                             if let Some(row) = p.rows.get(i) {
                                 let root = root_sig.get();
-                                let enc = encode_matter_id(&root);
-                                let doc_enc = encode_matter_id(&row.id);
+                                let fj = filter_json.get();
+                                let fam = include_family.get();
+                                let kw = keyword.get();
+                                let fam_filter = with_include_family(&fj, fam).unwrap_or(fj);
+                                let href = review_doc_href(&root, &row.id, Some(&fam_filter), Some(&kw));
                                 navigate.with_value(|nav| {
-                                    nav(&format!("/matters/{enc}/review/{doc_enc}"), Default::default());
+                                    nav(&href, Default::default());
                                 });
                             }
                         }
@@ -336,10 +332,13 @@ pub fn ReviewQueue() -> impl IntoView {
                             let i = current_idx.get();
                             if let Some(row) = p.rows.get(i) {
                                 let root = root_sig.get();
-                                let enc = encode_matter_id(&root);
-                                let doc_enc = encode_matter_id(&row.id);
+                                let fj = filter_json.get();
+                                let fam = include_family.get();
+                                let kw = keyword.get();
+                                let fam_filter = with_include_family(&fj, fam).unwrap_or(fj);
+                                let href = review_doc_href(&root, &row.id, Some(&fam_filter), Some(&kw));
                                 navigate.with_value(|nav| {
-                                    nav(&format!("/matters/{enc}/review/{doc_enc}"), Default::default());
+                                    nav(&href, Default::default());
                                 });
                             }
                         }
@@ -644,7 +643,7 @@ pub fn ReviewQueue() -> impl IntoView {
                     <h2>"Queue shortcuts"</h2>
                     <ul>
                         <li>"↑ ↓ — move current row"</li>
-                        <li>"Enter / Shift+↓ — open review window stub (0112)"</li>
+                        <li>"Enter / Shift+↓ — open review window"</li>
                         <li>"Space — toggle checkbox"</li>
                         <li>"/ — focus keyword"</li>
                         <li>"? — this overlay"</li>
@@ -779,13 +778,19 @@ pub fn ReviewQueue() -> impl IntoView {
                                                 on:click=move |_| {
                                                     current_idx.set(idx);
                                                     let root = root_sig.get();
-                                                    let enc = encode_matter_id(&root);
-                                                    let doc_enc = encode_matter_id(&id_open);
+                                                    let fj = filter_json.get();
+                                                    let fam = include_family.get();
+                                                    let kw = keyword.get();
+                                                    let fam_filter =
+                                                        with_include_family(&fj, fam).unwrap_or(fj);
+                                                    let href = review_doc_href(
+                                                        &root,
+                                                        &id_open,
+                                                        Some(&fam_filter),
+                                                        Some(&kw),
+                                                    );
                                                     navigate.with_value(|nav| {
-                                                        nav(
-                                                            &format!("/matters/{enc}/review/{doc_enc}"),
-                                                            Default::default(),
-                                                        );
+                                                        nav(&href, Default::default());
                                                     });
                                                 }
                                             >

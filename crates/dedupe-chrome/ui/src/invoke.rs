@@ -170,3 +170,139 @@ pub struct ReviewApplyCodesArgs {
     pub remove_code_ids: Vec<String>,
     pub propagate_family: Option<bool>,
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewDocumentArgs {
+    pub root: String,
+    pub item_id: String,
+    pub filter_json: Option<String>,
+    pub keyword: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct FamilyMemberThin {
+    pub id: String,
+    pub parent_item_id: Option<String>,
+    pub subject: Option<String>,
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct ItemCodeInfo {
+    pub code_id: String,
+    pub key: String,
+    pub label: String,
+    pub group_key: String,
+    pub cardinality: String,
+    pub color: Option<String>,
+    pub sort_order: i64,
+    pub is_active: i64,
+    pub set_at: String,
+    pub set_by: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct ItemPrivilegeDto {
+    pub item_id: String,
+    pub basis: String,
+    pub description: String,
+    pub status: String,
+    pub withhold: i64,
+    pub include_on_log: i64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct ItemNoteDto {
+    pub id: String,
+    pub item_id: String,
+    pub body: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by: String,
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct PredictionSlot {
+    pub present: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct ReviewDocument {
+    pub item_id: String,
+    pub from_addr: Option<String>,
+    pub to_addrs_json: Option<String>,
+    pub cc_addrs_json: Option<String>,
+    pub subject: Option<String>,
+    pub sent_at: Option<String>,
+    pub received_at: Option<String>,
+    pub mime_type: Option<String>,
+    pub path: Option<String>,
+    pub review_order: Option<i64>,
+    pub attachment_count: Option<i64>,
+    pub family_id: Option<String>,
+    pub family_size: u64,
+    pub family_truncated: bool,
+    pub family_members: Vec<FamilyMemberThin>,
+    pub apply_to_family_enabled: bool,
+    pub codes: Vec<ItemCodeInfo>,
+    pub privilege: Option<ItemPrivilegeDto>,
+    pub notes: Vec<ItemNoteDto>,
+    pub prev_id: Option<String>,
+    pub next_id: Option<String>,
+    pub position: u64,
+    pub total: u64,
+    #[serde(default)]
+    pub neighbors_error: Option<String>,
+    pub control_number: String,
+    pub bates: String,
+    pub bates_note: String,
+    pub prediction: PredictionSlot,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewDocumentBodyArgs {
+    pub root: String,
+    pub item_id: String,
+    pub pane: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct ReviewDocumentBody {
+    pub item_id: String,
+    pub pane: String,
+    pub text: String,
+    pub truncated: bool,
+    pub empty: bool,
+    pub digest: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewWindowApplyArgs {
+    pub root: String,
+    pub item_ids: Vec<String>,
+    pub add_code_ids: Vec<String>,
+    pub remove_code_ids: Vec<String>,
+    pub propagate_family: Option<bool>,
+    pub privilege_basis: Option<String>,
+    pub withhold: Option<bool>,
+    pub include_on_log: Option<bool>,
+    pub privilege_description: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewUpsertNoteArgs {
+    pub root: String,
+    pub item_id: String,
+    pub body: String,
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewUpsertPrivilegeArgs {
+    pub root: String,
+    pub item_id: String,
+    pub basis: String,
+    pub withhold: Option<bool>,
+    pub description: Option<String>,
+}

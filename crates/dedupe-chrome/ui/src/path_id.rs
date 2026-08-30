@@ -1,6 +1,8 @@
 //! Percent-encode / decode absolute matter roots for `/matters/:id` routes.
 
-use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{
+    percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS, NON_ALPHANUMERIC,
+};
 
 /// Encode path characters that are unsafe in a single URL path segment.
 const PATH_SEGMENT: &AsciiSet = &CONTROLS
@@ -50,6 +52,35 @@ pub fn matter_home_href_from_param(id_param: &str) -> String {
     format!("/matters/{}", encode_matter_id(id_param))
 }
 
+/// `/matters/:id/review/:docId` plus optional filter/keyword query for neighbors.
+pub fn review_doc_href(
+    root: &str,
+    doc_id: &str,
+    filter_json: Option<&str>,
+    keyword: Option<&str>,
+) -> String {
+    let mut href = format!(
+        "/matters/{}/review/{}",
+        encode_matter_id(root),
+        encode_matter_id(doc_id)
+    );
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(f) = filter_json.map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(format!(
+            "filter={}",
+            utf8_percent_encode(f, NON_ALPHANUMERIC)
+        ));
+    }
+    if let Some(k) = keyword.map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(format!("q={}", utf8_percent_encode(k, NON_ALPHANUMERIC)));
+    }
+    if !parts.is_empty() {
+        href.push('?');
+        href.push_str(&parts.join("&"));
+    }
+    href
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +109,21 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn review_doc_href_encodes_filter_and_keyword() {
+        let href = review_doc_href(
+            r"C:\matters\demo",
+            "itm_0001",
+            Some(r#"{"version":1,"scope":"review_corpus"}"#),
+            Some("invoice"),
+        );
+        assert!(href.contains("/review/itm_0001?"));
+        assert!(href.contains("filter="));
+        assert!(href.contains("q=invoice"));
+        assert!(!href.contains(' '), "query must be encoded");
+        assert!(href.contains("%7B") || href.contains("%22"));
+    }
+
     fn stub_back_href_reencodes_decoded_windows_param() {
         // ParamsMap unescapes before components see `:id`.
         let decoded_param = r"C:\Cases\Foo";

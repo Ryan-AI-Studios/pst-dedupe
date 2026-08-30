@@ -11,6 +11,11 @@ fn main() {
             "saved_search_upsert",
             "review_codes_preview",
             "review_apply_codes",
+            "review_document",
+            "review_document_body",
+            "review_window_apply",
+            "review_upsert_note",
+            "review_upsert_privilege",
         ]));
     if let Err(e) = tauri_build::try_build(attrs) {
         panic!("tauri-build failed: {e}");

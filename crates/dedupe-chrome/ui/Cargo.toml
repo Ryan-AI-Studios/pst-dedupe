@@ -31,6 +31,8 @@ features = [
     "Document",
     "HtmlElement",
     "HtmlInputElement",
+    "HtmlTextAreaElement",
+    "HtmlSelectElement",
     "KeyboardEvent",
     "MouseEvent",
     "Event",

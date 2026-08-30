@@ -15,6 +15,11 @@
     "allow-saved-searches-list",
     "allow-saved-search-upsert",
     "allow-review-codes-preview",
-    "allow-review-apply-codes"
+    "allow-review-apply-codes",
+    "allow-review-document",
+    "allow-review-document-body",
+    "allow-review-window-apply",
+    "allow-review-upsert-note",
+    "allow-review-upsert-privilege"
   ]
 }
