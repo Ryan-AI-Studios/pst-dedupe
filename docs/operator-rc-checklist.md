@@ -58,7 +58,7 @@ Residual: **D-0068-02**. Until D1/D2 pass in *your* environment, do **not** clai
 
 | # | Step | Pass criteria |
 |---|---|---|
-| E1 | Create matter in Desk or CLI | `SCHEMA_VERSION` 39 after open |
+| E1 | Create matter in Desk or CLI | `SCHEMA_VERSION` 41 after open |
 | E2 | Ingest synthetic package / fixture path | Job completes |
 | E3 | Extract + promote path | Items appear in review |
 | E4 | Produce small volume | DAT + natives + text layout present |

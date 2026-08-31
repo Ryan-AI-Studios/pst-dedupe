@@ -30,6 +30,8 @@ pub struct ProductionProfileThin {
     pub slug: String,
     pub name: String,
     pub qc_pack_id: String,
+    pub include_images: bool,
+    pub bates_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -592,6 +594,8 @@ pub fn produce_page_blocking(root: &str) -> Result<ProducePageResponse, CommandE
             slug: p.slug,
             name: p.label,
             qc_pack_id: matter_core::normalize_qc_pack_id(&p.body.qc.pack_id),
+            include_images: p.body.packaging.include_images,
+            bates_mode: p.body.bates.mode.clone(),
         })
         .collect();
     let (need_burn, burned_fresh, unmapped_text) =

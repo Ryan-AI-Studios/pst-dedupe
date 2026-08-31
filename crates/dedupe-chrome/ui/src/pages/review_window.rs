@@ -966,8 +966,12 @@ pub fn ReviewWindow() -> impl IntoView {
                                         if let Some(e) = err {
                                             let copy = if e.contains("pdf_encrypted") || e.starts_with("pdf_encrypted") {
                                                 "pdf_encrypted".to_string()
-                                            } else if e.contains("unsupported_kind") || e.contains("Not a page image") {
-                                                "Not a page image (TIFF/OPT is 0115).".to_string()
+                                            } else if e.contains("unsupported_kind")
+                                                || e.contains("Not a page image")
+                                                || e.contains("native-only")
+                                                || e.contains("no print-to-TIFF")
+                                            {
+                                                "Native-only (no print-to-TIFF)".to_string()
                                             } else {
                                                 e
                                             };

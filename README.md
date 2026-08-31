@@ -2,7 +2,7 @@
 
 A pure Rust Windows tool for deduplicating emails across Outlook PST files.
 
-**RC:** product version **0.2.0-rc.1** (schema **v39**). Operator day-1 runbook: [`docs/operator-golden-path.md`](docs/operator-golden-path.md). Unique-PST eDiscovery lifecycle: [`docs/unique-pst-ediscovery-runbook.md`](docs/unique-pst-ediscovery-runbook.md). Release notes: [`CHANGELOG.md`](CHANGELOG.md). Residual checklist: [`docs/operator-rc-checklist.md`](docs/operator-rc-checklist.md).
+**RC:** product version **0.2.0-rc.1** (schema **v41**). Operator day-1 runbook: [`docs/operator-golden-path.md`](docs/operator-golden-path.md). Unique-PST eDiscovery lifecycle: [`docs/unique-pst-ediscovery-runbook.md`](docs/unique-pst-ediscovery-runbook.md). Release notes: [`CHANGELOG.md`](CHANGELOG.md). Residual checklist: [`docs/operator-rc-checklist.md`](docs/operator-rc-checklist.md).
 
 ## What It Does
 
@@ -318,7 +318,7 @@ Small Aspose/sample fixtures live under `fixtures/` (see `fixtures/README.md`). 
 | `pst-dedup-cli` | CLI surface: inspect / scan / dups / keep-set / unique-eml / **unique-pst** + headless matter automation (`matter`, `job`, `profile`, `workflow`, `produce`, `qc`, …) + opt-in `service` / `platform` |
 | `pst-dedup-gui` | egui scan/dedup + **Unique PST Export** wizard (shared keep-set path with CLI) |
 | `pst-writer` | Production Unicode PST writer used by unique-pst (streaming multi-GB path); fixture/EML helpers remain |
-| `matter-core` | Matter layout + SQLite (**schema v39**: Normalized Item + Series A–I columns through cloud blob/job backends) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + logical_hash v1 + `workspace/temp/` |
+| `matter-core` | Matter layout + SQLite (**schema v41**: Normalized Item + Series A–I columns through production image pages / `end_bates`) + CAS (`put_bytes` / streaming `put_reader`) + audit + jobs + logical_hash v1 + `workspace/temp/` |
 | `extract-teams` | Offline Teams/chat export adapters (HTML+PST required, JSON best-effort) + resumable `teams_extract` job; plain-text bodies via ammonia; day-bucketed `conversation_id` (schema v34) |
 | `ingest-purview` | Purview/package/ZIP detect + safe expand + resumable inventory (blocking worker API; `*_on_job` for runner) |
 | `extract-pst` | PST → Normalized Items + families + logical_hash; `pst-native-message-v1` native (not EML); mid-folder resume (blocking; `*_on_job` for runner) |

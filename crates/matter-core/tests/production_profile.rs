@@ -13,7 +13,7 @@ fn open_matter() -> (tempfile::TempDir, Matter) {
     let path = camino::Utf8PathBuf::from_path_buf(root).expect("utf8");
     let matter = Matter::create(&path, "prod-profile-test").expect("create");
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 40);
+    assert_eq!(SCHEMA_VERSION, 41);
     (dir, matter)
 }
 
@@ -34,7 +34,10 @@ fn schema_v38_and_builtin_list() {
         .expect("default");
     assert!(def.is_builtin);
     assert_eq!(def.slug, BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1);
-    assert_eq!(builtin_production_profiles().len(), 3);
+    assert!(!def.body.packaging.include_images);
+    assert_eq!(def.body.bates.mode, "document");
+    assert_eq!(def.body.packaging.image_folder_cap, 500);
+    assert_eq!(builtin_production_profiles().len(), 4);
 }
 
 #[test]
@@ -87,4 +90,52 @@ fn reject_reserved_slug_and_start_at() {
     let bad = serde_json::to_string(&val).unwrap();
     let err = parse_production_profile_body(&bad).expect_err("start_at");
     assert!(err.to_string().to_ascii_lowercase().contains("start"));
+}
+
+#[test]
+fn image_opt_builtin_and_folder_cap() {
+    use matter_core::{
+        BUILTIN_US_CONCORDANCE_IMAGE_OPT_V1, IMAGE_FOLDER_CAP_MIN, QC_PACK_IMAGE_OPT_V1,
+    };
+    let (_d, matter) = open_matter();
+    let p = matter
+        .get_production_profile(BUILTIN_US_CONCORDANCE_IMAGE_OPT_V1)
+        .expect("image builtin");
+    assert!(p.is_builtin);
+    assert!(p.body.packaging.include_images);
+    assert_eq!(p.body.bates.mode, "page");
+    assert_eq!(p.body.layout.images, "IMAGES");
+    assert_eq!(p.body.packaging.image_dpi, 300);
+    assert_eq!(p.body.packaging.image_folder_cap, IMAGE_FOLDER_CAP_MIN);
+    assert_eq!(IMAGE_FOLDER_CAP_MIN, 500);
+    assert_eq!(p.body.qc.pack_id, QC_PACK_IMAGE_OPT_V1);
+
+    let mut body = default_production_profile_body();
+    body.packaging.image_folder_cap = 499;
+    let json = production_profile_body_to_json(&body).expect("json");
+    let err = parse_production_profile_body(&json).expect_err("cap");
+    assert!(err.to_string().contains("image_folder_cap"));
+}
+
+#[test]
+fn reject_mismatched_include_images_and_bates_mode() {
+    let mut images_without_page = default_production_profile_body();
+    images_without_page.packaging.include_images = true;
+    images_without_page.bates.mode = "document".into();
+    let json = production_profile_body_to_json(&images_without_page).expect("json");
+    let err = parse_production_profile_body(&json).expect_err("images+document");
+    assert!(
+        err.to_string().contains("include_images"),
+        "unexpected: {err}"
+    );
+
+    let mut page_without_images = default_production_profile_body();
+    page_without_images.packaging.include_images = false;
+    page_without_images.bates.mode = "page".into();
+    let json = production_profile_body_to_json(&page_without_images).expect("json");
+    let err = parse_production_profile_body(&json).expect_err("page+dat-only");
+    assert!(
+        err.to_string().contains("bates.mode=page"),
+        "unexpected: {err}"
+    );
 }

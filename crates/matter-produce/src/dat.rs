@@ -55,6 +55,8 @@ pub const DAT_FIELDS: &[&str] = &[
 #[derive(Debug, Clone, Default)]
 pub struct LoadRow {
     pub control_number: String,
+    /// Last page Bates; empty means same as [`Self::control_number`].
+    pub end_bates: String,
     pub item_id: String,
     pub parent_item_id: String,
     pub family_id: String,
@@ -87,7 +89,7 @@ impl LoadRow {
     pub fn field_values(&self) -> [&str; 26] {
         [
             self.control_number.as_str(), // BEGBATES
-            self.control_number.as_str(), // ENDBATES
+            self.end_bates_or_control(),  // ENDBATES
             self.control_number.as_str(), // CONTROL_NUMBER
             self.item_id.as_str(),
             self.parent_item_id.as_str(),
@@ -115,10 +117,22 @@ impl LoadRow {
         ]
     }
 
+    /// ENDBATES value (control when `end_bates` is empty).
+    pub fn end_bates_or_control(&self) -> &str {
+        let t = self.end_bates.trim();
+        if t.is_empty() {
+            self.control_number.as_str()
+        } else {
+            t
+        }
+    }
+
     /// Value for a canonical source field name (case-insensitive).
     pub fn value_for_source(&self, source: &str) -> &str {
         match source.trim().to_ascii_uppercase().as_str() {
-            "BEGBATES" | "ENDBATES" | "CONTROL_NUMBER" => self.control_number.as_str(),
+            "BEGBATES" => self.control_number.as_str(),
+            "ENDBATES" => self.end_bates_or_control(),
+            "CONTROL_NUMBER" => self.control_number.as_str(),
             "ITEM_ID" => self.item_id.as_str(),
             "PARENT_ITEM_ID" => self.parent_item_id.as_str(),
             "FAMILY_ID" => self.family_id.as_str(),

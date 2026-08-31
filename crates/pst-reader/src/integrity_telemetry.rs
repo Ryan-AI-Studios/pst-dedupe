@@ -709,7 +709,14 @@ mod tests {
             for i in 0..50 {
                 note_block_crc(i, 1, 2);
             }
-            assert_eq!(emissions_count(), 50);
+            // Floor, not exact: NDB lib tests can note CRC without TEST_LOCK and
+            // bump process-global G_EMISSIONS. DEFAULT_FIRST_N would cap this
+            // thread at 10.
+            assert!(
+                emissions_count() >= 50,
+                "firehose first_n=MAX should emit at least 50 detail lines, got {}",
+                emissions_count()
+            );
         });
     }
 }

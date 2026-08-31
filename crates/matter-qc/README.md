@@ -34,6 +34,7 @@ Empty `rules` → pack severities. Per-rule severity override: `off` / `warn` / 
 | `qc_default_v1` | Current 0041 defaults (alias `default_production_qc_v1`) |
 | `qc_strict_privilege_v1` | `withheld_in_selection`, `withheld_family_member`, `broken_family_incomplete_parent` → **Error** |
 | `qc_native_heavy_v1` | `missing_native` / `zero_size` → **Error**; missing text stays taxonomy-aware Warn base |
+| `qc_image_opt_v1` | Image-volume rules (`image_page_missing`, Bates span, OPT count, multi-page TIFF) → **Error**; `image_skipped_native_only` → **Warn** |
 
 Fingerprint = SHA-256 of sorted item ids + `#pack=<pack_id>`. Different pack → produce gate miss under `require_qc_pass`.
 
@@ -108,7 +109,7 @@ Helpers:
 
 ## Schema
 
-Requires matter-core **schema v21** table `qc_runs` (current workspace schema **v38**). Pack id is stored in `qc_runs.profile`.
+Requires matter-core **schema v21** table `qc_runs` (current workspace schema **v41**). Pack id is stored in `qc_runs.profile`.
 
 ## Audit
 

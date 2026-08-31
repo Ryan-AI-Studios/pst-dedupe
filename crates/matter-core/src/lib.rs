@@ -2,7 +2,7 @@
 //!
 //! On-disk **matter** store for Dedupe Desk:
 //!
-//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v40**)
+//! - SQLite metadata (`matter.db`) with versioned migrations (schema **v41**)
 //! - Content-addressable blob store (CAS) for **raw physical bytes**
 //!   (local default; opt-in cloud via `matter-storage` / track 0061)
 //! - Append-only audit log with integrity hash chain
@@ -62,6 +62,8 @@
 //! - **Geometric PDF/image redaction** (schema v40 / track 0114): `item_geom_redactions`
 //!   and burned-native bookkeeping (`geom_redaction_count`, `burned_native_sha256`,
 //!   `burned_source_digest`); original native CAS is never rewritten
+//! - **Image production bookkeeping** (schema v41 / track 0115): `production_items.end_bates`
+//!   / `page_count` plus `production_image_pages` (page Bates + TIFF relpath + sha256)
 //!
 //! ## Layout
 //!
@@ -264,11 +266,12 @@ pub use production_profile::{
     production_profile_config_hash, relativity_alias_field_map, strip_production_builtin_prefix,
     us_date_field_map, validate_production_profile_body, BatesConfig, FieldMapEntry, LayoutConfig,
     LoadFileConfig, PackagingConfig, ProductionProfile, ProductionProfileBody,
-    ProductionProfileInput, ProductionQcConfig, BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1,
-    BUILTIN_US_CONCORDANCE_REL_ALIAS_V1, BUILTIN_US_STRICT_QC_CONCORDANCE_V1,
-    CANONICAL_DAT_SOURCES, FORBIDDEN_FIELD_SOURCES, PRODUCTION_PROFILE_BODY_MAX_BYTES,
-    PRODUCTION_PROFILE_BODY_VERSION, QC_PACK_DEFAULT_V1, QC_PACK_LEGACY_DEFAULT,
-    QC_PACK_NATIVE_HEAVY_V1, QC_PACK_STRICT_PRIVILEGE_V1, RESERVED_PRODUCTION_PROFILE_SLUGS,
+    ProductionProfileInput, ProductionQcConfig, BUILTIN_US_CONCORDANCE_IMAGE_OPT_V1,
+    BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1, BUILTIN_US_CONCORDANCE_REL_ALIAS_V1,
+    BUILTIN_US_STRICT_QC_CONCORDANCE_V1, CANONICAL_DAT_SOURCES, FORBIDDEN_FIELD_SOURCES,
+    IMAGE_FOLDER_CAP_MIN, PRODUCTION_PROFILE_BODY_MAX_BYTES, PRODUCTION_PROFILE_BODY_VERSION,
+    QC_PACK_DEFAULT_V1, QC_PACK_IMAGE_OPT_V1, QC_PACK_LEGACY_DEFAULT, QC_PACK_NATIVE_HEAVY_V1,
+    QC_PACK_STRICT_PRIVILEGE_V1, RESERVED_PRODUCTION_PROFILE_SLUGS,
 };
 pub use profile::{
     builtin_id, builtin_profile, builtin_profiles, expand_profile_stage, is_allowlisted_stage,

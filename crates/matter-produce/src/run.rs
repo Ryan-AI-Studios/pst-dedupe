@@ -17,15 +17,19 @@ use crate::dat::{
 };
 use crate::error::{ProduceError, Result};
 use crate::layout::{
-    production_stamp, resolve_output_root_with_layout, sanitize_filename_part, write_readme,
-    VolumeLayout, PRODUCTIONS_DIR,
+    choose_image_folder_excluding, opt_volume_token, production_stamp,
+    resolve_output_root_with_layout, sanitize_filename_part, write_readme_ex, VolumeLayout,
+    PRODUCTIONS_DIR,
 };
+use crate::opt::{encode_opt_line, write_image_opt};
 use crate::params::{ProduceParams, SCOPE_ITEM_IDS, SCOPE_REVIEW_CORPUS};
 use crate::profile::{
     effective_bates_prefix, effective_pad_width, effective_qc_pack_id, resolve_produce_config,
     ResolvedProduceConfig,
 };
-use crate::resolve::{is_email_like, load_body_for_eml, resolve_native, resolve_text};
+use crate::resolve::{
+    is_email_like, load_body_for_eml, load_native_payload, resolve_native, resolve_text,
+};
 
 /// Job kind string for process-runner.
 pub const JOB_KIND_PRODUCE: &str = "produce";
@@ -433,12 +437,9 @@ fn run_produce_inner(
         ));
     }
 
-    let layout = VolumeLayout::create_with_names(
-        camino::Utf8Path::new(&cursor.output_root),
-        &resolved.body.layout.data,
-        &resolved.body.layout.natives,
-        &resolved.body.layout.text,
-    )?;
+    let layout = volume_layout_from_resolved(resolved, &cursor.output_root)?;
+    let image_page_mode = resolved.body.packaging.include_images
+        && resolved.body.bates.mode.trim().eq_ignore_ascii_case("page");
     // Index existing rows.jsonl so resume after crash-between-append-and-checkpoint
     // does not re-produce / re-append (idempotent by ITEM_ID).
     let mut jsonl_by_item = index_rows_jsonl_by_item_id(&layout)?;
@@ -547,13 +548,22 @@ fn run_produce_inner(
         // (append succeeded, checkpoint did not). Reuse that control only when
         // referenced artifacts still exist under the volume (and SHA matches when set).
         if let Some(existing) = jsonl_by_item.get(&item_id).cloned() {
-            if recovered_artifacts_valid(&layout, &existing) {
+            if recovered_artifacts_valid(&layout, &existing)
+                && recovered_image_pages_complete(
+                    matter,
+                    &cursor.production_set_id,
+                    &item_id,
+                    &layout,
+                    image_page_mode,
+                )?
+            {
                 recover_done_from_existing_row(
                     &mut cursor,
                     &mut done,
                     &bates_prefix,
                     &item_id,
                     &existing.control_number,
+                    existing.end_bates_or_control(),
                 );
                 offset += 1;
                 cursor.cursor_index = offset as u64;
@@ -571,8 +581,7 @@ fn run_produce_inner(
 
         // production_items status=ok without JSONL: re-use control if recorded, then re-produce
         // so the load row is written (crash between DB record and JSONL append).
-        let prior_ok_control =
-            production_item_ok_control(matter, &cursor.production_set_id, &item_id)?;
+        let prior_ok = production_item_ok_span(matter, &cursor.production_set_id, &item_id)?;
 
         let item = match matter.get_item(&item_id) {
             Ok(i) => i,
@@ -601,24 +610,207 @@ fn run_produce_inner(
         };
 
         // Assign control number from next_seq (monotonic; never renumber done rows).
-        // If production_items already recorded ok with a control, reuse that control and
-        // do not burn a new sequence value.
-        let control_safe = if let Some(prior) = prior_ok_control.as_deref() {
-            let safe = sanitize_filename_part(prior);
-            advance_next_seq_for_control(&mut cursor, &bates_prefix, prior);
-            safe
+        // Image resume honors end_bates so a crash mid-document cannot reuse interior Bates.
+        let (control_safe, end_bates_assigned, page_count_assigned) = if let Some(prior) = prior_ok
+        {
+            let high = match prior
+                .end_bates
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(e) => e,
+                None => prior.control.as_str(),
+            };
+            advance_next_seq_for_control(&mut cursor, &bates_prefix, high);
+            let safe = sanitize_filename_part(&prior.control);
+            let end = prior
+                .end_bates
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(prior.control.as_str())
+                .to_string();
+            let recovered = prior.page_count.filter(|n| *n >= 1).unwrap_or(0) as u32;
+            let pages = if recovered >= 1 {
+                recovered
+            } else if image_page_mode {
+                match load_native_payload(matter, &item)? {
+                    Ok(bytes) => match pdf_raster::native_image_page_count(
+                        &bytes,
+                        item.path.as_deref(),
+                        item.mime_type.as_deref(),
+                    ) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            let message = format!("image page count: {e}");
+                            cursor.error_count += 1;
+                            record_production_item(
+                                matter,
+                                &cursor.production_set_id,
+                                &item_id,
+                                "",
+                                None,
+                                None,
+                                "error",
+                                None,
+                                Some(&message),
+                            )?;
+                            update_production_set_status(
+                                matter,
+                                &cursor.production_set_id,
+                                "failed",
+                                cursor.next_seq,
+                            )?;
+                            return Ok(ProduceOutcome::Failed {
+                                message,
+                                summary: summary_from_cursor(&cursor),
+                            });
+                        }
+                    },
+                    Err(reason) => {
+                        if image_page_mode
+                            && pdf_raster::is_image_eligible_native(
+                                item.path.as_deref(),
+                                item.mime_type.as_deref(),
+                                &[],
+                            )
+                        {
+                            let message = format!("image-eligible item wrote zero TIFFs: {reason}");
+                            cursor.error_count += 1;
+                            record_production_item(
+                                matter,
+                                &cursor.production_set_id,
+                                &item_id,
+                                "",
+                                None,
+                                None,
+                                "error",
+                                None,
+                                Some(&message),
+                            )?;
+                            update_production_set_status(
+                                matter,
+                                &cursor.production_set_id,
+                                "failed",
+                                cursor.next_seq,
+                            )?;
+                            return Ok(ProduceOutcome::Failed {
+                                message,
+                                summary: summary_from_cursor(&cursor),
+                            });
+                        }
+                        0
+                    }
+                }
+            } else {
+                0
+            };
+            (safe, end, pages)
         } else {
-            let control = format_control(&bates_prefix, cursor.next_seq, pad_width);
-            let safe = sanitize_filename_part(&control);
-            cursor.next_seq += 1;
-            safe
+            let predicted = if image_page_mode {
+                match load_native_payload(matter, &item)? {
+                    Ok(bytes) => match pdf_raster::native_image_page_count(
+                        &bytes,
+                        item.path.as_deref(),
+                        item.mime_type.as_deref(),
+                    ) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            let message = format!("image page count: {e}");
+                            cursor.error_count += 1;
+                            record_production_item(
+                                matter,
+                                &cursor.production_set_id,
+                                &item_id,
+                                "",
+                                None,
+                                None,
+                                "error",
+                                None,
+                                Some(&message),
+                            )?;
+                            update_production_set_status(
+                                matter,
+                                &cursor.production_set_id,
+                                "failed",
+                                cursor.next_seq,
+                            )?;
+                            return Ok(ProduceOutcome::Failed {
+                                message,
+                                summary: summary_from_cursor(&cursor),
+                            });
+                        }
+                    },
+                    Err(reason) => {
+                        if image_page_mode
+                            && pdf_raster::is_image_eligible_native(
+                                item.path.as_deref(),
+                                item.mime_type.as_deref(),
+                                &[],
+                            )
+                        {
+                            let message = format!("image-eligible item wrote zero TIFFs: {reason}");
+                            cursor.error_count += 1;
+                            record_production_item(
+                                matter,
+                                &cursor.production_set_id,
+                                &item_id,
+                                "",
+                                None,
+                                None,
+                                "error",
+                                None,
+                                Some(&message),
+                            )?;
+                            update_production_set_status(
+                                matter,
+                                &cursor.production_set_id,
+                                "failed",
+                                cursor.next_seq,
+                            )?;
+                            return Ok(ProduceOutcome::Failed {
+                                message,
+                                summary: summary_from_cursor(&cursor),
+                            });
+                        }
+                        0
+                    }
+                }
+            } else {
+                0
+            };
+            if predicted >= 1 {
+                let beg = cursor.next_seq;
+                let end = cursor.next_seq + u64::from(predicted) - 1;
+                let control = format_control(&bates_prefix, beg, pad_width);
+                let end_b = format_control(&bates_prefix, end, pad_width);
+                cursor.next_seq = cursor.next_seq.saturating_add(u64::from(predicted));
+                (sanitize_filename_part(&control), end_b, predicted)
+            } else {
+                let control = format_control(&bates_prefix, cursor.next_seq, pad_width);
+                let safe = sanitize_filename_part(&control);
+                cursor.next_seq += 1;
+                (safe.clone(), safe, 0)
+            }
         };
 
-        match produce_one_item(matter, params, resolved, &item, &layout, &control_safe) {
+        match produce_one_item(
+            matter,
+            resolved,
+            &item,
+            &layout,
+            &control_safe,
+            &end_bates_assigned,
+            page_count_assigned,
+        ) {
             Ok(ProducedOne::Ok {
                 native_relpath,
                 text_relpath,
                 row,
+                image_pages,
+                page_count,
+                end_bates,
             }) => {
                 // TOCTOU: hold may be asserted during CAS copy / EML write.
                 // Recheck before committing production_items / JSONL / DAT.
@@ -630,6 +822,10 @@ fn run_produce_inner(
                     }
                     if let Some(ref rel) = text_relpath {
                         let p = layout.root.join(rel.replace('\\', "/"));
+                        let _ = fs::remove_file(p.as_std_path());
+                    }
+                    for img in &image_pages {
+                        let p = layout.root.join(img.relpath.replace('\\', "/"));
                         let _ = fs::remove_file(p.as_std_path());
                     }
                     if params.fail_if_withheld {
@@ -673,18 +869,29 @@ fn run_produce_inner(
                     progress(cursor.completed_count);
                     continue;
                 }
-                // Order: production_items (ok) → JSONL append → done + checkpoint.
+                // Order: production_items (ok) + image pages in one SQLite
+                // transaction → JSONL append → done + checkpoint.
                 // Crash after JSONL is recovered via jsonl_by_item on resume.
-                record_production_item(
+                let persist_end = if image_page_mode {
+                    Some(end_bates.as_str())
+                } else {
+                    None
+                };
+                let persist_pc = if image_page_mode {
+                    Some(page_count as i64)
+                } else {
+                    None
+                };
+                persist_ok_item_and_pages(
                     matter,
                     &cursor.production_set_id,
                     &item_id,
                     &control_safe,
                     native_relpath.as_deref(),
                     text_relpath.as_deref(),
-                    "ok",
-                    None,
-                    None,
+                    persist_end,
+                    persist_pc,
+                    &image_pages,
                 )?;
                 append_row_json(&layout, &row)?;
                 cursor.produced_count += 1;
@@ -716,8 +923,25 @@ fn run_produce_inner(
                     None,
                     Some(&message),
                 )?;
+                if image_eligible_zero_tiff_fail(
+                    resolved,
+                    page_count_assigned,
+                    Some(message.as_str()),
+                ) {
+                    update_production_set_status(
+                        matter,
+                        &cursor.production_set_id,
+                        "failed",
+                        cursor.next_seq,
+                    )?;
+                    return Ok(ProduceOutcome::Failed {
+                        message,
+                        summary: summary_from_cursor(&cursor),
+                    });
+                }
             }
             Err(e) => {
+                let message = e.to_string();
                 cursor.error_count += 1;
                 record_production_item(
                     matter,
@@ -728,8 +952,20 @@ fn run_produce_inner(
                     None,
                     "error",
                     None,
-                    Some(&e.to_string()),
+                    Some(&message),
                 )?;
+                if image_eligible_zero_tiff_fail(resolved, page_count_assigned, Some(&message)) {
+                    update_production_set_status(
+                        matter,
+                        &cursor.production_set_id,
+                        "failed",
+                        cursor.next_seq,
+                    )?;
+                    return Ok(ProduceOutcome::Failed {
+                        message,
+                        summary: summary_from_cursor(&cursor),
+                    });
+                }
             }
         }
 
@@ -758,6 +994,9 @@ enum ProducedOne {
         native_relpath: Option<String>,
         text_relpath: Option<String>,
         row: Box<LoadRow>,
+        image_pages: Vec<ImagePageRec>,
+        page_count: u32,
+        end_bates: String,
     },
     Skipped {
         reason: String,
@@ -767,17 +1006,52 @@ enum ProducedOne {
     },
 }
 
+#[derive(Debug, Clone)]
+struct ImagePageRec {
+    page_index: u32,
+    bates: String,
+    relpath: String,
+    sha256: String,
+}
+
+fn volume_layout_from_resolved(
+    resolved: &ResolvedProduceConfig,
+    output_root: &str,
+) -> Result<VolumeLayout> {
+    let images_name = if resolved.body.packaging.include_images {
+        Some(resolved.body.layout.images.as_str())
+    } else {
+        None
+    };
+    VolumeLayout::create_with_layout(
+        camino::Utf8Path::new(output_root),
+        &resolved.body.layout.data,
+        &resolved.body.layout.natives,
+        &resolved.body.layout.text,
+        images_name,
+    )
+}
+
 fn produce_one_item(
     matter: &Matter,
-    _params: &ProduceParams,
     resolved: &ResolvedProduceConfig,
     item: &Item,
     layout: &VolumeLayout,
     control: &str,
+    end_bates: &str,
+    predicted_pages: u32,
 ) -> Result<ProducedOne> {
     // Package both text + native fully before returning Ok; on any Error/Err after
     // writes, delete partial control artifacts so withhold/failure never leaves bytes.
-    let result = produce_one_item_inner(matter, resolved, item, layout, control);
+    let result = produce_one_item_inner(
+        matter,
+        resolved,
+        item,
+        layout,
+        control,
+        end_bates,
+        predicted_pages,
+    );
     match &result {
         Ok(ProducedOne::Ok { .. }) | Ok(ProducedOne::Skipped { .. }) => {}
         Ok(ProducedOne::Error { .. }) | Err(_) => {
@@ -793,6 +1067,8 @@ fn produce_one_item_inner(
     item: &Item,
     layout: &VolumeLayout,
     control: &str,
+    end_bates: &str,
+    predicted_pages: u32,
 ) -> Result<ProducedOne> {
     // When redactions exist, resolve text first so a missing redacted artifact
     // never leaves an unregistered native under NATIVES/.
@@ -898,6 +1174,102 @@ fn produce_one_item_inner(
         }
     };
 
+    let include_images = resolved.body.packaging.include_images
+        && resolved.body.bates.mode.trim().eq_ignore_ascii_case("page");
+    let mut image_pages: Vec<ImagePageRec> = Vec::new();
+    let mut written_page_count = predicted_pages;
+    if include_images && predicted_pages >= 1 {
+        let Some(art) = native_art.as_ref() else {
+            return Ok(ProducedOne::Error {
+                message: "image-eligible item wrote zero TIFFs".into(),
+            });
+        };
+        let bytes = fs::read(&art.abs_path)?;
+        let prefix = resolved.body.bates.prefix.trim();
+        let pad = resolved.body.bates.pad_width;
+        let Some(beg_seq) = parse_control_seq(prefix, control) else {
+            return Ok(ProducedOne::Error {
+                message: "cannot parse Bates sequence for image pages".into(),
+            });
+        };
+        let cap = resolved.body.packaging.image_folder_cap;
+        let mut exclude_names = Vec::new();
+        for i in 0..predicted_pages {
+            let bates = format_control(prefix, beg_seq.saturating_add(u64::from(i)), pad);
+            exclude_names.push(format!("{bates}.TIF"));
+            exclude_names.push(format!("{bates}.tif"));
+        }
+        let folder =
+            match choose_image_folder_excluding(layout, predicted_pages, cap, &exclude_names) {
+                Ok(f) => f,
+                Err(e) => {
+                    return Ok(ProducedOne::Error {
+                        message: e.to_string(),
+                    });
+                }
+            };
+        let encoded = match pdf_raster::raster_and_encode_document(
+            &bytes,
+            &|i| format_control(prefix, beg_seq.saturating_add(u64::from(i)), pad),
+            resolved.body.packaging.image_dpi,
+            Some(art.sha256.as_str()),
+            item.path.as_deref(),
+            item.mime_type.as_deref(),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(ProducedOne::Error {
+                    message: format!("image encode: {e}"),
+                });
+            }
+        };
+        if encoded.is_empty() {
+            return Ok(ProducedOne::Error {
+                message: "image-eligible item wrote zero TIFFs".into(),
+            });
+        }
+        if encoded.len() as u32 != predicted_pages {
+            return Ok(ProducedOne::Error {
+                message: format!(
+                    "image page count mismatch: predicted {predicted_pages} encoded {}",
+                    encoded.len()
+                ),
+            });
+        }
+        let mut written_abs: Vec<std::path::PathBuf> = Vec::new();
+        for (i, p) in encoded.iter().enumerate() {
+            let n_ifd = pdf_raster::tiff_ifd_count(&p.tiff).unwrap_or(0);
+            if n_ifd != 1 {
+                for w in &written_abs {
+                    let _ = fs::remove_file(w);
+                }
+                return Ok(ProducedOne::Error {
+                    message: "multi_page_tiff_as_artifact".into(),
+                });
+            }
+            let bates = format_control(prefix, beg_seq.saturating_add(i as u64), pad);
+            let rel = layout.image_relpath(folder, &bates);
+            let abs = layout.root.join(rel.replace('\\', "/"));
+            if let Some(parent) = abs.parent() {
+                fs::create_dir_all(parent.as_std_path())?;
+            }
+            if let Err(e) = fs::write(abs.as_std_path(), &p.tiff) {
+                for w in &written_abs {
+                    let _ = fs::remove_file(w);
+                }
+                return Err(e.into());
+            }
+            written_abs.push(abs.as_std_path().to_path_buf());
+            image_pages.push(ImagePageRec {
+                page_index: i as u32,
+                bates,
+                relpath: rel,
+                sha256: p.sha256.clone(),
+            });
+        }
+        written_page_count = encoded.len() as u32;
+    }
+
     let field_map = &resolved.body.load_file.field_map;
     let (sent_fmt, sent_tz) = date_mods_for_source(field_map, "DATE_SENT");
     let (recv_fmt, recv_tz) = date_mods_for_source(field_map, "DATE_RECEIVED");
@@ -906,6 +1278,7 @@ fn produce_one_item_inner(
     let file_name = path_basename(item.path.as_deref());
     let row = LoadRow {
         control_number: control.to_string(),
+        end_bates: end_bates.to_string(),
         item_id: item.id.clone(),
         parent_item_id: item.parent_item_id.clone().unwrap_or_default(),
         family_id: item.family_id.clone().unwrap_or_default(),
@@ -948,11 +1321,14 @@ fn produce_one_item_inner(
         text_sha256,
     };
 
-    let _ = native_art; // silence unused when only metadata used
+    let _ = native_art;
     Ok(ProducedOne::Ok {
         native_relpath,
         text_relpath,
         row: Box::new(row),
+        image_pages,
+        page_count: written_page_count,
+        end_bates: end_bates.to_string(),
     })
 }
 
@@ -985,12 +1361,7 @@ fn finalize_volume(
     resolved: &ResolvedProduceConfig,
     cursor: &mut CheckpointCursor,
 ) -> Result<ProduceOutcome> {
-    let layout = VolumeLayout::create_with_names(
-        camino::Utf8Path::new(&cursor.output_root),
-        &resolved.body.layout.data,
-        &resolved.body.layout.natives,
-        &resolved.body.layout.text,
-    )?;
+    let layout = volume_layout_from_resolved(resolved, &cursor.output_root)?;
     // Hold may land after the last work-item commit but before finalize writes DAT.
     let mut jsonl_by_item = index_rows_jsonl_by_item_id(&layout)?;
     let mut done: HashSet<String> = cursor.done_item_ids.iter().cloned().collect();
@@ -1020,12 +1391,19 @@ fn finalize_volume(
         cursor.skipped_other,
         cursor.error_count
     );
-    write_readme(
+    write_readme_ex(
         &layout.readme,
         &cursor.production_name,
         resolved.body.packaging.expand_family,
         &counts_line,
+        resolved.body.packaging.include_images,
     )?;
+
+    if resolved.body.packaging.include_images {
+        if let Some(failed) = finalize_image_volume(matter, resolved, cursor, &layout, &rows)? {
+            return Ok(failed);
+        }
+    }
 
     let status = if cursor.error_count > 0 || cursor.skipped_other > 0 {
         "complete_with_errors"
@@ -1097,6 +1475,7 @@ fn load_row_from_json_value(v: &serde_json::Value) -> Result<LoadRow> {
     let g = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     Ok(LoadRow {
         control_number: g("CONTROL_NUMBER"),
+        end_bates: g("ENDBATES"),
         item_id: g("ITEM_ID"),
         parent_item_id: g("PARENT_ITEM_ID"),
         family_id: g("FAMILY_ID"),
@@ -1146,9 +1525,15 @@ fn recover_done_from_existing_row(
     prefix: &str,
     item_id: &str,
     control_number: &str,
+    end_bates: &str,
 ) {
     let seq_before = cursor.next_seq;
-    advance_next_seq_for_control(cursor, prefix, control_number);
+    let high = if end_bates.trim().is_empty() {
+        control_number
+    } else {
+        end_bates
+    };
+    advance_next_seq_for_control(cursor, prefix, high);
     // If this control was at/after the checkpoint's next_seq, the append was not
     // checkpointed yet — count it as produced now.
     if let Some(seq) = parse_control_seq(prefix, control_number) {
@@ -1183,7 +1568,7 @@ fn apply_late_withhold_sweep(
             production_item_is_skipped_withheld(matter, &cursor.production_set_id, &item_id)?;
         let had_jsonl = jsonl_by_item.contains_key(&item_id);
         let was_ok =
-            production_item_ok_control(matter, &cursor.production_set_id, &item_id)?.is_some();
+            production_item_ok_span(matter, &cursor.production_set_id, &item_id)?.is_some();
         let existing = jsonl_by_item.remove(&item_id);
         // Purge JSONL paths, production_items relpaths, and control-derived files.
         purge_withheld_item_artifacts(
@@ -1255,6 +1640,77 @@ fn production_item_is_skipped_withheld(
 /// resolve under the volume root, and that SHA256 matches the native file when set.
 fn recovered_artifacts_valid(layout: &VolumeLayout, row: &LoadRow) -> bool {
     validate_recovered_artifacts(layout, row).is_ok()
+}
+
+/// Image resume must not skip rematerialize when `page_count >= 1` but TIFFs
+/// or `production_image_pages` rows are missing (crash between item span and pages).
+/// Image-profile rows with NULL/zero `page_count` are complete only when the
+/// native is actually native-only (`native_image_page_count == 0`).
+fn recovered_image_pages_complete(
+    matter: &Matter,
+    set_id: &str,
+    item_id: &str,
+    layout: &VolumeLayout,
+    image_page_mode: bool,
+) -> Result<bool> {
+    let pc: Option<i64> = {
+        let mut stmt = matter.connection().prepare(
+            "SELECT page_count FROM production_items \
+             WHERE production_set_id = ?1 AND item_id = ?2 AND status = 'ok' LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![set_id, item_id])?;
+        match rows.next()? {
+            Some(row) => row.get(0)?,
+            None => return Ok(true),
+        }
+    };
+    let Some(pc) = pc.filter(|n| *n >= 1) else {
+        if !image_page_mode {
+            return Ok(true);
+        }
+        let item = match matter.get_item(item_id) {
+            Ok(i) => i,
+            Err(_) => return Ok(false),
+        };
+        return match load_native_payload(matter, &item)? {
+            Ok(bytes) => match pdf_raster::native_image_page_count(
+                &bytes,
+                item.path.as_deref(),
+                item.mime_type.as_deref(),
+            ) {
+                Ok(0) => Ok(true),
+                Ok(_) => Ok(false),
+                Err(_) => Ok(false),
+            },
+            Err(_) => Ok(false),
+        };
+    };
+    let mut stmt = matter.connection().prepare(
+        "SELECT relpath, sha256 FROM production_image_pages \
+         WHERE production_set_id = ?1 AND item_id = ?2",
+    )?;
+    let mut q = stmt.query(params![set_id, item_id])?;
+    let mut n = 0i64;
+    while let Some(row) = q.next()? {
+        n += 1;
+        let rel: String = row.get(0)?;
+        let expected: String = row.get(1)?;
+        let Ok(abs) = volume_rel_to_abs(layout, &rel) else {
+            return Ok(false);
+        };
+        let Ok(bytes) = std::fs::read(&abs) else {
+            return Ok(false);
+        };
+        let digest = Sha256::digest(&bytes);
+        let disk: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        if !disk.eq_ignore_ascii_case(expected.trim()) {
+            return Ok(false);
+        }
+        if pdf_raster::count_ifds_or_zero(&bytes) != 1 {
+            return Ok(false);
+        }
+    }
+    Ok(n == pc)
 }
 
 fn validate_recovered_artifacts(layout: &VolumeLayout, row: &LoadRow) -> Result<()> {
@@ -1389,6 +1845,21 @@ fn purge_withheld_item_artifacts(
             }
         }
     }
+    let (control, end) = match load_production_item_paths(matter, set_id, item_id)? {
+        Some(rec) => (rec.control_number, rec.end_bates),
+        None => (
+            jsonl_row.map(|r| r.control_number.clone()),
+            jsonl_row.map(|r| r.end_bates.clone()),
+        ),
+    };
+    purge_item_image_artifacts(
+        matter,
+        layout,
+        set_id,
+        item_id,
+        control.as_deref(),
+        end.as_deref(),
+    )?;
     Ok(())
 }
 
@@ -1397,6 +1868,7 @@ struct ProductionItemPaths {
     control_number: Option<String>,
     native_relpath: Option<String>,
     text_relpath: Option<String>,
+    end_bates: Option<String>,
 }
 
 fn load_production_item_paths(
@@ -1405,7 +1877,7 @@ fn load_production_item_paths(
     item_id: &str,
 ) -> Result<Option<ProductionItemPaths>> {
     let mut stmt = matter.connection().prepare(
-        "SELECT control_number, native_relpath, text_relpath FROM production_items \
+        "SELECT control_number, native_relpath, text_relpath, end_bates FROM production_items \
          WHERE production_set_id = ?1 AND item_id = ?2 LIMIT 1",
     )?;
     let mut rows = stmt.query(params![set_id, item_id])?;
@@ -1413,10 +1885,12 @@ fn load_production_item_paths(
         let control: Option<String> = row.get(0)?;
         let native: Option<String> = row.get(1)?;
         let text: Option<String> = row.get(2)?;
+        let end: Option<String> = row.get(3)?;
         return Ok(Some(ProductionItemPaths {
             control_number: control,
             native_relpath: native,
             text_relpath: text,
+            end_bates: end,
         }));
     }
     Ok(None)
@@ -1501,23 +1975,36 @@ fn parse_control_seq(prefix: &str, control: &str) -> Option<u64> {
     rest.parse().ok()
 }
 
-/// If `production_items` already has status=ok for this item, return its control number.
-fn production_item_ok_control(
+/// If `production_items` already has status=ok for this item, return
+/// control, end_bates, and page_count (NULL page_count → None).
+struct OkItemSpan {
+    control: String,
+    end_bates: Option<String>,
+    page_count: Option<i64>,
+}
+
+fn production_item_ok_span(
     matter: &Matter,
     set_id: &str,
     item_id: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<OkItemSpan>> {
     let mut stmt = matter.connection().prepare(
-        "SELECT control_number FROM production_items \
+        "SELECT control_number, end_bates, page_count FROM production_items \
          WHERE production_set_id = ?1 AND item_id = ?2 AND status = 'ok' LIMIT 1",
     )?;
     let mut rows = stmt.query(params![set_id, item_id])?;
     if let Some(row) = rows.next()? {
         let control: String = row.get(0)?;
+        let end: Option<String> = row.get(1)?;
+        let pc: Option<i64> = row.get(2)?;
         if control.is_empty() || control.starts_with("SKIP_") {
             return Ok(None);
         }
-        return Ok(Some(control));
+        return Ok(Some(OkItemSpan {
+            control,
+            end_bates: end,
+            page_count: pc,
+        }));
     }
     Ok(None)
 }
@@ -1663,8 +2150,36 @@ fn record_production_item(
     skip_reason: Option<&str>,
     error: Option<&str>,
 ) -> Result<()> {
+    record_production_item_span(
+        matter,
+        set_id,
+        item_id,
+        control_number,
+        native_relpath,
+        text_relpath,
+        status,
+        skip_reason,
+        error,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_production_item_span(
+    matter: &Matter,
+    set_id: &str,
+    item_id: &str,
+    control_number: &str,
+    native_relpath: Option<&str>,
+    text_relpath: Option<&str>,
+    status: &str,
+    skip_reason: Option<&str>,
+    error: Option<&str>,
+    end_bates: Option<&str>,
+    page_count: Option<i64>,
+) -> Result<()> {
     let now = Utc::now().to_rfc3339();
-    // control_number may be empty for withheld skips — use a unique placeholder for unique index.
     let control = if control_number.is_empty() {
         format!("SKIP_{item_id}")
     } else {
@@ -1672,8 +2187,8 @@ fn record_production_item(
     };
     matter.connection().execute(
         "INSERT INTO production_items \
-         (production_set_id, item_id, control_number, native_relpath, text_relpath, status, skip_reason, error, produced_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+         (production_set_id, item_id, control_number, native_relpath, text_relpath, status, skip_reason, error, produced_at, end_bates, page_count) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
          ON CONFLICT(production_set_id, item_id) DO UPDATE SET \
            control_number = excluded.control_number, \
            native_relpath = excluded.native_relpath, \
@@ -1681,7 +2196,9 @@ fn record_production_item(
            status = excluded.status, \
            skip_reason = excluded.skip_reason, \
            error = excluded.error, \
-           produced_at = excluded.produced_at",
+           produced_at = excluded.produced_at, \
+           end_bates = excluded.end_bates, \
+           page_count = excluded.page_count",
         params![
             set_id,
             item_id,
@@ -1691,10 +2208,460 @@ fn record_production_item(
             status,
             skip_reason,
             error,
-            now
+            now,
+            end_bates,
+            page_count
         ],
     )?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_ok_item_and_pages(
+    matter: &Matter,
+    set_id: &str,
+    item_id: &str,
+    control_safe: &str,
+    native_relpath: Option<&str>,
+    text_relpath: Option<&str>,
+    end_bates: Option<&str>,
+    page_count: Option<i64>,
+    pages: &[ImagePageRec],
+) -> Result<()> {
+    let conn = matter.connection();
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let persist = record_production_item_span(
+        matter,
+        set_id,
+        item_id,
+        control_safe,
+        native_relpath,
+        text_relpath,
+        "ok",
+        None,
+        None,
+        end_bates,
+        page_count,
+    )
+    .and_then(|()| record_image_pages(matter, set_id, item_id, pages));
+    match persist {
+        Ok(()) => {
+            conn.execute("COMMIT", [])?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
+    }
+}
+
+/// Delete produced TIFFs + `production_image_pages` rows for a withheld item.
+fn purge_item_image_artifacts(
+    matter: &Matter,
+    layout: &VolumeLayout,
+    set_id: &str,
+    item_id: &str,
+    control: Option<&str>,
+    end_bates: Option<&str>,
+) -> Result<()> {
+    let mut names: HashSet<String> = HashSet::new();
+    let mut stmt = matter.connection().prepare(
+        "SELECT bates, relpath FROM production_image_pages \
+         WHERE production_set_id = ?1 AND item_id = ?2",
+    )?;
+    let mut q = stmt.query(params![set_id, item_id])?;
+    let mut rels: Vec<String> = Vec::new();
+    while let Some(row) = q.next()? {
+        let bates: String = row.get(0)?;
+        let rel: String = row.get(1)?;
+        if !bates.trim().is_empty() {
+            names.insert(sanitize_filename_part(bates.trim()));
+        }
+        if !rel.trim().is_empty() {
+            rels.push(rel);
+        }
+    }
+    drop(q);
+    drop(stmt);
+    for rel in &rels {
+        if let Ok(abs) = volume_rel_to_abs(layout, rel) {
+            let _ = std::fs::remove_file(abs);
+        }
+    }
+    let beg = control.map(str::trim).filter(|s| !s.is_empty());
+    let end = end_bates.map(str::trim).filter(|s| !s.is_empty()).or(beg);
+    if let (Some(b), Some(e)) = (beg, end) {
+        for n in expand_bates_span(b, e) {
+            names.insert(sanitize_filename_part(&n));
+        }
+    }
+    delete_images_named(layout, &names);
+    matter.connection().execute(
+        "DELETE FROM production_image_pages WHERE production_set_id = ?1 AND item_id = ?2",
+        params![set_id, item_id],
+    )?;
+    Ok(())
+}
+
+fn expand_bates_span(beg: &str, end: &str) -> Vec<String> {
+    if beg.is_empty() {
+        return Vec::new();
+    }
+    if end.is_empty() || end == beg {
+        return vec![beg.to_string()];
+    }
+    let (p1, n1) = split_bates_prefix_digits(beg);
+    let (p2, n2) = split_bates_prefix_digits(end);
+    if p1 != p2 || n1.is_empty() || n2.is_empty() || n1.len() != n2.len() {
+        return vec![beg.to_string(), end.to_string()];
+    }
+    let Ok(a) = n1.parse::<u64>() else {
+        return vec![beg.to_string(), end.to_string()];
+    };
+    let Ok(b) = n2.parse::<u64>() else {
+        return vec![beg.to_string(), end.to_string()];
+    };
+    if b < a {
+        return vec![beg.to_string(), end.to_string()];
+    }
+    let width = n1.len();
+    (a..=b)
+        .map(|seq| format!("{p1}{seq:0width$}", width = width))
+        .collect()
+}
+
+fn split_bates_prefix_digits(s: &str) -> (&str, &str) {
+    let i = s
+        .as_bytes()
+        .iter()
+        .rposition(|b| !b.is_ascii_digit())
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    (&s[..i], &s[i..])
+}
+
+fn delete_images_named(layout: &VolumeLayout, names: &HashSet<String>) {
+    if names.is_empty() {
+        return;
+    }
+    let Some(root) = layout.images.as_ref() else {
+        return;
+    };
+    let Ok(folders) = std::fs::read_dir(root.as_std_path()) else {
+        return;
+    };
+    for folder in folders.flatten() {
+        let path = folder.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let fp = f.path();
+            let stem = fp.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if names.contains(stem) {
+                let _ = std::fs::remove_file(&fp);
+            }
+        }
+    }
+}
+
+fn record_image_pages(
+    matter: &Matter,
+    set_id: &str,
+    item_id: &str,
+    pages: &[ImagePageRec],
+) -> Result<()> {
+    for p in pages {
+        matter.connection().execute(
+            "INSERT INTO production_image_pages \
+             (production_set_id, item_id, page_index, bates, relpath, sha256) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(production_set_id, item_id, page_index) DO UPDATE SET \
+               bates = excluded.bates, \
+               relpath = excluded.relpath, \
+               sha256 = excluded.sha256",
+            params![
+                set_id,
+                item_id,
+                p.page_index as i64,
+                p.bates,
+                p.relpath,
+                p.sha256
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn finalize_image_volume(
+    matter: &Matter,
+    resolved: &ResolvedProduceConfig,
+    cursor: &CheckpointCursor,
+    layout: &VolumeLayout,
+    rows: &[LoadRow],
+) -> Result<Option<ProduceOutcome>> {
+    let vol = opt_volume_token(
+        camino::Utf8Path::new(&cursor.output_root)
+            .file_name()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(cursor.production_name.as_str()),
+    );
+    let mut stmt = matter.connection().prepare(
+        "SELECT pip.item_id, pip.page_index, pip.bates, pip.relpath, COALESCE(pi.page_count, 0) \
+         FROM production_image_pages pip \
+         INNER JOIN production_items pi \
+           ON pi.production_set_id = pip.production_set_id AND pi.item_id = pip.item_id \
+         WHERE pip.production_set_id = ?1 \
+           AND pi.status = 'ok' \
+           AND (pi.skip_reason IS NULL OR pi.skip_reason != 'withheld') \
+         ORDER BY pip.bates ASC, pip.page_index ASC",
+    )?;
+    let mut q = stmt.query(params![&cursor.production_set_id])?;
+    let mut lines = Vec::new();
+    let mut n_pages = 0u64;
+    while let Some(row) = q.next()? {
+        let item_id: String = row.get(0)?;
+        if matter.item_is_withheld(&item_id)? {
+            continue;
+        }
+        let page_index: i64 = row.get(1)?;
+        let bates: String = row.get(2)?;
+        let relpath: String = row.get(3)?;
+        let pc: i64 = row.get(4)?;
+        n_pages += 1;
+        lines.push(encode_opt_line(
+            &bates,
+            &vol,
+            &relpath,
+            page_index as u32,
+            pc.max(0) as u32,
+        ));
+    }
+    let opt_path = layout
+        .opt_path
+        .clone()
+        .unwrap_or_else(|| layout.root.join("IMAGE.opt"));
+    write_image_opt(opt_path.as_std_path(), &lines)?;
+    check_image_fail_closed(matter, resolved, cursor, rows, n_pages)
+}
+
+fn check_image_fail_closed(
+    matter: &Matter,
+    resolved: &ResolvedProduceConfig,
+    cursor: &CheckpointCursor,
+    rows: &[LoadRow],
+    opt_lines: u64,
+) -> Result<Option<ProduceOutcome>> {
+    let mut stmt = matter.connection().prepare(
+        "SELECT item_id, control_number, end_bates, COALESCE(page_count, 0) \
+         FROM production_items WHERE production_set_id = ?1 AND status = 'ok'",
+    )?;
+    let mut q = stmt.query(params![&cursor.production_set_id])?;
+    let mut sum_pages: u64 = 0;
+    let prefix = resolved.body.bates.prefix.trim();
+    while let Some(row) = q.next()? {
+        let item_id: String = row.get(0)?;
+        let control: String = row.get(1)?;
+        let end: Option<String> = row.get(2)?;
+        let pc: i64 = row.get(3)?;
+        if pc >= 1 {
+            sum_pages += pc as u64;
+            let n_written: i64 = matter.connection().query_row(
+                "SELECT COUNT(*) FROM production_image_pages \
+                 WHERE production_set_id = ?1 AND item_id = ?2",
+                params![&cursor.production_set_id, &item_id],
+                |r| r.get(0),
+            )?;
+            if n_written != pc {
+                return fail_image(
+                    matter,
+                    cursor,
+                    format!("image_page_missing: item {item_id} page_count={pc} tiffs={n_written}"),
+                );
+            }
+            if let Some(failed) = verify_image_page_files(matter, cursor, &item_id, pc)? {
+                return Ok(Some(failed));
+            }
+            let end_s = end.as_deref().unwrap_or(control.as_str());
+            if let (Some(beg), Some(end_seq)) = (
+                parse_control_seq(prefix, &control),
+                parse_control_seq(prefix, end_s),
+            ) {
+                if end_seq.saturating_sub(beg).saturating_add(1) != pc as u64 {
+                    return fail_image(
+                        matter,
+                        cursor,
+                        format!("beg_end_bates_span mismatch for {item_id}"),
+                    );
+                }
+            }
+        } else {
+            let item = matter.get_item(&item_id)?;
+            let sniffed = match load_native_payload(matter, &item)? {
+                Ok(bytes) => pdf_raster::is_image_eligible_native(
+                    item.path.as_deref(),
+                    item.mime_type.as_deref(),
+                    &bytes,
+                ),
+                Err(_) => pdf_raster::is_image_eligible_native(
+                    item.path.as_deref(),
+                    item.mime_type.as_deref(),
+                    &[],
+                ),
+            };
+            if sniffed {
+                return fail_image(
+                    matter,
+                    cursor,
+                    format!("image-eligible item wrote zero TIFFs: {item_id}"),
+                );
+            }
+        }
+    }
+    if opt_lines != sum_pages {
+        return fail_image(
+            matter,
+            cursor,
+            format!("opt_row_count_mismatch: opt={opt_lines} sum_page_count={sum_pages}"),
+        );
+    }
+    for row in rows {
+        if let (Some(beg), Some(end_seq)) = (
+            parse_control_seq(prefix, &row.control_number),
+            parse_control_seq(prefix, row.end_bates_or_control()),
+        ) {
+            if end_seq < beg {
+                return fail_image(
+                    matter,
+                    cursor,
+                    format!("OPT/DAT Bates span mismatch for {}", row.item_id),
+                );
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn verify_image_page_files(
+    matter: &Matter,
+    cursor: &CheckpointCursor,
+    item_id: &str,
+    expected_pages: i64,
+) -> Result<Option<ProduceOutcome>> {
+    let mut stmt = matter.connection().prepare(
+        "SELECT relpath, sha256 FROM production_image_pages \
+         WHERE production_set_id = ?1 AND item_id = ?2 \
+         ORDER BY page_index ASC",
+    )?;
+    let mut q = stmt.query(params![&cursor.production_set_id, item_id])?;
+    let mut n = 0i64;
+    while let Some(row) = q.next()? {
+        n += 1;
+        let rel: String = row.get(0)?;
+        let expected_sha: String = row.get(1)?;
+        let abs = match volume_rel_to_abs_root(&cursor.output_root, &rel) {
+            Ok(p) => p,
+            Err(e) => {
+                return fail_image(
+                    matter,
+                    cursor,
+                    format!("image_page_missing: item {item_id} path {rel}: {e}"),
+                );
+            }
+        };
+        let bytes = match std::fs::read(&abs) {
+            Ok(b) => b,
+            Err(_) => {
+                return fail_image(
+                    matter,
+                    cursor,
+                    format!("image_page_missing: item {item_id} missing file {rel}"),
+                );
+            }
+        };
+        let digest = Sha256::digest(&bytes);
+        let disk_sha: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        if !disk_sha.eq_ignore_ascii_case(expected_sha.trim()) {
+            return fail_image(
+                matter,
+                cursor,
+                format!("image_page_hash_mismatch: item {item_id} {rel}"),
+            );
+        }
+        let n_ifd = pdf_raster::count_ifds_or_zero(&bytes);
+        if n_ifd != 1 {
+            return fail_image(
+                matter,
+                cursor,
+                format!("multi_page_tiff_as_artifact: item {item_id} ifds={n_ifd}"),
+            );
+        }
+    }
+    if n != expected_pages {
+        return fail_image(
+            matter,
+            cursor,
+            format!("image_page_missing: item {item_id} page_count={expected_pages} tiffs={n}"),
+        );
+    }
+    Ok(None)
+}
+
+fn volume_rel_to_abs_root(root: &str, rel: &str) -> Result<std::path::PathBuf> {
+    let normalized = rel.replace('/', "\\");
+    let parts: Vec<&str> = normalized.split('\\').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return Err(ProduceError::Other("empty relative path".into()));
+    }
+    if parts.iter().any(|p| *p == ".." || p.contains(':')) {
+        return Err(ProduceError::Other(format!(
+            "refusing unsafe relative path: {rel}"
+        )));
+    }
+    let mut abs = std::path::PathBuf::from(root);
+    for p in parts {
+        abs.push(p);
+    }
+    Ok(abs)
+}
+
+fn fail_image(
+    matter: &Matter,
+    cursor: &CheckpointCursor,
+    message: String,
+) -> Result<Option<ProduceOutcome>> {
+    update_production_set_status(matter, &cursor.production_set_id, "failed", cursor.next_seq)?;
+    Ok(Some(ProduceOutcome::Failed {
+        message,
+        summary: summary_from_cursor(cursor),
+    }))
+}
+
+/// Image profile + image-eligible item wrote no TIFFs → job error (spec §3.8).
+fn image_eligible_zero_tiff_fail(
+    resolved: &ResolvedProduceConfig,
+    predicted_pages: u32,
+    message: Option<&str>,
+) -> bool {
+    if !resolved.body.packaging.include_images {
+        return false;
+    }
+    if predicted_pages >= 1 {
+        return true;
+    }
+    let Some(m) = message.map(str::trim) else {
+        return false;
+    };
+    m == "burned_native_missing"
+        || m == "missing_native"
+        || m.contains("image-eligible")
+        || m.contains("image encode")
+        || m.contains("image page")
+        || m.contains("CAS read")
 }
 
 fn save_checkpoint(matter: &Matter, job_id: &str, cursor: &CheckpointCursor) -> Result<()> {
@@ -1720,4 +2687,41 @@ fn new_id(prefix: &str) -> String {
     let digest = hasher.finalize();
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     format!("{prefix}_{}", &hex[..16])
+}
+
+#[cfg(test)]
+mod bates_resume_tests {
+    use super::*;
+
+    fn cursor_at(next_seq: u64) -> CheckpointCursor {
+        CheckpointCursor {
+            phase: "work".into(),
+            cursor_index: 0,
+            completed_count: 0,
+            selected_count: 0,
+            produced_count: 0,
+            skipped_withheld: 0,
+            skipped_other: 0,
+            error_count: 0,
+            next_seq,
+            production_set_id: String::new(),
+            production_name: String::new(),
+            output_root: String::new(),
+            params: json!({}),
+            ordered_ids: Vec::new(),
+            done_item_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn advance_next_seq_honors_end_bates() {
+        // Crash after page 1 of a 3-page item: beg=PROD000001, end=PROD000003.
+        // A beg-only resume would set next_seq=2 (interior reuse). End-bates sets 4.
+        let mut c = cursor_at(2);
+        advance_next_seq_for_control(&mut c, "PROD", "PROD000003");
+        assert_eq!(c.next_seq, 4);
+        let mut d = cursor_at(1);
+        advance_next_seq_for_control(&mut d, "PROD", "PROD000001");
+        assert_eq!(d.next_seq, 2);
+    }
 }

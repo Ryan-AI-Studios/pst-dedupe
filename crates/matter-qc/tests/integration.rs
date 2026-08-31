@@ -10,9 +10,10 @@ use matter_core::{
 };
 use matter_qc::{
     evaluate_candidates_with_cancel, resolve_rules, run_production_qc, QcError, QcOutcome,
-    QcParams, QcRuleConfig, QcSeverity, JOB_KIND_QC, RULE_BROKEN_FAMILY_INCOMPLETE_PARENT,
-    RULE_BROKEN_FAMILY_ORPHAN_CHILD, RULE_BURNED_NATIVE_MISSING, RULE_EMPTY_SELECTION,
-    RULE_MISSING_NATIVE, RULE_MISSING_TEXT, RULE_ONLY_WITHHELD, RULE_PDF_NEEDS_OCR,
+    QcParams, QcRuleConfig, QcSeverity, JOB_KIND_QC, PACK_IMAGE_OPT_V1,
+    RULE_BROKEN_FAMILY_INCOMPLETE_PARENT, RULE_BROKEN_FAMILY_ORPHAN_CHILD,
+    RULE_BURNED_NATIVE_MISSING, RULE_EMPTY_SELECTION, RULE_IMAGE_PAGE_MISSING, RULE_MISSING_NATIVE,
+    RULE_MISSING_TEXT, RULE_ONLY_WITHHELD, RULE_OPT_ROW_COUNT_MISMATCH, RULE_PDF_NEEDS_OCR,
     RULE_REDACTED_TEXT_MISSING, RULE_TEXT_REDACT_UNMAPPED_ON_PDF, RULE_WITHHELD_FAMILY_MEMBER,
     RULE_WITHHELD_IN_SELECTION, RULE_ZERO_SIZE,
 };
@@ -135,7 +136,7 @@ fn insert_child(
 #[test]
 fn schema_v21_qc_runs_table() {
     let (_tmp, matter) = temp_matter("schema-v21");
-    assert_eq!(SCHEMA_VERSION, 40);
+    assert_eq!(SCHEMA_VERSION, 41);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     let has: bool = matter
         .connection()
@@ -790,4 +791,403 @@ fn text_redact_unmapped_on_pdf_error() {
     let f = findings_of(&r, RULE_TEXT_REDACT_UNMAPPED_ON_PDF);
     assert_eq!(f.len(), 1);
     assert_eq!(f[0].severity, QcSeverity::Error);
+}
+
+#[test]
+fn run_production_qc_image_pack_finds_missing_tiff() {
+    let (_tmp, matter) = temp_matter("0115-qc-img");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let id = good_doc(&matter, "scan.pdf");
+    let vol = matter
+        .root()
+        .join("exports")
+        .join("productions")
+        .join("QCIMG");
+    fs::create_dir_all(vol.as_std_path()).expect("vol");
+    let now = "2020-01-01T00:00:00Z";
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_sets \
+             (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, output_root, profile_slug) \
+             VALUES ('set_qc_img', ?1, 'QCIMG', ?2, ?2, 'PROD', 2, 'complete', ?3, 'us_concordance_image_opt_v1')",
+            rusqlite::params![matter.id(), now, vol.as_str()],
+        )
+        .expect("set");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_items \
+             (production_set_id, item_id, control_number, status, produced_at, end_bates, page_count) \
+             VALUES ('set_qc_img', ?1, 'PROD000001', 'ok', ?2, 'PROD000001', 1)",
+            rusqlite::params![&id, now],
+        )
+        .expect("item");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_image_pages \
+             (production_set_id, item_id, page_index, bates, relpath, sha256) \
+             VALUES ('set_qc_img', ?1, 0, 'PROD000001', 'IMAGES\\001\\PROD000001.TIF', \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')",
+            rusqlite::params![&id],
+        )
+        .expect("page");
+    let r = run_qc(
+        &matter,
+        &job.id,
+        &QcParams {
+            pack_id: Some(PACK_IMAGE_OPT_V1.into()),
+            ..Default::default()
+        },
+    );
+    assert!(!r.passed, "missing TIFF must fail QC");
+    let f = findings_of(&r, RULE_IMAGE_PAGE_MISSING);
+    assert!(
+        !f.is_empty(),
+        "run_production_qc must evaluate image_page_missing, findings={:?}",
+        r.findings
+    );
+}
+
+#[test]
+fn run_production_qc_image_pack_respects_item_scope() {
+    let (_tmp, matter) = temp_matter("0115-qc-scope");
+    let broken = good_doc(&matter, "broken.pdf");
+    let other = good_doc(&matter, "other.pdf");
+    let vol = matter
+        .root()
+        .join("exports")
+        .join("productions")
+        .join("QCSCOPE");
+    fs::create_dir_all(vol.as_std_path()).expect("vol");
+    let now = "2020-01-01T00:00:00Z";
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_sets \
+             (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, output_root, profile_slug) \
+             VALUES ('set_qc_scope', ?1, 'QCSCOPE', ?2, ?2, 'PROD', 2, 'complete', ?3, 'us_concordance_image_opt_v1')",
+            rusqlite::params![matter.id(), now, vol.as_str()],
+        )
+        .expect("set");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_items \
+             (production_set_id, item_id, control_number, status, produced_at, end_bates, page_count) \
+             VALUES ('set_qc_scope', ?1, 'PROD000001', 'ok', ?2, 'PROD000001', 1)",
+            rusqlite::params![&broken, now],
+        )
+        .expect("item");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_image_pages \
+             (production_set_id, item_id, page_index, bates, relpath, sha256) \
+             VALUES ('set_qc_scope', ?1, 0, 'PROD000001', 'IMAGES\\001\\PROD000001.TIF', \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')",
+            rusqlite::params![&broken],
+        )
+        .expect("page");
+
+    let job_other = matter.create_job(JOB_KIND_QC).expect("job other");
+    let r_other = run_qc(
+        &matter,
+        &job_other.id,
+        &QcParams {
+            scope: "item_ids".into(),
+            item_ids: vec![other],
+            pack_id: Some(PACK_IMAGE_OPT_V1.into()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        findings_of(&r_other, RULE_IMAGE_PAGE_MISSING).is_empty(),
+        "scoped QC of unrelated item must not inherit another item's missing TIFF: {:?}",
+        r_other.findings
+    );
+
+    let job_broken = matter.create_job(JOB_KIND_QC).expect("job broken");
+    let r_broken = run_qc(
+        &matter,
+        &job_broken.id,
+        &QcParams {
+            scope: "item_ids".into(),
+            item_ids: vec![broken],
+            pack_id: Some(PACK_IMAGE_OPT_V1.into()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !findings_of(&r_broken, RULE_IMAGE_PAGE_MISSING).is_empty(),
+        "scoped QC of the broken item must still find the missing TIFF"
+    );
+}
+
+#[test]
+fn run_production_qc_image_pack_empty_selection_skips_volume() {
+    let (_tmp, matter) = temp_matter("0115-qc-empty-vol");
+    let vol = matter
+        .root()
+        .join("exports")
+        .join("productions")
+        .join("QCEMPTY");
+    fs::create_dir_all(vol.as_std_path()).expect("vol");
+    fs::write(
+        vol.join("IMAGE.opt").as_std_path(),
+        "VOL001,IMAGES\\001\\PROD000001.TIF,Y,,,PROD000001,\r\n",
+    )
+    .expect("opt");
+    let now = "2020-01-01T00:00:00Z";
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_sets \
+             (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, output_root, profile_slug) \
+             VALUES ('set_qc_empty', ?1, 'QCEMPTY', ?2, ?2, 'PROD', 2, 'complete', ?3, 'us_concordance_image_opt_v1')",
+            rusqlite::params![matter.id(), now, vol.as_str()],
+        )
+        .expect("set");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let r = run_qc(
+        &matter,
+        &job.id,
+        &QcParams {
+            pack_id: Some(PACK_IMAGE_OPT_V1.into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        findings_of(&r, RULE_EMPTY_SELECTION).len(),
+        1,
+        "empty corpus must still report empty_selection"
+    );
+    assert!(
+        findings_of(&r, RULE_IMAGE_PAGE_MISSING).is_empty(),
+        "empty selection must not inherit unrelated volume TIFF findings: {:?}",
+        r.findings
+    );
+    assert!(
+        findings_of(&r, RULE_OPT_ROW_COUNT_MISMATCH).is_empty(),
+        "empty selection must not inherit unrelated OPT count findings: {:?}",
+        r.findings
+    );
+}
+
+#[test]
+fn run_production_qc_image_pack_missing_opt_on_completed_volume() {
+    use sha2::{Digest, Sha256};
+    let (_tmp, matter) = temp_matter("0115-qc-no-opt");
+    let id = good_doc(&matter, "scan.pdf");
+    let vol = matter
+        .root()
+        .join("exports")
+        .join("productions")
+        .join("QCNOOPT");
+    let tif_dir = vol.join("IMAGES").join("001");
+    fs::create_dir_all(tif_dir.as_std_path()).expect("dir");
+    let tif_bytes = b"II*\0fake-tif";
+    fs::write(tif_dir.join("PROD000001.TIF").as_std_path(), tif_bytes).expect("tif");
+    let sha = Sha256::digest(tif_bytes);
+    let sha_hex: String = sha.iter().map(|b| format!("{b:02x}")).collect();
+    let now = "2020-01-01T00:00:00Z";
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_sets \
+             (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, output_root, profile_slug) \
+             VALUES ('set_qc_noopt', ?1, 'QCNOOPT', ?2, ?2, 'PROD', 2, 'complete', ?3, 'us_concordance_image_opt_v1')",
+            rusqlite::params![matter.id(), now, vol.as_str()],
+        )
+        .expect("set");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_items \
+             (production_set_id, item_id, control_number, status, produced_at, end_bates, page_count) \
+             VALUES ('set_qc_noopt', ?1, 'PROD000001', 'ok', ?2, 'PROD000001', 1)",
+            rusqlite::params![&id, now],
+        )
+        .expect("item");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_image_pages \
+             (production_set_id, item_id, page_index, bates, relpath, sha256) \
+             VALUES ('set_qc_noopt', ?1, 0, 'PROD000001', 'IMAGES\\001\\PROD000001.TIF', ?2)",
+            rusqlite::params![&id, sha_hex],
+        )
+        .expect("page");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let r = run_qc(
+        &matter,
+        &job.id,
+        &QcParams {
+            pack_id: Some(PACK_IMAGE_OPT_V1.into()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !r.passed,
+        "missing IMAGE.opt on a completed image volume must fail"
+    );
+    assert!(
+        !findings_of(&r, RULE_OPT_ROW_COUNT_MISMATCH).is_empty(),
+        "must emit opt_row_count_mismatch when OPT is absent: {:?}",
+        r.findings
+    );
+}
+
+#[test]
+fn run_production_qc_image_pack_zero_page_pdf_is_missing() {
+    let (_tmp, matter) = temp_matter("0115-qc-zero-pc");
+    let id = good_doc(&matter, "scan.pdf");
+    let vol = matter
+        .root()
+        .join("exports")
+        .join("productions")
+        .join("QCZERO");
+    fs::create_dir_all(vol.as_std_path()).expect("vol");
+    let now = "2020-01-01T00:00:00Z";
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_sets \
+             (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, output_root, profile_slug) \
+             VALUES ('set_qc_zero', ?1, 'QCZERO', ?2, ?2, 'PROD', 2, 'complete', ?3, 'us_concordance_image_opt_v1')",
+            rusqlite::params![matter.id(), now, vol.as_str()],
+        )
+        .expect("set");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_items \
+             (production_set_id, item_id, control_number, status, produced_at, end_bates, page_count) \
+             VALUES ('set_qc_zero', ?1, 'PROD000001', 'ok', ?2, 'PROD000001', 0)",
+            rusqlite::params![&id, now],
+        )
+        .expect("item");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let r = run_qc(
+        &matter,
+        &job.id,
+        &QcParams {
+            pack_id: Some(PACK_IMAGE_OPT_V1.into()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !findings_of(&r, RULE_IMAGE_PAGE_MISSING).is_empty(),
+        "image-eligible page_count=0 must fail image QC: {:?}",
+        r.findings
+    );
+}
+
+#[test]
+fn run_production_qc_image_pack_magic_only_pdf_zero_pages() {
+    let (_tmp, matter) = temp_matter("0115-qc-magic");
+    let pdf = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n";
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: None,
+            native_sha256: Some(put_native(&matter, pdf)),
+            text_sha256: Some(put_text(&matter, "p")),
+            mime_type: None,
+            file_category: Some("document".into()),
+            size_bytes: Some(pdf.len() as i64),
+            ..Default::default()
+        },
+    );
+    let vol = matter
+        .root()
+        .join("exports")
+        .join("productions")
+        .join("QCMAGIC");
+    fs::create_dir_all(vol.as_std_path()).expect("vol");
+    let now = "2020-01-01T00:00:00Z";
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_sets \
+             (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, output_root, profile_slug) \
+             VALUES ('set_qc_magic', ?1, 'QCMAGIC', ?2, ?2, 'PROD', 2, 'complete', ?3, 'us_concordance_image_opt_v1')",
+            rusqlite::params![matter.id(), now, vol.as_str()],
+        )
+        .expect("set");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_items \
+             (production_set_id, item_id, control_number, status, produced_at, end_bates, page_count) \
+             VALUES ('set_qc_magic', ?1, 'PROD000001', 'ok', ?2, 'PROD000001', 0)",
+            rusqlite::params![&id, now],
+        )
+        .expect("item");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let r = run_qc(
+        &matter,
+        &job.id,
+        &QcParams {
+            pack_id: Some(PACK_IMAGE_OPT_V1.into()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !findings_of(&r, RULE_IMAGE_PAGE_MISSING).is_empty(),
+        "magic-only PDF with page_count=0 must fail image QC: {:?}",
+        r.findings
+    );
+}
+
+#[test]
+fn run_production_qc_image_pack_skips_dat_only_sets() {
+    use matter_core::BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1;
+    let (_tmp, matter) = temp_matter("0115-qc-dat-only");
+    let id = good_doc(&matter, "scan.pdf");
+    let vol = matter
+        .root()
+        .join("exports")
+        .join("productions")
+        .join("QCDAT");
+    fs::create_dir_all(vol.as_std_path()).expect("vol");
+    let now = "2020-01-01T00:00:00Z";
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_sets \
+             (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, output_root, profile_slug) \
+             VALUES ('set_qc_dat', ?1, 'QCDAT', ?2, ?2, 'PROD', 2, 'complete', ?3, ?4)",
+            rusqlite::params![
+                matter.id(),
+                now,
+                vol.as_str(),
+                BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1
+            ],
+        )
+        .expect("set");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_items \
+             (production_set_id, item_id, control_number, status, produced_at, end_bates, page_count) \
+             VALUES ('set_qc_dat', ?1, 'PROD000001', 'ok', ?2, 'PROD000001', 0)",
+            rusqlite::params![&id, now],
+        )
+        .expect("item");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let r = run_qc(
+        &matter,
+        &job.id,
+        &QcParams {
+            pack_id: Some(PACK_IMAGE_OPT_V1.into()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        findings_of(&r, RULE_IMAGE_PAGE_MISSING).is_empty(),
+        "DAT-only PDF rows must not inherit image_page_missing: {:?}",
+        r.findings
+    );
 }

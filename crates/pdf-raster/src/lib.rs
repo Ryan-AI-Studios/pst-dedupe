@@ -9,7 +9,17 @@ use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Mutex;
 
-use extract_pdf::{detect_pdf, looks_like_pdf, MAX_NATIVE_INPUT_BYTES, MAX_PAGES};
+use extract_pdf::{detect_pdf, looks_like_pdf, MAX_NATIVE_INPUT_BYTES};
+
+pub use extract_pdf::MAX_PAGES;
+
+pub mod g4;
+pub use g4::{
+    count_ifds_or_zero, decode_tiff_ifd, encode_g4_tif, looks_like_tiff, native_image_page_count,
+    parse_le_ifd0_tags, raster_and_encode_document, raster_and_encode_page, read_le_rational,
+    stamp_bates_lower_right, synthetic_gray8_tiff, tiff_ifd_count, wrap_g4_le_ifd, G4Page,
+    BATES_MARGIN_IN, BT601_B, BT601_BLACK_THRESHOLD, BT601_G, BT601_R,
+};
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -32,6 +42,8 @@ pub use error::{Error, Result};
 pub const ENGINE_PIN: &str = "zpdf-0.13.0";
 /// Review raster DPI.
 pub const DPI_REVIEW: u32 = 150;
+/// Produce raster DPI (TIFF G4).
+pub const DPI_PRODUCE: u32 = 300;
 /// Thumbnail DPI.
 pub const DPI_THUMB: u32 = 72;
 /// Long-side pixel cap.
@@ -72,6 +84,7 @@ pub enum NativeKind {
     Pdf,
     Jpeg,
     Png,
+    Tiff,
     Other,
 }
 
@@ -191,7 +204,34 @@ pub fn sniff_kind(path: Option<&str>, mime: Option<&str>, bytes: &[u8]) -> Nativ
     {
         return NativeKind::Png;
     }
+    if g4::looks_like_tiff(bytes)
+        || matches!(
+            mime.map(|m| m.to_ascii_lowercase()).as_deref(),
+            Some("image/tiff") | Some("image/tif")
+        )
+        || path
+            .map(|p| {
+                let l = p.to_ascii_lowercase();
+                l.ends_with(".tif") || l.ends_with(".tiff")
+            })
+            .unwrap_or(false)
+    {
+        return NativeKind::Tiff;
+    }
     NativeKind::Other
+}
+
+/// True when path, MIME, or magic identifies a PDF/JPEG/PNG/TIFF native
+/// that the image profile must rasterize (not native-only DAT).
+pub fn is_image_eligible_native(path: Option<&str>, mime: Option<&str>, bytes: &[u8]) -> bool {
+    if !matches!(sniff_kind(path, mime, bytes), NativeKind::Other) {
+        return true;
+    }
+    path.map(|p| {
+        let l = p.to_ascii_lowercase();
+        l.ends_with(".jpg") || l.ends_with(".jpeg") || l.ends_with(".png")
+    })
+    .unwrap_or(false)
 }
 
 fn reject_size(len: usize) -> Result<()> {
@@ -216,7 +256,7 @@ fn box_from_rect(r: Rect) -> BoxF {
     BoxF::from_corners(r.x0, r.y0, r.x1, r.y1)
 }
 
-fn encode_png_rgba(width: u32, height: u32, data: Vec<u8>) -> Result<Vec<u8>> {
+pub(crate) fn encode_png_rgba(width: u32, height: u32, data: Vec<u8>) -> Result<Vec<u8>> {
     let img = RgbaImage::from_raw(width, height, data).ok_or(Error::PngEncodeFailed)?;
     let mut buf = Cursor::new(Vec::new());
     DynamicImage::ImageRgba8(img)
@@ -225,7 +265,7 @@ fn encode_png_rgba(width: u32, height: u32, data: Vec<u8>) -> Result<Vec<u8>> {
     Ok(buf.into_inner())
 }
 
-fn cap_long_side(rgba: RgbaImage) -> (RgbaImage, bool) {
+pub(crate) fn cap_long_side(rgba: RgbaImage) -> (RgbaImage, bool) {
     let long = rgba.width().max(rgba.height());
     if long <= LONG_SIDE_CAP {
         return (rgba, false);
@@ -265,7 +305,7 @@ fn raster_image_to_png(bytes: &[u8]) -> Result<RasterPage> {
     })
 }
 
-fn open_pdf(bytes: &[u8]) -> Result<PdfDocument> {
+pub(crate) fn open_pdf(bytes: &[u8]) -> Result<PdfDocument> {
     match PdfDocument::open(bytes.to_vec()) {
         Ok(doc) => {
             if doc.is_encrypted() {
@@ -275,6 +315,15 @@ fn open_pdf(bytes: &[u8]) -> Result<PdfDocument> {
         }
         Err(e) => Err(map_zpdf(e)),
     }
+}
+
+pub(crate) fn pdf_page_count(bytes: &[u8]) -> Result<u32> {
+    let doc = open_pdf(bytes)?;
+    let n = doc.page_count();
+    if n > MAX_PAGES {
+        return Err(Error::TooManyPages { count: n });
+    }
+    Ok(n as u32)
 }
 
 fn raster_pdf_page_inner(bytes: &[u8], page_index: u32, dpi: u32) -> Result<RasterPage> {
@@ -359,6 +408,12 @@ pub fn raster_page(
                 });
             }
             match catch_unwind(AssertUnwindSafe(|| raster_image_to_png(bytes))) {
+                Ok(r) => r,
+                Err(_) => Err(Error::Panicked),
+            }
+        }
+        NativeKind::Tiff => {
+            match catch_unwind(AssertUnwindSafe(|| g4::raster_tiff_page(bytes, page_index))) {
                 Ok(r) => r,
                 Err(_) => Err(Error::Panicked),
             }
@@ -591,6 +646,20 @@ pub fn burn_native(
             Ok(r) => r,
             Err(_) => Err(Error::Panicked),
         },
+        NativeKind::Tiff => {
+            let n = g4::tiff_ifd_count(original)?;
+            if n > 1 {
+                return Err(Error::Burn(
+                    "multi-IFD TIFF burn is unsupported; refuse to collapse pages".into(),
+                ));
+            }
+            match catch_unwind(AssertUnwindSafe(|| {
+                burn_raster_image(original, rects, false)
+            })) {
+                Ok(r) => r,
+                Err(_) => Err(Error::Panicked),
+            }
+        }
         NativeKind::Other => Err(Error::UnsupportedKind),
     }
 }
@@ -737,6 +806,8 @@ pub fn sniff_ext_mime(bytes: &[u8]) -> (&'static str, &'static str) {
         ("jpg", "image/jpeg")
     } else if looks_like_png(bytes) {
         ("png", "image/png")
+    } else if g4::looks_like_tiff(bytes) {
+        ("tif", "image/tiff")
     } else {
         ("bin", "application/octet-stream")
     }

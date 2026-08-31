@@ -142,7 +142,7 @@ Also in this folder
 Version / schema
 ----------------
 - Product version: $Version
-- Matter SCHEMA_VERSION: 39
+- Matter SCHEMA_VERSION: 41
 
 Golden path
 -----------

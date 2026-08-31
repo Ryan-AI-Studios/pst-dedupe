@@ -15,6 +15,8 @@ pub const PRODUCTIONS_DIR: &str = "productions";
 pub const DATA_DIR: &str = "DATA";
 pub const NATIVES_DIR: &str = "NATIVES";
 pub const TEXT_DIR: &str = "TEXT";
+pub const IMAGES_DIR: &str = "IMAGES";
+pub const IMAGE_OPT_NAME: &str = "IMAGE.opt";
 
 /// Resolved volume paths.
 #[derive(Debug, Clone)]
@@ -32,6 +34,10 @@ pub struct VolumeLayout {
     pub text_name: String,
     /// Folder segment for data (default `DATA`).
     pub data_name: String,
+    /// Image folder when `include_images` (not created for DAT-only).
+    pub images: Option<Utf8PathBuf>,
+    pub images_name: Option<String>,
+    pub opt_path: Option<Utf8PathBuf>,
 }
 
 impl VolumeLayout {
@@ -47,6 +53,19 @@ impl VolumeLayout {
         natives_name: &str,
         text_name: &str,
     ) -> Result<Self> {
+        Self::create_with_layout(root, data_name, natives_name, text_name, None)
+    }
+
+    /// Like [`create_with_names`], optionally creating the images folder.
+    ///
+    /// DAT-only callers must pass `images_name = None` so `IMAGES/` is not mkdir'd.
+    pub fn create_with_layout(
+        root: &Utf8Path,
+        data_name: &str,
+        natives_name: &str,
+        text_name: &str,
+        images_name: Option<&str>,
+    ) -> Result<Self> {
         let data_name = data_name.trim();
         let natives_name = natives_name.trim();
         let text_name = text_name.trim();
@@ -56,6 +75,15 @@ impl VolumeLayout {
         fs::create_dir_all(data.as_std_path())?;
         fs::create_dir_all(natives.as_std_path())?;
         fs::create_dir_all(text.as_std_path())?;
+        let (images, images_name_owned, opt_path) =
+            if let Some(name) = images_name.map(str::trim).filter(|s| !s.is_empty()) {
+                let name = opt_safe_folder_segment(name);
+                let images = root.join(&name);
+                fs::create_dir_all(images.as_std_path())?;
+                (Some(images), Some(name), Some(root.join(IMAGE_OPT_NAME)))
+            } else {
+                (None, None, None)
+            };
         Ok(Self {
             load_dat: data.join("load.dat"),
             load_csv: data.join("load.csv"),
@@ -67,6 +95,9 @@ impl VolumeLayout {
             natives_name: natives_name.to_string(),
             text_name: text_name.to_string(),
             data_name: data_name.to_string(),
+            images,
+            images_name: images_name_owned,
+            opt_path,
         })
     }
 
@@ -98,6 +129,110 @@ impl VolumeLayout {
     /// Static text relpath with default `TEXT` folder.
     pub fn text_relpath_default(control: &str) -> String {
         format!("{TEXT_DIR}\\{control}.txt")
+    }
+
+    /// Windows-style image relpath `IMAGES\001\PROD000001.TIF`.
+    pub fn image_relpath(&self, folder_idx: u32, bates: &str) -> String {
+        let name = self.images_name.as_deref().unwrap_or(IMAGES_DIR);
+        format!(
+            "{}\\{:03}\\{}.TIF",
+            name,
+            folder_idx.max(1),
+            sanitize_filename_part(bates)
+        )
+    }
+
+    /// Absolute directory for image folder shard `NNN`.
+    pub fn image_folder_dir(&self, folder_idx: u32) -> Option<Utf8PathBuf> {
+        self.images
+            .as_ref()
+            .map(|root| root.join(format!("{:03}", folder_idx.max(1))))
+    }
+}
+
+/// Count `.TIF`/`.tif` files in a folder (0 if missing).
+pub fn count_tif_files(dir: &Utf8Path) -> u32 {
+    count_tif_files_excluding(dir, &[])
+}
+
+/// Like [`count_tif_files`], ignoring in-flight / rematerialized Bates names
+/// so an orphan page of the current document cannot bump the folder.
+pub fn count_tif_files_excluding(dir: &Utf8Path, exclude_names: &[String]) -> u32 {
+    let std = dir.as_std_path();
+    if !std.is_dir() {
+        return 0;
+    }
+    fs::read_dir(std)
+        .map(|it| {
+            it.filter_map(|e| e.ok())
+                .filter(|e| {
+                    let path = e.path();
+                    let ext_ok = path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|ext| {
+                            ext.eq_ignore_ascii_case("tif") || ext.eq_ignore_ascii_case("tiff")
+                        })
+                        .unwrap_or(false);
+                    if !ext_ok {
+                        return false;
+                    }
+                    let name = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default();
+                    !exclude_names.iter().any(|ex| ex.eq_ignore_ascii_case(name))
+                })
+                .count() as u32
+        })
+        .unwrap_or(0)
+}
+
+/// First folder index (1-based) that can hold `page_count` more files.
+///
+/// Never splits a document: if the current folder cannot fit all pages, the
+/// next folder is used. `page_count > cap` is an error for the caller.
+pub fn choose_image_folder(
+    layout: &VolumeLayout,
+    page_count: u32,
+    cap: u32,
+) -> crate::error::Result<u32> {
+    choose_image_folder_excluding(layout, page_count, cap, &[])
+}
+
+/// Like [`choose_image_folder`], ignoring TIFF names already reserved for
+/// this document (resume rematerialize / crash orphans).
+pub fn choose_image_folder_excluding(
+    layout: &VolumeLayout,
+    page_count: u32,
+    cap: u32,
+    exclude_names: &[String],
+) -> crate::error::Result<u32> {
+    if page_count == 0 {
+        return Ok(1);
+    }
+    if page_count > cap {
+        return Err(crate::error::ProduceError::Other(format!(
+            "image page_count {page_count} exceeds image_folder_cap {cap}; refuse to split document"
+        )));
+    }
+    let mut folder = 1u32;
+    loop {
+        let Some(dir) = layout.image_folder_dir(folder) else {
+            return Err(crate::error::ProduceError::Other(
+                "image folder not configured".into(),
+            ));
+        };
+        let n = count_tif_files_excluding(&dir, exclude_names);
+        if n.saturating_add(page_count) <= cap {
+            return Ok(folder);
+        }
+        folder = folder.saturating_add(1);
+        if folder > 100_000 {
+            return Err(crate::error::ProduceError::Other(
+                "image folder index overflow".into(),
+            ));
+        }
     }
 }
 
@@ -199,6 +334,12 @@ pub fn volume_has_production_content_with_layout(
     if dir_has_any_file(&root.join(text_dir)) {
         return true;
     }
+    if root.join(IMAGE_OPT_NAME).as_std_path().exists() {
+        return true;
+    }
+    if dir_has_any_file(&root.join(IMAGES_DIR)) {
+        return true;
+    }
     // Also check default folder names (prior volume may have used defaults while
     // this run uses a custom layout, or vice versa).
     if (data_dir != DATA_DIR || natives_dir != NATIVES_DIR || text_dir != TEXT_DIR)
@@ -269,6 +410,27 @@ pub fn sanitize_folder_name(name: &str) -> String {
     }
 }
 
+/// Folder segment safe for OPT (ASCII, no comma/whitespace).
+fn opt_safe_folder_segment(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .filter_map(|c| {
+            if c == ',' || c.is_whitespace() || c.is_ascii_control() {
+                None
+            } else if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                Some(c)
+            } else {
+                Some('_')
+            }
+        })
+        .collect();
+    if s.is_empty() {
+        IMAGES_DIR.into()
+    } else {
+        s
+    }
+}
+
 /// Sanitize control number + extension for Windows filenames.
 pub fn sanitize_filename_part(s: &str) -> String {
     s.chars()
@@ -280,12 +442,44 @@ pub fn sanitize_filename_part(s: &str) -> String {
         .collect()
 }
 
+/// OPT volume token: strip comma + whitespace, ASCII-only, then [`sanitize_filename_part`].
+pub fn opt_volume_token(name: &str) -> String {
+    let stripped: String = name
+        .chars()
+        .filter(|c| *c != ',' && !c.is_whitespace())
+        .map(|c| {
+            if c.is_ascii() && !c.is_ascii_control() {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let s = sanitize_filename_part(&stripped);
+    if s.is_empty() {
+        "VOL".into()
+    } else {
+        s
+    }
+}
+
 /// Write volume README with format + privacy notes.
 pub fn write_readme(
     path: &Utf8Path,
     production_name: &str,
     expand_family: bool,
     counts_line: &str,
+) -> Result<()> {
+    write_readme_ex(path, production_name, expand_family, counts_line, false)
+}
+
+/// Write volume README; mention IMAGES + IMAGE.opt when `include_images`.
+pub fn write_readme_ex(
+    path: &Utf8Path,
+    production_name: &str,
+    expand_family: bool,
+    counts_line: &str,
+    include_images: bool,
 ) -> Result<()> {
     let mut f = fs::File::create(path.as_std_path())?;
     writeln!(f, "Dedupe production volume (matter_produce_v1)")?;
@@ -299,6 +493,13 @@ pub fn write_readme(
     writeln!(f, "  DATA/load.csv   Optional CSV twin (UTF-8 BOM)")?;
     writeln!(f, "  NATIVES/        Produced native files")?;
     writeln!(f, "  TEXT/           Extracted or redacted text (.txt)")?;
+    if include_images {
+        writeln!(f, "  IMAGES/         Single-page TIFF G4 (CCITT Group 4)")?;
+        writeln!(
+            f,
+            "  IMAGE.opt       Opticon load file (seven fields, CRLF)"
+        )?;
+    }
     writeln!(f)?;
     writeln!(f, "DAT format:")?;
     writeln!(f, "  Encoding: UTF-8 with BOM (EF BB BF)")?;
@@ -346,4 +547,37 @@ pub fn write_readme(
         "EML note: synthetic .eml files are export-only packaging, not original MIME identity."
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod folder_cap_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn choose_folder_ignores_orphan_bates_of_current_document() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = camino::Utf8Path::from_path(tmp.path()).expect("utf8");
+        let layout =
+            VolumeLayout::create_with_layout(root, "DATA", "NATIVES", "TEXT", Some("IMAGES"))
+                .expect("layout");
+        let dir = layout.image_folder_dir(1).expect("dir");
+        fs::create_dir_all(dir.as_std_path()).expect("mkdir");
+        for i in 0..497u32 {
+            fs::write(dir.join(format!("FILL{i:06}.TIF")).as_std_path(), b"x").expect("fill");
+        }
+        fs::write(dir.join("PROD000001.TIF").as_std_path(), b"orphan").expect("orphan");
+        let exclude = vec![
+            "PROD000001.TIF".into(),
+            "PROD000002.TIF".into(),
+            "PROD000003.TIF".into(),
+        ];
+        let folder = choose_image_folder_excluding(&layout, 3, 500, &exclude).expect("choose");
+        assert_eq!(
+            folder, 1,
+            "orphan of the in-flight document must not force folder 002"
+        );
+        let without = choose_image_folder(&layout, 3, 500).expect("no exclude");
+        assert_eq!(without, 2, "counting the orphan should overflow folder 001");
+    }
 }
