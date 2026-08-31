@@ -20,6 +20,25 @@ fn override_key(rule_id: &str, item_id: Option<&str>) -> String {
     }
 }
 
+const DAT_ONLY_PROFILE: &str = "us_concordance_native_text_v1";
+const IMAGE_OPT_PROFILE: &str = "us_concordance_image_opt_v1";
+
+fn selected_profile_flags(
+    page: &Option<ProducePageResponse>,
+    slug: &str,
+) -> (bool, bool) {
+    let Some(p) = page
+        .as_ref()
+        .and_then(|pg| pg.profiles.iter().find(|x| x.slug == slug))
+    else {
+        return (false, false);
+    };
+    (
+        p.include_images,
+        p.bates_mode.eq_ignore_ascii_case("page"),
+    )
+}
+
 #[component]
 pub fn ProducePage() -> impl IntoView {
     let params = use_params_map();
@@ -299,10 +318,53 @@ pub fn ProducePage() -> impl IntoView {
                                             " Family together (locked on)"
                                         </label>
                                         <div class="seg">
-                                            <button class="primary" disabled=true>"Doc-level Bates"</button>
-                                            <button disabled=true title="Page-level Bates ships with image productions (0115).">"Page-level Bates"</button>
+                                            <button
+                                                class=move || {
+                                                    let (_, page_bates) = selected_profile_flags(&page.get(), &profile.get());
+                                                    if page_bates { String::new() } else { "primary".into() }
+                                                }
+                                                on:click=move |_| {
+                                                    let slug = page.get().and_then(|pg| {
+                                                        pg.profiles.into_iter().find(|x| !x.include_images).map(|x| x.slug)
+                                                    }).unwrap_or_else(|| DAT_ONLY_PROFILE.to_string());
+                                                    profile.set(slug);
+                                                    overrides.set(HashMap::new());
+                                                    qc.set(None);
+                                                }
+                                            >"Doc-level Bates"</button>
+                                            <button
+                                                class=move || {
+                                                    let (_, page_bates) = selected_profile_flags(&page.get(), &profile.get());
+                                                    if page_bates { "primary".into() } else { String::new() }
+                                                }
+                                                disabled=move || {
+                                                    page.get().map(|pg| {
+                                                        !pg.profiles.iter().any(|x| {
+                                                            x.include_images || x.bates_mode.eq_ignore_ascii_case("page")
+                                                        })
+                                                    }).unwrap_or(true)
+                                                }
+                                                on:click=move |_| {
+                                                    let slug = page.get().and_then(|pg| {
+                                                        pg.profiles.into_iter().find(|x| {
+                                                            x.slug == IMAGE_OPT_PROFILE
+                                                                || (x.include_images && x.bates_mode.eq_ignore_ascii_case("page"))
+                                                        }).map(|x| x.slug)
+                                                    }).unwrap_or_else(|| IMAGE_OPT_PROFILE.to_string());
+                                                    profile.set(slug);
+                                                    overrides.set(HashMap::new());
+                                                    qc.set(None);
+                                                }
+                                            >"Page-level Bates"</button>
                                         </div>
-                                        <p class="empty">"Page-level Bates ships with image productions (0115). This DAT volume uses one Bates per native (BEGBATES=ENDBATES)."</p>
+                                        <p class="empty">{move || {
+                                            let (_, page_bates) = selected_profile_flags(&page.get(), &profile.get());
+                                            if page_bates {
+                                                "Page-level Bates: BEGBATES is the first page, ENDBATES the last.".to_string()
+                                            } else {
+                                                "DAT-only profile uses one Bates per native (BEGBATES=ENDBATES).".to_string()
+                                            }
+                                        }}</p>
                                     </div>
                                 </Show>
 
@@ -310,7 +372,14 @@ pub fn ProducePage() -> impl IntoView {
                                     <div class="produce-step">
                                         <h2>"Format"</h2>
                                         <p>"NATIVES + TEXT + DATA/load.dat on."</p>
-                                        <p class="empty">"TIFF / PDF image / OPT off — ships in 0115. Do not create IMAGES/ or IMAGE.opt."</p>
+                                        <p class="empty">{move || {
+                                            let (include_images, _) = selected_profile_flags(&page.get(), &profile.get());
+                                            if include_images {
+                                                "Single-page TIFF G4 + IMAGE.opt. Spreadsheets and email stay native-only. LFP is not this track.".to_string()
+                                            } else {
+                                                "DAT-only profile: no IMAGES/ or IMAGE.opt.".to_string()
+                                            }
+                                        }}</p>
                                         <p class="empty">"Slipsheets off."</p>
                                         <label>
                                             "Production profile "

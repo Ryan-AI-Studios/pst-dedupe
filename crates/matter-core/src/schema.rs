@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current schema version applied by this crate.
-pub const SCHEMA_VERSION: u32 = 40;
+pub const SCHEMA_VERSION: u32 = 41;
 
 /// Ordered migrations: `(target_version, sql)`.
 ///
@@ -54,6 +54,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (38, MIGRATION_V38),
     (39, MIGRATION_V39),
     (40, MIGRATION_V40),
+    (41, MIGRATION_V41),
 ];
 
 const MIGRATION_V1: &str = r#"
@@ -1320,6 +1321,29 @@ ALTER TABLE items ADD COLUMN burned_native_sha256 TEXT;
 ALTER TABLE items ADD COLUMN burned_native_at TEXT;
 ALTER TABLE items ADD COLUMN burned_source_digest TEXT;
 ALTER TABLE items ADD COLUMN raster_engine TEXT;
+"#;
+
+/// Schema v41: page-level Bates + produced image pages (track 0115).
+///
+/// DAT-only rows keep `end_bates` / `page_count` NULL (treat as control_number / 0).
+/// Image pages are stored separately so interior Bates never collide on
+/// `production_items.control_number`.
+const MIGRATION_V41: &str = r#"
+ALTER TABLE production_items ADD COLUMN end_bates TEXT;
+ALTER TABLE production_items ADD COLUMN page_count INTEGER;
+
+CREATE TABLE production_image_pages (
+    production_set_id TEXT NOT NULL REFERENCES production_sets(id),
+    item_id TEXT NOT NULL,
+    page_index INTEGER NOT NULL,
+    bates TEXT NOT NULL,
+    relpath TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    PRIMARY KEY (production_set_id, item_id, page_index)
+);
+
+CREATE UNIQUE INDEX idx_production_image_pages_bates
+    ON production_image_pages(production_set_id, bates);
 "#;
 
 /// Apply pending migrations up to [`SCHEMA_VERSION`].
@@ -5405,6 +5429,83 @@ mod tests {
         let ms: u32 = conn
             .query_row(
                 "SELECT schema_version FROM matters WHERE id = 'mat_v39'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mat schema");
+        assert_eq!(ms, SCHEMA_VERSION);
+    }
+
+    /// v40 → v41 adds end_bates / page_count on production_items + production_image_pages.
+    #[test]
+    fn migrate_v40_to_v41() {
+        let conn = Connection::open_in_memory().expect("open");
+        configure_connection(&conn).expect("configure");
+
+        for &(target, sql) in MIGRATIONS {
+            if target > 40 {
+                break;
+            }
+            conn.execute_batch(sql).expect("sql");
+            if target == 1 {
+                conn.execute("INSERT INTO schema_meta (version) VALUES (?1)", [target])
+                    .expect("meta");
+            } else {
+                conn.execute("UPDATE schema_meta SET version = ?1", [target])
+                    .expect("meta");
+            }
+        }
+        assert_eq!(read_schema_version(&conn).expect("read"), 40);
+
+        conn.execute(
+            "INSERT INTO matters (id, name, created_at, schema_version, storage_root) \
+             VALUES ('mat_v40', 'V40 Matter', '2020-01-01T00:00:00Z', 40, '/tmp/v40')",
+            [],
+        )
+        .expect("matter");
+
+        let v = migrate(&conn).expect("migrate v40 to v41");
+        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(read_schema_version(&conn).expect("read"), SCHEMA_VERSION);
+
+        for col in ["end_bates", "page_count"] {
+            let has: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM pragma_table_info('production_items') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("col");
+            assert!(has, "expected production_items column {col}");
+        }
+
+        let has_table: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='production_image_pages'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table");
+        assert!(has_table);
+
+        let fk_to_sets: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_foreign_key_list('production_image_pages') \
+                 WHERE \"table\" = 'production_sets'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fk");
+        assert!(
+            fk_to_sets,
+            "production_image_pages.production_set_id must REFERENCES production_sets(id)"
+        );
+
+        let ms: u32 = conn
+            .query_row(
+                "SELECT schema_version FROM matters WHERE id = 'mat_v40'",
                 [],
                 |row| row.get(0),
             )

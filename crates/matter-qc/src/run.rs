@@ -15,8 +15,9 @@ use crate::error::{QcError, Result};
 use crate::params::{QcParams, QcSeverity};
 use crate::report::{count_severities, default_qc_report_dir, write_qc_report, QcReportMeta};
 use crate::rules::{
-    empty_selection_finding, evaluate_one_item, only_withheld_finding, resolve_rules_for_pack,
-    QcFinding,
+    empty_selection_finding, evaluate_image_volume_rules, evaluate_one_item, only_withheld_finding,
+    resolve_rules_for_pack, QcFinding, RULE_BEG_END_BATES_SPAN, RULE_IMAGE_PAGE_MISSING,
+    RULE_MULTI_PAGE_TIFF_AS_ARTIFACT, RULE_OPT_ROW_COUNT_MISMATCH,
 };
 use crate::select::select_item_ids;
 
@@ -464,6 +465,20 @@ fn finalize_success(
             cursor.findings.push(f);
         }
     }
+
+    // Volume-level image rules (OPT / TIFF / Bates span). Re-evaluate on
+    // finalize so the resumable QC job path matches evaluate_candidates.
+    cursor.findings.retain(|f| {
+        f.rule_id != RULE_IMAGE_PAGE_MISSING
+            && f.rule_id != RULE_BEG_END_BATES_SPAN
+            && f.rule_id != RULE_OPT_ROW_COUNT_MISMATCH
+            && f.rule_id != RULE_MULTI_PAGE_TIFF_AS_ARTIFACT
+    });
+    cursor.findings.extend(evaluate_image_volume_rules(
+        matter,
+        rules,
+        &cursor.ordered_ids,
+    )?);
 
     let (error_count, warn_count) = recompute_severity_counts(&cursor.findings);
     cursor.error_count = error_count;

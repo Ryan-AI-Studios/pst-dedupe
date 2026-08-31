@@ -170,7 +170,8 @@ impl QcParams {
         {
             return Err(QcError::InvalidParams(format!(
                 "unknown QC pack_id '{pack}' (supported: qc_default_v1, \
-                 qc_strict_privilege_v1, qc_native_heavy_v1, default_production_qc_v1)"
+                 qc_strict_privilege_v1, qc_native_heavy_v1, qc_image_opt_v1, \
+                 default_production_qc_v1)"
             )));
         }
         if let Some(ref p) = self.pack_id {
@@ -178,7 +179,8 @@ impl QcParams {
             if !t.is_empty() && !crate::packs::is_known_pack_id(t) {
                 return Err(QcError::InvalidParams(format!(
                     "unknown QC pack_id '{t}' (supported: qc_default_v1, \
-                     qc_strict_privilege_v1, qc_native_heavy_v1, default_production_qc_v1)"
+                     qc_strict_privilege_v1, qc_native_heavy_v1, qc_image_opt_v1, \
+                     default_production_qc_v1)"
                 )));
             }
         }

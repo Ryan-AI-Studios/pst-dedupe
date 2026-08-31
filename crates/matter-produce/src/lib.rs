@@ -28,6 +28,7 @@
 pub mod dat;
 pub mod error;
 pub mod layout;
+pub mod opt;
 pub mod params;
 pub mod profile;
 pub mod resolve;
@@ -40,10 +41,11 @@ pub use dat::{
 };
 pub use error::{ProduceError, Result};
 pub use layout::{
-    production_stamp, resolve_output_root, resolve_output_root_with_layout,
+    opt_volume_token, production_stamp, resolve_output_root, resolve_output_root_with_layout,
     volume_has_production_content, volume_has_production_content_with_layout, VolumeLayout,
-    DATA_DIR, NATIVES_DIR, PRODUCTIONS_DIR, TEXT_DIR,
+    DATA_DIR, IMAGES_DIR, IMAGE_OPT_NAME, NATIVES_DIR, PRODUCTIONS_DIR, TEXT_DIR,
 };
+pub use opt::{encode_opt_line, write_image_opt};
 pub use params::{ProduceParams, DEFAULT_BATES_PREFIX, SCOPE_ITEM_IDS, SCOPE_REVIEW_CORPUS};
 pub use profile::{
     effective_bates_prefix, effective_pad_width, effective_qc_pack_id, resolve_produce_config,

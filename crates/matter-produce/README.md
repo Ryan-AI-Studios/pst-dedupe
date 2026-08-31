@@ -47,8 +47,9 @@ Default output root: `<matter>/exports/productions/<name_or_stamp>/`.
 | `us_concordance_native_text_v1` | **Default** — Concordance DAT, US date formats (`%m/%d/%Y` + `America/New_York`), `qc_default_v1` |
 | `us_concordance_rel_alias_v1` | Same packaging; Relativity-oriented **header aliases** only |
 | `us_strict_qc_concordance_v1` | Same packaging as default + `qc_strict_privilege_v1` |
+| `us_concordance_image_opt_v1` | Same DAT map + page-level Bates, `IMAGES/` G4 TIFFs, `IMAGE.opt`, `qc_image_opt_v1` |
 
-Matter-local profiles: `production_profiles` table (schema **v38**); list = built-ins ∪ user. CLI: `pst-dedup production-profile list|show|upsert|delete`.
+Matter-local profiles: `production_profiles` table (introduced schema **v38**; current matter schema **v41**); list = built-ins ∪ user. CLI: `pst-dedup production-profile list|show|upsert|delete`.
 
 ### Field map
 
@@ -65,8 +66,14 @@ Each entry: `{ source, header, include, date_format?, timezone? }`. Unknown sour
     <CONTROL>.<ext>
   TEXT/
     <CONTROL>.txt
+  IMAGES/             # image profile only (`us_concordance_image_opt_v1`)
+    001/
+      <BATES>.TIF     # single-page CCITT G4
+  IMAGE.opt           # Opticon; omitted for DAT-only
   README.txt
 ```
+
+DAT-only builtin does **not** create `IMAGES/` or `IMAGE.opt`. Native-only kinds (xlsx/eml) stay in DAT with `page_count=0` and `BEGBATES=ENDBATES`; they do not get OPT lines.
 
 Load-file paths are **Windows-style relative** (e.g. `NATIVES\PROD000001.eml`).
 
@@ -101,7 +108,7 @@ Load-file paths are **Windows-style relative** (e.g. `NATIVES\PROD000001.eml`).
 
 ## Schema
 
-Requires matter-core **schema v20** tables `production_sets` / `production_items`, **v21** `qc_runs` when `require_qc_pass` is used, and **v38** `production_profiles` + `production_sets.profile_slug`.
+Requires matter-core **schema v20** tables `production_sets` / `production_items`, **v21** `qc_runs` when `require_qc_pass` is used, **v38** `production_profiles` + `production_sets.profile_slug`, and **v41** `production_items.end_bates` / `page_count` plus `production_image_pages` for image-profile volumes.
 
 ## Audit
 

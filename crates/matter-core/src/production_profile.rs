@@ -34,12 +34,15 @@ pub const BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1: &str = "us_concordance_native_t
 pub const BUILTIN_US_CONCORDANCE_REL_ALIAS_V1: &str = "us_concordance_rel_alias_v1";
 /// Same packaging as default + strict privilege QC pack.
 pub const BUILTIN_US_STRICT_QC_CONCORDANCE_V1: &str = "us_strict_qc_concordance_v1";
+/// Opt-in Concordance DAT + single-page TIFF G4 / Opticon OPT (track 0115).
+pub const BUILTIN_US_CONCORDANCE_IMAGE_OPT_V1: &str = "us_concordance_image_opt_v1";
 
 /// Reserved built-in slugs (user cannot upsert these).
 pub const RESERVED_PRODUCTION_PROFILE_SLUGS: &[&str] = &[
     BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1,
     BUILTIN_US_CONCORDANCE_REL_ALIAS_V1,
     BUILTIN_US_STRICT_QC_CONCORDANCE_V1,
+    BUILTIN_US_CONCORDANCE_IMAGE_OPT_V1,
 ];
 
 const BUILTIN_ID_PREFIX: &str = "builtin:";
@@ -95,8 +98,14 @@ pub const QC_PACK_DEFAULT_V1: &str = "qc_default_v1";
 pub const QC_PACK_STRICT_PRIVILEGE_V1: &str = "qc_strict_privilege_v1";
 /// QC pack: missing native / zero-size as Error; softer missing text for binaries.
 pub const QC_PACK_NATIVE_HEAVY_V1: &str = "qc_native_heavy_v1";
+/// QC pack: default plus image/OPT oracles (track 0115). Not bound to DAT-only.
+pub const QC_PACK_IMAGE_OPT_V1: &str = "qc_image_opt_v1";
 /// Legacy 0041 profile string (maps to [`QC_PACK_DEFAULT_V1`]).
 pub const QC_PACK_LEGACY_DEFAULT: &str = "default_production_qc_v1";
+
+/// Minimum `packaging.image_folder_cap`. Must match `pdf-raster::MAX_PAGES`
+/// / `extract_pdf::MAX_PAGES` (500) so a document is never split across folders.
+pub const IMAGE_FOLDER_CAP_MIN: u32 = 500;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -155,6 +164,9 @@ pub struct BatesConfig {
     /// `name_by_bates` → all artifacts share Bates stem (native + text).
     #[serde(default = "default_filename_mode")]
     pub filename_mode: String,
+    /// `document` (DAT-only, one Bates per item) or `page` (image profile).
+    #[serde(default = "default_bates_mode")]
+    pub mode: String,
 }
 
 fn default_bates_prefix() -> String {
@@ -169,6 +181,10 @@ fn default_filename_mode() -> String {
     "name_by_bates".into()
 }
 
+fn default_bates_mode() -> String {
+    "document".into()
+}
+
 /// Volume folder layout names.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayoutConfig {
@@ -178,6 +194,9 @@ pub struct LayoutConfig {
     pub natives: String,
     #[serde(default = "default_text_dir")]
     pub text: String,
+    /// Image folder segment (created only when `packaging.include_images`).
+    #[serde(default = "default_images_dir")]
+    pub images: String,
 }
 
 fn default_data_dir() -> String {
@@ -192,6 +211,10 @@ fn default_text_dir() -> String {
     "TEXT".into()
 }
 
+fn default_images_dir() -> String {
+    "IMAGES".into()
+}
+
 /// Packaging toggles.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PackagingConfig {
@@ -201,6 +224,23 @@ pub struct PackagingConfig {
     pub export_eml_if_missing_native: bool,
     #[serde(default)]
     pub expand_family: bool,
+    /// When true, write single-page TIFF G4 under `layout.images` + `IMAGE.opt`.
+    #[serde(default)]
+    pub include_images: bool,
+    /// Intended TIFF resolution (dpi). Default 300.
+    #[serde(default = "default_image_dpi")]
+    pub image_dpi: u32,
+    /// Max TIFF files per `IMAGES\NNN\` folder. Must be ≥ [`IMAGE_FOLDER_CAP_MIN`].
+    #[serde(default = "default_image_folder_cap")]
+    pub image_folder_cap: u32,
+}
+
+fn default_image_dpi() -> u32 {
+    300
+}
+
+fn default_image_folder_cap() -> u32 {
+    IMAGE_FOLDER_CAP_MIN
 }
 
 impl Default for PackagingConfig {
@@ -209,6 +249,9 @@ impl Default for PackagingConfig {
             include_csv_twin: true,
             export_eml_if_missing_native: true,
             expand_family: false,
+            include_images: false,
+            image_dpi: default_image_dpi(),
+            image_folder_cap: default_image_folder_cap(),
         }
     }
 }
@@ -296,7 +339,10 @@ pub fn normalize_qc_pack_id(pack_or_profile: &str) -> String {
     let s = pack_or_profile.trim();
     match s {
         "" | QC_PACK_LEGACY_DEFAULT | "default" => QC_PACK_DEFAULT_V1.into(),
-        QC_PACK_DEFAULT_V1 | QC_PACK_STRICT_PRIVILEGE_V1 | QC_PACK_NATIVE_HEAVY_V1 => s.into(),
+        QC_PACK_DEFAULT_V1
+        | QC_PACK_STRICT_PRIVILEGE_V1
+        | QC_PACK_NATIVE_HEAVY_V1
+        | QC_PACK_IMAGE_OPT_V1 => s.into(),
         other => other.to_string(),
     }
 }
@@ -307,6 +353,7 @@ pub fn known_qc_pack_ids() -> &'static [&'static str] {
         QC_PACK_DEFAULT_V1,
         QC_PACK_STRICT_PRIVILEGE_V1,
         QC_PACK_NATIVE_HEAVY_V1,
+        QC_PACK_IMAGE_OPT_V1,
         QC_PACK_LEGACY_DEFAULT,
     ]
 }
@@ -420,6 +467,7 @@ fn default_layout() -> LayoutConfig {
         data: default_data_dir(),
         natives: default_natives_dir(),
         text: default_text_dir(),
+        images: default_images_dir(),
     }
 }
 
@@ -428,6 +476,7 @@ fn default_bates() -> BatesConfig {
         prefix: default_bates_prefix(),
         pad_width: default_pad_width(),
         filename_mode: default_filename_mode(),
+        mode: default_bates_mode(),
     }
 }
 
@@ -465,6 +514,17 @@ fn rel_alias_body() -> ProductionProfileBody {
 fn strict_qc_body() -> ProductionProfileBody {
     let mut body = default_production_profile_body();
     body.qc.pack_id = QC_PACK_STRICT_PRIVILEGE_V1.into();
+    body
+}
+
+fn image_opt_body() -> ProductionProfileBody {
+    let mut body = default_production_profile_body();
+    body.packaging.include_images = true;
+    body.packaging.image_dpi = default_image_dpi();
+    body.packaging.image_folder_cap = default_image_folder_cap();
+    body.bates.mode = "page".into();
+    body.layout.images = default_images_dir();
+    body.qc.pack_id = QC_PACK_IMAGE_OPT_V1.into();
     body
 }
 
@@ -507,6 +567,12 @@ pub fn builtin_production_profiles() -> Vec<ProductionProfile> {
             "US Concordance + strict privilege QC",
             "us_federal",
             strict_qc_body(),
+        ),
+        make_builtin(
+            BUILTIN_US_CONCORDANCE_IMAGE_OPT_V1,
+            "US Concordance + TIFF G4 / OPT",
+            "us_federal",
+            image_opt_body(),
         ),
     ]
 }
@@ -708,11 +774,29 @@ pub fn validate_production_profile_body(body: &ProductionProfileBody) -> Result<
             "unknown bates.filename_mode '{mode}' (supported: name_by_bates)"
         )));
     }
+    let bates_mode = body.bates.mode.trim();
+    if bates_mode != "document" && bates_mode != "page" {
+        return Err(Error::Other(format!(
+            "unknown bates.mode '{bates_mode}' (supported: document, page)"
+        )));
+    }
+    if body.packaging.include_images && bates_mode != "page" {
+        return Err(Error::Other(
+            "packaging.include_images requires bates.mode=page (page-level Bates)".into(),
+        ));
+    }
+    if !body.packaging.include_images && bates_mode == "page" {
+        return Err(Error::Other(
+            "bates.mode=page requires packaging.include_images (DAT-only uses document-level Bates)"
+                .into(),
+        ));
+    }
 
     for (label, folder) in [
         ("layout.data", body.layout.data.as_str()),
         ("layout.natives", body.layout.natives.as_str()),
         ("layout.text", body.layout.text.as_str()),
+        ("layout.images", body.layout.images.as_str()),
     ] {
         let t = folder.trim();
         if t.is_empty() {
@@ -723,6 +807,29 @@ pub fn validate_production_profile_body(body: &ProductionProfileBody) -> Result<
                 "{label} must be a single folder segment (no path separators)"
             )));
         }
+        if body.packaging.include_images
+            && label == "layout.images"
+            && t.chars()
+                .any(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+        {
+            return Err(Error::Other(
+                "layout.images must be ASCII alphanumeric, '_' or '-' \
+                 so OPT paths match on-disk folders"
+                    .into(),
+            ));
+        }
+    }
+
+    if body.packaging.image_dpi == 0 {
+        return Err(Error::Other(
+            "packaging.image_dpi must be >= 1 (typical produce dpi is 300)".into(),
+        ));
+    }
+    if body.packaging.image_folder_cap < IMAGE_FOLDER_CAP_MIN {
+        return Err(Error::Other(format!(
+            "packaging.image_folder_cap must be >= {IMAGE_FOLDER_CAP_MIN} \
+             (pdf-raster MAX_PAGES); refusing a smaller cap so a document is never split"
+        )));
     }
 
     let pack = normalize_qc_pack_id(&body.qc.pack_id);
@@ -730,12 +837,11 @@ pub fn validate_production_profile_body(body: &ProductionProfileBody) -> Result<
         && pack != QC_PACK_DEFAULT_V1
         && pack != QC_PACK_STRICT_PRIVILEGE_V1
         && pack != QC_PACK_NATIVE_HEAVY_V1
+        && pack != QC_PACK_IMAGE_OPT_V1
     {
-        // Allow unknown pack ids only if they match known list after normalize —
-        // fail closed for free-form unknowns that are not the three built-ins.
         return Err(Error::Other(format!(
             "unknown qc.pack_id '{pack}' (supported: {QC_PACK_DEFAULT_V1}, \
-             {QC_PACK_STRICT_PRIVILEGE_V1}, {QC_PACK_NATIVE_HEAVY_V1})"
+             {QC_PACK_STRICT_PRIVILEGE_V1}, {QC_PACK_NATIVE_HEAVY_V1}, {QC_PACK_IMAGE_OPT_V1})"
         )));
     }
 
@@ -1087,13 +1193,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtins_include_three_slugs() {
+    fn builtins_include_reserved_slugs() {
         let list = builtin_production_profiles();
-        assert_eq!(list.len(), 3);
+        assert_eq!(list.len(), 4);
         let slugs: Vec<_> = list.iter().map(|p| p.slug.as_str()).collect();
         assert!(slugs.contains(&BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1));
         assert!(slugs.contains(&BUILTIN_US_CONCORDANCE_REL_ALIAS_V1));
         assert!(slugs.contains(&BUILTIN_US_STRICT_QC_CONCORDANCE_V1));
+        assert!(slugs.contains(&BUILTIN_US_CONCORDANCE_IMAGE_OPT_V1));
     }
 
     #[test]

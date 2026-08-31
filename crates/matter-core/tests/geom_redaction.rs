@@ -61,7 +61,7 @@ fn schema_v40_on_create() {
     let (_tmp, base) = utf8_tempdir();
     let root = base.join("matter-v40");
     let matter = Matter::create(&root, "V40").expect("create");
-    assert_eq!(SCHEMA_VERSION, 40);
+    assert_eq!(SCHEMA_VERSION, 41);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
 
     let item = insert_pdf_item(&matter, b"%PDF-1.4 SECRET_TOKEN_0114");

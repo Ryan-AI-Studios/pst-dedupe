@@ -6,23 +6,24 @@
 use std::collections::HashMap;
 
 use matter_core::{
-    normalize_qc_pack_id, QC_PACK_DEFAULT_V1, QC_PACK_LEGACY_DEFAULT, QC_PACK_NATIVE_HEAVY_V1,
-    QC_PACK_STRICT_PRIVILEGE_V1,
+    normalize_qc_pack_id, QC_PACK_DEFAULT_V1, QC_PACK_IMAGE_OPT_V1, QC_PACK_LEGACY_DEFAULT,
+    QC_PACK_NATIVE_HEAVY_V1, QC_PACK_STRICT_PRIVILEGE_V1,
 };
 
 use crate::params::{QcRuleConfig, QcSeverity, PROFILE_DEFAULT_PRODUCTION_QC_V1};
 use crate::rules::{
-    RULE_BROKEN_FAMILY_INCOMPLETE_PARENT, RULE_BROKEN_FAMILY_ORPHAN_CHILD,
-    RULE_BURNED_NATIVE_MISSING, RULE_EMPTY_SELECTION, RULE_ITEM_STATUS_ERROR, RULE_MISSING_NATIVE,
-    RULE_MISSING_TEXT, RULE_ONLY_WITHHELD, RULE_PDF_NEEDS_OCR, RULE_REDACTED_TEXT_MISSING,
-    RULE_TEXT_REDACT_UNMAPPED_ON_PDF, RULE_WITHHELD_FAMILY_MEMBER, RULE_WITHHELD_IN_SELECTION,
-    RULE_ZERO_SIZE,
+    RULE_BEG_END_BATES_SPAN, RULE_BROKEN_FAMILY_INCOMPLETE_PARENT, RULE_BROKEN_FAMILY_ORPHAN_CHILD,
+    RULE_BURNED_NATIVE_MISSING, RULE_EMPTY_SELECTION, RULE_IMAGE_PAGE_MISSING,
+    RULE_IMAGE_SKIPPED_NATIVE_ONLY, RULE_ITEM_STATUS_ERROR, RULE_MISSING_NATIVE, RULE_MISSING_TEXT,
+    RULE_MULTI_PAGE_TIFF_AS_ARTIFACT, RULE_ONLY_WITHHELD, RULE_OPT_ROW_COUNT_MISMATCH,
+    RULE_PDF_NEEDS_OCR, RULE_REDACTED_TEXT_MISSING, RULE_TEXT_REDACT_UNMAPPED_ON_PDF,
+    RULE_WITHHELD_FAMILY_MEMBER, RULE_WITHHELD_IN_SELECTION, RULE_ZERO_SIZE,
 };
 
 /// Re-export pack id constants for callers that depend on matter-qc only.
 pub use matter_core::{
-    QC_PACK_DEFAULT_V1 as PACK_DEFAULT_V1, QC_PACK_LEGACY_DEFAULT as PACK_LEGACY_DEFAULT,
-    QC_PACK_NATIVE_HEAVY_V1 as PACK_NATIVE_HEAVY_V1,
+    QC_PACK_DEFAULT_V1 as PACK_DEFAULT_V1, QC_PACK_IMAGE_OPT_V1 as PACK_IMAGE_OPT_V1,
+    QC_PACK_LEGACY_DEFAULT as PACK_LEGACY_DEFAULT, QC_PACK_NATIVE_HEAVY_V1 as PACK_NATIVE_HEAVY_V1,
     QC_PACK_STRICT_PRIVILEGE_V1 as PACK_STRICT_PRIVILEGE_V1,
 };
 
@@ -125,12 +126,41 @@ pub fn pack_native_heavy_v1() -> Vec<QcRuleConfig> {
     rules
 }
 
+/// Image + OPT pack: default severities plus page/OPT rules. 0114 Errors stay.
+pub fn pack_image_opt_v1() -> Vec<QcRuleConfig> {
+    let mut rules = pack_default_v1();
+    rules.push(QcRuleConfig {
+        id: RULE_IMAGE_PAGE_MISSING.into(),
+        severity: QcSeverity::Error,
+    });
+    rules.push(QcRuleConfig {
+        id: RULE_BEG_END_BATES_SPAN.into(),
+        severity: QcSeverity::Error,
+    });
+    rules.push(QcRuleConfig {
+        id: RULE_OPT_ROW_COUNT_MISMATCH.into(),
+        severity: QcSeverity::Error,
+    });
+    rules.push(QcRuleConfig {
+        id: RULE_IMAGE_SKIPPED_NATIVE_ONLY.into(),
+        severity: QcSeverity::Warn,
+    });
+    rules.push(QcRuleConfig {
+        id: RULE_MULTI_PAGE_TIFF_AS_ARTIFACT.into(),
+        severity: QcSeverity::Error,
+    });
+    rules
+}
+
 /// Whether `pack_id` is a known built-in (or legacy alias).
 pub fn is_known_pack_id(pack_id: &str) -> bool {
     let n = normalize_qc_pack_id(pack_id);
     matches!(
         n.as_str(),
-        QC_PACK_DEFAULT_V1 | QC_PACK_STRICT_PRIVILEGE_V1 | QC_PACK_NATIVE_HEAVY_V1
+        QC_PACK_DEFAULT_V1
+            | QC_PACK_STRICT_PRIVILEGE_V1
+            | QC_PACK_NATIVE_HEAVY_V1
+            | QC_PACK_IMAGE_OPT_V1
     ) || pack_id.trim() == QC_PACK_LEGACY_DEFAULT
         || pack_id.trim() == PROFILE_DEFAULT_PRODUCTION_QC_V1
 }
@@ -147,6 +177,7 @@ pub fn pack_rules_checked(pack_id: &str) -> Option<Vec<QcRuleConfig>> {
     Some(match normalized.as_str() {
         QC_PACK_STRICT_PRIVILEGE_V1 => pack_strict_privilege_v1(),
         QC_PACK_NATIVE_HEAVY_V1 => pack_native_heavy_v1(),
+        QC_PACK_IMAGE_OPT_V1 => pack_image_opt_v1(),
         _ => pack_default_v1(),
     })
 }
@@ -175,6 +206,7 @@ pub fn list_pack_ids() -> Vec<&'static str> {
         QC_PACK_DEFAULT_V1,
         QC_PACK_STRICT_PRIVILEGE_V1,
         QC_PACK_NATIVE_HEAVY_V1,
+        QC_PACK_IMAGE_OPT_V1,
         QC_PACK_LEGACY_DEFAULT,
     ]
 }
@@ -238,5 +270,27 @@ mod tests {
         let pack = pack_native_heavy_v1();
         let z = pack.iter().find(|r| r.id == RULE_ZERO_SIZE).expect("zero");
         assert_eq!(z.severity, QcSeverity::Error);
+    }
+
+    #[test]
+    fn image_opt_pack_adds_rules_default_unchanged() {
+        let def = pack_default_v1();
+        assert!(def.iter().all(|r| r.id != RULE_IMAGE_PAGE_MISSING));
+        assert!(def.iter().all(|r| r.id != RULE_IMAGE_SKIPPED_NATIVE_ONLY));
+        let img = pack_image_opt_v1();
+        let get = |id: &str| {
+            img.iter()
+                .find(|r| r.id == id)
+                .map(|r| r.severity)
+                .expect("rule")
+        };
+        assert_eq!(get(RULE_IMAGE_PAGE_MISSING), QcSeverity::Error);
+        assert_eq!(get(RULE_BEG_END_BATES_SPAN), QcSeverity::Error);
+        assert_eq!(get(RULE_OPT_ROW_COUNT_MISMATCH), QcSeverity::Error);
+        assert_eq!(get(RULE_IMAGE_SKIPPED_NATIVE_ONLY), QcSeverity::Warn);
+        assert_eq!(get(RULE_MULTI_PAGE_TIFF_AS_ARTIFACT), QcSeverity::Error);
+        assert_eq!(get(RULE_BURNED_NATIVE_MISSING), QcSeverity::Error);
+        assert_eq!(get(RULE_TEXT_REDACT_UNMAPPED_ON_PDF), QcSeverity::Error);
+        assert!(is_known_pack_id(QC_PACK_IMAGE_OPT_V1));
     }
 }

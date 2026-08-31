@@ -2,7 +2,7 @@
 
 **Audience:** counsel / ops who need a day-1 run without reading the conductor board.  
 **Version:** product RC **0.2.0-rc.1** (all crates aligned).  
-**Schema pin:** matter store `SCHEMA_VERSION` = **39** (`matter_core::SCHEMA_VERSION`).  
+**Schema pin:** matter store `SCHEMA_VERSION` = **41** (`matter_core::SCHEMA_VERSION`).  
 Older matters open and migrate through the existing migration path in `matter-core`; do not hand-edit `matter.db`.
 
 This page is the **single stand-alone** day-1 runbook. Deep docs are linked at the end.
@@ -163,7 +163,7 @@ Deep docs: [`docs/unique-pst-export.md`](unique-pst-export.md) (flags), [`docs/u
 | Item | Value |
 |---|---|
 | Constant | `matter_core::SCHEMA_VERSION` |
-| RC pin | **39** |
+| RC pin | **41** |
 | Migrations | Applied automatically on matter open/create |
 
 ---

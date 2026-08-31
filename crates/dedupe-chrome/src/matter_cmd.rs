@@ -112,7 +112,7 @@ mod tests {
         assert!(!resp.custodians_plus);
         assert_eq!(resp.produced, 0);
         assert_eq!(resp.schema_version, SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 40);
+        assert_eq!(SCHEMA_VERSION, 41);
         assert!(!resp.generated_at.is_empty());
         assert_eq!(resp.name, "EmptyOv");
     }

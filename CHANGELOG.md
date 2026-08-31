@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0115 — TIFF G4 + Opticon OPT)
+
+- Opt-in production profile `us_concordance_image_opt_v1` writes single-page TIFF CCITT Group 4 under `IMAGES/` plus seven-field Opticon `IMAGE.opt`, with page-level Bates (`BEGBATES` ≠ `ENDBATES`). Schema **v41** (`production_items.end_bates` / `page_count` + `production_image_pages`). Default `us_concordance_native_text_v1` stays DAT-only (no `IMAGES/`, no OPT). Spreadsheets and email stay native-only. Pin: `fax = "0.3"` (MIT). Absorbs **D-0040-01** / **D-0060-04** OPT half.
+
 ### Added (0114 — PDF raster + geometric burn)
 
 - zpdf 0.13.0 MIT CPU raster (`cpu-render`) for the chrome Image tab, schema v40 geometric drafts (`item_geom_redactions` + burned-native bookkeeping), content-stream burn then `rewrite_pdf` (incremental-only write is not the produce artifact), and JPEG/PNG paint-burn with matching codec. Absorbs **D-0032-01** / **D-0034-02**. Pin: `zpdf = "0.13.0"`.

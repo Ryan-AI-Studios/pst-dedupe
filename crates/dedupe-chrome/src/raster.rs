@@ -96,7 +96,7 @@ pub fn review_raster_page_blocking(
     {
         return Err(CommandError {
             kind: "unsupported_kind".into(),
-            message: "Not a page image (TIFF/OPT is 0115).".into(),
+            message: "Native-only (no print-to-TIFF)".into(),
         });
     }
     let bytes = load_native(&matter, &item)?;
@@ -130,6 +130,7 @@ pub fn review_raster_page_blocking(
             NativeKind::Pdf => "pdf".into(),
             NativeKind::Jpeg => "jpeg".into(),
             NativeKind::Png => "png".into(),
+            NativeKind::Tiff => "tiff".into(),
             NativeKind::Other => "other".into(),
         },
         truncated: page.truncated,
@@ -261,10 +262,14 @@ pub fn review_geom_upsert_blocking(
                 pixel_to_user_space(pixel, hw, hh, page.crop_box, page.rotate)
             }
         }
-        NativeKind::Jpeg | NativeKind::Png => {
+        NativeKind::Jpeg | NativeKind::Png | NativeKind::Tiff => {
             let page = raster_page(
                 &bytes,
-                0,
+                if kind == NativeKind::Tiff {
+                    args.page_index
+                } else {
+                    0
+                },
                 DPI_REVIEW,
                 item.native_sha256.as_deref(),
                 item.path.as_deref(),
@@ -298,7 +303,7 @@ pub fn review_geom_upsert_blocking(
         NativeKind::Other => {
             return Err(CommandError {
                 kind: "unsupported_kind".into(),
-                message: "Not a page image (TIFF/OPT is 0115).".into(),
+                message: "Native-only (no print-to-TIFF)".into(),
             });
         }
     };
@@ -998,7 +1003,11 @@ mod tests {
         .expect_err("eml");
         assert_eq!(err.kind, "unsupported_kind");
         assert!(
-            err.message.contains("Not a page image"),
+            err.message.to_ascii_lowercase().contains("native-only")
+                || err
+                    .message
+                    .to_ascii_lowercase()
+                    .contains("not a page image"),
             "got {}",
             err.message
         );

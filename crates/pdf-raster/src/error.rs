@@ -14,8 +14,12 @@ pub enum Error {
     TooManyPages { count: usize },
     #[error("pdf_encrypted")]
     Encrypted,
-    #[error("not a page image (TIFF/OPT is 0115)")]
+    #[error("not a page image (native-only; no print-to-TIFF)")]
     UnsupportedKind,
+    #[error("g4 encode failed")]
+    G4EncodeFailed,
+    #[error("tiff ifd write failed: {0}")]
+    TiffIfd(String),
     #[error("page index {index} out of range (page_count={count})")]
     PageOutOfRange { index: u32, count: u32 },
     #[error("jpeg encode failed; refuse codec swap")]
@@ -42,6 +46,8 @@ impl Error {
             Error::TooManyPages { .. } => "too_many_pages",
             Error::Encrypted => "pdf_encrypted",
             Error::UnsupportedKind => "unsupported_kind",
+            Error::G4EncodeFailed => "g4_encode_failed",
+            Error::TiffIfd(_) => "tiff_ifd",
             Error::PageOutOfRange { .. } => "page_out_of_range",
             Error::JpegEncodeFailed => "jpeg_encode_failed",
             Error::PngEncodeFailed => "png_encode_failed",

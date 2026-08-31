@@ -324,6 +324,10 @@ pub struct ProductionProfileThin {
     pub slug: String,
     pub name: String,
     pub qc_pack_id: String,
+    #[serde(default)]
+    pub include_images: bool,
+    #[serde(default)]
+    pub bates_mode: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]

@@ -313,6 +313,47 @@ pub fn resolve_native(
     Ok(Err("missing_native".into()))
 }
 
+/// CAS bytes that [`resolve_native`] would ship (burned when required, else original).
+///
+/// Does not write NATIVES/. Encrypted / missing-burn surfaces as `Err(reason)`.
+pub fn load_native_payload(
+    matter: &Matter,
+    item: &Item,
+) -> Result<std::result::Result<Vec<u8>, String>> {
+    const CAP: u64 = 100 * 1024 * 1024;
+    let fingerprint = matter.geom_burn_fingerprint(&item.id)?;
+    let is_pdf = item_is_pdf_native(matter, item)?;
+    if burn_required_pdf_known(item, &fingerprint, is_pdf) {
+        if !burned_native_fresh(item, &fingerprint) {
+            return Ok(Err("burned_native_missing".into()));
+        }
+        let Some(sha) = item
+            .burned_native_sha256
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(Err("burned_native_missing".into()));
+        };
+        let b = matter
+            .get_bytes_capped(sha, CAP)
+            .map_err(|e| ProduceError::Other(format!("burned native CAS read failed: {e}")))?;
+        return Ok(Ok(b));
+    }
+    if let Some(sha) = item
+        .native_sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let b = matter
+            .get_bytes_capped(sha, CAP)
+            .map_err(|e| ProduceError::Other(format!("native CAS read failed: {e}")))?;
+        return Ok(Ok(b));
+    }
+    Ok(Err("missing_native".into()))
+}
+
 fn guess_mime(ext: &str) -> &'static str {
     match ext {
         "eml" => "message/rfc822",

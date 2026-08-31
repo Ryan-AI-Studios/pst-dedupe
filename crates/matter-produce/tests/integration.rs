@@ -13,7 +13,7 @@ use matter_core::{
 };
 use matter_produce::{
     encode_dat_field, format_utc_datetime, run_produce, ProduceOutcome, ProduceParams, DAT_FIELDS,
-    DAT_NEWLINE, JOB_KIND_PRODUCE, PRODUCE_STAGE, UTF8_BOM,
+    DAT_NEWLINE, DAT_QUALIFIER, DAT_SEPARATOR, JOB_KIND_PRODUCE, PRODUCE_STAGE, UTF8_BOM,
 };
 use sha2::{Digest, Sha256};
 
@@ -99,7 +99,7 @@ fn sha256_file(path: &std::path::Path) -> String {
 #[test]
 fn schema_v20_production_tables() {
     let (_tmp, matter) = temp_matter("schema-v20");
-    assert_eq!(SCHEMA_VERSION, 40);
+    assert_eq!(SCHEMA_VERSION, 41);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     for table in ["production_sets", "production_items"] {
         let has: bool = matter
@@ -2102,7 +2102,7 @@ fn qc_expand_false_produce_expand_true_is_stale() {
 #[test]
 fn schema_v38_production_profiles_table() {
     let (_tmp, matter) = temp_matter("schema-v38");
-    assert_eq!(SCHEMA_VERSION, 40);
+    assert_eq!(SCHEMA_VERSION, 41);
     assert_eq!(matter.schema_version().expect("ver"), SCHEMA_VERSION);
     let has: bool = matter
         .connection()
@@ -2785,5 +2785,1116 @@ fn fingerprint_pack_mismatch_blocks_produce() {
             );
         }
         other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 0115 TIFF G4 + Opticon OPT
+// ---------------------------------------------------------------------------
+
+fn image_produce_params(name: &str, ids: Vec<String>) -> ProduceParams {
+    use matter_core::BUILTIN_US_CONCORDANCE_IMAGE_OPT_V1;
+    ProduceParams {
+        name: Some(name.into()),
+        production_profile: Some(BUILTIN_US_CONCORDANCE_IMAGE_OPT_V1.into()),
+        scope: "item_ids".into(),
+        item_ids: ids,
+        bates_start: Some(1),
+        bates_prefix: Some("PROD".into()),
+        ..Default::default()
+    }
+}
+
+fn parse_dat_row(root: &str, index: usize) -> Vec<String> {
+    let text = dat_text(root);
+    let line = text
+        .lines()
+        .nth(index + 1)
+        .unwrap_or_else(|| panic!("missing DAT row {index}"));
+    line.split(DAT_SEPARATOR)
+        .map(|s| s.trim_matches(DAT_QUALIFIER).to_string())
+        .collect()
+}
+
+fn oracle_produced_g4(bytes: &[u8], expect_dpi: u32) {
+    use pdf_raster::{looks_like_tiff, parse_le_ifd0_tags, read_le_rational, tiff_ifd_count};
+    assert!(looks_like_tiff(bytes), "not TIFF");
+    assert_eq!(&bytes[0..4], b"II*\0", "little-endian II*");
+    let tags = parse_le_ifd0_tags(bytes).expect("ifd");
+    let get = |t: u16| {
+        tags.iter()
+            .find(|(tag, _, _, _)| *tag == t)
+            .copied()
+            .unwrap_or_else(|| panic!("missing tag {t}"))
+    };
+    let (_, _, _, v258) = get(258);
+    assert_eq!(v258 & 0xFFFF, 1, "BitsPerSample");
+    let (_, _, _, v259) = get(259);
+    assert_eq!(v259 & 0xFFFF, 4, "Compression");
+    let (_, _, _, v262) = get(262);
+    assert_eq!(v262 & 0xFFFF, 0, "Photometric");
+    let (_, _, _, v296) = get(296);
+    assert_eq!(v296 & 0xFFFF, 2, "ResolutionUnit");
+    let (_, _, _, xoff) = get(282);
+    let (_, _, _, yoff) = get(283);
+    let (xn, xd) = read_le_rational(bytes, xoff).expect("xres");
+    let (yn, yd) = read_le_rational(bytes, yoff).expect("yres");
+    assert_ne!(xd, 0);
+    assert_ne!(yd, 0);
+    assert_eq!(xn / xd, expect_dpi, "XRes");
+    assert_eq!(yn / yd, expect_dpi, "YRes");
+    assert_eq!(tiff_ifd_count(bytes).expect("ifd count"), 1);
+}
+
+fn contains_utf16le(hay: &[u8], needle: &str) -> bool {
+    let mut enc = Vec::new();
+    for u in needle.encode_utf16() {
+        enc.extend_from_slice(&u.to_le_bytes());
+    }
+    hay.windows(enc.len()).any(|w| w == enc.as_slice())
+}
+
+#[test]
+fn dod1_dat_only_profile_no_images() {
+    use matter_core::BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1;
+    let (_tmp, matter) = temp_matter("0115-dod1");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let pdf = pdf_raster::synthetic_text_pdf(&[("hello", 0)]);
+    let n = put_native(&matter, &pdf);
+    let t = put_text(&matter, "hello");
+    insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("a.pdf".into()),
+            native_sha256: Some(n),
+            text_sha256: Some(t),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &ProduceParams {
+            name: Some("DATONLY".into()),
+            production_profile: Some(BUILTIN_US_CONCORDANCE_NATIVE_TEXT_V1.into()),
+            ..Default::default()
+        },
+    );
+    let root = camino::Utf8Path::new(&s.output_root);
+    assert!(root.join("DATA").join("load.dat").as_std_path().is_file());
+    assert!(root.join("NATIVES").as_std_path().is_dir());
+    assert!(root.join("TEXT").as_std_path().is_dir());
+    assert!(!root.join("IMAGES").as_std_path().exists());
+    assert!(!root.join("IMAGE.opt").as_std_path().exists());
+    let row = parse_dat_row(&s.output_root, 0);
+    assert_eq!(row[0], row[1], "BEGBATES=ENDBATES");
+    assert_eq!(row[0], row[2], "BEGBATES=CONTROL_NUMBER");
+    let (end_bates, page_count): (Option<String>, Option<i64>) = matter
+        .connection()
+        .query_row(
+            "SELECT end_bates, page_count FROM production_items WHERE production_set_id = ?1",
+            [&s.production_set_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("dat-only span");
+    assert!(
+        end_bates.is_none(),
+        "DAT-only end_bates must be NULL, got {end_bates:?}"
+    );
+    assert!(
+        page_count.is_none(),
+        "DAT-only page_count must be NULL, got {page_count:?}"
+    );
+}
+
+#[test]
+fn dod2_image_profile_two_page_pdf_and_inbound_tiff() {
+    let (_tmp, matter) = temp_matter("0115-dod2");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let pdf = pdf_raster::synthetic_text_pdf(&[("PAGE ONE", 0), ("PAGE TWO", 0)]);
+    let pdf_id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("two.pdf".into()),
+            native_sha256: Some(put_native(&matter, &pdf)),
+            text_sha256: Some(put_text(&matter, "pdf")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let tiff = pdf_raster::synthetic_gray8_tiff(&[vec![200u8; 64], vec![30u8; 64]], 8, 8)
+        .expect("2-ifd tiff");
+    let tiff_id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("scan.tif".into()),
+            native_sha256: Some(put_native(&matter, &tiff)),
+            text_sha256: Some(put_text(&matter, "tiff")),
+            mime_type: Some("image/tiff".into()),
+            file_category: Some("image".into()),
+            ..Default::default()
+        },
+    );
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &image_produce_params("VOL001", vec![pdf_id, tiff_id]),
+    );
+    assert_eq!(s.error_count, 0);
+    assert_eq!(s.produced_count, 2);
+    let root = camino::Utf8Path::new(&s.output_root);
+    for name in [
+        "PROD000001.TIF",
+        "PROD000002.TIF",
+        "PROD000003.TIF",
+        "PROD000004.TIF",
+    ] {
+        let p = root.join("IMAGES").join("001").join(name);
+        let bytes = fs::read(p.as_std_path()).unwrap_or_else(|_| panic!("missing {p}"));
+        oracle_produced_g4(&bytes, 300);
+        assert_ne!(
+            bytes.as_slice(),
+            tiff.as_slice(),
+            "original multi-page TIFF must not be copied into IMAGES/"
+        );
+    }
+    let opt = fs::read_to_string(root.join("IMAGE.opt").as_std_path()).expect("opt");
+    let lines: Vec<_> = opt.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 4);
+    assert!(
+        lines[0].starts_with("PROD000001,") && lines[0].contains(",Y,,,2"),
+        "first OPT: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].starts_with("PROD000002,") && lines[1].ends_with(",,,,"),
+        "interior OPT: {}",
+        lines[1]
+    );
+    let pdf_row = parse_dat_row(&s.output_root, 0);
+    assert_eq!(pdf_row[0], "PROD000001");
+    assert_eq!(pdf_row[1], "PROD000002");
+    assert_ne!(pdf_row[0], pdf_row[1]);
+    let natives = root.join("NATIVES");
+    let has_pdf = fs::read_dir(natives.as_std_path())
+        .expect("natives")
+        .filter_map(|e| e.ok())
+        .any(|d| {
+            d.path()
+                .extension()
+                .map(|x| x.eq_ignore_ascii_case("pdf"))
+                .unwrap_or(false)
+        });
+    assert!(has_pdf, "NATIVES must still contain the PDF");
+}
+
+#[test]
+fn image_resume_honors_end_bates() {
+    let (_tmp, matter) = temp_matter("0115-resume");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let pdf3 = pdf_raster::synthetic_text_pdf(&[("A", 0), ("B", 0), ("C", 0)]);
+    let pdf1 = pdf_raster::synthetic_text_pdf(&[("D", 0)]);
+    let id3 = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("three.pdf".into()),
+            native_sha256: Some(put_native(&matter, &pdf3)),
+            text_sha256: Some(put_text(&matter, "3")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let id1 = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("one.pdf".into()),
+            native_sha256: Some(put_native(&matter, &pdf1)),
+            text_sha256: Some(put_text(&matter, "1")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let outcome = run_produce_pkg(
+        &matter,
+        &job.id,
+        &image_produce_params("RESUME", vec![id3.clone(), id1.clone()]),
+        Some(&|| flag.load(Ordering::SeqCst)),
+        |completed| {
+            if completed >= 1 {
+                flag.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .expect("run");
+    let paused = match outcome {
+        ProduceOutcome::Paused(s) => s,
+        other => panic!("expected Paused, got {other:?}"),
+    };
+    assert!(paused.produced_count >= 1);
+    assert_eq!(
+        paused.next_seq, 4,
+        "page-level Bates must consume 3 sequences for the first item"
+    );
+
+    let cp = matter
+        .get_checkpoint(&job.id, PRODUCE_STAGE)
+        .unwrap()
+        .expect("checkpoint");
+    let mut cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor");
+    let done = cursor
+        .get_mut("done_item_ids")
+        .and_then(|v| v.as_array_mut())
+        .expect("done");
+    done.retain(|v| v.as_str() != Some(id3.as_str()));
+    cursor["next_seq"] = serde_json::json!(2);
+    cursor["produced_count"] = serde_json::json!(0);
+    cursor["cursor_index"] = serde_json::json!(0);
+    cursor["completed_count"] = serde_json::json!(0);
+    cursor["phase"] = serde_json::json!("work");
+    matter
+        .put_checkpoint(&job.id, PRODUCE_STAGE, &cursor.to_string(), 0)
+        .expect("put");
+
+    let s2 = run_ok(
+        &matter,
+        &job.id,
+        &image_produce_params("RESUME", vec![id3.clone(), id1.clone()]),
+    );
+    assert_eq!(s2.error_count, 0);
+    assert_eq!(s2.next_seq, 5, "second item must start after end_bates+1");
+    let end: String = matter
+        .connection()
+        .query_row(
+            "SELECT end_bates FROM production_items WHERE production_set_id = ?1 AND item_id = ?2",
+            [&s2.production_set_id, &id3],
+            |row| row.get(0),
+        )
+        .expect("end");
+    assert_eq!(end, "PROD000003");
+    let beg2: String = matter
+        .connection()
+        .query_row(
+            "SELECT control_number FROM production_items WHERE production_set_id = ?1 AND item_id = ?2",
+            [&s2.production_set_id, &id1],
+            |row| row.get(0),
+        )
+        .expect("beg2");
+    assert_eq!(
+        beg2, "PROD000004",
+        "resume must use end_bates, not beg+1 (would be PROD000002)"
+    );
+}
+
+#[test]
+fn dod3_native_only_xlsx_zero_opt_warn() {
+    use matter_core::QC_PACK_IMAGE_OPT_V1;
+    use matter_qc::{
+        evaluate_candidates, resolve_rules_for_pack, QcSeverity, RULE_IMAGE_SKIPPED_NATIVE_ONLY,
+    };
+    let (_tmp, matter) = temp_matter("0115-dod3");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let pdf = pdf_raster::synthetic_text_pdf(&[("P", 0)]);
+    let pdf_id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("a.pdf".into()),
+            native_sha256: Some(put_native(&matter, &pdf)),
+            text_sha256: Some(put_text(&matter, "p")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let xlsx_id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("sheet.xlsx".into()),
+            native_sha256: Some(put_native(&matter, b"PK\x03\x04xlsx")),
+            text_sha256: Some(put_text(&matter, "sheet")),
+            mime_type: Some(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
+            ),
+            file_category: Some("spreadsheet".into()),
+            ..Default::default()
+        },
+    );
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &image_produce_params("XLSX", vec![pdf_id.clone(), xlsx_id.clone()]),
+    );
+    assert_eq!(s.produced_count, 2);
+    let root = camino::Utf8Path::new(&s.output_root);
+    let opt = fs::read_to_string(root.join("IMAGE.opt").as_std_path()).expect("opt");
+    let opt_lines: Vec<_> = opt.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(opt_lines.len(), 1, "xlsx must not appear in OPT");
+    assert!(opt_lines[0].starts_with("PROD000001,"));
+    let xlsx_row = parse_dat_row(&s.output_root, 1);
+    assert_eq!(xlsx_row[0], xlsx_row[1], "BEGBATES=ENDBATES for xlsx");
+    assert!(
+        xlsx_row[21].contains("NATIVES\\"),
+        "native path {}",
+        xlsx_row[21]
+    );
+    let tifs: Vec<_> = fs::read_dir(root.join("IMAGES").join("001").as_std_path())
+        .expect("images")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(tifs.len(), 1, "no slip-sheet TIF for xlsx");
+
+    let rules = resolve_rules_for_pack(QC_PACK_IMAGE_OPT_V1, &[]);
+    let findings = evaluate_candidates(&matter, &[pdf_id, xlsx_id.clone()], &rules).expect("qc");
+    let skip: Vec<_> = findings
+        .iter()
+        .filter(|f| f.rule_id == RULE_IMAGE_SKIPPED_NATIVE_ONLY)
+        .collect();
+    assert_eq!(skip.len(), 1);
+    assert_eq!(skip[0].severity, QcSeverity::Warn);
+    assert_eq!(skip[0].item_id.as_deref(), Some(xlsx_id.as_str()));
+    let (xlsx_end, xlsx_pc): (Option<String>, Option<i64>) = matter
+        .connection()
+        .query_row(
+            "SELECT end_bates, page_count FROM production_items \
+             WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![&s.production_set_id, &xlsx_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("xlsx span");
+    assert_eq!(xlsx_end.as_deref(), Some(xlsx_row[0].as_str()));
+    assert_eq!(
+        xlsx_pc,
+        Some(0),
+        "native-only image profile stores page_count=0"
+    );
+}
+
+#[test]
+fn dod4_burn_required_then_token_absent_from_g4() {
+    use pdf_raster::{burn_native, search_hit_rects};
+    let (_tmp, matter) = temp_matter("0115-dod4");
+    let pdf = pdf_raster::synthetic_text_pdf(&[("SECRET_TOKEN_0114", 0)]);
+    let orig = put_native(&matter, &pdf);
+    let text = put_text(&matter, "body");
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("secret.pdf".into()),
+            native_sha256: Some(orig.clone()),
+            text_sha256: Some(text),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let hits = search_hit_rects(&pdf, "SECRET_TOKEN_0114").expect("hits");
+    assert!(!hits.is_empty(), "synthetic PDF must expose the token");
+    for h in &hits {
+        matter
+            .create_geom_redaction(CreateGeomRedactionInput {
+                item_id: id.clone(),
+                page_index: i64::from(h.page_index),
+                x: h.x,
+                y: h.y,
+                w: h.w,
+                h: h.h,
+                reason: "privilege".into(),
+                label: None,
+                source: geom_source::DRAW.into(),
+                actor: "tester".into(),
+            })
+            .expect("geom");
+    }
+
+    let job_fail = matter.create_job(JOB_KIND_PRODUCE).expect("job fail");
+    let fail_out = run_produce_pkg(
+        &matter,
+        &job_fail.id,
+        &image_produce_params("NOBURN", vec![id.clone()]),
+        None,
+        |_| {},
+    )
+    .expect("run");
+    match fail_out {
+        ProduceOutcome::Failed { message, summary } => {
+            assert!(
+                message.contains("burned_native_missing"),
+                "job must refuse: {message}"
+            );
+            assert_eq!(summary.produced_count, 0);
+            assert!(summary.error_count >= 1);
+        }
+        other => panic!("expected Failed without burned native, got {other:?}"),
+    }
+
+    let burned =
+        burn_native(&pdf, &hits, Some("secret.pdf"), Some("application/pdf")).expect("burn");
+    assert!(!burned
+        .windows(b"SECRET_TOKEN_0114".len())
+        .any(|w| w == b"SECRET_TOKEN_0114"));
+    let burned_sha = put_native(&matter, &burned);
+    matter
+        .set_burned_native(SetBurnedNativeInput {
+            item_id: id.clone(),
+            burned_native_sha256: burned_sha,
+            expected_fingerprint: matter.geom_burn_fingerprint(&id).expect("fp"),
+            actor: "tester".into(),
+        })
+        .expect("set burned");
+
+    let job_ok = matter.create_job(JOB_KIND_PRODUCE).expect("job ok");
+    let s = run_ok(
+        &matter,
+        &job_ok.id,
+        &image_produce_params("BURNED", vec![id]),
+    );
+    assert_eq!(s.error_count, 0);
+    assert_eq!(s.produced_count, 1);
+    let tif_path = camino::Utf8Path::new(&s.output_root)
+        .join("IMAGES")
+        .join("001")
+        .join("PROD000001.TIF");
+    let tif = fs::read(tif_path.as_std_path()).expect("tif");
+    oracle_produced_g4(&tif, 300);
+    assert!(!tif
+        .windows(b"SECRET_TOKEN_0114".len())
+        .any(|w| w == b"SECRET_TOKEN_0114"));
+    assert!(!contains_utf16le(&tif, "SECRET_TOKEN_0114"));
+    let decoded = pdf_raster::raster_page(
+        &tif,
+        0,
+        300,
+        None,
+        Some("PROD000001.TIF"),
+        Some("image/tiff"),
+    )
+    .expect("decode g4");
+    assert!(!decoded
+        .png
+        .windows(b"SECRET_TOKEN_0114".len())
+        .any(|w| w == b"SECRET_TOKEN_0114"));
+    assert!(!contains_utf16le(&decoded.png, "SECRET_TOKEN_0114"));
+    let orig_bytes = matter.get_bytes(&orig).expect("orig cas");
+    assert!(orig_bytes
+        .windows(b"SECRET_TOKEN_0114".len())
+        .any(|w| w == b"SECRET_TOKEN_0114"));
+}
+
+#[test]
+fn late_withhold_purges_tiffs_and_opt() {
+    let (_tmp, matter) = temp_matter("0115-late-img");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let mut ids = Vec::new();
+    for (i, label) in ["ONE", "TWO"].iter().enumerate() {
+        let pdf = pdf_raster::synthetic_text_pdf(&[(label, 0)]);
+        ids.push(insert_review_item(
+            &matter,
+            ItemInput {
+                path: Some(format!("p{i}.pdf")),
+                native_sha256: Some(put_native(&matter, &pdf)),
+                text_sha256: Some(put_text(&matter, label)),
+                mime_type: Some("application/pdf".into()),
+                file_category: Some("pdf".into()),
+                ..Default::default()
+            },
+        ));
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let outcome = run_produce_pkg(
+        &matter,
+        &job.id,
+        &image_produce_params("LATEIMG", ids.clone()),
+        Some(&|| flag.load(Ordering::SeqCst)),
+        |completed| {
+            if completed >= 1 {
+                flag.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .expect("run");
+    let paused = match outcome {
+        ProduceOutcome::Paused(s) => s,
+        other => panic!("expected Paused, got {other:?}"),
+    };
+    assert!(paused.produced_count >= 1);
+    matter
+        .upsert_item_privilege(UpsertItemPrivilegeInput {
+            item_id: ids[0].clone(),
+            basis: "attorney_client".into(),
+            description: "hold after image produce".into(),
+            status: "asserted".into(),
+            withhold: true,
+            include_on_log: true,
+            actor: "t".into(),
+            expected_version: None,
+        })
+        .expect("withhold");
+    let s2 = run_ok(
+        &matter,
+        &job.id,
+        &image_produce_params("LATEIMG", ids.clone()),
+    );
+    assert_eq!(s2.skipped_withheld, 1);
+    let tif1 = camino::Utf8Path::new(&s2.output_root)
+        .join("IMAGES")
+        .join("001")
+        .join("PROD000001.TIF");
+    assert!(!tif1.as_std_path().exists(), "withheld TIFF must be purged");
+    let opt = fs::read_to_string(
+        camino::Utf8Path::new(&s2.output_root)
+            .join("IMAGE.opt")
+            .as_std_path(),
+    )
+    .expect("opt");
+    assert!(
+        !opt.contains("PROD000001"),
+        "withheld Bates must not appear in OPT: {opt}"
+    );
+    let n_pages: i64 = matter
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM production_image_pages \
+             WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![s2.production_set_id, &ids[0]],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(n_pages, 0, "withheld image page rows must be deleted");
+}
+
+#[test]
+fn image_crash_between_span_and_pages_rematerializes() {
+    let (_tmp, matter) = temp_matter("0115-crash-pages");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let pdf3 = pdf_raster::synthetic_text_pdf(&[("A", 0), ("B", 0), ("C", 0)]);
+    let pdf1 = pdf_raster::synthetic_text_pdf(&[("D", 0)]);
+    let id3 = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("three.pdf".into()),
+            native_sha256: Some(put_native(&matter, &pdf3)),
+            text_sha256: Some(put_text(&matter, "3")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let id1 = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("one.pdf".into()),
+            native_sha256: Some(put_native(&matter, &pdf1)),
+            text_sha256: Some(put_text(&matter, "1")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let outcome = run_produce_pkg(
+        &matter,
+        &job.id,
+        &image_produce_params("CRASH", vec![id3.clone(), id1.clone()]),
+        Some(&|| flag.load(Ordering::SeqCst)),
+        |completed| {
+            if completed >= 1 {
+                flag.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .expect("run");
+    let paused = match outcome {
+        ProduceOutcome::Paused(s) => s,
+        other => panic!("expected Paused, got {other:?}"),
+    };
+    let set_id = paused.production_set_id.clone();
+    let pc: i64 = matter
+        .connection()
+        .query_row(
+            "SELECT COALESCE(page_count, 0) FROM production_items \
+             WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![&set_id, &id3],
+            |r| r.get(0),
+        )
+        .expect("pc");
+    assert_eq!(pc, 3, "first item must have persisted page_count=3");
+    matter
+        .connection()
+        .execute(
+            "DELETE FROM production_image_pages WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![&set_id, &id3],
+        )
+        .expect("delete pages");
+    let images = camino::Utf8Path::new(&paused.output_root)
+        .join("IMAGES")
+        .join("001");
+    for name in ["PROD000001.TIF", "PROD000002.TIF", "PROD000003.TIF"] {
+        let p = images.join(name);
+        let _ = fs::remove_file(p.as_std_path());
+    }
+    let cp = matter
+        .get_checkpoint(&job.id, PRODUCE_STAGE)
+        .unwrap()
+        .expect("checkpoint");
+    let mut cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor");
+    let done = cursor
+        .get_mut("done_item_ids")
+        .and_then(|v| v.as_array_mut())
+        .expect("done");
+    done.retain(|v| v.as_str() != Some(id3.as_str()));
+    cursor["next_seq"] = serde_json::json!(2);
+    cursor["produced_count"] = serde_json::json!(0);
+    cursor["cursor_index"] = serde_json::json!(0);
+    cursor["completed_count"] = serde_json::json!(0);
+    cursor["phase"] = serde_json::json!("work");
+    matter
+        .put_checkpoint(&job.id, PRODUCE_STAGE, &cursor.to_string(), 0)
+        .expect("put");
+
+    let s2 = run_ok(
+        &matter,
+        &job.id,
+        &image_produce_params("CRASH", vec![id3.clone(), id1.clone()]),
+    );
+    assert_eq!(s2.error_count, 0);
+    let pc2: i64 = matter
+        .connection()
+        .query_row(
+            "SELECT COALESCE(page_count, 0) FROM production_items \
+             WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![&s2.production_set_id, &id3],
+            |r| r.get(0),
+        )
+        .expect("pc2");
+    assert_eq!(pc2, 3, "resume must not overwrite page_count with 0");
+    let n_pages: i64 = matter
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM production_image_pages \
+             WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![&s2.production_set_id, &id3],
+            |r| r.get(0),
+        )
+        .expect("pages");
+    assert_eq!(n_pages, 3);
+    for name in ["PROD000001.TIF", "PROD000002.TIF", "PROD000003.TIF"] {
+        let p = images.join(name);
+        assert!(p.as_std_path().is_file(), "missing rematerialized {p}");
+    }
+}
+
+#[test]
+fn finalize_fails_when_tiff_hash_mutated() {
+    let (_tmp, matter) = temp_matter("0115-hash-mut");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let pdf = pdf_raster::synthetic_text_pdf(&[("P", 0)]);
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("p.pdf".into()),
+            native_sha256: Some(put_native(&matter, &pdf)),
+            text_sha256: Some(put_text(&matter, "p")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let s = run_ok(&matter, &job.id, &image_produce_params("HASHMUT", vec![id]));
+    let tif = camino::Utf8Path::new(&s.output_root)
+        .join("IMAGES")
+        .join("001")
+        .join("PROD000001.TIF");
+    let mut bytes = fs::read(tif.as_std_path()).expect("tif");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    fs::write(tif.as_std_path(), &bytes).expect("mutate");
+    let cp = matter
+        .get_checkpoint(&job.id, PRODUCE_STAGE)
+        .unwrap()
+        .expect("checkpoint");
+    let mut cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor");
+    cursor["phase"] = serde_json::json!("finalize");
+    matter
+        .put_checkpoint(&job.id, PRODUCE_STAGE, &cursor.to_string(), 0)
+        .expect("put");
+    let out = run_produce_pkg(
+        &matter,
+        &job.id,
+        &image_produce_params("HASHMUT", vec![]),
+        None,
+        |_| {},
+    )
+    .expect("rerun");
+    match out {
+        ProduceOutcome::Failed { message, .. } => {
+            assert!(
+                message.contains("hash") || message.contains("image_page"),
+                "expected hash/page fail, got {message}"
+            );
+        }
+        other => panic!("expected Failed after TIFF mutate, got {other:?}"),
+    }
+}
+
+#[test]
+fn image_crash_after_first_tiff_write_rematerializes() {
+    let (_tmp, matter) = temp_matter("0115-crash-p1");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let pdf3 = pdf_raster::synthetic_text_pdf(&[("A", 0), ("B", 0), ("C", 0)]);
+    let pdf1 = pdf_raster::synthetic_text_pdf(&[("D", 0)]);
+    let id3 = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("three.pdf".into()),
+            native_sha256: Some(put_native(&matter, &pdf3)),
+            text_sha256: Some(put_text(&matter, "3")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let id1 = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("one.pdf".into()),
+            native_sha256: Some(put_native(&matter, &pdf1)),
+            text_sha256: Some(put_text(&matter, "1")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let outcome = run_produce_pkg(
+        &matter,
+        &job.id,
+        &image_produce_params("CRASHP1", vec![id3.clone(), id1.clone()]),
+        Some(&|| flag.load(Ordering::SeqCst)),
+        |completed| {
+            if completed >= 1 {
+                flag.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .expect("run");
+    let paused = match outcome {
+        ProduceOutcome::Paused(s) => s,
+        other => panic!("expected Paused, got {other:?}"),
+    };
+    let set_id = paused.production_set_id.clone();
+    let images = camino::Utf8Path::new(&paused.output_root)
+        .join("IMAGES")
+        .join("001");
+    for name in ["PROD000002.TIF", "PROD000003.TIF"] {
+        let _ = fs::remove_file(images.join(name).as_std_path());
+    }
+    assert!(
+        images.join("PROD000001.TIF").as_std_path().is_file(),
+        "page-1 TIFF must remain as the orphan"
+    );
+    matter
+        .connection()
+        .execute(
+            "DELETE FROM production_image_pages WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![&set_id, &id3],
+        )
+        .expect("delete pages");
+    matter
+        .connection()
+        .execute(
+            "DELETE FROM production_items WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![&set_id, &id3],
+        )
+        .expect("delete item");
+    let jsonl = camino::Utf8Path::new(&paused.output_root)
+        .join("DATA")
+        .join("rows.jsonl");
+    if jsonl.as_std_path().is_file() {
+        let kept: Vec<String> = fs::read_to_string(jsonl.as_std_path())
+            .expect("jsonl")
+            .lines()
+            .filter(|l| !l.contains(&id3))
+            .map(str::to_string)
+            .collect();
+        fs::write(jsonl.as_std_path(), kept.join("\n") + "\n").expect("rewrite jsonl");
+    }
+    let cp = matter
+        .get_checkpoint(&job.id, PRODUCE_STAGE)
+        .unwrap()
+        .expect("checkpoint");
+    let mut cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor");
+    let done = cursor
+        .get_mut("done_item_ids")
+        .and_then(|v| v.as_array_mut())
+        .expect("done");
+    done.retain(|v| v.as_str() != Some(id3.as_str()));
+    cursor["next_seq"] = serde_json::json!(1);
+    cursor["produced_count"] = serde_json::json!(0);
+    cursor["cursor_index"] = serde_json::json!(0);
+    cursor["completed_count"] = serde_json::json!(0);
+    cursor["phase"] = serde_json::json!("work");
+    matter
+        .put_checkpoint(&job.id, PRODUCE_STAGE, &cursor.to_string(), 0)
+        .expect("put");
+
+    let s2 = run_ok(
+        &matter,
+        &job.id,
+        &image_produce_params("CRASHP1", vec![id3.clone(), id1.clone()]),
+    );
+    assert_eq!(s2.error_count, 0);
+    assert_eq!(s2.next_seq, 5, "second item must start at page 4");
+    for name in ["PROD000001.TIF", "PROD000002.TIF", "PROD000003.TIF"] {
+        let p = images.join(name);
+        assert!(p.as_std_path().is_file(), "missing rematerialized {p}");
+        let bytes = fs::read(p.as_std_path()).expect("tif");
+        oracle_produced_g4(&bytes, 300);
+    }
+    let n_pages: i64 = matter
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM production_image_pages \
+             WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![&s2.production_set_id, &id3],
+            |r| r.get(0),
+        )
+        .expect("pages");
+    assert_eq!(n_pages, 3);
+}
+
+#[test]
+fn image_zero_ifd_tiff_fails_job() {
+    let (_tmp, matter) = temp_matter("0115-zero-ifd");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let empty_tiff = vec![b'I', b'I', 0x2A, 0, 0, 0, 0, 0];
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("empty.tif".into()),
+            native_sha256: Some(put_native(&matter, &empty_tiff)),
+            text_sha256: Some(put_text(&matter, "empty")),
+            mime_type: Some("image/tiff".into()),
+            file_category: Some("image".into()),
+            ..Default::default()
+        },
+    );
+    let out = run_produce_pkg(
+        &matter,
+        &job.id,
+        &image_produce_params("ZEROIFD", vec![id]),
+        None,
+        |_| {},
+    )
+    .expect("run");
+    match out {
+        ProduceOutcome::Failed { message, summary } => {
+            assert!(
+                message.to_ascii_lowercase().contains("zero")
+                    || message.to_ascii_lowercase().contains("image page"),
+                "job must refuse zero-IFD TIFF: {message}"
+            );
+            assert_eq!(summary.produced_count, 0);
+            assert!(summary.error_count >= 1);
+        }
+        other => panic!("expected Failed for zero-IFD TIFF, got {other:?}"),
+    }
+}
+
+#[test]
+fn image_resume_zero_page_ok_row_fails_job() {
+    let (_tmp, matter) = temp_matter("0115-resume-zero");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let pdf = pdf_raster::synthetic_text_pdf(&[("P", 0)]);
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("p.pdf".into()),
+            native_sha256: Some(put_native(&matter, &pdf)),
+            text_sha256: Some(put_text(&matter, "p")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &image_produce_params("RESUMEZERO", vec![id.clone()]),
+    );
+    let empty_tiff = vec![b'I', b'I', 0x2A, 0, 0, 0, 0, 0];
+    let new_sha = put_native(&matter, &empty_tiff);
+    matter
+        .connection()
+        .execute(
+            "UPDATE items SET native_sha256 = ?1, path = 'empty.tif', \
+             mime_type = 'image/tiff', file_category = 'image' WHERE id = ?2",
+            rusqlite::params![&new_sha, &id],
+        )
+        .expect("swap native");
+    matter
+        .connection()
+        .execute(
+            "UPDATE production_items SET page_count = NULL WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![&s.production_set_id, &id],
+        )
+        .expect("null pages");
+    matter
+        .connection()
+        .execute(
+            "DELETE FROM production_image_pages WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![&s.production_set_id, &id],
+        )
+        .expect("delete pages");
+    let images = camino::Utf8Path::new(&s.output_root)
+        .join("IMAGES")
+        .join("001");
+    let _ = fs::remove_file(images.join("PROD000001.TIF").as_std_path());
+    let jsonl = camino::Utf8Path::new(&s.output_root)
+        .join("DATA")
+        .join("rows.jsonl");
+    let _ = fs::remove_file(jsonl.as_std_path());
+    let cp = matter
+        .get_checkpoint(&job.id, PRODUCE_STAGE)
+        .unwrap()
+        .expect("checkpoint");
+    let mut cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor");
+    cursor["done_item_ids"] = serde_json::json!([]);
+    cursor["next_seq"] = serde_json::json!(1);
+    cursor["produced_count"] = serde_json::json!(0);
+    cursor["cursor_index"] = serde_json::json!(0);
+    cursor["completed_count"] = serde_json::json!(0);
+    cursor["phase"] = serde_json::json!("work");
+    matter
+        .put_checkpoint(&job.id, PRODUCE_STAGE, &cursor.to_string(), 0)
+        .expect("put");
+    let out = run_produce_pkg(
+        &matter,
+        &job.id,
+        &image_produce_params("RESUMEZERO", vec![id]),
+        None,
+        |_| {},
+    )
+    .expect("resume");
+    match out {
+        ProduceOutcome::Failed { message, .. } => {
+            assert!(
+                message.to_ascii_lowercase().contains("zero")
+                    || message.to_ascii_lowercase().contains("image page"),
+                "resume must refuse zero-IFD native: {message}"
+            );
+        }
+        other => panic!("expected Failed on resume of zero-page image ok-row, got {other:?}"),
+    }
+}
+
+#[test]
+fn image_finalize_zero_page_ok_row_fails_job() {
+    let (_tmp, matter) = temp_matter("0115-fin-zero");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let pdf = pdf_raster::synthetic_text_pdf(&[("P", 0)]);
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("p.pdf".into()),
+            native_sha256: Some(put_native(&matter, &pdf)),
+            text_sha256: Some(put_text(&matter, "p")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &image_produce_params("FINZERO", vec![id.clone()]),
+    );
+    matter
+        .connection()
+        .execute(
+            "UPDATE production_items SET page_count = NULL WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![&s.production_set_id, &id],
+        )
+        .expect("null pages");
+    matter
+        .connection()
+        .execute(
+            "DELETE FROM production_image_pages WHERE production_set_id = ?1 AND item_id = ?2",
+            rusqlite::params![&s.production_set_id, &id],
+        )
+        .expect("delete pages");
+    let images = camino::Utf8Path::new(&s.output_root)
+        .join("IMAGES")
+        .join("001");
+    let _ = fs::remove_file(images.join("PROD000001.TIF").as_std_path());
+    let cp = matter
+        .get_checkpoint(&job.id, PRODUCE_STAGE)
+        .unwrap()
+        .expect("checkpoint");
+    let mut cursor: serde_json::Value = serde_json::from_str(&cp.cursor_json).expect("cursor");
+    cursor["phase"] = serde_json::json!("finalize");
+    matter
+        .put_checkpoint(&job.id, PRODUCE_STAGE, &cursor.to_string(), 0)
+        .expect("put");
+    let out = run_produce_pkg(
+        &matter,
+        &job.id,
+        &image_produce_params("FINZERO", vec![id]),
+        None,
+        |_| {},
+    )
+    .expect("finalize");
+    match out {
+        ProduceOutcome::Failed { message, .. } => {
+            assert!(
+                message.to_ascii_lowercase().contains("zero")
+                    || message.to_ascii_lowercase().contains("image-eligible"),
+                "finalize must refuse zero-page image ok-row: {message}"
+            );
+        }
+        other => panic!("expected Failed on finalize of zero-page image ok-row, got {other:?}"),
+    }
+}
+
+#[test]
+fn image_missing_native_fails_job() {
+    let (_tmp, matter) = temp_matter("0115-miss-native");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("gone.pdf".into()),
+            native_sha256: None,
+            text_sha256: Some(put_text(&matter, "p")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let out = run_produce_pkg(
+        &matter,
+        &job.id,
+        &image_produce_params("MISSNAT", vec![id]),
+        None,
+        |_| {},
+    )
+    .expect("run");
+    match out {
+        ProduceOutcome::Failed { message, .. } => {
+            assert!(
+                message.to_ascii_lowercase().contains("image-eligible")
+                    || message.to_ascii_lowercase().contains("missing"),
+                "missing native PDF must fail closed: {message}"
+            );
+        }
+        other => panic!("expected Failed for missing native PDF, got {other:?}"),
     }
 }

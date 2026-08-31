@@ -264,6 +264,30 @@ fn jpeg_burn_keeps_jpeg_magic() {
 }
 
 #[test]
+fn multi_ifd_tiff_burn_fails_closed() {
+    let page = vec![128u8; 4];
+    let tiff = pdf_raster::synthetic_gray8_tiff(&[page.clone(), page], 2, 2).expect("tiff");
+    let err = burn_native(
+        &tiff,
+        &[BurnRect {
+            page_index: 1,
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        }],
+        Some("scan.tif"),
+        Some("image/tiff"),
+    )
+    .expect_err("must not collapse IFDs");
+    assert!(
+        err.to_string().to_ascii_lowercase().contains("multi-ifd")
+            || err.to_string().to_ascii_lowercase().contains("collapse"),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
 fn encrypted_pdf_is_honest() {
     let original = uncompressed_pdf(&[(SECRET, 0)]);
     let parsed = PdfFile::parse(original.clone()).expect("parse");
