@@ -12,7 +12,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes review window. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-08-31); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is research only (no `/review/:docId`).
-- **Status:** In Progress
+- **Status:** Completed
 - **Depends on:** **0112 Completed** (PR **#115** / `81a3aad`) · schema **v41** (no bump)
 - **Spec authored:** 2026-08-31 (placeholder → Ready)
 - **Series:** O (Review chrome) — PR #115 window async residual
