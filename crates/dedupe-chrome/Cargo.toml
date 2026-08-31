@@ -24,6 +24,7 @@ matter-produce = { path = "../matter-produce" }
 matter-qc = { path = "../matter-qc" }
 pdf-raster = { path = "../pdf-raster" }
 extract-pdf = { path = "../extract-pdf" }
+process-runner = { path = "../process-runner" }
 base64 = { workspace = true }
 camino = { workspace = true }
 csv = { workspace = true }
@@ -36,3 +37,4 @@ percent-encoding = "2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }

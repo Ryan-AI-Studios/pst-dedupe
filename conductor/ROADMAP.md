@@ -430,7 +430,7 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 | **0113** | ProduceChecklist | **Completed** | **P1 O** | Checklist; DAT only. PR **#117** `f192b2d`. Spec: `0113-ProduceChecklist/`. |
 | **0114** | PdfRasterRedact | **Completed** | **P1 O** | zpdf CPU raster + geometric burn (schema v40). PR **#119** `5ed53bf`. Spec: `0114-PdfRasterRedact/`. |
 | **0115** | ImageOptFactory | **Completed** | **P2 O** | TIFF G4 + OPT; page-level Bates; builtin image profile. Default DAT-only unchanged. PR **#121** `19d0c1f`. Spec: `0115-ImageOptFactory/`. |
-| **0116** | ProcessFold | **Proposed** | **P2 O** | Fold egui Process last. |
+| **0116** | ProcessFold | **In Progress** | **P2 O** | Fold Process into chrome (`process-runner`); absorb D-0113-long-job. Spec: `0116-ProcessFold/`. |
 | **0117** | QueueVirtualizationResiduals | **Proposed** | **P3 O** | PR #113 queue Bugbot (header/spacer, vacant lie, arrow scroll). Not the 0112 window. |
 | **0118** | ReviewWindowAsyncResiduals | **Proposed** | **P3 O** | PR #115 window Bugbot (stale fetch, post-save snapshot, path_id test). Not produce. |
 | **0119** | ProduceChecklistResiduals | **Proposed** | **P3 O** | PR #117 produce Bugbot (Finalize re-arm, empty log filter, QC across matters). Not raster. |
@@ -464,7 +464,7 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 - Immediate FedRAMP / full SaaS ops / billing  
 - Another intelligence/plugin series without demand  
 - Full Relativity suite, SCIM — unless production rejections or a paid requirement. Image/OPT factory is **0115 Completed** (opt-in; default DAT-only stays).  
-- Rewriting Process jobs in WASM or standing up a daemon (Process stays **egui** until **0116**; Review/Produce chrome is **Tauri 2 + Leptos** Series O)
+- Rewriting Process jobs in WASM or standing up a daemon (Process chrome is **0116 Ready**; still one `process-runner` pipeline, no WASM jobs. Review/Produce chrome is **Tauri 2 + Leptos** Series O)
 
 ### Series K — Clean Unique export (planned)
 
@@ -485,7 +485,7 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 
 | Surface | Stack |
 |---|---|
-| **Dedupe Desk Process** | Native **`eframe` / `egui`** (`dedupe-desk`) until **0116** |
+| **Dedupe Desk Process** | Native **`eframe` / `egui`** (`dedupe-desk`) until **0116** (Ready — chrome hosts `process-runner`; Desk Process not deleted) |
 | **Review / Produce / Matter chrome** | **Tauri 2 + Leptos** (Series O **0110+**). One EXE, no daemon, no WASM job rewrite. Plex/paper tokens. |
 | **CLI** | `pst-dedup` headless |
 | **Service** | `matter-service` HTTP (opt-in multi-user / platform) |

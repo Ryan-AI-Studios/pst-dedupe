@@ -407,6 +407,8 @@ pub struct ProduceQcRun {
     pub burned_fresh: u64,
     #[serde(default)]
     pub unmapped_text: u64,
+    #[serde(default)]
+    pub job_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -437,6 +439,8 @@ pub struct ProduceStart {
     pub produced_count: u64,
     pub production_set_id: Option<String>,
     pub privilege_log_path: Option<String>,
+    #[serde(default)]
+    pub job_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -561,4 +565,124 @@ pub struct ProduceBurnSet {
     pub burned: u64,
     pub skipped: u64,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProcessPageArgs {
+    pub root: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProcessStartArgs {
+    pub root: String,
+    pub kind: String,
+    pub params_json: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct ProcessStartResponse {
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProcessCancelArgs {
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProcessResumeArgs {
+    pub root: String,
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct JobProgressSnapshot {
+    pub job_id: String,
+    pub kind: String,
+    pub matter_id: String,
+    pub state: String,
+    pub stage: Option<String>,
+    pub completed_count: u64,
+    pub total_hint: Option<u64>,
+    pub message: Option<String>,
+    pub error_summary: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct ProcessSourceRow {
+    pub id: String,
+    pub path: String,
+    pub kind: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct ProcessPstRow {
+    pub id: String,
+    pub source_id: Option<String>,
+    pub path: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct ProcessJobRow {
+    pub id: String,
+    pub kind: String,
+    pub state: String,
+    pub parent_job_id: Option<String>,
+    pub error_summary: Option<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct ProcessErrorGroup {
+    pub code: String,
+    pub count: u64,
+    pub sample_message: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct BuiltinProfileFlags {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub classify: bool,
+    pub office_extract: bool,
+    pub pdf_extract: bool,
+    pub ics_extract: bool,
+    pub ocr: bool,
+    pub fts: bool,
+    pub dedupe: bool,
+    pub thread: bool,
+    pub neardup: bool,
+    pub cull: bool,
+    pub promote: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct ProcessPageResponse {
+    pub matter_id: String,
+    pub schema_version: u32,
+    pub sources: Vec<ProcessSourceRow>,
+    pub pst_inventory: Vec<ProcessPstRow>,
+    pub jobs: Vec<ProcessJobRow>,
+    pub error_groups: Vec<ProcessErrorGroup>,
+    pub selected_profile: String,
+    pub builtins: Vec<BuiltinProfileFlags>,
+    pub discovered: u64,
+    pub exceptions: u64,
+    pub in_review: u64,
+    pub still_processing: u64,
+    pub unaccounted_for: u64,
+    pub denist: Option<u64>,
+    pub dupes: Option<u64>,
+    pub families: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProduceQcFindingsArgs {
+    pub root: String,
+    pub job_id: Option<String>,
 }

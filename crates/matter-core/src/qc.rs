@@ -240,6 +240,42 @@ impl Matter {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// QC run recorded for `job_id`, if any.
+    pub fn load_qc_run_for_job(&self, job_id: &str) -> Result<Option<QcRunRecord>> {
+        let result = self.connection().query_row(
+            "SELECT id, matter_id, profile, created_at, passed, error_count, warn_count, \
+             candidate_count, selection_fingerprint, scope, scope_json, report_path, \
+             job_id, rules_json \
+             FROM qc_runs WHERE matter_id = ?1 AND job_id = ?2 \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            params![self.id(), job_id],
+            |row| {
+                let passed_i: i64 = row.get(4)?;
+                Ok(QcRunRecord {
+                    id: row.get(0)?,
+                    matter_id: row.get(1)?,
+                    profile: row.get(2)?,
+                    created_at: row.get(3)?,
+                    passed: passed_i != 0,
+                    error_count: row.get::<_, i64>(5)? as u64,
+                    warn_count: row.get::<_, i64>(6)? as u64,
+                    candidate_count: row.get::<_, i64>(7)? as u64,
+                    selection_fingerprint: row.get(8)?,
+                    scope: row.get(9)?,
+                    scope_json: row.get(10)?,
+                    report_path: row.get(11)?,
+                    job_id: row.get(12)?,
+                    rules_json: row.get(13)?,
+                })
+            },
+        );
+        match result {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

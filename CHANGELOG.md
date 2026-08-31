@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0116 — Process fold)
+
+- `dedupe-chrome` Process workspace hosts `process-runner` for ingest/extract/`profile_run`, and produce/QC start+cancel via the same runner instead of blocking `join_worker`.
+
 ### Added (0115 — TIFF G4 + Opticon OPT)
 
 - Opt-in production profile `us_concordance_image_opt_v1` writes single-page TIFF CCITT Group 4 under `IMAGES/` plus seven-field Opticon `IMAGE.opt`, with page-level Bates (`BEGBATES` ≠ `ENDBATES`). Schema **v41** (`production_items.end_bates` / `page_count` + `production_image_pages`). Default `us_concordance_native_text_v1` stays DAT-only (no `IMAGES/`, no OPT). Spreadsheets and email stay native-only. Pin: `fax = "0.3"` (MIT). Absorbs **D-0040-01** / **D-0060-04** OPT half.

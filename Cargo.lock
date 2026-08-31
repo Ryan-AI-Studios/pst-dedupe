@@ -1831,12 +1831,14 @@ dependencies = [
  "matter-search",
  "pdf-raster",
  "percent-encoding",
+ "process-runner",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tempfile",
+ "zip",
 ]
 
 [[package]]

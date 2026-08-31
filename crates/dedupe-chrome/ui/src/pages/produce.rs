@@ -7,9 +7,9 @@ use wasm_bindgen::JsCast;
 use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
 
 use crate::invoke::{
-    tauri_invoke, ChromeExtra, ChromeQcFinding, ProduceBurnSet, ProduceBurnSetArgs,
-    ProducePageResponse, ProduceQcRun, ProduceQcRunArgs, ProduceStart, ProduceStartArgs,
-    ProductionSetThin, RootArgs, WarningOverride,
+    tauri_invoke, ChromeExtra, ChromeQcFinding, JobProgressSnapshot, ProduceBurnSet,
+    ProduceBurnSetArgs, ProducePageResponse, ProduceQcFindingsArgs, ProduceQcRun, ProduceQcRunArgs,
+    ProduceStart, ProduceStartArgs, ProductionSetThin, RootArgs, WarningOverride,
 };
 use crate::path_id::{matter_home_href_from_param, review_doc_href};
 
@@ -20,23 +20,52 @@ fn override_key(rule_id: &str, item_id: Option<&str>) -> String {
     }
 }
 
+async fn sleep_ms(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(w) = web_sys::window() {
+            let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
+async fn wait_process_terminal(root: &str) -> Result<JobProgressSnapshot, String> {
+    loop {
+        let snap = tauri_invoke::<JobProgressSnapshot, _>(
+            "process_progress",
+            &RootArgs {
+                root: root.to_string(),
+            },
+        )
+        .await?;
+        if snap.job_id.is_empty()
+            || snap.state == "idle"
+            || snap.state == "succeeded"
+            || snap.state == "failed"
+            || snap.state == "cancelled"
+            || snap.state == "paused"
+        {
+            return Ok(snap);
+        }
+        sleep_ms(400).await;
+    }
+}
+
+fn is_busy_err(e: &str) -> bool {
+    e.starts_with("busy:") || e.contains("matter is busy")
+}
+
 const DAT_ONLY_PROFILE: &str = "us_concordance_native_text_v1";
 const IMAGE_OPT_PROFILE: &str = "us_concordance_image_opt_v1";
 
-fn selected_profile_flags(
-    page: &Option<ProducePageResponse>,
-    slug: &str,
-) -> (bool, bool) {
+fn selected_profile_flags(page: &Option<ProducePageResponse>, slug: &str) -> (bool, bool) {
     let Some(p) = page
         .as_ref()
         .and_then(|pg| pg.profiles.iter().find(|x| x.slug == slug))
     else {
         return (false, false);
     };
-    (
-        p.include_images,
-        p.bates_mode.eq_ignore_ascii_case("page"),
-    )
+    (p.include_images, p.bates_mode.eq_ignore_ascii_case("page"))
 }
 
 #[component]
@@ -56,6 +85,7 @@ pub fn ProducePage() -> impl IntoView {
     let start_busy = RwSignal::new(false);
     let start_result = RwSignal::new(Option::<ProduceStart>::None);
     let overrides = RwSignal::new(HashMap::<String, (String, String)>::new());
+    let busy_banner = RwSignal::new(Option::<String>::None);
 
     let home =
         move || params.with(|p| matter_home_href_from_param(&p.get("id").unwrap_or_default()));
@@ -95,10 +125,11 @@ pub fn ProducePage() -> impl IntoView {
         let entire = entire_corpus.get();
         let prof = profile.get();
         leptos::task::spawn_local(async move {
+            busy_banner.set(None);
             let res = tauri_invoke::<ProduceQcRun, _>(
                 "produce_qc_run",
                 &ProduceQcRunArgs {
-                    root,
+                    root: root.clone(),
                     filter_json: None,
                     item_ids: None,
                     production_profile: Some(prof),
@@ -106,15 +137,56 @@ pub fn ProducePage() -> impl IntoView {
                 },
             )
             .await;
-            qc_busy.set(false);
             match res {
                 Ok(r) => {
-                    overrides.set(HashMap::new());
-                    qc.set(Some(r));
-                    start_result.set(None);
+                    if let Some(job_id) = r.job_id.clone() {
+                        match wait_process_terminal(&root).await {
+                            Ok(snap) if snap.state == "failed" || snap.state == "paused" => {
+                                qc_busy.set(false);
+                                error.set(Some(
+                                    snap.error_summary
+                                        .unwrap_or_else(|| format!("QC {}", snap.state)),
+                                ));
+                                return;
+                            }
+                            Err(e) => {
+                                qc_busy.set(false);
+                                error.set(Some(e));
+                                return;
+                            }
+                            _ => {}
+                        }
+                        match tauri_invoke::<ProduceQcRun, _>(
+                            "produce_qc_findings",
+                            &ProduceQcFindingsArgs {
+                                root,
+                                job_id: Some(job_id),
+                            },
+                        )
+                        .await
+                        {
+                            Ok(findings) => {
+                                overrides.set(HashMap::new());
+                                qc.set(Some(findings));
+                                start_result.set(None);
+                            }
+                            Err(e) => error.set(Some(e)),
+                        }
+                    } else {
+                        overrides.set(HashMap::new());
+                        qc.set(Some(r));
+                        start_result.set(None);
+                    }
                 }
-                Err(e) => error.set(Some(e)),
+                Err(e) => {
+                    if is_busy_err(&e) {
+                        busy_banner.set(Some(e));
+                    } else {
+                        error.set(Some(e));
+                    }
+                }
             }
+            qc_busy.set(false);
         });
     };
 
@@ -162,10 +234,11 @@ pub fn ProducePage() -> impl IntoView {
                 .unwrap_or_default()
         };
         leptos::task::spawn_local(async move {
+            busy_banner.set(None);
             let res = tauri_invoke::<ProduceStart, _>(
                 "produce_start",
                 &ProduceStartArgs {
-                    root,
+                    root: root.clone(),
                     filter_json: None,
                     item_ids: None,
                     production_profile: Some(prof),
@@ -178,16 +251,56 @@ pub fn ProducePage() -> impl IntoView {
                 },
             )
             .await;
-            start_busy.set(false);
             match res {
                 Ok(r) => {
-                    start_result.set(Some(r.clone()));
                     if !r.ok {
+                        start_result.set(Some(r));
                         error.set(Some("Finalize blocked — see pre-flight cards.".into()));
+                    } else if r.job_id.is_some() {
+                        match wait_process_terminal(&root).await {
+                            Ok(snap) if snap.state == "failed" || snap.state == "paused" => {
+                                error.set(Some(
+                                    snap.error_summary
+                                        .unwrap_or_else(|| format!("produce {}", snap.state)),
+                                ));
+                            }
+                            Err(e) => error.set(Some(e)),
+                            Ok(_) => {
+                                match tauri_invoke::<ProducePageResponse, _>(
+                                    "produce_page",
+                                    &RootArgs { root },
+                                )
+                                .await
+                                {
+                                    Ok(pg) => {
+                                        let mut filled = r.clone();
+                                        if let Some(set) = pg.sets.iter().rev().find(|s| {
+                                            s.output_root.as_ref().is_some_and(|p| !p.is_empty())
+                                        }) {
+                                            filled.output_root = set.output_root.clone();
+                                            filled.production_set_id = Some(set.id.clone());
+                                            filled.produced_count = pg.produced_count;
+                                        }
+                                        page.set(Some(pg));
+                                        start_result.set(Some(filled));
+                                    }
+                                    Err(e) => error.set(Some(e)),
+                                }
+                            }
+                        }
+                    } else {
+                        start_result.set(Some(r));
                     }
                 }
-                Err(e) => error.set(Some(e)),
+                Err(e) => {
+                    if is_busy_err(&e) {
+                        busy_banner.set(Some(e));
+                    } else {
+                        error.set(Some(e));
+                    }
+                }
             }
+            start_busy.set(false);
         });
     };
 
@@ -197,6 +310,14 @@ pub fn ProducePage() -> impl IntoView {
                 <A href=home>"← Matter home"</A>
             </div>
             <h1>"Produce"</h1>
+            <Show when=move || busy_banner.get().is_some()>
+                <div class="busy-banner" role="status">
+                    <p>{move || busy_banner.get().unwrap_or_default()}</p>
+                    <A href=move || {
+                        format!("/matters/{}/process", crate::path_id::encode_matter_id(&root_sig.get()))
+                    }>"Open Process tab / active job"</A>
+                </div>
+            </Show>
             <Show when=move || error.get().is_some()>
                 <p class="error">{move || error.get().unwrap_or_default()}</p>
             </Show>
