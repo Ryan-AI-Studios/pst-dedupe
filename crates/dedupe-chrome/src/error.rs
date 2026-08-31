@@ -36,6 +36,21 @@ impl CommandError {
             message: message.into(),
         }
     }
+
+    pub fn busy(job_id: impl Into<String>) -> Self {
+        let job_id = job_id.into();
+        Self {
+            kind: "busy".into(),
+            message: format!("matter is busy: a job is already running ({job_id})"),
+        }
+    }
+}
+
+pub(crate) fn map_runner(err: process_runner::RunnerError) -> CommandError {
+    match err {
+        process_runner::RunnerError::Busy { job_id } => CommandError::busy(job_id),
+        other => CommandError::failed(other.to_string()),
+    }
 }
 
 impl std::fmt::Display for CommandError {

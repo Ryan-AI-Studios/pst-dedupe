@@ -1,4 +1,4 @@
-//! Chrome produce checklist (track 0113): QC + DAT-only produce.
+﻿//! Chrome produce checklist (track 0113): QC + DAT-only produce.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -9,17 +9,16 @@ use matter_core::{
     UpsertPrivilegeProtocolInput, SCOPE_REVIEW_CORPUS,
 };
 use matter_produce::{
-    effective_qc_pack_id, resolve_produce_config, run_produce, ProduceOutcome, ProduceParams,
-    DEFAULT_BATES_PREFIX, SCOPE_ITEM_IDS,
+    effective_qc_pack_id, resolve_produce_config, ProduceParams, DEFAULT_BATES_PREFIX,
+    SCOPE_ITEM_IDS,
 };
-use matter_qc::{
-    check_qc_gate_for_pack, run_production_qc, QcGateBlock, QcOutcome, QcParams, QcSeverity,
-};
+use matter_qc::{check_qc_gate_for_pack, QcGateBlock, QcParams, QcSeverity};
+use process_runner::{JobParams, ProcessRunner};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::error::{map_core, CommandError};
-use crate::open_root::{open_matter_read, open_matter_write};
+use crate::error::{map_core, map_runner, CommandError};
+use crate::open_root::{open_matter_read, open_matter_write, utf8_root};
 
 const ACTOR: &str = "chrome";
 const DEFAULT_PROFILE: &str = "us_concordance_native_text_v1";
@@ -95,6 +94,7 @@ pub struct ProduceQcRunResponse {
     pub need_burn: u64,
     pub burned_fresh: u64,
     pub unmapped_text: u64,
+    pub job_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -111,8 +111,10 @@ pub struct ProduceStartResponse {
     pub produced_count: u64,
     pub production_set_id: Option<String>,
     pub privilege_log_path: Option<String>,
+    pub job_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct ProduceQcRunArgs {
     pub root: String,
     pub filter_json: Option<String>,
@@ -121,6 +123,7 @@ pub struct ProduceQcRunArgs {
     pub source_entire_corpus: Option<bool>,
 }
 
+#[derive(Clone)]
 pub struct ProduceStartArgs {
     pub root: String,
     pub filter_json: Option<String>,
@@ -372,6 +375,7 @@ fn chrome_extras(
     Ok(extras)
 }
 
+#[allow(dead_code)]
 fn finding_from_engine(f: &matter_qc::QcFinding) -> ChromeQcFinding {
     ChromeQcFinding {
         item_id: f.item_id.clone(),
@@ -544,7 +548,7 @@ fn override_key(rule_id: &str, item_id: Option<&str>) -> String {
     }
 }
 
-fn intended_produce_params(
+pub(crate) fn intended_produce_params(
     ordered: &[String],
     profile: &str,
     pack_id: &str,
@@ -568,7 +572,112 @@ fn intended_produce_params(
     }
 }
 
+pub(crate) fn intended_qc_params(ordered: &[String], pack_id: &str) -> QcParams {
+    QcParams {
+        scope: SCOPE_ITEM_IDS.into(),
+        item_ids: ordered.to_vec(),
+        expand_family_for_scan: false,
+        pack_id: Some(pack_id.to_string()),
+        ..QcParams::default()
+    }
+}
+
+fn serialize_produce_params(params: &ProduceParams) -> Result<serde_json::Value, CommandError> {
+    serde_json::to_value(params)
+        .map_err(|e| CommandError::failed(format!("produce params serialize failed: {e}")))
+}
+
+fn serialize_qc_params(params: &QcParams) -> Result<String, CommandError> {
+    serde_json::to_string(params)
+        .map_err(|e| CommandError::failed(format!("qc params serialize failed: {e}")))
+}
+
+/// Retry the write-side post-step until the runner releases `.matter.lock`.
+///
+/// The runner publishes a terminal produce snapshot before dropping the
+/// exclusive Matter handle. Progress polling must not fail the UI on that
+/// window, and must keep trying until the log is written.
+pub(crate) fn ensure_privilege_log_after_produce(root: &str) -> Result<(), CommandError> {
+    for _ in 0..20 {
+        match ensure_privilege_log_if_missing(root) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind == "encrypted" || e.kind == "not_found" => return Err(e),
+            Err(e) if e.message.contains("already open") => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    match ensure_privilege_log_if_missing(root) {
+        Ok(()) => Ok(()),
+        Err(e) if e.message.contains("already open") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Host idempotent privilege-log.csv write when a complete volume lacks the file.
+pub(crate) fn ensure_privilege_log_if_missing(root: &str) -> Result<(), CommandError> {
+    let matter = open_matter_write(root)?;
+    let sets = matter.list_production_sets_thin().map_err(map_core)?;
+    for set in sets {
+        let Some(output_root) = set.output_root.as_deref() else {
+            continue;
+        };
+        if set.status != "complete" && set.status != "complete_with_errors" {
+            continue;
+        }
+        let log_path = Utf8Path::new(output_root).join("privilege-log.csv");
+        if log_path.as_std_path().is_file() {
+            continue;
+        }
+        write_privilege_log_for_set(&matter, &set.id, output_root)?;
+    }
+    Ok(())
+}
+
+fn write_privilege_log_for_set(
+    matter: &Matter,
+    production_set_id: &str,
+    output_root: &str,
+) -> Result<Utf8PathBuf, CommandError> {
+    let controls = matter
+        .list_ok_production_controls(production_set_id)
+        .map_err(map_core)?;
+    let mut control_numbers: HashMap<String, String> = HashMap::new();
+    let mut produced_ids: Vec<String> = Vec::new();
+    for (id, cn) in controls {
+        control_numbers.insert(id.clone(), cn);
+        produced_ids.push(id);
+    }
+    let mut spec = FilterSpec::preset_withheld();
+    spec.scope = SCOPE_REVIEW_CORPUS.into();
+    spec.include_family = false;
+    let mut filter_ids = produced_ids;
+    filter_ids.extend(withheld_in_scope_ids(matter, &spec)?);
+    filter_ids.sort();
+    filter_ids.dedup();
+    let log_path = Utf8Path::new(output_root).join("privilege-log.csv");
+    matter
+        .export_privilege_log(PrivilegeLogExportParams {
+            scope: SCOPE_REVIEW_CORPUS.into(),
+            path: log_path.clone(),
+            filter_ids: Some(filter_ids),
+            control_numbers: Some(control_numbers),
+        })
+        .map_err(map_core)?;
+    Ok(log_path)
+}
+
 pub fn produce_page_blocking(root: &str) -> Result<ProducePageResponse, CommandError> {
+    match ensure_privilege_log_if_missing(root) {
+        Ok(()) => {}
+        Err(e) if e.kind == "encrypted" || e.kind == "not_found" => return Err(e),
+        // Runner holds `.matter.lock` during Process jobs; skip the write-side
+        // post-step and still serve the page. process_progress writes the log
+        // after produce succeeds.
+        Err(e) if e.message.contains("already open") => {}
+        Err(e) => return Err(e),
+    }
     let matter = open_matter_read(root)?;
     let mut spec = default_produce_filter();
     spec.include_family = true;
@@ -617,9 +726,11 @@ pub fn produce_page_blocking(root: &str) -> Result<ProducePageResponse, CommandE
 }
 
 pub fn produce_qc_run_blocking(
+    runner: &ProcessRunner,
     args: ProduceQcRunArgs,
 ) -> Result<ProduceQcRunResponse, CommandError> {
-    let matter = open_matter_write(&args.root)?;
+    crate::process::reject_if_busy(runner)?;
+    let matter = open_matter_read(&args.root)?;
     let spec = resolve_filter(
         args.filter_json.as_deref(),
         args.source_entire_corpus.unwrap_or(false),
@@ -642,42 +753,66 @@ pub fn produce_qc_run_blocking(
             need_burn: 0,
             burned_fresh: 0,
             unmapped_text: 0,
+            job_id: None,
         });
     }
 
-    let qc_params = QcParams {
+    let qc_params = intended_qc_params(&ordered, &pack_id);
+    let params_json = serialize_qc_params(&qc_params)?;
+    drop(matter);
+    let utf8 = utf8_root(&args.root)?;
+    let job_id = runner
+        .start(&utf8, "qc", JobParams::new(params_json))
+        .map_err(map_runner)?;
+    Ok(ProduceQcRunResponse {
+        ordered_ids: ordered,
+        pack_id,
         scope: SCOPE_ITEM_IDS.into(),
-        item_ids: ordered.clone(),
-        expand_family_for_scan: false,
-        pack_id: Some(pack_id.clone()),
-        ..QcParams::default()
+        findings: Vec::new(),
+        extras: Vec::new(),
+        error_count: 0,
+        warn_count: 0,
+        passed: false,
+        qc_run_id: String::new(),
+        need_burn: 0,
+        burned_fresh: 0,
+        unmapped_text: 0,
+        job_id: Some(job_id),
+    })
+}
+
+pub fn produce_qc_findings_blocking(
+    root: &str,
+    job_id: Option<String>,
+) -> Result<ProduceQcRunResponse, CommandError> {
+    let matter = open_matter_read(root)?;
+    let run = if let Some(ref jid) = job_id {
+        matter
+            .load_qc_run_for_job(jid)
+            .map_err(map_core)?
+            .ok_or_else(|| CommandError::failed(format!("no QC run for job {jid}")))?
+    } else {
+        matter
+            .load_latest_qc_run_for_scope(Some(SCOPE_ITEM_IDS))
+            .map_err(map_core)?
+            .ok_or_else(|| CommandError::failed("QC required: no production QC run found"))?
     };
-    let job = matter.create_job("qc").map_err(map_core)?;
-    let outcome = run_production_qc(&matter, &job.id, &qc_params, None, |_| {})
-        .map_err(|e| CommandError::failed(e.to_string()))?;
-    let (findings, error_count, warn_count, passed, report_path, qc_run_id) = match outcome {
-        QcOutcome::Succeeded(r) => (
-            r.findings
-                .iter()
-                .map(finding_from_engine)
-                .collect::<Vec<_>>(),
-            r.error_count,
-            r.warn_count,
-            r.passed,
-            r.report_path,
-            r.qc_run_id,
-        ),
-        QcOutcome::Paused(s) => {
-            return Err(CommandError::failed(format!(
-                "QC paused after {} candidate(s)",
-                s.completed_count
-            )));
-        }
-        QcOutcome::Failed { message, .. } => {
-            return Err(CommandError::failed(message));
+    let report_path = run
+        .report_path
+        .as_deref()
+        .ok_or_else(|| CommandError::failed("QC report path missing; re-run QC"))?;
+    let findings = load_findings_csv(report_path).map_err(|e| CommandError::failed(e.message))?;
+    let ordered = match load_ordered_ids(report_path) {
+        Ok(ids) => ids,
+        Err(_) => {
+            let ordered = ordered_ids_from_checkpoint(&matter, run.job_id.as_deref())?;
+            persist_ordered_ids(report_path, &ordered)?;
+            ordered
         }
     };
-    persist_ordered_ids(&report_path, &ordered)?;
+    let pack_id = matter_core::normalize_qc_pack_id(&run.profile);
+    let mut spec = default_produce_filter();
+    spec.include_family = true;
     let gate =
         check_qc_gate_for_pack(&matter, SCOPE_ITEM_IDS, &ordered, &pack_id).map_err(map_core)?;
     let extras = chrome_extras(&matter, &spec, &ordered, gate.as_ref())?;
@@ -686,17 +821,43 @@ pub fn produce_qc_run_blocking(
     Ok(ProduceQcRunResponse {
         ordered_ids: ordered,
         pack_id,
-        scope: SCOPE_ITEM_IDS.into(),
+        scope: run.scope,
         findings,
         extras,
-        error_count,
-        warn_count,
-        passed,
-        qc_run_id,
+        error_count: run.error_count,
+        warn_count: run.warn_count,
+        passed: run.passed,
+        qc_run_id: run.id,
         need_burn,
         burned_fresh,
         unmapped_text,
+        job_id: run.job_id,
     })
+}
+
+fn ordered_ids_from_checkpoint(
+    matter: &Matter,
+    job_id: Option<&str>,
+) -> Result<Vec<String>, CommandError> {
+    let Some(jid) = job_id else {
+        return Err(CommandError::failed(
+            "QC ordered_ids sidecar missing; re-run QC",
+        ));
+    };
+    let cp = matter
+        .get_checkpoint(jid, "qc")
+        .map_err(map_core)?
+        .ok_or_else(|| CommandError::failed("QC checkpoint missing; re-run QC"))?;
+    let v: serde_json::Value = serde_json::from_str(&cp.cursor_json)
+        .map_err(|e| CommandError::failed(format!("QC checkpoint json: {e}")))?;
+    let ids = v
+        .get("ordered_ids")
+        .and_then(|x| x.as_array())
+        .ok_or_else(|| CommandError::failed("QC checkpoint missing ordered_ids"))?;
+    Ok(ids
+        .iter()
+        .filter_map(|x| x.as_str().map(str::to_string))
+        .collect())
 }
 
 fn validate_log_format(log_format: Option<&str>) -> Result<String, CommandError> {
@@ -713,8 +874,10 @@ fn validate_log_format(log_format: Option<&str>) -> Result<String, CommandError>
 }
 
 pub fn produce_start_blocking(
+    runner: &ProcessRunner,
     args: ProduceStartArgs,
 ) -> Result<ProduceStartResponse, CommandError> {
+    crate::process::reject_if_busy(runner)?;
     let matter = open_matter_write(&args.root)?;
     let spec = resolve_filter(
         args.filter_json.as_deref(),
@@ -738,13 +901,11 @@ pub fn produce_start_blocking(
         }
     };
     let log_format = validate_log_format(args.log_format.as_deref())?;
-    // UI may send last_findings as a cache; the warning/error gate always
-    // loads the stored QC report so an empty IPC vec cannot skip overrides.
     let _ui_findings_cache = args.last_findings;
     let ordered = resolve_ordered_ids(&matter, &spec, args.item_ids.as_deref())?;
     let produce_params =
         intended_produce_params(&ordered, &profile, &pack_id, &prefix, bates_start);
-    let produce_params_json = serde_json::to_value(&produce_params).unwrap_or_else(|_| json!({}));
+    let produce_params_json = serialize_produce_params(&produce_params)?;
 
     let blocked = |blockers: Vec<ChromeExtra>| ProduceStartResponse {
         ok: false,
@@ -759,6 +920,7 @@ pub fn produce_start_blocking(
         produced_count: 0,
         production_set_id: None,
         privilege_log_path: None,
+        job_id: None,
     };
 
     if ordered.is_empty() {
@@ -806,6 +968,7 @@ pub fn produce_start_blocking(
     let ordered = stored.ordered_ids.clone();
     let produce_params =
         intended_produce_params(&ordered, &profile, &pack_id, &prefix, bates_start);
+    let produce_params_json = serialize_produce_params(&produce_params)?;
     let findings = stored.findings;
     for f in &findings {
         if f.severity == QcSeverity::Error.as_str() {
@@ -883,35 +1046,6 @@ pub fn produce_start_blocking(
             .map_err(map_core)?;
     }
 
-    let job = matter.create_job("produce").map_err(map_core)?;
-    let outcome = run_produce(&matter, &job.id, &produce_params, None, |_| {})
-        .map_err(|e| CommandError::failed(e.to_string()))?;
-    let summary = match outcome {
-        ProduceOutcome::Succeeded(s) => s,
-        ProduceOutcome::Paused(s) => {
-            return Err(CommandError::failed(format!(
-                "produce paused after {} item(s)",
-                s.completed_count
-            )));
-        }
-        ProduceOutcome::Failed { message, .. } => {
-            return Err(CommandError::failed(message));
-        }
-    };
-
-    let mut control_numbers: HashMap<String, String> = HashMap::new();
-    let mut produced_ids: Vec<String> = Vec::new();
-    for id in &ordered {
-        if let Some(cn) = matter.latest_control_number(id).map_err(map_core)? {
-            control_numbers.insert(id.clone(), cn);
-            produced_ids.push(id.clone());
-        }
-    }
-    let mut filter_ids = produced_ids;
-    filter_ids.extend(withheld_in_scope_ids(&matter, &spec)?);
-    filter_ids.sort();
-    filter_ids.dedup();
-
     let proto = matter.get_privilege_protocol().map_err(map_core)?;
     matter
         .upsert_privilege_protocol(UpsertPrivilegeProtocolInput {
@@ -923,20 +1057,13 @@ pub fn produce_start_blocking(
         })
         .map_err(map_core)?;
 
-    let log_path = Utf8Path::new(&summary.output_root).join("privilege-log.csv");
-    matter
-        .export_privilege_log(PrivilegeLogExportParams {
-            scope: if spec.scope == SCOPE_REVIEW_CORPUS {
-                SCOPE_REVIEW_CORPUS.into()
-            } else {
-                spec.scope.clone()
-            },
-            path: log_path.clone(),
-            filter_ids: Some(filter_ids),
-            control_numbers: Some(control_numbers),
-        })
-        .map_err(map_core)?;
-
+    let params_json = serde_json::to_string(&produce_params)
+        .map_err(|e| CommandError::failed(format!("produce params serialize failed: {e}")))?;
+    drop(matter);
+    let utf8 = utf8_root(&args.root)?;
+    let job_id = runner
+        .start(&utf8, "produce", JobParams::new(params_json))
+        .map_err(map_runner)?;
     Ok(ProduceStartResponse {
         ok: true,
         blockers: Vec::new(),
@@ -946,10 +1073,11 @@ pub fn produce_start_blocking(
         fail_if_withheld: true,
         require_qc_pass: true,
         produce_params: produce_params_json,
-        output_root: Some(summary.output_root),
-        produced_count: summary.produced_count,
-        production_set_id: Some(summary.production_set_id),
-        privilege_log_path: Some(log_path.to_string()),
+        output_root: None,
+        produced_count: 0,
+        production_set_id: None,
+        privilege_log_path: None,
+        job_id: Some(job_id),
     })
 }
 
@@ -964,11 +1092,61 @@ mod tests {
         Matter, UpsertItemPrivilegeInput, DEFAULT_REVIEW_SET_NAME,
     };
     use matter_qc::RULE_WITHHELD_IN_SELECTION;
+    use process_runner::{register_default_handlers, ProcessRunner, RunnerConfig};
     use std::fs;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn utf8_tmp(tmp: &tempfile::TempDir) -> Utf8PathBuf {
         Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8")
+    }
+
+    fn test_runner() -> ProcessRunner {
+        let mut r = ProcessRunner::new(RunnerConfig::default());
+        register_default_handlers(&mut r);
+        r
+    }
+
+    fn qc_wait(runner: &ProcessRunner, args: ProduceQcRunArgs) -> ProduceQcRunResponse {
+        let started = produce_qc_run_blocking(runner, args.clone()).expect("qc start");
+        if started.job_id.is_none() {
+            return started;
+        }
+        assert!(
+            runner.wait_until_idle(Duration::from_secs(120)),
+            "qc did not idle"
+        );
+        produce_qc_findings_blocking(&args.root, started.job_id.clone()).expect("qc findings")
+    }
+
+    fn start_wait(runner: &ProcessRunner, args: ProduceStartArgs) -> ProduceStartResponse {
+        let started = produce_start_blocking(runner, args.clone()).expect("produce start");
+        if !started.ok {
+            return started;
+        }
+        assert!(
+            runner.wait_until_idle(Duration::from_secs(180)),
+            "produce did not idle"
+        );
+        let _ = crate::process::process_progress_blocking(runner, &args.root);
+        ensure_privilege_log_if_missing(&args.root).expect("privilege log post-step");
+        let matter = open_matter_read(&args.root).expect("read");
+        let sets = matter.list_production_sets_thin().expect("sets");
+        let output_root = sets
+            .iter()
+            .find(|s| s.output_root.is_some())
+            .and_then(|s| s.output_root.clone());
+        let privilege_log_path = output_root
+            .as_ref()
+            .map(|r| Utf8Path::new(r).join("privilege-log.csv").to_string());
+        let produced_count = matter.count_produced_items().expect("count");
+        ProduceStartResponse {
+            output_root,
+            privilege_log_path,
+            produced_count,
+            production_set_id: sets.first().map(|s| s.id.clone()),
+            ..started
+        }
     }
 
     fn tiny_eml() -> &'static [u8] {
@@ -1131,6 +1309,7 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let parent = utf8_tmp(&tmp);
         let root = create_matter_under(&parent, "Dod2").expect("create");
+        let runner = test_runner();
         seed_family_three(&root);
 
         let page = produce_page_blocking(root.as_str()).expect("page");
@@ -1142,7 +1321,7 @@ mod tests {
         assert!(spec.include_family);
         assert_eq!(spec.scope, SCOPE_REVIEW_CORPUS);
 
-        let qc = produce_qc_run_blocking(qc_args(root.as_str(), None)).expect("qc");
+        let qc = qc_wait(&runner, qc_args(root.as_str(), None));
         assert_eq!(qc.scope, "item_ids");
         assert_eq!(
             qc.pack_id,
@@ -1169,14 +1348,16 @@ mod tests {
             qc.extras
         );
 
-        let start = produce_start_blocking(start_args(
-            root.as_str(),
-            None,
-            None,
-            Some(qc.findings.clone()),
-            Some(1),
-        ))
-        .expect("start blocked");
+        let start = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                None,
+                None,
+                Some(qc.findings.clone()),
+                Some(1),
+            ),
+        );
         assert!(!start.ok, "produce must fail while child A is withheld");
         assert!(start.fail_if_withheld);
         assert_eq!(start.produce_params["fail_if_withheld"], true);
@@ -1199,7 +1380,7 @@ mod tests {
                 })
                 .expect("clear withhold");
         }
-        let qc2 = produce_qc_run_blocking(qc_args(root.as_str(), None)).expect("qc2");
+        let qc2 = qc_wait(&runner, qc_args(root.as_str(), None));
         assert!(qc2.passed, "engine passed after coding: {:?}", qc2.findings);
         assert!(
             !qc2.extras.iter().any(|e| e.kind == "uncoded_in_set"),
@@ -1218,14 +1399,16 @@ mod tests {
                 qc_run_id: qc2.qc_run_id.clone(),
             })
             .collect();
-        let start2 = produce_start_blocking(start_args(
-            root.as_str(),
-            None,
-            Some(overrides),
-            Some(qc2.findings.clone()),
-            Some(1),
-        ))
-        .expect("start2");
+        let start2 = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                None,
+                Some(overrides),
+                Some(qc2.findings.clone()),
+                Some(1),
+            ),
+        );
         assert!(start2.ok, "start after coding: {:?}", start2.blockers);
         assert!(start2.fail_if_withheld);
         assert_eq!(start2.produce_params["fail_if_withheld"], true);
@@ -1237,6 +1420,7 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let parent = utf8_tmp(&tmp);
         let root = create_matter_under(&parent, "Dod3").expect("create");
+        let runner = test_runner();
         {
             let matter = Matter::open(&root).expect("open");
             let set = matter
@@ -1275,35 +1459,35 @@ mod tests {
             apply_responsive(&matter, &["itm_w0", "itm_w1"]);
         }
 
-        let empty = produce_qc_run_blocking(qc_args(
-            root.as_str(),
-            Some(vec!["itm_does_not_exist".into()]),
-        ))
-        .expect("empty qc");
+        let empty = qc_wait(
+            &runner,
+            qc_args(root.as_str(), Some(vec!["itm_does_not_exist".into()])),
+        );
         assert!(
             empty.extras.iter().any(|e| e.kind == "empty_selection"),
             "{:?}",
             empty.extras
         );
-        let empty_start = produce_start_blocking(start_args(
-            root.as_str(),
-            Some(vec!["itm_does_not_exist".into()]),
-            None,
-            None,
-            Some(1),
-        ))
-        .expect("empty start");
+        let empty_start = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                Some(vec!["itm_does_not_exist".into()]),
+                None,
+                None,
+                Some(1),
+            ),
+        );
         assert!(!empty_start.ok);
         assert!(empty_start
             .blockers
             .iter()
             .any(|e| e.kind == "empty_selection"));
 
-        let qc = produce_qc_run_blocking(qc_args(
-            root.as_str(),
-            Some(vec!["itm_w0".into(), "itm_w1".into()]),
-        ))
-        .expect("qc");
+        let qc = qc_wait(
+            &runner,
+            qc_args(root.as_str(), Some(vec!["itm_w0".into(), "itm_w1".into()])),
+        );
         assert!(qc.passed, "warn-only should pass engine: {:?}", qc.findings);
         assert!(
             qc.findings.iter().any(|f| f.severity == "warn"),
@@ -1311,14 +1495,16 @@ mod tests {
             qc.findings
         );
 
-        let no_ov = produce_start_blocking(start_args(
-            root.as_str(),
-            Some(vec!["itm_w0".into(), "itm_w1".into()]),
-            None,
-            Some(qc.findings.clone()),
-            Some(1),
-        ))
-        .expect("no ov");
+        let no_ov = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                Some(vec!["itm_w0".into(), "itm_w1".into()]),
+                None,
+                Some(qc.findings.clone()),
+                Some(1),
+            ),
+        );
         assert!(!no_ov.ok);
 
         let empty_reason = qc
@@ -1333,14 +1519,16 @@ mod tests {
                 qc_run_id: qc.qc_run_id.clone(),
             })
             .collect();
-        let blank = produce_start_blocking(start_args(
-            root.as_str(),
-            Some(vec!["itm_w0".into(), "itm_w1".into()]),
-            Some(empty_reason),
-            Some(qc.findings.clone()),
-            Some(1),
-        ))
-        .expect("blank reason");
+        let blank = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                Some(vec!["itm_w0".into(), "itm_w1".into()]),
+                Some(empty_reason),
+                Some(qc.findings.clone()),
+                Some(1),
+            ),
+        );
         assert!(!blank.ok);
 
         let only_one: Vec<WarningOverride> = qc
@@ -1355,14 +1543,16 @@ mod tests {
                 qc_run_id: qc.qc_run_id.clone(),
             })
             .collect();
-        let partial = produce_start_blocking(start_args(
-            root.as_str(),
-            Some(vec!["itm_w0".into(), "itm_w1".into()]),
-            Some(only_one),
-            Some(qc.findings.clone()),
-            Some(1),
-        ))
-        .expect("partial");
+        let partial = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                Some(vec!["itm_w0".into(), "itm_w1".into()]),
+                Some(only_one),
+                Some(qc.findings.clone()),
+                Some(1),
+            ),
+        );
         assert!(!partial.ok, "old override must not cover new item warning");
 
         let err_findings = vec![ChromeQcFinding {
@@ -1371,32 +1561,35 @@ mod tests {
             severity: "error".into(),
             message: "withheld item in selection".into(),
         }];
-        let with_reason_on_error = produce_start_blocking(start_args(
-            root.as_str(),
-            Some(vec!["itm_w0".into(), "itm_w1".into()]),
-            Some(vec![WarningOverride {
-                recorded_by: "counsel".into(),
-                reason: "override error".into(),
-                rule_id: RULE_WITHHELD_IN_SELECTION.into(),
-                item_id: Some("itm_w0".into()),
-                qc_run_id: qc.qc_run_id.clone(),
-            }]),
-            Some(err_findings),
-            Some(1),
-        ))
-        .expect("error not overridable");
+        let with_reason_on_error = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                Some(vec!["itm_w0".into(), "itm_w1".into()]),
+                Some(vec![WarningOverride {
+                    recorded_by: "counsel".into(),
+                    reason: "override error".into(),
+                    rule_id: RULE_WITHHELD_IN_SELECTION.into(),
+                    item_id: Some("itm_w0".into()),
+                    qc_run_id: qc.qc_run_id.clone(),
+                }]),
+                Some(err_findings),
+                Some(1),
+            ),
+        );
         assert!(!with_reason_on_error.ok);
 
-        let qc_one = produce_qc_run_blocking(qc_args(root.as_str(), Some(vec!["itm_w0".into()])))
-            .expect("qc one");
-        let stale = produce_start_blocking(start_args(
-            root.as_str(),
-            Some(vec!["itm_w0".into(), "itm_w1".into()]),
-            None,
-            Some(qc_one.findings.clone()),
-            Some(1),
-        ))
-        .expect("stale");
+        let qc_one = qc_wait(&runner, qc_args(root.as_str(), Some(vec!["itm_w0".into()])));
+        let stale = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                Some(vec!["itm_w0".into(), "itm_w1".into()]),
+                None,
+                Some(qc_one.findings.clone()),
+                Some(1),
+            ),
+        );
         assert!(!stale.ok);
         assert!(
             stale.blockers.iter().any(|e| e.kind == "qc_gate"),
@@ -1404,11 +1597,10 @@ mod tests {
             stale.blockers
         );
 
-        let qc_again = produce_qc_run_blocking(qc_args(
-            root.as_str(),
-            Some(vec!["itm_w0".into(), "itm_w1".into()]),
-        ))
-        .expect("qc again");
+        let qc_again = qc_wait(
+            &runner,
+            qc_args(root.as_str(), Some(vec!["itm_w0".into(), "itm_w1".into()])),
+        );
         let all_ov: Vec<WarningOverride> = qc_again
             .findings
             .iter()
@@ -1421,14 +1613,16 @@ mod tests {
                 qc_run_id: qc_again.qc_run_id.clone(),
             })
             .collect();
-        let ok = produce_start_blocking(start_args(
-            root.as_str(),
-            Some(vec!["itm_w0".into(), "itm_w1".into()]),
-            Some(all_ov),
-            Some(qc_again.findings.clone()),
-            Some(1),
-        ))
-        .expect("ok");
+        let ok = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                Some(vec!["itm_w0".into(), "itm_w1".into()]),
+                Some(all_ov),
+                Some(qc_again.findings.clone()),
+                Some(1),
+            ),
+        );
         assert!(ok.ok, "{:?}", ok.blockers);
     }
 
@@ -1437,6 +1631,7 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let parent = utf8_tmp(&tmp);
         let root = create_matter_under(&parent, "Dod4").expect("create");
+        let runner = test_runner();
         let (fam_first, fam_second) = {
             let matter = Matter::open(&root).expect("open");
             let fa = matter.insert_family("").expect("fa");
@@ -1522,7 +1717,7 @@ mod tests {
         };
         let _ = (fam_first, fam_second);
 
-        let qc = produce_qc_run_blocking(qc_args(root.as_str(), None)).expect("qc");
+        let qc = qc_wait(&runner, qc_args(root.as_str(), None));
         assert!(qc.passed, "{:?}", qc.findings);
         let overrides: Vec<WarningOverride> = qc
             .findings
@@ -1536,14 +1731,16 @@ mod tests {
                 qc_run_id: qc.qc_run_id.clone(),
             })
             .collect();
-        let start = produce_start_blocking(start_args(
-            root.as_str(),
-            None,
-            Some(overrides),
-            Some(qc.findings.clone()),
-            Some(1),
-        ))
-        .expect("start");
+        let start = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                None,
+                Some(overrides),
+                Some(qc.findings.clone()),
+                Some(1),
+            ),
+        );
         assert!(start.ok, "{:?}", start.blockers);
         let vol = start.output_root.clone().expect("vol");
         let dat_path = Utf8Path::new(&vol).join("DATA").join("load.dat");
@@ -1591,7 +1788,7 @@ mod tests {
         );
 
         let log = fs::read_to_string(Utf8Path::new(&vol).join("privilege-log.csv").as_std_path())
-            .expect("log");
+            .expect("privilege-log.csv");
         assert!(
             log.contains(p1),
             "produced privilege-log ControlNumber is Bates: {log}"
@@ -1638,6 +1835,7 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let parent = utf8_tmp(&tmp);
         let root = create_matter_under(&parent, "MissingCsv").expect("create");
+        let runner = test_runner();
         {
             let matter = Matter::open(&root).expect("open");
             let set = matter
@@ -1673,8 +1871,7 @@ mod tests {
                 .expect("zero");
             apply_responsive(&matter, &["itm_m"]);
         }
-        let qc = produce_qc_run_blocking(qc_args(root.as_str(), Some(vec!["itm_m".into()])))
-            .expect("qc");
+        let qc = qc_wait(&runner, qc_args(root.as_str(), Some(vec!["itm_m".into()])));
         assert!(qc.passed, "{:?}", qc.findings);
         {
             let matter = Matter::open_for_read(&root).expect("read");
@@ -1698,14 +1895,16 @@ mod tests {
                 qc_run_id: qc.qc_run_id.clone(),
             })
             .collect();
-        let start = produce_start_blocking(start_args(
-            root.as_str(),
-            Some(vec!["itm_m".into()]),
-            Some(ov),
-            None,
-            Some(1),
-        ))
-        .expect("start");
+        let start = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                Some(vec!["itm_m".into()]),
+                Some(ov),
+                None,
+                Some(1),
+            ),
+        );
         assert!(!start.ok);
         assert!(
             start.blockers.iter().any(|e| e.kind == "qc_gate"),
@@ -1719,6 +1918,7 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let parent = utf8_tmp(&tmp);
         let root = create_matter_under(&parent, "EmptyCsv").expect("create");
+        let runner = test_runner();
         {
             let matter = Matter::open(&root).expect("open");
             let set = matter
@@ -1744,8 +1944,7 @@ mod tests {
             put_native_text(&matter, "itm_e");
             apply_responsive(&matter, &["itm_e"]);
         }
-        let qc = produce_qc_run_blocking(qc_args(root.as_str(), Some(vec!["itm_e".into()])))
-            .expect("qc");
+        let qc = qc_wait(&runner, qc_args(root.as_str(), Some(vec!["itm_e".into()])));
         assert!(qc.passed, "{:?}", qc.findings);
         {
             let matter = Matter::open_for_read(&root).expect("read");
@@ -1769,14 +1968,16 @@ mod tests {
                 qc_run_id: qc.qc_run_id.clone(),
             })
             .collect();
-        let start = produce_start_blocking(start_args(
-            root.as_str(),
-            Some(vec!["itm_e".into()]),
-            Some(ov),
-            None,
-            Some(1),
-        ))
-        .expect("start");
+        let start = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                Some(vec!["itm_e".into()]),
+                Some(ov),
+                None,
+                Some(1),
+            ),
+        );
         assert!(!start.ok);
         assert!(
             start.blockers.iter().any(|e| e.kind == "qc_gate"),
@@ -1790,6 +1991,7 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let parent = utf8_tmp(&tmp);
         let root = create_matter_under(&parent, "LastFind").expect("create");
+        let runner = test_runner();
         {
             let matter = Matter::open(&root).expect("open");
             let set = matter
@@ -1825,22 +2027,23 @@ mod tests {
                 .expect("zero");
             apply_responsive(&matter, &["itm_z"]);
         }
-        let qc = produce_qc_run_blocking(qc_args(root.as_str(), Some(vec!["itm_z".into()])))
-            .expect("qc");
+        let qc = qc_wait(&runner, qc_args(root.as_str(), Some(vec!["itm_z".into()])));
         assert!(qc.passed, "{:?}", qc.findings);
         assert!(
             qc.findings.iter().any(|f| f.severity == "warn"),
             "{:?}",
             qc.findings
         );
-        let start = produce_start_blocking(start_args(
-            root.as_str(),
-            Some(vec!["itm_z".into()]),
-            None,
-            Some(Vec::new()),
-            Some(1),
-        ))
-        .expect("start");
+        let start = start_wait(
+            &runner,
+            start_args(
+                root.as_str(),
+                Some(vec!["itm_z".into()]),
+                None,
+                Some(Vec::new()),
+                Some(1),
+            ),
+        );
         assert!(!start.ok, "empty last_findings must not skip warning gate");
         assert!(
             start.blockers.iter().any(|e| e.kind == "warning_override"),
@@ -1854,6 +2057,7 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let parent = utf8_tmp(&tmp);
         let root = create_matter_under(&parent, "NoLogAudit").expect("create");
+        let runner = test_runner();
         {
             let matter = Matter::open(&root).expect("open");
             let set = matter
@@ -1891,8 +2095,10 @@ mod tests {
                 })
                 .expect("blank priv");
         }
-        let qc = produce_qc_run_blocking(qc_args(root.as_str(), Some(vec!["itm_blank".into()])))
-            .expect("qc");
+        let qc = qc_wait(
+            &runner,
+            qc_args(root.as_str(), Some(vec!["itm_blank".into()])),
+        );
         assert!(
             qc.extras.iter().any(|e| e.kind == "privilege_log_blank"),
             "{:?}",
@@ -1915,12 +2121,47 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let parent = utf8_tmp(&tmp);
         let root = create_matter_under(&parent, "BatesReq").expect("create");
-        let err = produce_start_blocking(start_args(root.as_str(), None, None, None, None))
-            .expect_err("missing start");
+        let runner = test_runner();
+        let err =
+            produce_start_blocking(&runner, start_args(root.as_str(), None, None, None, None))
+                .expect_err("missing start");
         assert_eq!(err.kind, "failed");
-        let err0 = produce_start_blocking(start_args(root.as_str(), None, None, None, Some(0)))
-            .expect_err("zero");
+        let err0 = produce_start_blocking(
+            &runner,
+            start_args(root.as_str(), None, None, None, Some(0)),
+        )
+        .expect_err("zero");
         assert_eq!(err0.kind, "failed");
+        runner.shutdown();
+    }
+
+    #[test]
+    fn intended_produce_and_qc_params_round_trip() {
+        let produce = intended_produce_params(
+            &["itm_a".into(), "itm_b".into()],
+            DEFAULT_PROFILE,
+            "qc_default_v1",
+            "PROD",
+            1,
+        );
+        let json = serde_json::to_string(&produce).expect("ser produce");
+        let back = ProduceParams::from_json(&json).expect("from_json produce");
+        assert_eq!(produce, back);
+        let qc = intended_qc_params(&["itm_a".into()], "qc_default_v1");
+        let qc_json = serialize_qc_params(&qc).expect("ser qc");
+        let qc_back = QcParams::from_json(&qc_json).expect("from_json qc");
+        assert_eq!(qc, qc_back);
+    }
+
+    #[test]
+    fn produce_source_has_no_silent_empty_json_fallback() {
+        let src = include_str!("produce.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            !prod.contains("unwrap_or_else(|_| json!({}))"),
+            "serialize fail must not fall back to empty JSON"
+        );
+        assert!(!prod.contains("create_job("));
     }
 
     #[test]
@@ -1931,6 +2172,9 @@ mod tests {
         assert!(page.contains("allow-produce-page"));
         assert!(qc.contains("allow-produce-qc-run"));
         assert!(start.contains("allow-produce-start"));
+        let caps = include_str!("../capabilities/default.json");
+        assert!(caps.contains("allow-produce-qc-findings"));
+        assert!(caps.contains("allow-process-page"));
         assert!(page.contains("deny-produce-page"));
     }
 }

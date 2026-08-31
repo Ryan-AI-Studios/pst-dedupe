@@ -4191,6 +4191,33 @@ impl Matter {
         Ok(out)
     }
 
+    /// `(item_id, control_number)` rows with `status = 'ok'` for a production set.
+    pub fn list_ok_production_controls(
+        &self,
+        production_set_id: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pi.item_id, pi.control_number \
+             FROM production_items pi \
+             INNER JOIN production_sets ps ON ps.id = pi.production_set_id \
+             WHERE ps.matter_id = ?1 \
+               AND pi.production_set_id = ?2 \
+               AND pi.status = 'ok' \
+               AND pi.control_number IS NOT NULL \
+               AND TRIM(pi.control_number) != '' \
+               AND pi.control_number NOT LIKE 'SKIP_%' \
+             ORDER BY pi.produced_at ASC, pi.item_id ASC",
+        )?;
+        let rows = stmt.query_map(params![self.matter_id, production_set_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Latest Bates/control number for `item_id` from a complete volume.
     ///
     /// Skips empty / `SKIP_*` control numbers and `failed` sets. Tie-break
@@ -6004,6 +6031,14 @@ impl Matter {
     /// Errors for a job.
     pub fn item_errors_for_job(&self, job_id: &str) -> Result<Vec<ItemError>> {
         item_errors::for_job(&self.conn, job_id)
+    }
+
+    /// Newest matter-wide item errors (read-only; works via [`Matter::open_for_read`]).
+    ///
+    /// Incoming `limit` is clamped to a maximum of **100**. Recency is
+    /// `created_at` DESC (this table has no `updated_at`; schema stays 41).
+    pub fn list_item_errors_recent(&self, limit: u64) -> Result<Vec<ItemError>> {
+        item_errors::recent(&self.conn, limit)
     }
 
     // --- Audit ---

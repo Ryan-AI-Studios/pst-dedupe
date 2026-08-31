@@ -100,6 +100,18 @@ pub(crate) fn for_job(conn: &Connection, job_id: &str) -> Result<Vec<ItemError>>
     )
 }
 
+/// Newest-first matter-wide errors. `item_errors` has `created_at` only (no
+/// `updated_at` column; schema stays 41). Incoming `limit` is capped at 100.
+pub(crate) fn recent(conn: &Connection, limit: u64) -> Result<Vec<ItemError>> {
+    let cap = limit.min(100) as i64;
+    query_list(
+        conn,
+        "SELECT id, item_id, source_id, job_id, stage, code, message, detail, created_at \
+         FROM item_errors ORDER BY created_at DESC, id DESC LIMIT ?1",
+        params![cap],
+    )
+}
+
 fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemError> {
     Ok(ItemError {
         id: row.get(0)?,
@@ -162,4 +174,45 @@ fn ensure_job_exists(conn: &Connection, job_id: &str) -> Result<()> {
         return Err(Error::JobNotFound(job_id.to_string()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::matter::Matter;
+    use camino::Utf8PathBuf;
+    use tempfile::tempdir;
+
+    fn utf8_tmp(tmp: &tempfile::TempDir) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8")
+    }
+
+    #[test]
+    fn list_item_errors_recent_via_open_for_read_caps_at_100() {
+        let tmp = tempdir().expect("tempdir");
+        let root = utf8_tmp(&tmp).join("err-recent");
+        {
+            let matter = Matter::create(&root, "ErrRecent").expect("create");
+            for i in 0..105 {
+                matter
+                    .record_item_error(ItemErrorInput {
+                        item_id: None,
+                        source_id: None,
+                        job_id: None,
+                        stage: "extract".into(),
+                        code: format!("CODE_{i:03}"),
+                        message: format!("msg {i}"),
+                        detail: None,
+                    })
+                    .expect("record");
+            }
+        }
+        let matter = Matter::open_for_read(&root).expect("read");
+        let rows = matter.list_item_errors_recent(1000).expect("recent");
+        assert_eq!(rows.len(), 100, "incoming limit must clamp to 100");
+        assert_eq!(rows[0].code, "CODE_104", "newest created_at first");
+        assert_eq!(rows[99].code, "CODE_005");
+        let fifty = matter.list_item_errors_recent(50).expect("50");
+        assert_eq!(fifty.len(), 50);
+    }
 }

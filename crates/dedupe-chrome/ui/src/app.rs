@@ -8,7 +8,7 @@ use wasm_bindgen::JsCast;
 use web_sys::MouseEvent;
 
 use crate::pages::{
-    AdminStub, MatterHome, MattersList, ProcessStub, ProducePage, ReviewQueue, ReviewWindow,
+    AdminStub, MatterHome, MattersList, ProcessPage, ProducePage, ReviewQueue, ReviewWindow,
 };
 
 static CTRL_K_ONCE: Once = Once::new();
@@ -152,7 +152,7 @@ pub fn App() -> impl IntoView {
                         } />
                         <Route path=path!("/matters") view=MattersList />
                         <Route path=path!("/matters/:id") view=MatterHome />
-                        <Route path=path!("/matters/:id/process") view=ProcessStub />
+                        <Route path=path!("/matters/:id/process") view=ProcessPage />
                         <Route path=path!("/matters/:id/review") view=ReviewQueue />
                         <Route path=path!("/matters/:id/review/:docId") view=ReviewWindow />
                         <Route path=path!("/matters/:id/produce") view=ProducePage />

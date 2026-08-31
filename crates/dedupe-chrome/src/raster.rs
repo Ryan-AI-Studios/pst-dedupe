@@ -602,7 +602,10 @@ mod tests {
     use super::*;
     use crate::create::create_matter_under;
     use crate::open_root::open_matter_read;
-    use crate::produce::{produce_page_blocking, ProducePageResponse};
+    use crate::produce::{
+        produce_page_blocking, produce_qc_findings_blocking, produce_qc_run_blocking,
+        ProducePageResponse, ProduceQcRunArgs, ProduceQcRunResponse,
+    };
     use matter_core::{
         is_encrypted_matter, item_role, item_status, CreateRedactionInput, ItemInput, ItemUpdate,
         Matter,
@@ -610,10 +613,30 @@ mod tests {
     use pdf_raster::{
         search_hit_rects, synthetic_text_pdf, synthetic_two_label_pdf, user_space_to_pixel,
     };
+    use process_runner::{register_default_handlers, ProcessRunner, RunnerConfig};
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn utf8_tmp(tmp: &tempfile::TempDir) -> camino::Utf8PathBuf {
         camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8")
+    }
+
+    fn test_runner() -> ProcessRunner {
+        let mut r = ProcessRunner::new(RunnerConfig::default());
+        register_default_handlers(&mut r);
+        r
+    }
+
+    fn qc_wait(runner: &ProcessRunner, args: ProduceQcRunArgs) -> ProduceQcRunResponse {
+        let started = produce_qc_run_blocking(runner, args.clone()).expect("qc start");
+        if started.job_id.is_none() {
+            return started;
+        }
+        assert!(
+            runner.wait_until_idle(Duration::from_secs(120)),
+            "qc did not idle"
+        );
+        produce_qc_findings_blocking(&args.root, started.job_id.clone()).expect("qc findings")
     }
 
     fn seed_pdf_item(root: &camino::Utf8Path, id: &str, pdf: &[u8]) -> String {
@@ -726,14 +749,17 @@ mod tests {
             generation: None,
         })
         .expect("geom");
-        let qc_need = crate::produce::produce_qc_run_blocking(crate::produce::ProduceQcRunArgs {
-            root: root.to_string(),
-            filter_json: None,
-            item_ids: None,
-            production_profile: None,
-            source_entire_corpus: Some(true),
-        })
-        .expect("qc need");
+        let runner = test_runner();
+        let qc_need = qc_wait(
+            &runner,
+            ProduceQcRunArgs {
+                root: root.to_string(),
+                filter_json: None,
+                item_ids: None,
+                production_profile: None,
+                source_entire_corpus: Some(true),
+            },
+        );
         assert!(
             qc_need.need_burn >= 1,
             "entire-corpus QC should count the geom item; need_burn={} ordered={:?}",
@@ -1033,14 +1059,17 @@ mod tests {
                 })
                 .expect("pdf");
         }
-        let qc = crate::produce::produce_qc_run_blocking(crate::produce::ProduceQcRunArgs {
-            root: root.to_string(),
-            filter_json: None,
-            item_ids: None,
-            production_profile: None,
-            source_entire_corpus: Some(true),
-        })
-        .expect("qc");
+        let runner = test_runner();
+        let qc = qc_wait(
+            &runner,
+            ProduceQcRunArgs {
+                root: root.to_string(),
+                filter_json: None,
+                item_ids: None,
+                production_profile: None,
+                source_entire_corpus: Some(true),
+            },
+        );
         assert!(
             qc.extras.iter().any(|e| {
                 e.kind == "pdf_raster_failed"

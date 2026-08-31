@@ -118,6 +118,9 @@ mod tests {
         register_default_handlers(&mut runner);
         // Unknown kind rejected; known kinds accepted at start only with matter —
         // just ensure shutdown is clean after register.
+        assert!(runner.is_registered("produce"));
+        assert!(runner.is_registered("qc"));
+        assert!(!runner.is_registered("not_a_real_kind"));
         runner.shutdown();
         assert!(default_handler_kinds().contains(&"workflow_run"));
         assert!(default_handler_kinds().contains(&"profile_run"));
@@ -129,5 +132,16 @@ mod tests {
         assert!(default_handler_kinds().contains(&"ai_suggest_codes"));
         assert!(default_handler_kinds().contains(&"transcribe"));
         assert!(default_handler_kinds().contains(&"teams_extract"));
+    }
+
+    #[test]
+    fn is_registered_true_after_register_default_handlers() {
+        let mut runner = ProcessRunner::new(RunnerConfig::default());
+        assert!(!runner.is_registered("produce"));
+        assert!(!runner.is_registered("qc"));
+        register_default_handlers(&mut runner);
+        assert!(runner.is_registered("produce"));
+        assert!(runner.is_registered("qc"));
+        runner.shutdown();
     }
 }

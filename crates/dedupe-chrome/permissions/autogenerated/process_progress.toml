@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-process-progress"
+description = "Enables the process_progress command without any pre-configured scope."
+commands.allow = ["process_progress"]
+
+[[permission]]
+identifier = "deny-process-progress"
+description = "Denies the process_progress command without any pre-configured scope."
+commands.deny = ["process_progress"]

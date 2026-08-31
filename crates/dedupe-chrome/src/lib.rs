@@ -13,6 +13,8 @@ mod params;
 #[allow(dead_code)] // Host mirror of UI encode helpers; covered by unit tests in CI.
 mod path_id;
 mod privilege_cmd;
+mod process;
+mod process_params;
 mod produce;
 mod queue;
 #[allow(dead_code)] // Pure helper mirrored in UI; exercised by unit tests in CI.
@@ -34,9 +36,10 @@ use error::CommandError;
 use matter_cmd::{matter_overview_blocking, MatterOverviewResponse};
 use notes::{review_upsert_note_blocking, ReviewUpsertNoteArgs};
 use privilege_cmd::{review_upsert_privilege_blocking, ReviewUpsertPrivilegeArgs};
+use process_runner::ProcessRunner;
 use produce::{
-    produce_page_blocking, produce_qc_run_blocking, produce_start_blocking, ProduceQcRunArgs,
-    ProduceStartArgs,
+    produce_page_blocking, produce_qc_findings_blocking, produce_qc_run_blocking,
+    produce_start_blocking, ProduceQcRunArgs, ProduceStartArgs,
 };
 use queue::{review_queue_page_blocking, ReviewQueuePageArgs};
 use raster::{
@@ -438,22 +441,27 @@ fn produce_page(root: String) -> Result<produce::ProducePageResponse, CommandErr
 
 #[tauri::command]
 fn produce_qc_run(
+    runner: tauri::State<std::sync::Arc<ProcessRunner>>,
     root: String,
     filter_json: Option<String>,
     item_ids: Option<Vec<String>>,
     production_profile: Option<String>,
     source_entire_corpus: Option<bool>,
 ) -> Result<produce::ProduceQcRunResponse, CommandError> {
+    let runner = runner.inner().clone();
     join_worker(
         "produce_qc_run",
         std::thread::spawn(move || {
-            produce_qc_run_blocking(ProduceQcRunArgs {
-                root,
-                filter_json,
-                item_ids,
-                production_profile,
-                source_entire_corpus,
-            })
+            produce_qc_run_blocking(
+                &runner,
+                ProduceQcRunArgs {
+                    root,
+                    filter_json,
+                    item_ids,
+                    production_profile,
+                    source_entire_corpus,
+                },
+            )
         }),
     )
 }
@@ -461,6 +469,7 @@ fn produce_qc_run(
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn produce_start(
+    runner: tauri::State<std::sync::Arc<ProcessRunner>>,
     root: String,
     filter_json: Option<String>,
     item_ids: Option<Vec<String>>,
@@ -472,22 +481,102 @@ fn produce_start(
     log_format: Option<String>,
     last_findings: Option<Vec<produce::ChromeQcFinding>>,
 ) -> Result<produce::ProduceStartResponse, CommandError> {
+    let runner = runner.inner().clone();
     join_worker(
         "produce_start",
         std::thread::spawn(move || {
-            produce_start_blocking(ProduceStartArgs {
-                root,
-                filter_json,
-                item_ids,
-                production_profile,
-                source_entire_corpus,
-                bates_prefix,
-                bates_start,
-                warning_overrides,
-                log_format,
-                last_findings,
-            })
+            produce_start_blocking(
+                &runner,
+                ProduceStartArgs {
+                    root,
+                    filter_json,
+                    item_ids,
+                    production_profile,
+                    source_entire_corpus,
+                    bates_prefix,
+                    bates_start,
+                    warning_overrides,
+                    log_format,
+                    last_findings,
+                },
+            )
         }),
+    )
+}
+
+#[tauri::command]
+fn produce_qc_findings(
+    root: String,
+    job_id: Option<String>,
+) -> Result<produce::ProduceQcRunResponse, CommandError> {
+    join_worker(
+        "produce_qc_findings",
+        std::thread::spawn(move || produce_qc_findings_blocking(&root, job_id)),
+    )
+}
+
+#[tauri::command]
+fn process_page(
+    runner: tauri::State<std::sync::Arc<ProcessRunner>>,
+    root: String,
+) -> Result<process::ProcessPageResponse, CommandError> {
+    let runner = runner.inner().clone();
+    join_worker(
+        "process_page",
+        std::thread::spawn(move || process::process_page_blocking(&runner, &root)),
+    )
+}
+
+#[tauri::command]
+fn process_start(
+    runner: tauri::State<std::sync::Arc<ProcessRunner>>,
+    root: String,
+    kind: String,
+    params_json: String,
+) -> Result<process::ProcessStartResponse, CommandError> {
+    let runner = runner.inner().clone();
+    join_worker(
+        "process_start",
+        std::thread::spawn(move || {
+            process::process_start_blocking(&runner, &root, &kind, &params_json)
+        }),
+    )
+}
+
+#[tauri::command]
+fn process_progress(
+    runner: tauri::State<std::sync::Arc<ProcessRunner>>,
+    root: String,
+) -> Result<process_runner::JobProgressSnapshot, CommandError> {
+    let runner = runner.inner().clone();
+    join_worker(
+        "process_progress",
+        std::thread::spawn(move || process::process_progress_blocking(&runner, &root)),
+    )
+}
+
+#[tauri::command]
+fn process_cancel(
+    runner: tauri::State<std::sync::Arc<ProcessRunner>>,
+    job_id: String,
+) -> Result<(), CommandError> {
+    let runner = runner.inner().clone();
+    join_worker(
+        "process_cancel",
+        std::thread::spawn(move || process::process_cancel_blocking(&runner, &job_id)),
+    )
+}
+
+#[tauri::command]
+fn process_resume(
+    runner: tauri::State<std::sync::Arc<ProcessRunner>>,
+    root: String,
+    job_id: String,
+) -> Result<(), CommandError> {
+    let runner = runner.inner().clone();
+    join_worker(
+        "process_resume",
+        std::thread::spawn(move || process::process_resume_blocking(&runner, &root, &job_id)),
     )
 }
 
@@ -515,8 +604,10 @@ fn review_upsert_privilege(
 
 /// Launch the Tauri app. Returns `Err` instead of panicking on run failure.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let runner = process::new_managed_runner();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(runner)
         .invoke_handler(tauri::generate_handler![
             matter_overview,
             create_matter,
@@ -536,6 +627,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             produce_page,
             produce_qc_run,
             produce_start,
+            produce_qc_findings,
+            process_page,
+            process_start,
+            process_progress,
+            process_cancel,
+            process_resume,
             review_raster_page,
             review_geom_list,
             review_geom_upsert,
@@ -544,6 +641,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             review_burn_native,
             produce_burn_set
         ])
-        .run(tauri::generate_context!())
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+        .build(tauri::generate_context!())?
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                use tauri::Manager;
+                app_handle
+                    .state::<std::sync::Arc<ProcessRunner>>()
+                    .shutdown();
+            }
+        });
+    Ok(())
 }

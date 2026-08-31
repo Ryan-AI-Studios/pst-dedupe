@@ -189,6 +189,16 @@ impl ProcessRunner {
             .insert(kind, handler);
     }
 
+    /// Whether a handler is registered for `kind`.
+    ///
+    /// Poisoned mutex is treated as an empty map (no panic).
+    pub fn is_registered(&self, kind: &str) -> bool {
+        self.handlers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(kind)
+    }
+
     /// Create a job, set Running, and queue work on the matter worker.
     ///
     /// Returns `job_id` once the job is created and accepted (before the

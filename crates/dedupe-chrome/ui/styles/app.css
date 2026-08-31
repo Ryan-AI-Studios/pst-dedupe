@@ -760,3 +760,47 @@ button.secondary {
   gap: 6px;
   align-items: center;
 }
+
+.process-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.4fr) minmax(220px, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.process-pane {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 12px;
+  min-height: 240px;
+}
+
+.process-pane h2 {
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.job-row {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 0;
+}
+
+.job-row.child {
+  padding-left: 16px;
+}
+
+.process-status {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.busy-banner {
+  background: var(--coding-pane);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
