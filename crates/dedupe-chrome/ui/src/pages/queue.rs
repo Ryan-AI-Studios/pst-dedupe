@@ -14,7 +14,10 @@ use crate::invoke::{
     SavedSearchUpsertArgs,
 };
 use crate::path_id::{encode_matter_id, matter_home_href_from_param, review_doc_href};
-use crate::queue_window::{visible_range, OVERSCAN, ROW_HEIGHT};
+use crate::queue_window::{
+    clamp_offset_for_fetch_meta, next_page_disabled, scroll_top_to_reveal, visible_range, OVERSCAN,
+    ROW_HEIGHT,
+};
 
 const PAGE_LIMIT: u64 = 500;
 
@@ -84,6 +87,28 @@ fn queue_shortcut_blocked(ev: &KeyboardEvent) -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("true") || v == "")
 }
 
+fn set_queue_dom_scroll_top(value: f64) {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let Some(el) = doc.get_element_by_id("queue") else {
+        return;
+    };
+    let Ok(html) = el.dyn_into::<HtmlElement>() else {
+        return;
+    };
+    html.set_scroll_top(value as i32);
+}
+
+fn reveal_row(idx: usize, scroll_top: RwSignal<f64>, viewport_h: RwSignal<f64>) {
+    let st = scroll_top.get();
+    let next = scroll_top_to_reveal(idx, ROW_HEIGHT, viewport_h.get(), st);
+    if next != st {
+        scroll_top.set(next);
+        set_queue_dom_scroll_top(next);
+    }
+}
+
 fn apply_codes_async(
     root: String,
     ids: Vec<String>,
@@ -145,6 +170,13 @@ pub fn ReviewQueue() -> impl IntoView {
     let current_idx = RwSignal::new(0usize);
     let scroll_top = RwSignal::new(0.0f64);
     let viewport_h = RwSignal::new(640.0f64);
+    let last_fetch_meta = RwSignal::new(Option::<(u64, u64, usize)>::None);
+
+    let reset_queue_navigation = move || {
+        current_idx.set(0);
+        scroll_top.set(0.0);
+        set_queue_dom_scroll_top(0.0);
+    };
 
     let help_open = RwSignal::new(false);
     let coding_hint = RwSignal::new(false);
@@ -163,8 +195,9 @@ pub fn ReviewQueue() -> impl IntoView {
         }
         root_sig.set(root.clone());
         selected.set(HashSet::new());
-        current_idx.set(0);
         offset.set(0);
+        last_fetch_meta.set(None);
+        reset_queue_navigation();
         leptos::task::spawn_local({
             let root = root.clone();
             async move {
@@ -207,6 +240,7 @@ pub fn ReviewQueue() -> impl IntoView {
                 // Invalidate in-flight fetches so a late OK cannot overwrite this error.
                 fetch_gen.update(|g| *g = g.wrapping_add(1));
                 page.set(None);
+                last_fetch_meta.set(None);
                 error.set(Some(e));
                 loading.set(false);
                 return;
@@ -242,17 +276,62 @@ pub fn ReviewQueue() -> impl IntoView {
                             m.insert(chip_for_total, total);
                         });
                     }
-                    page.set(Some(p));
-                    loading.set(false);
+                    last_fetch_meta.set(Some((p.offset, p.total, p.rows.len())));
+                    if p.rows.is_empty() && p.total > 0 {
+                        // Keep last good page. Clamp Effect owns offset_after_empty_page;
+                        // gap is offset < total (not a clamp). Do not call the clamp helper here.
+                        if p.offset < p.total {
+                            error.set(Some(
+                                "This page has no rows, but the queue still has items. Use Prev/Next."
+                                    .into(),
+                            ));
+                        }
+                        loading.set(false);
+                    } else {
+                        page.set(Some(p));
+                        loading.set(false);
+                    }
                 }
                 Err(e) => {
                     // Do not write saved chip totals on error (esp. fts_unavailable → fake 0).
                     page.set(None);
+                    last_fetch_meta.set(None);
                     error.set(Some(e));
                     loading.set(false);
                 }
             }
         });
+    });
+
+    // Dedicated clamp Effect — never in the render closure. Write offset only when changed.
+    // Ignore stale last_fetch_meta from a previous offset (Next from a gap must fetch first).
+    Effect::new(move |_| {
+        let Some((meta_off, total, fetched_len)) = last_fetch_meta.get() else {
+            return;
+        };
+        let off = offset.get();
+        if let Some(new) =
+            clamp_offset_for_fetch_meta(off, meta_off, total, fetched_len, PAGE_LIMIT)
+        {
+            if new != off {
+                offset.set(new);
+            }
+        }
+    });
+
+    Effect::new(move |_| {
+        let Some(p) = page.get() else {
+            return;
+        };
+        let n = p.rows.len();
+        let i = current_idx.get();
+        let next = if n == 0 { 0 } else { i.min(n - 1) };
+        if next != i {
+            current_idx.set(next);
+            if n > 0 {
+                reveal_row(next, scroll_top, viewport_h);
+            }
+        }
     });
 
     let home =
@@ -319,17 +398,25 @@ pub fn ReviewQueue() -> impl IntoView {
                         ev.prevent_default();
                         let n = page.get().map(|p| p.rows.len()).unwrap_or(0);
                         if n > 0 {
-                            current_idx.update(|i| *i = (*i + 1).min(n.saturating_sub(1)));
+                            let next = (current_idx.get() + 1).min(n.saturating_sub(1));
+                            current_idx.set(next);
+                            reveal_row(next, scroll_top, viewport_h);
                         }
                     }
                     "ArrowUp" => {
                         ev.prevent_default();
-                        current_idx.update(|i| *i = i.saturating_sub(1));
+                        let n = page.get().map(|p| p.rows.len()).unwrap_or(0);
+                        if n > 0 {
+                            let next = current_idx.get().saturating_sub(1);
+                            current_idx.set(next);
+                            reveal_row(next, scroll_top, viewport_h);
+                        }
                     }
                     "Enter" => {
                         ev.prevent_default();
                         if let Some(p) = page.get() {
                             let i = current_idx.get();
+                            reveal_row(i, scroll_top, viewport_h);
                             if let Some(row) = p.rows.get(i) {
                                 let root = root_sig.get();
                                 let fj = filter_json.get();
@@ -347,6 +434,7 @@ pub fn ReviewQueue() -> impl IntoView {
                         ev.prevent_default();
                         if let Some(p) = page.get() {
                             let i = current_idx.get();
+                            reveal_row(i, scroll_top, viewport_h);
                             if let Some(row) = p.rows.get(i) {
                                 let id = row.id.clone();
                                 selected.update(|set| {
@@ -388,7 +476,7 @@ pub fn ReviewQueue() -> impl IntoView {
                             include_family.set(false);
                             offset.set(0);
                             selected.set(HashSet::new());
-                            current_idx.set(0);
+                            reset_queue_navigation();
                         }
                     >"Unreviewed"</button>
                     <button
@@ -399,7 +487,7 @@ pub fn ReviewQueue() -> impl IntoView {
                             include_family.set(false);
                             offset.set(0);
                             selected.set(HashSet::new());
-                            current_idx.set(0);
+                            reset_queue_navigation();
                         }
                     >"Privileged"</button>
                     <button
@@ -410,7 +498,7 @@ pub fn ReviewQueue() -> impl IntoView {
                             include_family.set(false);
                             offset.set(0);
                             selected.set(HashSet::new());
-                            current_idx.set(0);
+                            reset_queue_navigation();
                         }
                     >"Responsive"</button>
                     <For
@@ -438,7 +526,7 @@ pub fn ReviewQueue() -> impl IntoView {
                                             keyword_draft.set(kw.clone());
                                             offset.set(0);
                                             selected.set(HashSet::new());
-                                            current_idx.set(0);
+                                            reset_queue_navigation();
                                         }
                                     }
                                 >{
@@ -466,6 +554,7 @@ pub fn ReviewQueue() -> impl IntoView {
                             if ev.key() == "Enter" {
                                 keyword.set(keyword_draft.get());
                                 offset.set(0);
+                                reset_queue_navigation();
                             }
                         }
                     />
@@ -484,6 +573,7 @@ pub fn ReviewQueue() -> impl IntoView {
                                     Err(e) => error.set(Some(e)),
                                 }
                                 offset.set(0);
+                                reset_queue_navigation();
                             }
                         />
                         "Include family"
@@ -662,36 +752,27 @@ pub fn ReviewQueue() -> impl IntoView {
                     prop:disabled=move || offset.get() == 0
                     on:click=move |_| {
                         offset.update(|o| *o = o.saturating_sub(PAGE_LIMIT));
-                        current_idx.set(0);
-                        scroll_top.set(0.0);
+                        reset_queue_navigation();
                     }
                 >"Prev page"</button>
                 <button
                     prop:disabled=move || {
-                        page.get().map(|p| p.offset + p.rows.len() as u64 >= p.total).unwrap_or(true)
+                        let off = offset.get();
+                        if let Some((_, total, fetched_len)) = last_fetch_meta.get() {
+                            return next_page_disabled(off, total, fetched_len, PAGE_LIMIT);
+                        }
+                        page.get()
+                            .map(|p| next_page_disabled(off, p.total, p.rows.len(), PAGE_LIMIT))
+                            .unwrap_or(true)
                     }
                     on:click=move |_| {
                         offset.update(|o| *o += PAGE_LIMIT);
-                        current_idx.set(0);
-                        scroll_top.set(0.0);
+                        reset_queue_navigation();
                     }
                 >"Next page"</button>
             </div>
 
-            <div
-                id="queue"
-                class="queue-viewport"
-                tabindex="-1"
-                on:scroll=move |ev: Event| {
-                    if let Some(t) = ev.current_target() {
-                        if let Ok(el) = t.dyn_into::<HtmlElement>() {
-                            scroll_top.set(el.scroll_top() as f64);
-                            viewport_h.set(el.client_height() as f64);
-                        }
-                    }
-                }
-            >
-                {move || {
+            {move || {
                     if page.get().is_none() {
                         // Error banner / loading handle status — do not fake an empty corpus.
                         return view! { <></> }.into_any();
@@ -699,155 +780,188 @@ pub fn ReviewQueue() -> impl IntoView {
                     let Some(p) = page.get() else {
                         return view! { <></> }.into_any();
                     };
-                    let fetched_len = p.rows.len();
-                    if p.total == 0 || fetched_len == 0 {
+                    if p.total == 0 {
                         return view! { <p class="empty">"0 in queue"</p> }.into_any();
                     }
-                    let spacer = fetched_len as f64 * ROW_HEIGHT;
-                    let (start, end) = visible_range(
-                        scroll_top.get(),
-                        viewport_h.get(),
-                        ROW_HEIGHT,
-                        fetched_len,
-                        OVERSCAN,
-                    );
-                    let cur = current_idx.get();
-                    let sel = selected.get();
+                    let fetched_len = p.rows.len();
+                    if fetched_len == 0 {
+                        // total > 0 with no last-good rows: banner already set; do not lie "0 in queue".
+                        return view! { <></> }.into_any();
+                    }
                     let show_extras = p.extras;
-                    let top_pad = start as f64 * ROW_HEIGHT;
-                    let visible: Vec<(usize, QueueRow)> = p.rows[start..end]
-                        .iter()
-                        .cloned()
-                        .enumerate()
-                        .map(|(i, r)| (start + i, r))
-                        .collect();
+                    let grid_class = if show_extras {
+                        "queue-grid extras"
+                    } else {
+                        "queue-grid"
+                    };
                     view! {
-                        <div class="queue-spacer" style=format!("height:{spacer}px;position:relative;")>
+                        <div class=grid_class role="grid" aria-rowcount=fetched_len.to_string()>
+                            <div class="queue-header" role="row">
+                                <span role="columnheader"></span>
+                                <span role="columnheader">"Control#"</span>
+                                <span role="columnheader">"Date"</span>
+                                <span role="columnheader">"From"</span>
+                                <span role="columnheader">"Subject"</span>
+                                <span role="columnheader">"Family"</span>
+                                <span role="columnheader">"Resp"</span>
+                                <span role="columnheader">"Privilege"</span>
+                                <Show when=move || show_extras>
+                                    <span role="columnheader">"Custodian"</span>
+                                    <span role="columnheader">"Withhold"</span>
+                                    <span role="columnheader">"Conf"</span>
+                                    <span role="columnheader">"Produced"</span>
+                                </Show>
+                            </div>
                             <div
-                                class=if show_extras { "queue-window extras" } else { "queue-window" }
-                                style=format!("transform:translateY({top_pad}px);")
-                                role="grid"
-                                aria-rowcount=fetched_len.to_string()
-                            >
-                                <div class="queue-header" role="row">
-                                    <span role="columnheader"></span>
-                                    <span role="columnheader">"Control#"</span>
-                                    <span role="columnheader">"Date"</span>
-                                    <span role="columnheader">"From"</span>
-                                    <span role="columnheader">"Subject"</span>
-                                    <span role="columnheader">"Family"</span>
-                                    <span role="columnheader">"Resp"</span>
-                                    <span role="columnheader">"Privilege"</span>
-                                    <Show when=move || show_extras>
-                                        <span role="columnheader">"Custodian"</span>
-                                        <span role="columnheader">"Withhold"</span>
-                                        <span role="columnheader">"Conf"</span>
-                                        <span role="columnheader">"Produced"</span>
-                                    </Show>
-                                </div>
-                                <For
-                                    each=move || visible.clone()
-                                    key=|(_, r)| r.id.clone()
-                                    children=move |(idx, row)| {
-                                        let id = row.id.clone();
-                                        let id_cb = id.clone();
-                                        let id_open = id.clone();
-                                        let tip = id.clone();
-                                        let checked = sel.contains(&id);
-                                        let is_current = idx == cur;
-                                        let indent = row.parent_item_id.is_some();
-                                        let priv_coded = row.privilege_coded;
-                                        let withhold = row.withhold;
-                                        let conf = row.confidential.unwrap_or(false);
-                                        let from = row.from_addr.clone().unwrap_or_else(|| "—".into());
-                                        let subject = row.subject.clone().unwrap_or_else(|| "—".into());
-                                        let custodian = row.custodian.clone().unwrap_or_else(|| "—".into());
-                                        let ctrl = control_number(row.review_order);
-                                        let date = format_date(&row.date);
-                                        let fam = row.family_size.to_string();
-                                        let resp = resp_display(&row.resp);
-                                        view! {
-                                            <div
-                                                class="queue-row"
-                                                role="row"
-                                                tabindex="0"
-                                                aria-selected=is_current.to_string()
-                                                data-current=is_current.to_string()
-                                                style=format!("height:{}px;", ROW_HEIGHT)
-                                                on:focus=move |_| current_idx.set(idx)
-                                                on:click=move |_| {
-                                                    current_idx.set(idx);
-                                                    let root = root_sig.get();
-                                                    let fj = filter_json.get();
-                                                    let fam = include_family.get();
-                                                    let kw = keyword.get();
-                                                    let fam_filter =
-                                                        with_include_family(&fj, fam).unwrap_or(fj);
-                                                    let href = review_doc_href(
-                                                        &root,
-                                                        &id_open,
-                                                        Some(&fam_filter),
-                                                        Some(&kw),
-                                                    );
-                                                    navigate.with_value(|nav| {
-                                                        nav(&href, Default::default());
-                                                    });
-                                                }
-                                            >
-                                                <span role="gridcell">
-                                                    <input
-                                                        type="checkbox"
-                                                        prop:checked=checked
-                                                        on:click=move |ev: MouseEvent| {
-                                                            ev.stop_propagation();
-                                                            let id = id_cb.clone();
-                                                            selected.update(|set| {
-                                                                if set.contains(&id) {
-                                                                    set.remove(&id);
-                                                                } else {
-                                                                    set.insert(id);
-                                                                }
-                                                            });
-                                                        }
-                                                    />
-                                                </span>
-                                                <span role="gridcell" title=tip>{ctrl}</span>
-                                                <span role="gridcell">{date}</span>
-                                                <span role="gridcell">{from}</span>
-                                                <span
-                                                    role="gridcell"
-                                                    class=if indent { "subject indented" } else { "subject" }
-                                                >{subject}</span>
-                                                <span role="gridcell">{fam}</span>
-                                                <span role="gridcell">{resp}</span>
-                                                <span role="gridcell">
-                                                    {if priv_coded {
-                                                        view! { <span class="priv-pill">"PRIV"</span> }.into_any()
-                                                    } else {
-                                                        view! { <span>"—"</span> }.into_any()
-                                                    }}
-                                                </span>
-                                                <Show when=move || show_extras>
-                                                    <span role="gridcell">{custodian.clone()}</span>
-                                                    <span role="gridcell">
-                                                        {if withhold {
-                                                            view! { <span class="priv-pill">"WITHHOLD"</span> }.into_any()
-                                                        } else {
-                                                            view! { <span>"—"</span> }.into_any()
-                                                        }}
-                                                    </span>
-                                                    <span role="gridcell">{if conf { "C" } else { "—" }}</span>
-                                                    <span role="gridcell">"—"</span>
-                                                </Show>
-                                            </div>
+                                id="queue"
+                                class="queue-viewport"
+                                tabindex="-1"
+                                on:scroll=move |ev: Event| {
+                                    if let Some(t) = ev.current_target() {
+                                        if let Ok(el) = t.dyn_into::<HtmlElement>() {
+                                            scroll_top.set(el.scroll_top() as f64);
+                                            viewport_h.set(el.client_height() as f64);
                                         }
                                     }
-                                />
+                                }
+                            >
+                                {move || {
+                                    let Some(p) = page.get() else {
+                                        return view! { <></> }.into_any();
+                                    };
+                                    let fetched_len = p.rows.len();
+                                    if fetched_len == 0 {
+                                        return view! { <></> }.into_any();
+                                    }
+                                    let spacer = fetched_len as f64 * ROW_HEIGHT;
+                                    let (start, end) = visible_range(
+                                        scroll_top.get(),
+                                        viewport_h.get(),
+                                        ROW_HEIGHT,
+                                        fetched_len,
+                                        OVERSCAN,
+                                    );
+                                    let cur = current_idx.get();
+                                    let sel = selected.get();
+                                    let top_pad = start as f64 * ROW_HEIGHT;
+                                    let visible: Vec<(usize, QueueRow)> = p.rows[start..end]
+                                        .iter()
+                                        .cloned()
+                                        .enumerate()
+                                        .map(|(i, r)| (start + i, r))
+                                        .collect();
+                                    view! {
+                                <div class="queue-spacer" style=format!("height:{spacer}px;position:relative;")>
+                                    <div
+                                        class="queue-window"
+                                        style=format!("transform:translateY({top_pad}px);")
+                                    >
+                                        <For
+                                            each=move || visible.clone()
+                                            key=|(_, r)| r.id.clone()
+                                            children=move |(idx, row)| {
+                                                let id = row.id.clone();
+                                                let id_cb = id.clone();
+                                                let id_open = id.clone();
+                                                let tip = id.clone();
+                                                let checked = sel.contains(&id);
+                                                let is_current = idx == cur;
+                                                let indent = row.parent_item_id.is_some();
+                                                let priv_coded = row.privilege_coded;
+                                                let withhold = row.withhold;
+                                                let conf = row.confidential.unwrap_or(false);
+                                                let from = row.from_addr.clone().unwrap_or_else(|| "—".into());
+                                                let subject = row.subject.clone().unwrap_or_else(|| "—".into());
+                                                let custodian = row.custodian.clone().unwrap_or_else(|| "—".into());
+                                                let ctrl = control_number(row.review_order);
+                                                let date = format_date(&row.date);
+                                                let fam = row.family_size.to_string();
+                                                let resp = resp_display(&row.resp);
+                                                view! {
+                                                    <div
+                                                        class="queue-row"
+                                                        role="row"
+                                                        tabindex="0"
+                                                        aria-selected=is_current.to_string()
+                                                        data-current=is_current.to_string()
+                                                        style=format!("height:{}px;", ROW_HEIGHT)
+                                                        on:focus=move |_| current_idx.set(idx)
+                                                        on:click=move |_| {
+                                                            current_idx.set(idx);
+                                                            let root = root_sig.get();
+                                                            let fj = filter_json.get();
+                                                            let fam = include_family.get();
+                                                            let kw = keyword.get();
+                                                            let fam_filter =
+                                                                with_include_family(&fj, fam).unwrap_or(fj);
+                                                            let href = review_doc_href(
+                                                                &root,
+                                                                &id_open,
+                                                                Some(&fam_filter),
+                                                                Some(&kw),
+                                                            );
+                                                            navigate.with_value(|nav| {
+                                                                nav(&href, Default::default());
+                                                            });
+                                                        }
+                                                    >
+                                                        <span role="gridcell">
+                                                            <input
+                                                                type="checkbox"
+                                                                prop:checked=checked
+                                                                on:click=move |ev: MouseEvent| {
+                                                                    ev.stop_propagation();
+                                                                    let id = id_cb.clone();
+                                                                    selected.update(|set| {
+                                                                        if set.contains(&id) {
+                                                                            set.remove(&id);
+                                                                        } else {
+                                                                            set.insert(id);
+                                                                        }
+                                                                    });
+                                                                }
+                                                            />
+                                                        </span>
+                                                        <span role="gridcell" title=tip>{ctrl}</span>
+                                                        <span role="gridcell">{date}</span>
+                                                        <span role="gridcell">{from}</span>
+                                                        <span
+                                                            role="gridcell"
+                                                            class=if indent { "subject indented" } else { "subject" }
+                                                        >{subject}</span>
+                                                        <span role="gridcell">{fam}</span>
+                                                        <span role="gridcell">{resp}</span>
+                                                        <span role="gridcell">
+                                                            {if priv_coded {
+                                                                view! { <span class="priv-pill">"PRIV"</span> }.into_any()
+                                                            } else {
+                                                                view! { <span>"—"</span> }.into_any()
+                                                            }}
+                                                        </span>
+                                                        <Show when=move || show_extras>
+                                                            <span role="gridcell">{custodian.clone()}</span>
+                                                            <span role="gridcell">
+                                                                {if withhold {
+                                                                    view! { <span class="priv-pill">"WITHHOLD"</span> }.into_any()
+                                                                } else {
+                                                                    view! { <span>"—"</span> }.into_any()
+                                                                }}
+                                                            </span>
+                                                            <span role="gridcell">{if conf { "C" } else { "—" }}</span>
+                                                            <span role="gridcell">"—"</span>
+                                                        </Show>
+                                                    </div>
+                                                }
+                                            }
+                                        />
+                                    </div>
+                                </div>
+                                    }.into_any()
+                                }}
                             </div>
                         </div>
                     }.into_any()
                 }}
-            </div>
 
             <div class="queue-footer" role="status">
                 {move || {
