@@ -1,7 +1,5 @@
 # 0117 — QueueVirtualizationResiduals — Review
 
-Engineering DoD-1–4. Registry **Completed** and merge SHA are filled after squash-merge (Phase 8).
-
 ## Scope
 
 First-pass queue honesty after PR **#113** Bugbot: header sibling above `#queue`, empty page ≠ empty corpus, arrows keep the current row in the DOM window. Schema stays **41**. **0118–0122** product code not implemented (0122 placeholder spec/plan minted only).
@@ -14,19 +12,20 @@ First-pass queue honesty after PR **#113** Bugbot: header sibling above `#queue`
 | DoD-2 Vacant honesty | PASS | Body `"0 in queue"` only when `total == 0`. Dedicated clamp Effect via `clamp_offset_for_fetch_meta` (write only when changed; ignores stale meta offset). Gap: banner + last-good page; Next stays enabled (`next_page_disabled`). `current_idx` clamped after shrink. |
 | DoD-3 Keyboard | PASS (static) | `scroll_top_to_reveal` + `#queue.scrollTop` only when the helper differs. `#queue` is outside the `scroll_top` inner closure. Shift+ArrowDown remains open-current. `reset_queue_navigation()` on chips/keyword/family/pager/matter params. |
 | DoD-4 Tests | PASS | `cargo test -p dedupe-chrome` — 108 passed. Host helpers + twin `include_str!("../ui/src/queue_window.rs")`. `cargo check --target wasm32-unknown-unknown` in `crates/dedupe-chrome/ui`. No `unwrap`/`expect` in new production queue code. Schema 41. |
-| DoD-5 Recorded | After merge | This file + registry Completed + `D-0117-queue-virtualization` closed. |
+| DoD-5 Recorded | PASS | This file; registry **Completed**; `D-0117-queue-virtualization` closed. Ledger BUGFIX `52da3f04` committed on the product squash. |
 
 ## Gates
 
 | Command | Result |
 |---|---|
 | `cargo fmt --all --check` | pass |
-| `cargo clippy --workspace --all-targets -- -D warnings` | pass (pre-r2 helper; chrome clippy re-run after r2) |
-| `cargo clippy -p dedupe-chrome --all-targets -- -D warnings` | pass after r2 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo clippy -p dedupe-chrome --all-targets -- -D warnings` | pass |
 | `cargo test -p dedupe-chrome` | 108 passed |
-| `cargo test --workspace` | pass |
+| `cargo test --workspace` | pass (independent; `ledgerful verify` workspace-test step timed out at 300s once, then passed on pre-push in 260s) |
 | chrome-ui wasm check | pass |
-| Codex r3 (`review.codex.r3.md`) | **PASS**, no findings |
+| CI (PR **#125**) | fmt, clippy, test, audit, deny, chrome-ui, verify-parity **green**. Bugbot NEUTRAL (skipping). |
+| Codex r3 | **PASS**, no findings |
 
 ## Reviewer rounds
 
@@ -43,5 +42,5 @@ Release chrome EXE, synthetic Unreviewed page: arrows, last-page bulk tag, heade
 ## Publish
 
 - Branch: `track/0117-queue-virtualization`
-- PR: _pending_
-- Merge SHA: _pending_
+- PR: **#125**
+- Merge SHA: `199975cba0f33d4f578230b83303e4e5bddae82d`

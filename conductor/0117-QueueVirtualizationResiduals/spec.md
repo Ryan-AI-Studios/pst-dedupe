@@ -12,7 +12,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes first-pass queue. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-08-31); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is research only (density, not coral, not 13-col lead/QC default).
-- **Status:** In Progress
+- **Status:** Completed
 - **Depends on:** **0111 Completed** (PR **#113** / `3c4ca65`) · schema **v41** (no bump)
 - **Spec authored:** 2026-08-31 (placeholder → Ready)
 - **Series:** O (Review chrome) — PR #113 queue Bugbot residual
