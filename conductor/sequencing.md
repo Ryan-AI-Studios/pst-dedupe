@@ -249,7 +249,7 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0122)
 
-**Series O** after Series S. **0110–0117 Completed**. **0118 Ready — not started** (PR #115 window Bugbot). **0119** Proposed (PR #117 produce Bugbot + PR #123 cancelled-produce). **0120** Proposed (PR #119 raster UI Bugbot). **0121** Proposed (PR #121 image QC Bugbot). **0122** Proposed (PR #123 Process Bugbot).
+**Series O** after Series S. **0110–0118 Completed**. **0119** Proposed (PR #117 produce Bugbot + PR #123 cancelled-produce). **0120** Proposed (PR #119 raster UI Bugbot). **0121** Proposed (PR #121 image QC Bugbot). **0122** Proposed (PR #123 Process Bugbot).
 
 | Order | Track | Notes |
 |---|---|---|
@@ -261,7 +261,7 @@
 | 6 | **0115** ImageOptFactory | **Completed** — TIFF G4 + OPT; page-level Bates; PR **#121** / `19d0c1f` |
 | 7 | **0116** ProcessFold | **Completed** — swallow egui Process; process-runner + D-0113-long-job; PR **#123** / `727c857` |
 | 8 | **0117** QueueVirtualizationResiduals | **Completed** — PR **#125** / `199975c`; header sibling, vacant honesty, arrow scrollTop |
-| 9 | **0118** ReviewWindowAsyncResiduals | **Ready — not started** — PR #115 window Bugbot; not produce |
+| 9 | **0118** ReviewWindowAsyncResiduals | **Completed** — PR **#127** / `74fd797`; stale fetch guard + same-item codes refresh |
 | 10 | **0119** ProduceChecklistResiduals | **Proposed** — PR #117 produce Bugbot + PR #123 cancelled-produce; not raster |
 | 11 | **0120** PdfRasterUiResiduals | **Proposed** — PR #119 Image-tab/Burn-count Bugbot; not OPT |
 | 12 | **0121** ImageOptQcResiduals | **Proposed** — PR #121 image QC Bugbot; not Process |
