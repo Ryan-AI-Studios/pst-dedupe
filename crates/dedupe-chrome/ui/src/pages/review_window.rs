@@ -49,6 +49,18 @@ fn ditto_set(snap: DittoSnap) {
     DITTO.with(|c| *c.borrow_mut() = Some(snap));
 }
 
+/// True iff a spawned fetch still matches the live item id and generation.
+fn fetch_is_current(want_id: &str, want_gen: u64, got_id: &str, got_gen: u64) -> bool {
+    want_id == got_id && want_gen == got_gen
+}
+
+/// After a successful persist, keep `saving` locked through the same-item
+/// `review_document` refresh so a follow-up save cannot diff against stale
+/// `doc.codes`. Navigation starts a new document Effect instead.
+fn persist_holds_save_for_refresh(did_navigate: bool) -> bool {
+    !did_navigate
+}
+
 fn codes_state(codes: &[ItemCodeInfo]) -> (Option<String>, bool, bool) {
     let mut resp = None;
     let mut privilege = false;
@@ -227,6 +239,41 @@ mod overlay_scale_tests {
     }
 }
 
+#[cfg(test)]
+mod fetch_is_current_tests {
+    use super::fetch_is_current;
+
+    #[test]
+    fn match_is_current() {
+        assert!(fetch_is_current("itm_a", 3, "itm_a", 3));
+    }
+
+    #[test]
+    fn id_mismatch_is_stale() {
+        assert!(!fetch_is_current("itm_a", 3, "itm_b", 3));
+    }
+
+    #[test]
+    fn gen_mismatch_is_stale() {
+        assert!(!fetch_is_current("itm_a", 3, "itm_a", 4));
+    }
+}
+
+#[cfg(test)]
+mod persist_holds_save_for_refresh_tests {
+    use super::persist_holds_save_for_refresh;
+
+    #[test]
+    fn same_item_holds_until_refresh() {
+        assert!(persist_holds_save_for_refresh(false));
+    }
+
+    #[test]
+    fn navigate_unlocks_immediately() {
+        assert!(!persist_holds_save_for_refresh(true));
+    }
+}
+
 fn window_find(query: &str) {
     let Some(win) = web_sys::window() else {
         return;
@@ -266,6 +313,8 @@ pub fn ReviewWindow() -> impl IntoView {
     let pending_conf = RwSignal::new(false);
     let find_q = RwSignal::new(String::new());
     let saving = RwSignal::new(false);
+    let doc_generation = RwSignal::new(0u64);
+    let body_generation = RwSignal::new(0u64);
     let raster_generation = RwSignal::new(0u64);
     let raster_page_index = RwSignal::new(0u32);
     let raster = RwSignal::new(Option::<ReviewRasterPage>::None);
@@ -303,6 +352,8 @@ pub fn ReviewWindow() -> impl IntoView {
         note_draft.set(String::new());
         let filter_json = query.with(|q| q.get("filter"));
         let keyword = query.with(|q| q.get("q"));
+        let gen = doc_generation.get_untracked() + 1;
+        doc_generation.set(gen);
         leptos::task::spawn_local(async move {
             match tauri_invoke::<Vec<CodeCatalogEntry>, _>(
                 "review_code_catalog",
@@ -310,14 +361,32 @@ pub fn ReviewWindow() -> impl IntoView {
             )
             .await
             {
-                Ok(c) => catalog.set(c),
-                Err(e) => error.set(Some(format!("Code catalog: {e}"))),
+                Ok(c) => {
+                    if fetch_is_current(
+                        &id,
+                        gen,
+                        &doc_id.get_untracked(),
+                        doc_generation.get_untracked(),
+                    ) {
+                        catalog.set(c);
+                    }
+                }
+                Err(e) => {
+                    if fetch_is_current(
+                        &id,
+                        gen,
+                        &doc_id.get_untracked(),
+                        doc_generation.get_untracked(),
+                    ) {
+                        error.set(Some(format!("Code catalog: {e}")));
+                    }
+                }
             }
             match tauri_invoke::<ReviewDocument, _>(
                 "review_document",
                 &ReviewDocumentArgs {
                     root,
-                    item_id: id,
+                    item_id: id.clone(),
                     filter_json,
                     keyword,
                 },
@@ -325,6 +394,14 @@ pub fn ReviewWindow() -> impl IntoView {
             .await
             {
                 Ok(d) => {
+                    if !fetch_is_current(
+                        &id,
+                        gen,
+                        &doc_id.get_untracked(),
+                        doc_generation.get_untracked(),
+                    ) {
+                        return;
+                    }
                     let (resp, priv_on, conf) = codes_state(&d.codes);
                     pending_resp.set(resp);
                     pending_priv.set(priv_on);
@@ -346,9 +423,16 @@ pub fn ReviewWindow() -> impl IntoView {
                     loading.set(false);
                 }
                 Err(e) => {
-                    doc.set(None);
-                    error.set(Some(e));
-                    loading.set(false);
+                    if fetch_is_current(
+                        &id,
+                        gen,
+                        &doc_id.get_untracked(),
+                        doc_generation.get_untracked(),
+                    ) {
+                        doc.set(None);
+                        error.set(Some(e));
+                        loading.set(false);
+                    }
                 }
             }
         });
@@ -365,19 +449,40 @@ pub fn ReviewWindow() -> impl IntoView {
             body.set(None);
             return;
         }
+        let gen = body_generation.get_untracked() + 1;
+        body_generation.set(gen);
         leptos::task::spawn_local(async move {
             match tauri_invoke::<ReviewDocumentBody, _>(
                 "review_document_body",
                 &ReviewDocumentBodyArgs {
                     root,
-                    item_id: id,
-                    pane: pane_now,
+                    item_id: id.clone(),
+                    pane: pane_now.clone(),
                 },
             )
             .await
             {
-                Ok(b) => body.set(Some(b)),
-                Err(e) => error.set(Some(format!("Body: {e}"))),
+                Ok(b) => {
+                    if fetch_is_current(
+                        &id,
+                        gen,
+                        &doc_id.get_untracked(),
+                        body_generation.get_untracked(),
+                    ) && b.pane == pane_now
+                    {
+                        body.set(Some(b));
+                    }
+                }
+                Err(e) => {
+                    if fetch_is_current(
+                        &id,
+                        gen,
+                        &doc_id.get_untracked(),
+                        body_generation.get_untracked(),
+                    ) {
+                        error.set(Some(format!("Body: {e}")));
+                    }
+                }
             }
         });
     });
@@ -645,10 +750,10 @@ pub fn ReviewWindow() -> impl IntoView {
                         failed = true;
                     }
                 }
-                saving.set(false);
                 family_confirm.set(false);
                 family_priv_preview.set(None);
                 if failed {
+                    saving.set(false);
                     return;
                 }
                 note_draft.set(String::new());
@@ -659,15 +764,73 @@ pub fn ReviewWindow() -> impl IntoView {
                     withhold,
                     confidential: want_conf,
                 });
-                if then_next {
+                let did_navigate = then_next && next.is_some();
+                if !persist_holds_save_for_refresh(did_navigate) {
+                    saving.set(false);
                     if let Some(nid) = next {
                         go_item(nid);
-                    } else {
-                        status.set(Some("End of queue".into()));
                     }
+                    return;
+                }
+                if then_next {
+                    status.set(Some("End of queue".into()));
                 } else {
                     status.set(Some("Saved.".into()));
                 }
+                let gen = doc_generation.get_untracked() + 1;
+                doc_generation.set(gen);
+                let filter_json = query.with(|q| q.get("filter"));
+                let keyword = query.with(|q| q.get("q"));
+                match tauri_invoke::<ReviewDocument, _>(
+                    "review_document",
+                    &ReviewDocumentArgs {
+                        root,
+                        item_id: item_id.clone(),
+                        filter_json,
+                        keyword,
+                    },
+                )
+                .await
+                {
+                    Ok(d) => {
+                        if fetch_is_current(
+                            &item_id,
+                            gen,
+                            &doc_id.get_untracked(),
+                            doc_generation.get_untracked(),
+                        ) {
+                            let (resp, priv_on, conf) = codes_state(&d.codes);
+                            pending_resp.set(resp);
+                            pending_priv.set(priv_on);
+                            pending_conf.set(conf);
+                            pending_withhold.set(
+                                d.privilege
+                                    .as_ref()
+                                    .map(|p| p.withhold != 0)
+                                    .unwrap_or(false),
+                            );
+                            family_propagate.set(false);
+                            pending_basis.set(String::from("attorney_client"));
+                            if let Some(p) = &d.privilege {
+                                if !p.basis.is_empty() {
+                                    pending_basis.set(p.basis.clone());
+                                }
+                            }
+                            doc.set(Some(d));
+                        }
+                    }
+                    Err(e) => {
+                        if fetch_is_current(
+                            &item_id,
+                            gen,
+                            &doc_id.get_untracked(),
+                            doc_generation.get_untracked(),
+                        ) {
+                            status.set(Some(format!("Saved, but refresh failed: {e}")));
+                        }
+                    }
+                }
+                saving.set(false);
             });
         }
     });
@@ -1432,7 +1595,9 @@ pub fn ReviewWindow() -> impl IntoView {
                                             }
                                         }
                                     }>"Ditto"</button>
-                                    <button class="primary" autofocus on:click=move |_| {
+                                    <button class="primary" autofocus
+                                        prop:disabled=move || saving.get()
+                                        on:click=move |_| {
                                         persist_and_maybe_next.with_value(|f| f(true));
                                     }>"Save & Next"</button>
                                 </div>

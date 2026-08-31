@@ -109,7 +109,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn review_doc_href_encodes_filter_and_keyword() {
         let href = review_doc_href(
             r"C:\matters\demo",
@@ -124,6 +123,7 @@ mod tests {
         assert!(href.contains("%7B") || href.contains("%22"));
     }
 
+    #[test]
     fn stub_back_href_reencodes_decoded_windows_param() {
         // ParamsMap unescapes before components see `:id`.
         let decoded_param = r"C:\Cases\Foo";
