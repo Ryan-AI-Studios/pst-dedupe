@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0117 — Queue virtualization)
+
+- First-pass queue column header is a sibling above `#queue` (not inside the translated row window). Body `"0 in queue"` only when `total == 0`. Arrow keys write `scrollTop` so the current row stays in the DOM window.
+
 ### Added (0116 — Process fold)
 
 - `dedupe-chrome` Process workspace hosts `process-runner` for ingest/extract/`profile_run`, and produce/QC start+cancel via the same runner instead of blocking `join_worker`.

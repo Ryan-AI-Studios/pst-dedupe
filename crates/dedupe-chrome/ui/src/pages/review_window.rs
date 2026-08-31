@@ -6,7 +6,9 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 use wasm_bindgen::JsCast;
-use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement, KeyboardEvent, MouseEvent};
+use web_sys::{
+    HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement, KeyboardEvent, MouseEvent,
+};
 
 use crate::invoke::{
     tauri_invoke, CodeCatalogEntry, FamilyMemberThin, GeomDto, ItemCodeInfo, ReviewBurnNativeArgs,
@@ -104,7 +106,15 @@ fn visual_size(crop_w: f64, crop_h: f64, rotate: i32) -> (f64, f64) {
     }
 }
 
-fn user_to_visual(ux: f64, uy: f64, crop_x: f64, crop_y: f64, crop_w: f64, crop_h: f64, rotate: i32) -> (f64, f64) {
+fn user_to_visual(
+    ux: f64,
+    uy: f64,
+    crop_x: f64,
+    crop_y: f64,
+    crop_w: f64,
+    crop_h: f64,
+    rotate: i32,
+) -> (f64, f64) {
     let rx = ux - crop_x;
     let ry = uy - crop_y;
     let r = ((rotate % 360) + 360) % 360;
@@ -132,10 +142,7 @@ fn css_point_to_raster(
 }
 
 fn event_to_raster(ev: &MouseEvent, raster_w: f64, raster_h: f64) -> Option<(f64, f64)> {
-    let el = ev
-        .current_target()?
-        .dyn_into::<web_sys::Element>()
-        .ok()?;
+    let el = ev.current_target()?.dyn_into::<web_sys::Element>().ok()?;
     let dw = f64::from(el.client_width());
     let dh = f64::from(el.client_height());
     Some(css_point_to_raster(
@@ -200,7 +207,12 @@ fn geom_to_overlay_pct(g: &GeomDto, raster: &ReviewRasterPage) -> (f64, f64, f64
             g.h / nh * 100.0,
         );
     };
-    (x / rw * 100.0, y / rh * 100.0, w / rw * 100.0, h / rh * 100.0)
+    (
+        x / rw * 100.0,
+        y / rh * 100.0,
+        w / rw * 100.0,
+        h / rh * 100.0,
+    )
 }
 
 #[cfg(test)]
@@ -408,7 +420,9 @@ pub fn ReviewWindow() -> impl IntoView {
             .await
             {
                 Ok(r) => {
-                    if r.item_id == doc_id.get_untracked() && r.generation == raster_generation.get_untracked() {
+                    if r.item_id == doc_id.get_untracked()
+                        && r.generation == raster_generation.get_untracked()
+                    {
                         raster.set(Some(r));
                     }
                 }
