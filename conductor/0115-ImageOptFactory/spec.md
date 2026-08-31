@@ -12,7 +12,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes Image / produce Format (TIFF G4 + OPT). `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-08-30); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is research only (density, not tokens, not coral, not fake `IMAGES/`).
-- **Status:** In Progress
+- **Status:** Completed
 - **Depends on:** **0114 Completed** (PR **#119** / `5ed53bf`; schema **v40**; `pdf-raster`; burned native) · **0113 Completed** (PR **#117** / `f192b2d`; DAT wizard; page-level Bates copy names this track) · produce **0040** · QC **0041** · profiles **0060** · `matter-core` schema **v40** (this track bumps **v41**)
 - **Spec authored:** 2026-08-30 (parked placeholder → Ready)
 - **Series:** O (Review chrome) — sixth track (un-parked)
@@ -473,7 +473,7 @@ cargo check -p dedupe-desk
 | **0112** | Three-pane review window | **Completed** (PR **#115** / `81a3aad`) |
 | **0113** | Produce checklist; DAT only | **Completed** (PR **#117** / `f192b2d`) |
 | **0114** | zpdf raster + geometric redact | **Completed** (PR **#119** / `5ed53bf`) |
-| **0115** | TIFF G4 + OPT | **Ready — not started** |
+| **0115** | TIFF G4 + OPT | **Completed** (PR **#121** / `19d0c1f`) |
 | **0116** | Fold egui Process | Proposed |
 | **0117** | Queue virtualization residuals (PR #113) | Proposed |
 | **0118** | Review-window async residuals (PR #115) | Proposed |

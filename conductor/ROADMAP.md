@@ -420,7 +420,7 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 
 ### Wave 11 — Review chrome (Series O)
 
-**Series O** (Series S closed 2026-08-29). Tauri 2 + Leptos. Plex/paper. Keep egui Process until **0116**. Mock at `C:\dev\dedupe-frontend` is research (do not vendor coral). **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Completed** (PR **#113** / `3c4ca65`). **0112 Completed** (PR **#115** / `81a3aad`). **0113 Completed** (PR **#117** / `f192b2d`). **0114 Completed** (PR **#119** / `5ed53bf`). **0115 Ready** (TIFF G4 + OPT; un-parked 2026-08-30).
+**Series O** (Series S closed 2026-08-29). Tauri 2 + Leptos. Plex/paper. Keep egui Process until **0116**. Mock at `C:\dev\dedupe-frontend` is research (do not vendor coral). **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Completed** (PR **#113** / `3c4ca65`). **0112 Completed** (PR **#115** / `81a3aad`). **0113 Completed** (PR **#117** / `f192b2d`). **0114 Completed** (PR **#119** / `5ed53bf`). **0115 Completed** (PR **#121** / `19d0c1f`).
 
 | ID | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|
@@ -429,14 +429,14 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 | **0112** | ReviewWindow | **Completed** | **P0 O** | Three-pane coding; money screen. PR **#115** `81a3aad`. Spec: `0112-ReviewWindow/`. |
 | **0113** | ProduceChecklist | **Completed** | **P1 O** | Checklist; DAT only. PR **#117** `f192b2d`. Spec: `0113-ProduceChecklist/`. |
 | **0114** | PdfRasterRedact | **Completed** | **P1 O** | zpdf CPU raster + geometric burn (schema v40). PR **#119** `5ed53bf`. Spec: `0114-PdfRasterRedact/`. |
-| **0115** | ImageOptFactory | **In Progress** | **P2 O** | TIFF G4 + OPT; page-level Bates; builtin image profile. Default DAT-only unchanged. Spec: `0115-ImageOptFactory/`. |
+| **0115** | ImageOptFactory | **Completed** | **P2 O** | TIFF G4 + OPT; page-level Bates; builtin image profile. Default DAT-only unchanged. PR **#121** `19d0c1f`. Spec: `0115-ImageOptFactory/`. |
 | **0116** | ProcessFold | **Proposed** | **P2 O** | Fold egui Process last. |
 | **0117** | QueueVirtualizationResiduals | **Proposed** | **P3 O** | PR #113 queue Bugbot (header/spacer, vacant lie, arrow scroll). Not the 0112 window. |
 | **0118** | ReviewWindowAsyncResiduals | **Proposed** | **P3 O** | PR #115 window Bugbot (stale fetch, post-save snapshot, path_id test). Not produce. |
 | **0119** | ProduceChecklistResiduals | **Proposed** | **P3 O** | PR #117 produce Bugbot (Finalize re-arm, empty log filter, QC across matters). Not raster. |
 | **0120** | PdfRasterUiResiduals | **Proposed** | **P3 O** | PR #119 Bugbot (overlay mouseup, draw state, stale Burn counts). Not OPT. |
 
-**Order:** **0110** → **0111** → **0112** → **0113**; **0114** after window; **0115** Ready (opt-in image factory); **0116** last. **0117** can run after 0111 without blocking 0112. **0118** can run after 0112 without blocking 0113. **0119** can run after 0113 without blocking 0114. **0120** can run after 0114 without blocking 0115.
+**Order:** **0110** → **0111** → **0112** → **0113**; **0114** after window; **0115 Completed**; **0116** last. **0117** can run after 0111 without blocking 0112. **0118** can run after 0112 without blocking 0113. **0119** can run after 0113 without blocking 0114. **0120** can run after 0114 without blocking 0115.
 
 ### What each step is for
 
@@ -463,7 +463,7 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 - Uncritically implementing all of `docs/deferred.md`  
 - Immediate FedRAMP / full SaaS ops / billing  
 - Another intelligence/plugin series without demand  
-- Full Relativity suite, SCIM — unless production rejections or a paid requirement. Image/OPT factory is **0115 Ready** (opt-in; default DAT-only stays).  
+- Full Relativity suite, SCIM — unless production rejections or a paid requirement. Image/OPT factory is **0115 Completed** (opt-in; default DAT-only stays).  
 - Rewriting Process jobs in WASM or standing up a daemon (Process stays **egui** until **0116**; Review/Produce chrome is **Tauri 2 + Leptos** Series O)
 
 ### Series K — Clean Unique export (planned)
