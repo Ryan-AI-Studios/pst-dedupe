@@ -12,7 +12,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes Process workspace + `conductor/0110` stack lock. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-08-31); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is research only (pane density + copy, not tokens, not fake OST/MBOX/NSRL).
-- **Status:** In Progress
+- **Status:** Completed
 - **Depends on:** **0110–0115 Completed** · Desk Process **0020** / runner **0019** / profiles **0043** · `matter-core` schema **v41**
 - **Spec authored:** 2026-08-31 (placeholder → Ready)
 - **Series:** O (Review chrome) — last spine track (0117–0121 are residual placeholders)

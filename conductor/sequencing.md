@@ -248,7 +248,7 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0121)
 
-**Series O** after Series S. **0110–0115 Completed**. **0116 In Progress**. **0119** Proposed (PR #117 produce Bugbot). **0120** Proposed (PR #119 raster UI Bugbot). **0121** Proposed (PR #121 image QC Bugbot).
+**Series O** after Series S. **0110–0116 Completed**. **0117** Proposed (PR #113 queue Bugbot). **0118** Proposed (PR #115 window Bugbot). **0119** Proposed (PR #117 produce Bugbot). **0120** Proposed (PR #119 raster UI Bugbot). **0121** Proposed (PR #121 image QC Bugbot).
 
 | Order | Track | Notes |
 |---|---|---|
@@ -258,7 +258,7 @@
 | 4 | **0113** ProduceChecklist | **Completed** — checklist; DAT only; no OPT; PR **#117** / `f192b2d` |
 | 5 | **0114** PdfRasterRedact | **Completed** — zpdf CPU raster + geometric burn; schema v40; PR **#119** / `5ed53bf` |
 | 6 | **0115** ImageOptFactory | **Completed** — TIFF G4 + OPT; page-level Bates; PR **#121** / `19d0c1f` |
-| 7 | **0116** ProcessFold | **In Progress** — swallow egui Process; process-runner + D-0113-long-job |
+| 7 | **0116** ProcessFold | **Completed** — swallow egui Process; process-runner + D-0113-long-job; PR **#123** / `727c857` |
 | 8 | **0117** QueueVirtualizationResiduals | **Proposed** — PR #113 queue Bugbot; not the 0112 window |
 | 9 | **0118** ReviewWindowAsyncResiduals | **Proposed** — PR #115 window Bugbot; not produce |
 | 10 | **0119** ProduceChecklistResiduals | **Proposed** — PR #117 produce Bugbot; not raster |
