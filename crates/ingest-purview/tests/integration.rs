@@ -701,12 +701,18 @@ fn package_root_symlink_rejected_windows() {
         det.notes
     );
     let matter = Matter::create(base.join("matter"), "RootSym").expect("matter");
-    // Must not follow into CAS.
+    // Must not follow into CAS. Detect-as-Unsupported may surface as Err or as
+    // a completed-false Unsupported summary (entries_ok=0, bytes_cas=0).
     let res = ingest_path(&matter, &link, &ExpandLimits::for_tests(), None);
-    assert!(
-        res.is_err(),
-        "expected unsupported err for symlink root, got {res:?}"
-    );
+    match res {
+        Err(_) => {}
+        Ok(summary) => {
+            assert_eq!(summary.kind, PackageKind::Unsupported);
+            assert_eq!(summary.entries_ok, 0);
+            assert_eq!(summary.bytes_cas, 0);
+            assert!(!summary.completed);
+        }
+    }
 }
 
 #[test]
