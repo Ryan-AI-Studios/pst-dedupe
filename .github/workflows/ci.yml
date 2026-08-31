@@ -109,6 +109,8 @@ jobs:
         run: trunk build --release --config Trunk.toml
       - name: cargo test -p dedupe-chrome (host)
         run: cargo test -p dedupe-chrome
+      - name: cargo test chrome-ui (host)
+        run: cargo test --manifest-path crates/dedupe-chrome/ui/Cargo.toml
 
   # Mirrors local `ledgerful verify` steps when ledgerful is not available in CI.
   # Local pre-push runs: ledgerful verify --scope fast (which uses the same steps).

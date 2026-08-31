@@ -432,13 +432,13 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 | **0115** | ImageOptFactory | **Completed** | **P2 O** | TIFF G4 + OPT; page-level Bates; builtin image profile. Default DAT-only unchanged. PR **#121** `19d0c1f`. Spec: `0115-ImageOptFactory/`. |
 | **0116** | ProcessFold | **Completed** | **P2 O** | Fold Process into chrome (`process-runner`); absorb D-0113-long-job. PR **#123** `727c857`. Spec: `0116-ProcessFold/`. |
 | **0117** | QueueVirtualizationResiduals | **Completed** | **P3 O** | PR #113 queue Bugbot. PR **#125** `199975c`. Spec: `0117-QueueVirtualizationResiduals/`. |
-| **0118** | ReviewWindowAsyncResiduals | **Proposed** | **P3 O** | PR #115 window Bugbot (stale fetch, post-save snapshot, path_id test). Not produce. |
+| **0118** | ReviewWindowAsyncResiduals | **Ready** | **P3 O** | PR #115 window Bugbot (stale fetch, post-save snapshot, path_id test). Not produce. |
 | **0119** | ProduceChecklistResiduals | **Proposed** | **P3 O** | PR #117 produce Bugbot (Finalize re-arm, empty log filter, QC across matters) + PR #123 cancelled-produce-as-success. Not raster. |
 | **0120** | PdfRasterUiResiduals | **Proposed** | **P3 O** | PR #119 Bugbot (overlay mouseup, draw state, stale Burn counts). Not OPT. |
 | **0121** | ImageOptQcResiduals | **Proposed** | **P3 O** | PR #121 Bugbot: OPT-missing resume; QC all volumes; JPEG eligibility vs sniff; TIFF magic vs MIME. Not Process. |
 | **0122** | ProcessFoldResiduals | **Proposed** | **P3 O** | PR #123 Bugbot: extract-all Busy wipes queue; live jobs as orphans. Not 0117. |
 
-**Order:** **0110** → **0111** → **0112** → **0113**; **0114** after window; **0115 Completed**; **0116 Completed**. **0117 Completed**. **0118** can run after 0112 without blocking 0113. **0119** can run after 0113 without blocking 0114. **0120** can run after 0114 without blocking 0115. **0121** can run after 0115 without blocking 0116. **0122** can run after 0116 without blocking 0117.
+**Order:** **0110** → **0111** → **0112** → **0113**; **0114** after window; **0115 Completed**; **0116 Completed**. **0117 Completed**. **0118 Ready**. **0119** can run after 0113 without blocking 0114. **0120** can run after 0114 without blocking 0115. **0121** can run after 0115 without blocking 0116. **0122** can run after 0116 without blocking 0117.
 
 ### What each step is for
 

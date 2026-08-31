@@ -909,7 +909,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0063-04 | P3 | `openidconnect::ClientSecret` / bare `String` retains IdP client secret until client Drop; no zeroize API | **P3 residual** (dependency limitation; not a product control gap). Mitigated: `CoreClient` constructed only inside a tight exchange+verify block; route zeroizes local secret after `finish_authorization`. Heap residue only during exchange until allocator reuse. Full zeroize requires upstream `openidconnect` support. | residual / upstream |
 | D-0063-05 | P3 | Desk UI passphrase widgets are plain `String` (egui TextEdit) | Cleared after submit; heap residue residual. Production service/CLI unlock paths zeroize. Full zeroizing widgets would need egui field redesign. | residual polish |
 
-## Series O — Review chrome placeholders (0110–0122, minted/refreshed 2026-08-29; 0117 Completed 2026-08-31; 0118/0119 2026-08-30; 0115 Completed 2026-08-31; 0116 Completed 2026-08-31; 0121 minted 2026-08-31; 0122 minted 2026-08-31)
+## Series O — Review chrome placeholders (0110–0122, minted/refreshed 2026-08-29; 0117 Completed 2026-08-31; 0118 Ready 2026-08-31; 0119 2026-08-30; 0115 Completed 2026-08-31; 0116 Completed 2026-08-31; 0121 minted 2026-08-31; 0122 minted 2026-08-31)
 
 Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs already occupied — do not remint. Expand with `/plan-track`, do not implement from this table.
 
@@ -922,7 +922,7 @@ Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs a
 | D-0117-queue-virtualization | — | PR #113 Bugbot: queue header inside spacer; empty page shown as vacant corpus; arrow keys leave `visible_range` | **Closed in 0117** (PR **#125** / `199975c`). Owner HITL: release EXE header-outside + classic scrollbar alignment. | **closed / 0117** |
 | D-0113-produce-checklist | — | Produce wizard + blockers/warnings; DAT only | **Closed in 0113** (PR **#117** / `f192b2d`). No fake OPT. Privilege-in-set hard block. | — |
 | D-0113-long-job | P3 | Chrome produce/QC uses blocking `join_worker` (no process-runner cancel/progress) | **Closed in 0116** (PR **#123** / `727c857`): produce/QC start through `process-runner`; wizard polls; Busy banner; cancel/progress. | **closed / 0116** |
-| D-0118-review-window-async | P3 | PR #115 Bugbot: stale document/body fetch overwrites current item; post-save codes/notes snapshot; unused path_id `#[test]` | Valid; review_window.rs / path_id.rs. Do not steal into 0113. | **0118** Proposed |
+| D-0118-review-window-async | P3 | PR #115 Bugbot: stale document/body fetch overwrites current item; post-save codes/notes snapshot; unused path_id `#[test]` | Valid; review_window.rs / path_id.rs. Fold-in 2026-08-31: refresh when persist does not navigate (`then_next && next_id is None`). | **0118** In Progress |
 | D-0032-01 | — | Geometric PDF redaction + burn-in | **Closed in 0114** (PR **#119** / `5ed53bf`) for PDF + jpeg/png. **TIFF G4 closed in 0115** (PR **#121** / `19d0c1f`). | — |
 | D-0034-02 | — | PDF raster preview | **Closed in 0114** (PR **#119** / `5ed53bf`). Visible page + prev/next; not D-0034-05. | — |
 | D-0034-04 | — | Geometric PDF redaction burn-in | **Closed in 0114** as duplicate of D-0032-01 (PR **#119** / `5ed53bf`) | — |

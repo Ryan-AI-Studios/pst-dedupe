@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0118 — Review window async)
+
+- Stale `review_document` / `review_document_body` replies no longer overwrite the current item after Save & Next or `[` `]`. End-of-queue save re-fetches codes/notes so a follow-up un-privilege actually removes.
+
 ### Fixed (0117 — Queue virtualization)
 
 - First-pass queue column header is a sibling above `#queue` (not inside the translated row window). Body `"0 in queue"` only when `total == 0`. Arrow keys write `scrollTop` so the current row stays in the DOM window.

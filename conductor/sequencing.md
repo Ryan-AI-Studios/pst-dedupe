@@ -125,12 +125,12 @@
 | 67 | P1 O | **0110** MatterChromeTauri | ✅ Completed | Tauri 2 + Leptos matter chrome; one `matter_overview`; PR **#111** `5a76f0b` |
 | 68 | P1 O | **0111** ReviewQueueFirstPass | ✅ Completed | virtualized first-pass queue; PR **#113** / `3c4ca65` |
 | 69 | P0 O | **0112** ReviewWindow | ✅ Completed | three-pane coding; Resp ⊥ Privilege; PR **#115** `81a3aad` |
-| 69b | P3 O | **0117** QueueVirtualizationResiduals | ⬜ Ready | PR #113 queue Bugbot (not 0112) |
+| 69b | P3 O | **0117** QueueVirtualizationResiduals | ✅ Completed | PR #113 queue Bugbot; PR **#125** / `199975c` |
 | 70 | P1 O | **0113** ProduceChecklist | ✅ Completed | produce checklist; DAT only; PR **#117** / `f192b2d` |
 | 71 | P1 O | **0114** PdfRasterRedact | ✅ Completed | zpdf CPU raster + geometric burn; schema v40; PR **#119** / `5ed53bf` |
 | 72 | P2 O | **0115** ImageOptFactory | ✅ Completed | TIFF G4 + OPT; page-level Bates; PR **#121** / `19d0c1f` |
 | 73 | P2 O | **0116** ProcessFold | ✅ Completed | fold egui Process into Tauri; absorb D-0113-long-job; PR **#123** / `727c857` |
-| 74 | P3 O | **0118** ReviewWindowAsyncResiduals | 📦 Proposed | PR #115 window Bugbot (not 0113) |
+| 74 | P3 O | **0118** ReviewWindowAsyncResiduals | ⬜ Ready | PR #115 window Bugbot (not 0113) |
 | 75 | P3 O | **0119** ProduceChecklistResiduals | 📦 Proposed | PR #117 produce Bugbot + PR #123 cancelled-produce (not 0114) |
 | 76 | P3 O | **0120** PdfRasterUiResiduals | 📦 Proposed | PR #119 Image-tab/Burn-count Bugbot (not 0115) |
 | 77 | P3 O | **0121** ImageOptQcResiduals | 📦 Proposed | PR #121 image QC/eligibility Bugbot (not 0116) |
@@ -249,7 +249,7 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0122)
 
-**Series O** after Series S. **0110–0117 Completed**. **0118** Proposed (PR #115 window Bugbot). **0119** Proposed (PR #117 produce Bugbot + PR #123 cancelled-produce). **0120** Proposed (PR #119 raster UI Bugbot). **0121** Proposed (PR #121 image QC Bugbot). **0122** Proposed (PR #123 Process Bugbot).
+**Series O** after Series S. **0110–0117 Completed**. **0118 Ready — not started** (PR #115 window Bugbot). **0119** Proposed (PR #117 produce Bugbot + PR #123 cancelled-produce). **0120** Proposed (PR #119 raster UI Bugbot). **0121** Proposed (PR #121 image QC Bugbot). **0122** Proposed (PR #123 Process Bugbot).
 
 | Order | Track | Notes |
 |---|---|---|
@@ -261,7 +261,7 @@
 | 6 | **0115** ImageOptFactory | **Completed** — TIFF G4 + OPT; page-level Bates; PR **#121** / `19d0c1f` |
 | 7 | **0116** ProcessFold | **Completed** — swallow egui Process; process-runner + D-0113-long-job; PR **#123** / `727c857` |
 | 8 | **0117** QueueVirtualizationResiduals | **Completed** — PR **#125** / `199975c`; header sibling, vacant honesty, arrow scrollTop |
-| 9 | **0118** ReviewWindowAsyncResiduals | **Proposed** — PR #115 window Bugbot; not produce |
+| 9 | **0118** ReviewWindowAsyncResiduals | **Ready — not started** — PR #115 window Bugbot; not produce |
 | 10 | **0119** ProduceChecklistResiduals | **Proposed** — PR #117 produce Bugbot + PR #123 cancelled-produce; not raster |
 | 11 | **0120** PdfRasterUiResiduals | **Proposed** — PR #119 Image-tab/Burn-count Bugbot; not OPT |
 | 12 | **0121** ImageOptQcResiduals | **Proposed** — PR #121 image QC Bugbot; not Process |
