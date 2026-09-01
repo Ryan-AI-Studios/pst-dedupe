@@ -13,7 +13,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes produce checklist. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-08-31); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is research only (layout is **0125**).
-- **Status:** In Progress
+- **Status:** Completed
 - **Depends on:** **0113 Completed** (PR **#117** / `f192b2d`) · **0116 Completed** (process-runner produce/QC) · schema **v41** (no bump)
 - **Spec authored:** 2026-08-31 (placeholder → Ready)
 - **Series:** O (Review chrome) — PR #117 / #123 produce honesty residual
