@@ -69,3 +69,18 @@ pub(crate) fn map_core(err: matter_core::Error) -> CommandError {
         other => CommandError::failed(other.to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn busy_display_starts_with_busy_colon() {
+        let e = CommandError::busy("job_x");
+        assert_eq!(e.kind, "busy");
+        assert!(
+            format!("{e}").starts_with("busy:"),
+            "tauri_invoke String must match ui is_busy_invoke_err: got {e}"
+        );
+    }
+}

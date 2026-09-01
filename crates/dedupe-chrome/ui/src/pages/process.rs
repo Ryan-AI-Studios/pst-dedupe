@@ -135,6 +135,98 @@ fn is_orphan_running(job: &ProcessJobRow, snap: &JobProgressSnapshot) -> bool {
         && (snap.job_id.is_empty() || snap.state == "idle" || snap.job_id != job.id)
 }
 
+fn extract_all_should_start(queue_len: usize, snapshot_busy: bool) -> bool {
+    queue_len == 0 && !snapshot_busy
+}
+
+fn is_busy_invoke_err(e: &str) -> bool {
+    e.starts_with("busy:") || e.contains("matter is busy")
+}
+
+fn should_clear_queue_on_start_err(err: &str) -> bool {
+    !is_busy_invoke_err(err)
+}
+
+fn should_set_busy_retry(err: &str) -> bool {
+    is_busy_invoke_err(err)
+}
+
+fn should_fire_busy_retry(pending: bool, snapshot_busy: bool) -> bool {
+    pending && !snapshot_busy
+}
+
+fn take_busy_retry_fire(pending: &mut bool, snapshot_busy: bool) -> bool {
+    if should_fire_busy_retry(*pending, snapshot_busy) {
+        *pending = false;
+        true
+    } else {
+        false
+    }
+}
+
+fn should_clear_busy_retry(started_ok: bool, finished_paused: bool, non_busy_clear: bool) -> bool {
+    started_ok || finished_paused || non_busy_clear
+}
+
+fn snapshot_clears_busy_retry(state: &str) -> bool {
+    state == "paused" || state == "cancelled"
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExtractStartErrEffect {
+    clear_queue: bool,
+    zero_total: bool,
+    set_retry: bool,
+    clear_retry: bool,
+    surface_error: bool,
+}
+
+fn extract_start_err_effect(err: &str, zero_total_on_clear: bool) -> ExtractStartErrEffect {
+    if should_set_busy_retry(err) {
+        ExtractStartErrEffect {
+            clear_queue: false,
+            zero_total: false,
+            set_retry: true,
+            clear_retry: false,
+            surface_error: false,
+        }
+    } else {
+        ExtractStartErrEffect {
+            clear_queue: should_clear_queue_on_start_err(err),
+            zero_total: zero_total_on_clear,
+            set_retry: false,
+            clear_retry: should_clear_busy_retry(false, false, true),
+            surface_error: true,
+        }
+    }
+}
+
+fn apply_extract_start_err(
+    err: String,
+    extract_queue: RwSignal<Vec<ExtractWork>>,
+    extract_total: RwSignal<u64>,
+    busy_retry_pending: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    zero_total: bool,
+) {
+    let effect = extract_start_err_effect(&err, zero_total);
+    if effect.set_retry {
+        busy_retry_pending.set(true);
+    }
+    if effect.clear_queue {
+        extract_queue.set(Vec::new());
+        if effect.zero_total {
+            extract_total.set(0);
+        }
+    }
+    if effect.clear_retry {
+        busy_retry_pending.set(false);
+    }
+    if effect.surface_error {
+        error.set(Some(err));
+    }
+}
+
 #[component]
 pub fn ProcessPage() -> impl IntoView {
     let params = use_params_map();
@@ -161,6 +253,7 @@ pub fn ProcessPage() -> impl IntoView {
     let extract_total = RwSignal::new(0u64);
     let extract_note = RwSignal::new(Option::<String>::None);
     let extract_current_name = RwSignal::new(String::new());
+    let busy_retry_pending = RwSignal::new(false);
 
     let home =
         move || params.with(|p| matter_home_href_from_param(&p.get("id").unwrap_or_default()));
@@ -227,6 +320,16 @@ pub fn ProcessPage() -> impl IntoView {
                                 .get_untracked()
                                 .map(|p| !p.jobs.iter().any(|j| j.id == snap.job_id))
                                 .unwrap_or(true);
+                        let mut pending = busy_retry_pending.get_untracked();
+                        if should_clear_busy_retry(
+                            false,
+                            snapshot_clears_busy_retry(&snap.state),
+                            false,
+                        ) {
+                            pending = false;
+                        }
+                        let fire_retry = take_busy_retry_fire(&mut pending, snapshot_busy(&snap));
+                        busy_retry_pending.set(pending);
                         progress.set(snap.clone());
                         if finished_ok || missing_job {
                             let prev_exceptions =
@@ -266,6 +369,7 @@ pub fn ProcessPage() -> impl IntoView {
                                 && snap.kind == "extract_pst"
                                 && !finished_paused
                                 && !q.is_empty()
+                                && !fire_retry
                             {
                                 q.remove(0);
                                 extract_queue.set(q.clone());
@@ -283,13 +387,55 @@ pub fn ProcessPage() -> impl IntoView {
                                     )
                                     .await
                                     {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            extract_queue.set(Vec::new());
-                                            error.set(Some(e));
+                                        Ok(_) => {
+                                            if should_clear_busy_retry(true, false, false) {
+                                                busy_retry_pending.set(false);
+                                            }
                                         }
+                                        Err(e) => apply_extract_start_err(
+                                            e,
+                                            extract_queue,
+                                            extract_total,
+                                            busy_retry_pending,
+                                            error,
+                                            false,
+                                        ),
                                     }
                                 }
+                            }
+                        }
+                        if fire_retry {
+                            if let Some(work) = extract_queue.get_untracked().first().cloned() {
+                                extract_current_name.set(work.name.clone());
+                                let params_json =
+                                    extract_params(&work.source_id, &work.pst_item_id);
+                                match tauri_invoke::<ProcessStartResponse, _>(
+                                    "process_start",
+                                    &ProcessStartArgs {
+                                        root: root.clone(),
+                                        kind: "extract_pst".into(),
+                                        params_json,
+                                    },
+                                )
+                                .await
+                                {
+                                    Ok(_) => {
+                                        if should_clear_busy_retry(true, false, false) {
+                                            busy_retry_pending.set(false);
+                                        }
+                                        error.set(None);
+                                    }
+                                    Err(e) => apply_extract_start_err(
+                                        e,
+                                        extract_queue,
+                                        extract_total,
+                                        busy_retry_pending,
+                                        error,
+                                        false,
+                                    ),
+                                }
+                            } else if should_clear_busy_retry(false, false, true) {
+                                busy_retry_pending.set(false);
                             }
                         }
                     }
@@ -380,6 +526,12 @@ pub fn ProcessPage() -> impl IntoView {
     };
 
     let extract_all = move |_| {
+        if !extract_all_should_start(
+            extract_queue.get().len(),
+            snapshot_busy(&progress.get()),
+        ) {
+            return;
+        }
         let Some(pg) = page.get() else {
             return;
         };
@@ -417,13 +569,19 @@ pub fn ProcessPage() -> impl IntoView {
             {
                 Ok(_) => {
                     error.set(None);
+                    if should_clear_busy_retry(true, false, false) {
+                        busy_retry_pending.set(false);
+                    }
                     reload(root);
                 }
-                Err(e) => {
-                    extract_queue.set(Vec::new());
-                    extract_total.set(0);
-                    error.set(Some(e));
-                }
+                Err(e) => apply_extract_start_err(
+                    e,
+                    extract_queue,
+                    extract_total,
+                    busy_retry_pending,
+                    error,
+                    true,
+                ),
             }
         });
     };
@@ -498,7 +656,14 @@ pub fn ProcessPage() -> impl IntoView {
                     />
                     <div class="cta-row">
                         <button on:click=extract_selected>"Extract selected"</button>
-                        <button on:click=extract_all>"Extract all"</button>
+                        <button
+                            on:click=extract_all
+                            disabled=move || {
+                                snapshot_busy(&progress.get()) || busy_retry_pending.get()
+                            }
+                        >
+                            "Extract all"
+                        </button>
                     </div>
                     <Show when=move || extract_note.get().is_some()>
                         <p class="empty">{move || extract_note.get().unwrap_or_default()}</p>
@@ -547,29 +712,36 @@ pub fn ProcessPage() -> impl IntoView {
                         each=move || page.get().map(|p| p.jobs).unwrap_or_default()
                         key=|j: &ProcessJobRow| j.id.clone()
                         children=move |j| {
-                            let snap = progress.get();
-                            let orphan = is_orphan_running(&j, &snap);
-                            let active = snap.job_id == j.id;
-                            let counts = if active {
-                                format!(
-                                    "{}/{}",
-                                    snap.completed_count,
-                                    snap.total_hint.map(|n| n.to_string()).unwrap_or_else(|| "—".into())
-                                )
-                            } else {
-                                "—".into()
-                            };
+                            let job_for_orphan = j.clone();
+                            let job_id_for_counts = j.id.clone();
+                            let job_id_for_active = j.id.clone();
                             let job_id = StoredValue::new(j.id.clone());
                             view! {
                                 <div class=job_indent(&j.parent_job_id)>
                                     <div class="name">{format!("{} · {}", j.kind, j.state)}</div>
-                                    <div class="empty">{counts}</div>
-                                    <Show when=move || active && snapshot_busy(&progress.get())>
+                                    <div class="empty">{move || {
+                                        let snap = progress.get();
+                                        if snap.job_id == job_id_for_counts {
+                                            format!(
+                                                "{}/{}",
+                                                snap.completed_count,
+                                                snap.total_hint.map(|n| n.to_string()).unwrap_or_else(|| "—".into())
+                                            )
+                                        } else {
+                                            "—".into()
+                                        }
+                                    }}</div>
+                                    <Show when=move || {
+                                        let snap = progress.get();
+                                        snap.job_id == job_id_for_active && snapshot_busy(&snap)
+                                    }>
                                         <button on:click=move |_| {
                                             spawn_cancel(job_id.get_value());
                                         }>"Pause"</button>
                                     </Show>
-                                    <Show when=move || orphan>
+                                    <Show when=move || {
+                                        is_orphan_running(&job_for_orphan, &progress.get())
+                                    }>
                                         <button class="primary" on:click=move |_| {
                                             spawn_resume(root_sig.get(), job_id.get_value());
                                         }>"Resume"</button>
@@ -664,5 +836,251 @@ pub fn ProcessPage() -> impl IntoView {
                 </aside>
             </div>
         </section>
+    }
+}
+
+#[cfg(test)]
+mod extract_all_busy_tests {
+    use super::*;
+
+    fn snap(job_id: &str, state: &str) -> JobProgressSnapshot {
+        JobProgressSnapshot {
+            job_id: job_id.into(),
+            kind: "extract_pst".into(),
+            matter_id: "m".into(),
+            state: state.into(),
+            stage: None,
+            completed_count: 3,
+            total_hint: Some(10),
+            message: None,
+            error_summary: None,
+            updated_at: String::new(),
+        }
+    }
+
+    fn job(id: &str, state: &str) -> ProcessJobRow {
+        ProcessJobRow {
+            id: id.into(),
+            kind: "extract_pst".into(),
+            state: state.into(),
+            parent_job_id: None,
+            error_summary: None,
+            started_at: None,
+            finished_at: None,
+        }
+    }
+
+    #[test]
+    fn extract_all_should_start_only_when_idle_and_queue_empty() {
+        assert!(extract_all_should_start(0, false));
+        assert!(!extract_all_should_start(2, false));
+        assert!(!extract_all_should_start(0, true));
+        assert!(!extract_all_should_start(1, true));
+    }
+
+    #[test]
+    fn is_busy_invoke_err_matches_produce_predicate() {
+        assert!(is_busy_invoke_err(
+            "busy: matter is busy: a job is already running (job_1)"
+        ));
+        assert!(is_busy_invoke_err("matter is busy: a job is already running"));
+        assert!(!is_busy_invoke_err("failed: extract boom"));
+        assert!(!is_busy_invoke_err(""));
+        assert!(should_set_busy_retry(
+            "busy: matter is busy: a job is already running (job_1)"
+        ));
+        assert!(!should_clear_queue_on_start_err(
+            "busy: matter is busy: a job is already running (job_1)"
+        ));
+        assert!(should_clear_queue_on_start_err("failed: extract boom"));
+    }
+
+    #[test]
+    fn extract_start_err_effect_keeps_queue_on_busy() {
+        let work = ExtractWork {
+            source_id: "s".into(),
+            pst_item_id: "p1".into(),
+            name: "one.pst".into(),
+        };
+        let mut queue = vec![work.clone(), work];
+        let mut total = 2u64;
+        let mut pending = false;
+        let mut note: Option<String> = None;
+        let busy = extract_start_err_effect(
+            "busy: matter is busy: a job is already running (job_1)",
+            true,
+        );
+        if busy.clear_queue {
+            queue.clear();
+            if busy.zero_total {
+                total = 0;
+            }
+        }
+        if busy.set_retry {
+            pending = true;
+        }
+        if busy.clear_retry {
+            pending = false;
+        }
+        if busy.surface_error {
+            note = Some("failed".into());
+        }
+        assert_eq!(queue.len(), 2);
+        assert_eq!(total, 2);
+        assert!(pending);
+        assert!(note.is_none());
+        let fail = extract_start_err_effect("failed: extract boom", true);
+        if fail.clear_queue {
+            queue.clear();
+            if fail.zero_total {
+                total = 0;
+            }
+        }
+        if fail.clear_retry {
+            pending = false;
+        }
+        if fail.surface_error {
+            note = Some("failed: extract boom".into());
+        }
+        assert!(queue.is_empty());
+        assert_eq!(total, 0);
+        assert!(!pending);
+        assert_eq!(note.as_deref(), Some("failed: extract boom"));
+    }
+
+    #[test]
+    fn busy_retry_state_machine() {
+        assert!(should_set_busy_retry("busy: matter is busy"));
+        assert!(!should_fire_busy_retry(true, true));
+        assert!(should_fire_busy_retry(true, false));
+        assert!(!should_fire_busy_retry(false, false));
+        assert!(should_clear_busy_retry(true, false, false));
+        assert!(should_clear_busy_retry(false, true, false));
+        assert!(should_clear_busy_retry(false, false, true));
+        assert!(!should_clear_busy_retry(false, false, false));
+        assert!(
+            !snapshot_busy(&snap("j1", "paused")),
+            "paused must not look busy or Pause would auto-retry remaining PSTs"
+        );
+        assert!(
+            should_fire_busy_retry(true, snapshot_busy(&snap("j1", "paused"))),
+            "without clearing the flag, Pause would fire a retry; wire clears on paused/cancelled first"
+        );
+        assert!(snapshot_clears_busy_retry("paused"));
+        assert!(snapshot_clears_busy_retry("cancelled"));
+        assert!(!snapshot_clears_busy_retry("succeeded"));
+        assert!(!snapshot_clears_busy_retry("running"));
+        assert!(!snapshot_clears_busy_retry("idle"));
+        let idle_then_cancelled = snap("j_block", "cancelled");
+        let mut pending = true;
+        if should_clear_busy_retry(
+            false,
+            snapshot_clears_busy_retry(&idle_then_cancelled.state),
+            false,
+        ) {
+            pending = false;
+        }
+        assert!(
+            !should_fire_busy_retry(pending, snapshot_busy(&idle_then_cancelled)),
+            "Busy-while-idle then Cancel before first poll must not auto-start q.first()"
+        );
+        let mut overlapping = true;
+        let first = take_busy_retry_fire(&mut overlapping, false);
+        let second = take_busy_retry_fire(&mut overlapping, false);
+        assert!(first);
+        assert!(!second);
+        assert!(!overlapping);
+        assert!(!snapshot_busy(&snap("j1", "paused")));
+        assert!(!snapshot_busy(&snap("j1", "cancelled")));
+        assert!(!snapshot_busy(&snap("j1", "succeeded")));
+        assert!(!snapshot_busy(&snap("", "idle")));
+        assert!(snapshot_busy(&snap("j1", "running")));
+    }
+
+    #[test]
+    fn matching_running_snap_is_not_orphan() {
+        let running = job("job_live", "running");
+        let matching = snap("job_live", "running");
+        assert!(!is_orphan_running(&running, &matching));
+        assert!(snapshot_busy(&matching));
+        let idle = snap("", "idle");
+        assert!(is_orphan_running(&running, &idle));
+        let other = snap("job_other", "running");
+        assert!(is_orphan_running(&running, &other));
+        let succeeded = job("job_live", "succeeded");
+        assert!(!is_orphan_running(&succeeded, &idle));
+    }
+
+    #[test]
+    fn extract_all_and_rows_wire_helpers_not_one_shot_bools() {
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let extract_all = prod
+            .split("let extract_all = move |_|")
+            .nth(1)
+            .unwrap_or("");
+        let guard = extract_all
+            .find("extract_all_should_start")
+            .expect("extract_all must call extract_all_should_start");
+        let queue_write = extract_all
+            .find("extract_queue.set(q)")
+            .expect("extract_all still writes the queue after the guard");
+        assert!(
+            guard < queue_write,
+            "extract_all must guard before rebuilding extract_queue"
+        );
+        assert!(prod.contains("busy_retry_pending"));
+        assert!(prod.contains("should_fire_busy_retry"));
+        assert!(prod.contains("apply_extract_start_err"));
+        let poller = prod.split("Ok(snap) =>").nth(1).unwrap_or("");
+        let clear_paused = poller
+            .find("snapshot_clears_busy_retry(&snap.state)")
+            .expect("poller must clear busy_retry on paused/cancelled snapshots");
+        let consume = poller
+            .find("take_busy_retry_fire")
+            .expect("poller must consume busy_retry_pending before any retry await");
+        let page_await = poller
+            .find("if finished_ok || missing_job")
+            .expect("poller still reloads the page after a terminal job");
+        assert!(
+            clear_paused < consume,
+            "Pause/Cancel must clear busy_retry_pending before a retry can be taken"
+        );
+        assert!(
+            consume < page_await,
+            "retry flag must be consumed before process_page/process_start awaits"
+        );
+        assert!(
+            prod.matches("extract_queue.set(Vec::new())").count() == 1,
+            "queue wipe must live only in apply_extract_start_err (Busy keep-queue)"
+        );
+        let drain = prod
+            .split("q.remove(0)")
+            .nth(1)
+            .unwrap_or("");
+        assert!(
+            drain.contains("apply_extract_start_err"),
+            "drain next-start Err must keep-queue via apply_extract_start_err"
+        );
+        assert!(
+            prod.contains("extract_start_err_effect"),
+            "Busy keep-queue must go through extract_start_err_effect"
+        );
+        assert!(
+            !prod.contains("let orphan = is_orphan_running"),
+            "job For must not freeze orphan at child create"
+        );
+        assert!(
+            !prod.contains("let active = snap.job_id == j.id"),
+            "job For must not freeze active at child create"
+        );
+        assert!(
+            !prod.contains("let counts = if active"),
+            "job For must not freeze counts at child create"
+        );
+        assert!(
+            prod.contains("is_orphan_running(&job_for_orphan, &progress.get())"),
+            "orphan Show must read live progress"
+        );
     }
 }
