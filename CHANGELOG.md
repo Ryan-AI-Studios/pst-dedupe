@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0124 — Review queue chrome)
+
+- First-pass queue cells ellipsis instead of painting on Fam/Resp/PRIV. A 244px rail holds Unreviewed / Privileged / Responsive and saved searches. Go-to sits in the TopBar right slot; StatusBar left shows the SQL-page row range. Select page tags only the current page.
+
 ### Added (0123 — Matter shell)
 
 - Matter workspace routes share one 46px TopBar and 30px StatusBar (Home under the bar, not a fifth tab). Admin is an inert span. Recents JSON with a UTF-8 BOM still loads.

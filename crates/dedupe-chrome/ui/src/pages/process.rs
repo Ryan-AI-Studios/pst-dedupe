@@ -521,10 +521,7 @@ pub fn ProcessPage() -> impl IntoView {
     };
 
     let extract_all = move |_| {
-        if !extract_all_should_start(
-            extract_queue.get().len(),
-            snapshot_busy(&progress.get()),
-        ) {
+        if !extract_all_should_start(extract_queue.get().len(), snapshot_busy(&progress.get())) {
             return;
         }
         let Some(pg) = page.get() else {
@@ -867,7 +864,9 @@ mod extract_all_busy_tests {
         assert!(is_busy_invoke_err(
             "busy: matter is busy: a job is already running (job_1)"
         ));
-        assert!(is_busy_invoke_err("matter is busy: a job is already running"));
+        assert!(is_busy_invoke_err(
+            "matter is busy: a job is already running"
+        ));
         assert!(!is_busy_invoke_err("failed: extract boom"));
         assert!(!is_busy_invoke_err(""));
         assert!(should_set_busy_retry(
@@ -1038,10 +1037,7 @@ mod extract_all_busy_tests {
             prod.matches("extract_queue.set(Vec::new())").count() == 1,
             "queue wipe must live only in apply_extract_start_err (Busy keep-queue)"
         );
-        let drain = prod
-            .split("q.remove(0)")
-            .nth(1)
-            .unwrap_or("");
+        let drain = prod.split("q.remove(0)").nth(1).unwrap_or("");
         assert!(
             drain.contains("apply_extract_start_err"),
             "drain next-start Err must keep-queue via apply_extract_start_err"
