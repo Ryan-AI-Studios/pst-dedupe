@@ -909,7 +909,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0063-04 | P3 | `openidconnect::ClientSecret` / bare `String` retains IdP client secret until client Drop; no zeroize API | **P3 residual** (dependency limitation; not a product control gap). Mitigated: `CoreClient` constructed only inside a tight exchange+verify block; route zeroizes local secret after `finish_authorization`. Heap residue only during exchange until allocator reuse. Full zeroize requires upstream `openidconnect` support. | residual / upstream |
 | D-0063-05 | P3 | Desk UI passphrase widgets are plain `String` (egui TextEdit) | Cleared after submit; heap residue residual. Production service/CLI unlock paths zeroize. Full zeroizing widgets would need egui field redesign. | residual polish |
 
-## Series O — Review chrome placeholders (0110–0122, minted/refreshed 2026-08-29; 0117 Completed 2026-08-31; 0118 Ready 2026-08-31; 0119 2026-08-30; 0115 Completed 2026-08-31; 0116 Completed 2026-08-31; 0121 minted 2026-08-31; 0122 minted 2026-08-31)
+## Series O — Review chrome placeholders (0110–0122, minted/refreshed 2026-08-29; 0117–0118 Completed 2026-08-31; 0119 2026-08-30; 0115–0116 Completed 2026-08-31; 0121–0122 minted 2026-08-31)
 
 Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs already occupied — do not remint. Expand with `/plan-track`, do not implement from this table.
 
@@ -935,16 +935,27 @@ Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs a
 | D-0115-email-print | P3 | EML/OOXML print-to-TIFF | Native-only + Warn in 0115 | residual |
 | D-0116-process-fold | — | Swallow egui Process into the Tauri window | **Closed in 0116** (PR **#123** / `727c857`) — chrome Process workspace + `process-runner`. Residuals **D-0116-workflow** / **D-0116-drop** / **D-0116-report**. | **closed / 0116** |
 | D-0116-workflow | P3 | Chrome Process has no `workflow_run` picker | Builtins only (`profile_run`); workflow UI skipped | residual / after **0116** |
-| D-0116-drop | P3 | Process ingest is dialog picker only | No drag-drop onto the sources pane | residual / after **0116** |
-| D-0116-report | P3 | No reconciliation report download on Process | 0039 CSV pack not wired as a Process download | residual / after **0116** |
+| D-0116-drop | P3 | Process ingest is dialog picker only | No drag-drop onto the sources pane. Drop-zone **copy** is **0126**; actual Tauri drop may remain. | residual / **0126** copy |
+| D-0116-report | P3 | No reconciliation report download on Process | 0039 CSV pack not wired as a Process download. Absorb into **0126** if a one-liner. | residual / **0126** |
 | D-0031-09 | — | Court e-file / load-file Bates on privilege log | Chrome 0113 volume log joins Bates when `production_items` exist; Desk/CLI still item_id | residual (Desk/CLI) |
 | D-0040-04 | — | Privilege log co-export into volume `PRIVILEGE/` | Chrome 0113 writes `privilege-log.csv` at volume root; folder layout residual | residual (`PRIVILEGE/` folder) |
 | D-0119-produce-checklist-residuals | — | PR #117 Bugbot: Finalize re-arm / colliding Bates; empty `filter_ids` dumps privilege log; QC state survives matter change. Plus PR #123: cancelled/idle produce treated as success | **Closed in 0119** (PR **#129** / `6a775b5`) — `Some([])` empty-set; `volume_succeeded` latch; succeeded-only waits; matter-switch session clear. Residual first-paint Bates auto-fill **D-0060-03**. | **closed / 0119** |
 | D-0120-pdf-raster-ui | — | PR #119 Bugbot: overlay mouseup coords; draw state across pages; stale Burn counts | **Closed in 0120** (PR **#131** / `e87f4c1`) — frame-relative draw; in-flight cancel; set-scoped Need-burn recount. Owner HITL remaining (release EXE). | **closed / 0120** |
 | D-0121-image-opt-qc | P3 | PR #121 Bugbot: OPT-missing resume; QC all volumes; JPEG eligibility vs sniff; TIFF magic vs MIME | Valid; matter-qc / pdf-raster / matter-produce. Do not steal into 0116. | **0121** Proposed |
-| D-0122-process-fold-residuals | P3 | PR #123 Bugbot: extract-all Busy wipes remaining PST queue; live running jobs painted as orphans at mount | Valid; process.rs only. Cancelled-produce stays **0119**. Do not steal into 0117. | **0122** Proposed |
+| D-0122-process-fold-residuals | P3 | PR #123 Bugbot: extract-all Busy wipes remaining PST queue; live running jobs painted as orphans at mount | Valid; process.rs only. Cancelled-produce stays **0119**. Visual jobs table is **0126**. | **0122** Proposed |
 
-**Not minted (v1.1 / never as next IDs):** local AI first-pass job, clawback packet, LFP default, native spreadsheet redact, legal hold, TAR-as-primary, cluster wheel, StoryBuilder, auto-privilege, BCC-default, `D-0108-keepset-crc-retaint`, `D-0067-embedded-depth` matter children. Mock `tokens.css` retune stays in `C:\dev\dedupe-frontend`. Next free ID **0123**.
+## Series T — Mockup chrome fidelity (0123–0126, minted 2026-08-31)
+
+From `C:\dev\deviations.md` vs `C:\dev\dedupe-frontend` (research only). Expand with `/plan-track`. Do not steal 0119–0122 Bugbot. **0123 locks (2026-09-01):** Plex + ink-navy `#1b3049` (blue theme); Home under the shared bar. Do not port Archivo/coral.
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0123-matter-shell | P3 | Shared TopBar + StatusBar; Home under the bar; tabs on Produce/Admin; Admin inert; recents UTF-8 BOM | Live `app.rs` header is Dedupe Desk; Produce/Admin drop tabs. Tokens: Plex + ink-navy `#1b3049`. `recents.rs` `from_str` fails on BOM. | **0123** Proposed |
+| D-0124-review-queue-chrome | P3 | Review left rail + toolbar + bulk + row range. **Column text collides** (no ellipsis; X500 From overflows Fam/Resp; 32px rows must not wrap) | Live `app.css` `.queue-row` tracks; viewport `overflow-x: hidden`. Keep 0111 Control# / PRIV locks. | **0124** Proposed |
+| D-0125-produce-canvas | P3 | Un-wizard produce: five steps visible + protocol + Stage pane; split Stage vs Finalize | Live tabbed `step` Show. 0119 Bugbot (re-arm / empty log / cancelled) stays. | **0125** Proposed |
+| D-0126-process-chrome-visual | P3 | Process jobs table, locked profile, drop copy, strip `\\?\`, minus-stack; absorb D-0116-report if 0039 is a one-liner | Live chips + error_groups exist. **0122** extract-all Busy stays. D-0116-drop may remain if only copy ships. | **0126** Proposed |
+
+**Not minted (v1.1 / never as next IDs):** local AI first-pass job, clawback packet, LFP default, native spreadsheet redact, legal hold, TAR-as-primary, cluster wheel, StoryBuilder, auto-privilege, BCC-default, `D-0108-keepset-crc-retaint`, `D-0067-embedded-depth` matter children. Mock Archivo/coral declined 2026-09-01 (0123 = Plex + ink-navy). Next free ID **0127**.
 
 ## Hygiene
 

@@ -135,6 +135,10 @@
 | 76 | P3 O | **0120** PdfRasterUiResiduals | ✅ Completed | PR #119 Image-tab/Burn-count Bugbot; PR **#131** / `e87f4c1` |
 | 77 | P3 O | **0121** ImageOptQcResiduals | 📦 Proposed | PR #121 image QC/eligibility Bugbot (not 0116) |
 | 78 | P3 O | **0122** ProcessFoldResiduals | 📦 Proposed | PR #123 Process extract-all/orphan Bugbot (not 0117) |
+| 79 | P3 T | **0123** MatterShell | 📦 Proposed | Shared TopBar/StatusBar; Home under bar; Plex + navy |
+| 80 | P3 T | **0124** ReviewQueueChrome | 📦 Proposed | Rail + **column collision**/ellipsis; not 0117 math |
+| 81 | P3 T | **0125** ProduceCanvas | 📦 Proposed | Un-wizard produce; 0119 Bugbot stays |
+| 82 | P3 T | **0126** ProcessChromeVisual | 📦 Proposed | Jobs table / minus-stack; 0122 Bugbot stays |
 
 ## Series K spine (clean unique export)
 
@@ -249,7 +253,7 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0122)
 
-**Series O** after Series S. **0110–0120 Completed**. **0121** Proposed (PR #121 image QC Bugbot). **0122** Proposed (PR #123 Process Bugbot).
+**Series O** after Series S. **0110–0120 Completed**. **0121** Proposed (PR #121 image QC Bugbot). **0122** Proposed (PR #123 Process Bugbot). **Series T 0123–0126 Proposed** (mockup fidelity; 0123 = Plex + navy, Home under bar).
 
 | Order | Track | Notes |
 |---|---|---|
@@ -266,3 +270,14 @@
 | 11 | **0120** PdfRasterUiResiduals | **Completed** — PR **#131** / `e87f4c1`; frame coords, draw cancel, Burn-set recount |
 | 12 | **0121** ImageOptQcResiduals | **Proposed** — PR #121 image QC Bugbot; not Process |
 | 13 | **0122** ProcessFoldResiduals | **Proposed** — PR #123 Process extract-all/orphan; not queue |
+
+## Series T — Mockup chrome fidelity (0123–0126)
+
+After **0119–0122** Bugbot. Steal layout from `C:\dev\dedupe-frontend`; do not vendor coral. **0123** before **0124–0126**. **0125** ∥ **0126** after shell.
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0123** MatterShell | **Proposed** — TopBar/StatusBar; Home under bar; Plex + ink-navy |
+| 2 | **0124** ReviewQueueChrome | **Proposed** — rail + colliding column text |
+| 3 | **0125** ProduceCanvas | **Proposed** — five steps + Stage; not 0119 |
+| 4 | **0126** ProcessChromeVisual | **Proposed** — jobs table; not 0122 |
