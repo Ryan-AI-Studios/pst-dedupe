@@ -22,7 +22,7 @@ A pure Rust Windows tool for deduplicating emails across Outlook PST files.
 
 ## Build
 
-Requires [Rust](https://rustup.rs/) 1.80+ on Windows.
+Requires [Rust](https://rustup.rs/) 1.80+ on Windows. Full chrome (Tauri) steps, Trunk/`NO_COLOR` pitfalls, and “what a rebuild includes”: [`docs/how-to-build.md`](docs/how-to-build.md).
 
 ```powershell
 # CLI (recommended for scripts and agents)
@@ -39,6 +39,7 @@ cargo build --release -p pst-dedup-gui
 
 | Binary | Path |
 |---|---|
+| Chrome (review window) | `target\release\dedupe-chrome.exe` |
 | Desk | `target\release\dedupe-desk.exe` |
 | CLI | `target\release\pst-dedup.exe` |
 | Legacy GUI | `target\release\pst-dedup-gui.exe` |

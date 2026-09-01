@@ -37,8 +37,9 @@ PR #123 Bugbot (live-verified 2026-08-31 on HEAD `3bde470` / product `727c857`):
 
 Queue virtualization (**0117**), window async (**0118**), produce wizard
 Finalize / cancelled-as-success (**0119**), raster UI (**0120**), image QC
-(**0121**). Do not change `process-runner` Busy semantics. Do not re-open
-0116 DoD. No schema bump. No BCC.
+(**0121**). Process visual / jobs table / drop copy (**0126**). Do not
+change `process-runner` Busy semantics. Do not re-open 0116 DoD. No schema
+bump. No BCC.
 
 ## 4. DoD (sketch)
 

@@ -44,7 +44,7 @@ Full residual inventory: [`docs/deferred.md`](deferred.md). Freeze notes: [`docs
 
 **Goal:** Create a matter, ingest a package, extract, reduce, promote to review, code, produce.
 
-1. **Install** the signed operator ZIP (see `README-RELEASE.txt` in the package). Engineering unsigned builds are for development only.
+1. **Install** the signed operator ZIP (see `README-RELEASE.txt` in the package). Engineering unsigned builds are for development only (chrome EXE: [`docs/how-to-build.md`](how-to-build.md)).
 2. **Start Desk:** `dedupe-desk.exe`
 3. **Create or open** a matter directory on local disk (not a network share for `matter.db`).
 4. **Add source** (Purview ZIP / export package or PST path as supported by the UI).
