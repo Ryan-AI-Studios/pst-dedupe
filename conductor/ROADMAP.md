@@ -420,7 +420,7 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 
 ### Wave 11 — Review chrome (Series O)
 
-**Series O** (Series S closed 2026-08-29). Tauri 2 + Leptos. Plex/paper. Process chrome **0116 Completed**. Mock at `C:\dev\dedupe-frontend` is research (do not vendor coral). **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Completed** (PR **#113** / `3c4ca65`). **0112 Completed** (PR **#115** / `81a3aad`). **0113 Completed** (PR **#117** / `f192b2d`). **0114 Completed** (PR **#119** / `5ed53bf`). **0115 Completed** (PR **#121** / `19d0c1f`). **0116 Completed** (PR **#123** / `727c857`).
+**Series O** (Series S closed 2026-08-29). Tauri 2 + Leptos. Plex/paper. Process chrome **0116 Completed**. Mock at `C:\dev\dedupe-frontend` is research (do not vendor coral). **0110 Completed** (PR **#111** / `5a76f0b`). **0111 Completed** (PR **#113** / `3c4ca65`). **0112 Completed** (PR **#115** / `81a3aad`). **0113 Completed** (PR **#117** / `f192b2d`). **0114 Completed** (PR **#119** / `5ed53bf`). **0115 Completed** (PR **#121** / `19d0c1f`). **0116 Completed** (PR **#123** / `727c857`). **0120 Completed** (PR **#131** / `e87f4c1`).
 
 | ID | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|
@@ -434,11 +434,11 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 | **0117** | QueueVirtualizationResiduals | **Completed** | **P3 O** | PR #113 queue Bugbot. PR **#125** `199975c`. Spec: `0117-QueueVirtualizationResiduals/`. |
 | **0118** | ReviewWindowAsyncResiduals | **Completed** | **P3 O** | PR #115 window Bugbot. PR **#127** `74fd797`. Spec: `0118-ReviewWindowAsyncResiduals/`. |
 | **0119** | ProduceChecklistResiduals | **Completed** | **P3 O** | PR #117 produce Bugbot + PR #123 cancelled/idle-as-success. PR **#129** `6a775b5`. Spec: `0119-ProduceChecklistResiduals/`. |
-| **0120** | PdfRasterUiResiduals | **Proposed** | **P3 O** | PR #119 Bugbot (overlay mouseup, draw state, stale Burn counts). Not OPT. |
+| **0120** | PdfRasterUiResiduals | **Completed** | **P3 O** | PR #119 Bugbot (overlay mouseup frame coords, draw cancel, Burn-set recount). Not OPT. PR **#131** `e87f4c1`. Spec: `0120-PdfRasterUiResiduals/`. |
 | **0121** | ImageOptQcResiduals | **Proposed** | **P3 O** | PR #121 Bugbot: OPT-missing resume; QC all volumes; JPEG eligibility vs sniff; TIFF magic vs MIME. Not Process. |
 | **0122** | ProcessFoldResiduals | **Proposed** | **P3 O** | PR #123 Bugbot: extract-all Busy wipes queue; live jobs as orphans. Not 0117. |
 
-**Order:** **0110** → **0111** → **0112** → **0113**; **0114** after window; **0115 Completed**; **0116 Completed**. **0117 Completed**. **0118 Completed**. **0119 Completed**. **0120** can run after 0114 without blocking 0115. **0121** can run after 0115 without blocking 0116. **0122** can run after 0116 without blocking 0117.
+**Order:** **0110** → **0111** → **0112** → **0113**; **0114** after window; **0115 Completed**; **0116 Completed**. **0117 Completed**. **0118 Completed**. **0119 Completed**. **0120 Completed**. **0121** can run after 0115 without blocking 0116. **0122** can run after 0116 without blocking 0117.
 
 ### What each step is for
 
