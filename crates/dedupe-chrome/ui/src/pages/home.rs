@@ -1,51 +1,21 @@
 use leptos::prelude::*;
-use leptos_router::components::A;
-use leptos_router::hooks::{use_navigate, use_params_map};
+use leptos_router::hooks::use_navigate;
 
-use crate::invoke::{tauri_invoke, MatterOverview, RootArgs};
 use crate::path_id::encode_matter_id;
+use crate::shell::MatterShellCtx;
 
 #[component]
 pub fn MatterHome() -> impl IntoView {
-    let params = use_params_map();
-    let overview = RwSignal::new(Option::<MatterOverview>::None);
-    let error = RwSignal::new(Option::<String>::None);
-    let root_sig = RwSignal::new(String::new());
+    let ctx = expect_context::<MatterShellCtx>();
+    let overview = ctx.overview;
+    let error = ctx.error;
+    let root_sig = ctx.root;
     let navigate = StoredValue::new(use_navigate());
-
-    Effect::new(move |_| {
-        // ParamsMap already URL-decodes `:id` — treat as absolute matter root.
-        let root = params.with(|p| p.get("id").unwrap_or_default());
-        if root.is_empty() {
-            overview.set(None);
-            error.set(Some("Missing matter id in route.".into()));
-            return;
-        }
-        root_sig.set(root.clone());
-        error.set(None);
-        leptos::task::spawn_local(async move {
-            match tauri_invoke::<MatterOverview, _>(
-                "matter_overview",
-                &RootArgs { root: root.clone() },
-            )
-            .await
-            {
-                Ok(ov) => overview.set(Some(ov)),
-                Err(e) => {
-                    overview.set(None);
-                    error.set(Some(e));
-                }
-            }
-        });
-    });
 
     let id_encoded = move || encode_matter_id(&root_sig.get());
 
     view! {
         <section>
-            <div class="toolbar">
-                <A href="/matters">"← Matters"</A>
-            </div>
             <Show when=move || error.get().is_some()>
                 <p class="error">{move || error.get().unwrap_or_default()}</p>
             </Show>
@@ -134,14 +104,6 @@ pub fn MatterHome() -> impl IntoView {
                                 })
                             }>"Produce"</button>
                         </div>
-                        <nav class="tabs" aria-label="Matter workspace">
-                            <A href=format!("/matters/{id}")>"Home"</A>
-                            <A href=format!("/matters/{id}/process")>"Process"</A>
-                            <A href=format!("/matters/{id}/review")>"Review"</A>
-                            <A href=format!("/matters/{id}/produce")>"Produce"</A>
-                            <A href=format!("/matters/{id}/admin")>"Admin"</A>
-                        </nav>
-                        <p class="empty">"Matter home — overview chips above match Desk load_case_overview rollups."</p>
                     }
                 })}
             </Show>

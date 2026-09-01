@@ -134,8 +134,8 @@
 | 75 | P3 O | **0119** ProduceChecklistResiduals | ✅ Completed | PR #117 produce Bugbot + PR #123 cancelled/idle; PR **#129** / `6a775b5` |
 | 76 | P3 O | **0120** PdfRasterUiResiduals | ✅ Completed | PR #119 Image-tab/Burn-count Bugbot; PR **#131** / `e87f4c1` |
 | 77 | P3 O | **0121** ImageOptQcResiduals | ✅ Completed | PR #121 image QC/eligibility Bugbot; PR **#135** / `600d6b3` |
-| 78 | P3 O | **0122** ProcessFoldResiduals | ⬜ Ready | PR #123 Process extract-all/orphan Bugbot (not 0117) |
-| 79 | P3 T | **0123** MatterShell | 📦 Proposed | Shared TopBar/StatusBar; Home under bar; Plex + navy |
+| 78 | P3 O | **0122** ProcessFoldResiduals | ✅ Completed | PR #123 Process extract-all/orphan Bugbot; PR **#137** / `f1810fe` |
+| 79 | P3 T | **0123** MatterShell | ⬜ Ready | Shared TopBar/StatusBar; Home under bar; Plex + navy |
 | 80 | P3 T | **0124** ReviewQueueChrome | 📦 Proposed | Rail + **column collision**/ellipsis; not 0117 math |
 | 81 | P3 T | **0125** ProduceCanvas | 📦 Proposed | Un-wizard produce; 0119 Bugbot stays |
 | 82 | P3 T | **0126** ProcessChromeVisual | 📦 Proposed | Jobs table / minus-stack; 0122 Bugbot stays |
@@ -253,7 +253,7 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0122)
 
-**Series O** after Series S. **0110–0122 Completed**. **Series T 0123–0126 Proposed** (mockup fidelity; 0123 = Plex + navy, Home under bar).
+**Series O** after Series S. **0110–0122 Completed**. **0123 Ready — not started**. **0124–0126 Proposed** (mockup fidelity; 0123 = Plex + navy, Home under bar).
 
 | Order | Track | Notes |
 |---|---|---|
@@ -269,7 +269,7 @@
 | 10 | **0119** ProduceChecklistResiduals | **Completed** — PR **#129** / `6a775b5`; empty `Some([])` log; Finalize latch; matter QC reset; success only on `succeeded` |
 | 11 | **0120** PdfRasterUiResiduals | **Completed** — PR **#131** / `e87f4c1`; frame coords, draw cancel, Burn-set recount |
 | 12 | **0121** ImageOptQcResiduals | **Completed** — PR **#135** / `600d6b3`; OPT skip until complete, scoped QC, sniff magic-first |
-| 13 | **0122** ProcessFoldResiduals | **Ready — not started** — PR #123 Process extract-all/orphan; not queue |
+| 13 | **0122** ProcessFoldResiduals | **Completed** — PR **#137** / `f1810fe`; extract-all Busy keep-queue; live row Pause |
 
 ## Series T — Mockup chrome fidelity (0123–0126)
 
@@ -277,7 +277,7 @@ After **0119–0122** Bugbot. Steal layout from `C:\dev\dedupe-frontend`; do not
 
 | Order | Track | Notes |
 |---|---|---|
-| 1 | **0123** MatterShell | **Proposed** — TopBar/StatusBar; Home under bar; Plex + ink-navy |
+| 1 | **0123** MatterShell | **Ready — not started** — TopBar/StatusBar; Home under bar; Plex + ink-navy; recents BOM |
 | 2 | **0124** ReviewQueueChrome | **Proposed** — rail + colliding column text |
 | 3 | **0125** ProduceCanvas | **Proposed** — five steps + Stage; not 0119 |
 | 4 | **0126** ProcessChromeVisual | **Proposed** — jobs table; not 0122 |

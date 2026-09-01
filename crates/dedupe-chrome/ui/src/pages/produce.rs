@@ -11,7 +11,7 @@ use crate::invoke::{
     ProduceBurnSetArgs, ProducePageResponse, ProduceQcFindingsArgs, ProduceQcRun, ProduceQcRunArgs,
     ProduceStart, ProduceStartArgs, ProductionSetThin, RootArgs, WarningOverride,
 };
-use crate::path_id::{matter_home_href_from_param, review_doc_href};
+use crate::path_id::review_doc_href;
 
 fn override_key(rule_id: &str, item_id: Option<&str>) -> String {
     match item_id.map(str::trim).filter(|s| !s.is_empty()) {
@@ -280,9 +280,6 @@ pub fn ProducePage() -> impl IntoView {
     let overrides = RwSignal::new(HashMap::<String, (String, String)>::new());
     let busy_banner = RwSignal::new(Option::<String>::None);
     let last_root = RwSignal::new(String::new());
-
-    let home =
-        move || params.with(|p| matter_home_href_from_param(&p.get("id").unwrap_or_default()));
 
     Effect::new(move |_| {
         let root = params.with(|p| p.get("id").unwrap_or_default());
@@ -586,9 +583,6 @@ pub fn ProducePage() -> impl IntoView {
 
     view! {
         <section class="produce-page">
-            <div class="toolbar">
-                <A href=home>"← Matter home"</A>
-            </div>
             <h1>"Produce"</h1>
             <Show when=move || busy_banner.get().is_some()>
                 <div class="busy-banner" role="status">

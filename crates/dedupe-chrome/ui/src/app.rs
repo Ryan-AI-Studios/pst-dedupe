@@ -10,6 +10,7 @@ use web_sys::MouseEvent;
 use crate::pages::{
     AdminStub, MatterHome, MattersList, ProcessPage, ProducePage, ReviewQueue, ReviewWindow,
 };
+use crate::shell::{MatterShell, WorkspaceTab};
 
 static CTRL_K_ONCE: Once = Once::new();
 
@@ -82,6 +83,67 @@ fn focus_skip_target(preferred_id: &str) {
 }
 
 #[component]
+fn MattersLauncher() -> impl IntoView {
+    view! {
+        <div class="matters-launcher">
+            <header class="top-bar launcher-top-bar">
+                <div class="brand">"Dedupe Desk"</div>
+                <div class="hint">"Matter chrome · overview from matter-core"</div>
+            </header>
+            <MattersList/>
+        </div>
+    }
+}
+
+fn wrap_home() -> impl IntoView {
+    view! {
+        <MatterShell tab=WorkspaceTab::Home>
+            <MatterHome/>
+        </MatterShell>
+    }
+}
+
+fn wrap_process() -> impl IntoView {
+    view! {
+        <MatterShell tab=WorkspaceTab::Process>
+            <ProcessPage/>
+        </MatterShell>
+    }
+}
+
+fn wrap_review() -> impl IntoView {
+    view! {
+        <MatterShell tab=WorkspaceTab::Review>
+            <ReviewQueue/>
+        </MatterShell>
+    }
+}
+
+fn wrap_review_window() -> impl IntoView {
+    view! {
+        <MatterShell tab=WorkspaceTab::Review>
+            <ReviewWindow/>
+        </MatterShell>
+    }
+}
+
+fn wrap_produce() -> impl IntoView {
+    view! {
+        <MatterShell tab=WorkspaceTab::Produce>
+            <ProducePage/>
+        </MatterShell>
+    }
+}
+
+fn wrap_admin() -> impl IntoView {
+    view! {
+        <MatterShell tab=WorkspaceTab::Admin>
+            <AdminStub/>
+        </MatterShell>
+    }
+}
+
+#[component]
 pub fn App() -> impl IntoView {
     Effect::new(move |_| {
         install_ctrl_k_once();
@@ -127,13 +189,9 @@ pub fn App() -> impl IntoView {
                     "Skip to document"
                 </a>
             </div>
-            <header class="top-bar">
-                <div class="brand">"Dedupe Desk"</div>
-                <div class="hint">"Matter chrome · overview from matter-core"</div>
-                <div id="ctrl-k-hint" class="chord-hint" role="status" aria-live="polite">
-                    "Ctrl+K focuses matter search on the Matters list."
-                </div>
-            </header>
+            <div id="ctrl-k-hint" class="chord-hint app-chord-hint" role="status" aria-live="polite">
+                "Ctrl+K focuses matter search on the Matters list."
+            </div>
             <div
                 id="chrome-status"
                 class="chrome-status"
@@ -143,20 +201,20 @@ pub fn App() -> impl IntoView {
             <main id="main-content" class="main-surface" tabindex="-1">
                 <Router>
                     <Routes fallback=|| {
-                        view! { <p class="empty" style="padding: 8px;">"Not found"</p> }
+                        view! { <p class="empty route-fallback">"Not found"</p> }
                     }>
                         <Route path=path!("/") view=|| {
                             view! {
                                 <leptos_router::components::Redirect path="/matters"/>
                             }
                         } />
-                        <Route path=path!("/matters") view=MattersList />
-                        <Route path=path!("/matters/:id") view=MatterHome />
-                        <Route path=path!("/matters/:id/process") view=ProcessPage />
-                        <Route path=path!("/matters/:id/review") view=ReviewQueue />
-                        <Route path=path!("/matters/:id/review/:docId") view=ReviewWindow />
-                        <Route path=path!("/matters/:id/produce") view=ProducePage />
-                        <Route path=path!("/matters/:id/admin") view=AdminStub />
+                        <Route path=path!("/matters") view=MattersLauncher />
+                        <Route path=path!("/matters/:id") view=wrap_home />
+                        <Route path=path!("/matters/:id/process") view=wrap_process />
+                        <Route path=path!("/matters/:id/review") view=wrap_review />
+                        <Route path=path!("/matters/:id/review/:docId") view=wrap_review_window />
+                        <Route path=path!("/matters/:id/produce") view=wrap_produce />
+                        <Route path=path!("/matters/:id/admin") view=wrap_admin />
                     </Routes>
                 </Router>
             </main>

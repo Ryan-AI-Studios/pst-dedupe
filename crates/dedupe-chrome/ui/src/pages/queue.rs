@@ -3,7 +3,6 @@
 use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
-use leptos_router::components::A;
 use leptos_router::hooks::{use_navigate, use_params_map};
 use wasm_bindgen::JsCast;
 use web_sys::{Event, HtmlElement, HtmlInputElement, KeyboardEvent, MouseEvent};
@@ -13,7 +12,7 @@ use crate::invoke::{
     ReviewCodesPreviewArgs, ReviewQueuePage, ReviewQueuePageArgs, RootArgs, SavedSearchDto,
     SavedSearchUpsertArgs,
 };
-use crate::path_id::{encode_matter_id, matter_home_href_from_param, review_doc_href};
+use crate::path_id::review_doc_href;
 use crate::queue_window::{
     clamp_offset_for_fetch_meta, next_page_disabled, scroll_top_to_reveal, visible_range, OVERSCAN,
     ROW_HEIGHT,
@@ -334,10 +333,6 @@ pub fn ReviewQueue() -> impl IntoView {
         }
     });
 
-    let home =
-        move || params.with(|p| matter_home_href_from_param(&p.get("id").unwrap_or_default()));
-    let id_encoded = move || encode_matter_id(&root_sig.get());
-
     view! {
         <section
             class="queue-page"
@@ -454,16 +449,6 @@ pub fn ReviewQueue() -> impl IntoView {
                 }
             }
         >
-            <div class="toolbar">
-                <A href=home>"← Matter home"</A>
-                <nav class="tabs" aria-label="Matter workspace">
-                    <A href=move || format!("/matters/{}", id_encoded())>"Home"</A>
-                    <A href=move || format!("/matters/{}/process", id_encoded())>"Process"</A>
-                    <A href=move || format!("/matters/{}/review", id_encoded())>"Review"</A>
-                    <A href=move || format!("/matters/{}/produce", id_encoded())>"Produce"</A>
-                    <A href=move || format!("/matters/{}/admin", id_encoded())>"Admin"</A>
-                </nav>
-            </div>
             <h1>"Review"</h1>
 
             <div class="filter-bar">

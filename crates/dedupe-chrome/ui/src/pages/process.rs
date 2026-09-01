@@ -1,5 +1,4 @@
 use leptos::prelude::*;
-use leptos_router::components::A;
 use leptos_router::hooks::{use_navigate, use_params_map};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -9,10 +8,8 @@ use crate::invoke::{
     ProcessJobRow, ProcessPageArgs, ProcessPageResponse, ProcessPstRow, ProcessResumeArgs,
     ProcessSourceRow, ProcessStartArgs, ProcessStartResponse, RootArgs,
 };
-use crate::path_id::{encode_matter_id, matter_home_href_from_param};
+use crate::path_id::encode_matter_id;
 
-const STATUS_BAR: &str =
-    "Processing is deterministic. No prediction, no coding, no privilege calls here.";
 const DEFAULT_PROFILE: &str = "builtin:standard";
 
 fn ingest_params(path: &str) -> String {
@@ -255,8 +252,6 @@ pub fn ProcessPage() -> impl IntoView {
     let extract_current_name = RwSignal::new(String::new());
     let busy_retry_pending = RwSignal::new(false);
 
-    let home =
-        move || params.with(|p| matter_home_href_from_param(&p.get("id").unwrap_or_default()));
     let id_encoded = move || encode_matter_id(&root_sig.get());
 
     let reload = move |root: String| {
@@ -595,16 +590,6 @@ pub fn ProcessPage() -> impl IntoView {
 
     view! {
         <section class="process-page">
-            <div class="toolbar">
-                <A href=home>"← Matter home"</A>
-                <nav class="tabs" aria-label="Matter workspace">
-                    <A href=move || format!("/matters/{}", id_encoded())>"Home"</A>
-                    <A href=move || format!("/matters/{}/process", id_encoded())>"Process"</A>
-                    <A href=move || format!("/matters/{}/review", id_encoded())>"Review"</A>
-                    <A href=move || format!("/matters/{}/produce", id_encoded())>"Produce"</A>
-                    <A href=move || format!("/matters/{}/admin", id_encoded())>"Admin"</A>
-                </nav>
-            </div>
             <h1>"Process"</h1>
             <Show when=move || error.get().is_some()>
                 <p class="error">{move || error.get().unwrap_or_default()}</p>
@@ -830,7 +815,6 @@ pub fn ProcessPage() -> impl IntoView {
                     >
                         "Open review-ready"
                     </button>
-                    <p class="process-status" role="status">{STATUS_BAR}</p>
                     <p class="empty">{move || format!("Profile {}", selected_profile.get())}</p>
                     <p class="empty">"Identity is SHA-256."</p>
                 </aside>

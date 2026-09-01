@@ -437,12 +437,12 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 | **0120** | PdfRasterUiResiduals | **Completed** | **P3 O** | PR #119 Bugbot (overlay mouseup frame coords, draw cancel, Burn-set recount). Not OPT. PR **#131** `e87f4c1`. Spec: `0120-PdfRasterUiResiduals/`. |
 | **0121** | ImageOptQcResiduals | **Completed** | **P3 O** | PR #121 Bugbot: OPT skip until complete; scoped image QC; JPEG eligibility vs sniff; TIFF magic vs MIME. Not Process. PR **#135** `600d6b3`. Spec: `0121-ImageOptQcResiduals/`. |
 | **0122** | ProcessFoldResiduals | **Completed** | **P3 O** | PR #123 Bugbot: extract-all Busy must not wipe queue; live job-row Pause from current progress. PR **#137** / `f1810fe`. Spec: `0122-ProcessFoldResiduals/`. |
-| **0123** | MatterShell | **Proposed** | **P3 T** | Shared TopBar/StatusBar; Home under bar; Plex + ink-navy. Spec: `0123-MatterShell/`. |
+| **0123** | MatterShell | **Ready — not started** | **P3 T** | Shared TopBar/StatusBar; Home under bar; Plex + ink-navy `#1b3049`; Admin span; recents BOM. Spec: `0123-MatterShell/`. |
 | **0124** | ReviewQueueChrome | **Proposed** | **P3 T** | Rail + column collision (ellipsis). Spec: `0124-ReviewQueueChrome/`. |
 | **0125** | ProduceCanvas | **Proposed** | **P3 T** | Un-wizard produce; 0119 stays. Spec: `0125-ProduceCanvas/`. |
 | **0126** | ProcessChromeVisual | **Proposed** | **P3 T** | Jobs table / minus-stack; 0122 stays. Spec: `0126-ProcessChromeVisual/`. |
 
-**Order:** **0110** → **0111** → **0112** → **0113**; **0114** after window; **0115 Completed**; **0116 Completed**. **0117 Completed**. **0118 Completed**. **0119 Completed**. **0120 Completed**. **0121 Completed**. **0122 Completed**. **Series T:** **0123** (Plex + navy; Home under bar) then **0124**; **0125** ∥ **0126** after shell.
+**Order:** **0110** → **0111** → **0112** → **0113**; **0114** after window; **0115 Completed**; **0116 Completed**. **0117 Completed**. **0118 Completed**. **0119 Completed**. **0120 Completed**. **0121 Completed**. **0122 Completed**. **0123 Ready**. **Series T:** **0123** (Plex + navy; Home under bar) then **0124**; **0125** ∥ **0126** after shell.
 
 ### What each step is for
 
