@@ -11,7 +11,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes matter chrome. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-09-01); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is **layout research only** (46/30 shell, four tabs, StatusBar flag). Do not copy Archivo, coral `#ec3013`, or brand `DEDUPE / REVIEW`.
-- **Status:** In progress
+- **Status:** Completed
 - **Depends on:** **0110–0122 Completed** (0122 PR **#137** / `f1810fe`) · schema **v41** (no bump)
 - **Spec authored:** 2026-09-01 (placeholder → Ready)
 - **Series:** T (mockup chrome fidelity)
@@ -195,12 +195,12 @@ Matter routes (Home, Process, Review, Review window, Produce, Admin) share one T
 
 Complete only when ALL hold:
 
-- [ ] **DoD-1 — Shared TopBar:** Home, Process, Review queue, Review window, Produce, and Admin all show **exactly one** 46px TopBar (no stacked `app.rs` global header): brand `Dedupe Desk`, matter name (from shared `matter_overview`) + processed/meta, four tabs (Admin inert span). Home is brand/name, not a fifth tab. **Review stays `active` on `/review/:docId`.** Produce is not `← Matter home` alone. In-page workspace `<nav class="tabs">` is gone from those pages.
-- [ ] **DoD-2 — StatusBar:** 30px bar on those routes. Process deterministic sentence is the **flag**, not body copy. Produce flag is the privileged-document override rule. Host `process_ui_is_live_not_stub` still passes.
-- [ ] **DoD-3 — Home + list:** After Open, Home is under the shell with overview chips (no placeholder-only body). Matters list has **no** workflow tabs. No deep-link Open → Process.
-- [ ] **DoD-4 — Recents BOM:** UTF-8 BOM file loads; writes are BOM-less. Unit tests in `recents.rs`.
-- [ ] **DoD-5 — Hygiene:** No `unwrap`/`expect` in new production code. No schema bump. 0122 Busy tests still pass. Tokens: Plex, `#1b3049` action, no Archivo/coral. `cargo test --manifest-path crates/dedupe-chrome/ui/Cargo.toml` + `cargo test -p dedupe-chrome`. trunk chrome-ui still builds.
-- [ ] **DoD-6 — Recorded:** `review.md`; registry **Completed**; CHANGELOG Unreleased sentence; `D-0123-matter-shell` closed; ledger committed (`FEATURE`). **0124–0126** stay Proposed unless separately implemented.
+- [x] **DoD-1 — Shared TopBar:** Home, Process, Review queue, Review window, Produce, and Admin all show **exactly one** 46px TopBar (no stacked `app.rs` global header): brand `Dedupe Desk`, matter name (from shared `matter_overview`) + processed/meta, four tabs (Admin inert span). Home is brand/name, not a fifth tab. **Review stays `active` on `/review/:docId`.** Produce is not `← Matter home` alone. In-page workspace `<nav class="tabs">` is gone from those pages.
+- [x] **DoD-2 — StatusBar:** 30px bar on those routes. Process deterministic sentence is the **flag**, not body copy. Produce flag is the privileged-document override rule. Host `process_ui_is_live_not_stub` still passes.
+- [x] **DoD-3 — Home + list:** After Open, Home is under the shell with overview chips (no placeholder-only body). Matters list has **no** workflow tabs. No deep-link Open → Process.
+- [x] **DoD-4 — Recents BOM:** UTF-8 BOM file loads; writes are BOM-less. Unit tests in `recents.rs`.
+- [x] **DoD-5 — Hygiene:** No `unwrap`/`expect` in new production code. No schema bump. 0122 Busy tests still pass. Tokens: Plex, `#1b3049` action, no Archivo/coral. `cargo test --manifest-path crates/dedupe-chrome/ui/Cargo.toml` + `cargo test -p dedupe-chrome`. trunk chrome-ui still builds.
+- [x] **DoD-6 — Recorded:** `review.md`; registry **Completed**; CHANGELOG Unreleased sentence; `D-0123-matter-shell` closed; ledger committed (`FEATURE`). **0124–0126** stay Proposed unless separately implemented.
 
 ---
 
