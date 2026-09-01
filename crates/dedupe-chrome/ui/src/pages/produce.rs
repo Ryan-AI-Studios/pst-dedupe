@@ -51,6 +51,146 @@ async fn wait_process_terminal(root: &str) -> Result<JobProgressSnapshot, String
     }
 }
 
+/// Wire `process_progress.state` is success only as exact `"succeeded"`.
+fn process_job_succeeded(state: &str) -> bool {
+    state == "succeeded"
+}
+
+fn wait_root_is_current(captured: &str, live: &str) -> bool {
+    captured == live
+}
+
+/// Not-succeeded terminals leave a prior latch; first cancel stays unlatched.
+fn volume_latch_after_produce_terminal(prev: bool, succeeded: bool) -> bool {
+    if succeeded {
+        true
+    } else {
+        prev
+    }
+}
+
+fn finalize_blocked_by_volume_latch(volume_succeeded: bool, start_busy: bool) -> bool {
+    volume_succeeded || start_busy
+}
+
+/// Apply `next_seq_hint` only after a succeeded volume (never first-paint silent 1).
+fn bates_start_from_next_seq_hint(hint: Option<u64>) -> Option<String> {
+    hint.filter(|n| *n >= 1).map(|n| n.to_string())
+}
+
+fn terminal_job_error(kind: &str, snap: &JobProgressSnapshot) -> String {
+    snap.error_summary
+        .clone()
+        .unwrap_or_else(|| format!("{kind} {}", snap.state))
+}
+
+/// Host attaches genuine post-step failures as `privilege log: …` on a succeeded snap.
+fn privilege_log_post_step_banner(snap: &JobProgressSnapshot) -> Option<String> {
+    snap.error_summary
+        .as_ref()
+        .filter(|s| s.contains("privilege log:"))
+        .cloned()
+}
+
+#[cfg(test)]
+mod process_job_succeeded_tests {
+    use super::{
+        bates_start_from_next_seq_hint, finalize_blocked_by_volume_latch,
+        privilege_log_post_step_banner, process_job_succeeded, volume_latch_after_produce_terminal,
+        wait_root_is_current, JobProgressSnapshot,
+    };
+
+    #[test]
+    fn only_succeeded_is_success() {
+        assert!(process_job_succeeded("succeeded"));
+        assert!(!process_job_succeeded("Succeeded"));
+        assert!(!process_job_succeeded("cancelled"));
+        assert!(!process_job_succeeded("idle"));
+        assert!(!process_job_succeeded("paused"));
+        assert!(!process_job_succeeded("failed"));
+        assert!(!process_job_succeeded(""));
+        assert!(!process_job_succeeded("running"));
+    }
+
+    #[test]
+    fn stale_wait_when_root_drifts() {
+        assert!(wait_root_is_current(r"C:\a", r"C:\a"));
+        assert!(!wait_root_is_current(r"C:\a", r"C:\b"));
+    }
+
+    #[test]
+    fn latch_sets_only_on_success_and_survives_cancel() {
+        assert!(volume_latch_after_produce_terminal(false, true));
+        assert!(volume_latch_after_produce_terminal(true, false));
+        assert!(!volume_latch_after_produce_terminal(false, false));
+        // Hint refresh is independent: a failed produce_page still leaves the latch on.
+        assert_eq!(bates_start_from_next_seq_hint(None), None);
+        assert!(volume_latch_after_produce_terminal(false, true));
+    }
+
+    #[test]
+    fn qc_cannot_rearm_finalize_via_latch() {
+        assert!(finalize_blocked_by_volume_latch(true, false));
+        assert!(finalize_blocked_by_volume_latch(false, true));
+        assert!(!finalize_blocked_by_volume_latch(false, false));
+    }
+
+    #[test]
+    fn log_post_step_error_still_succeeded_for_latch() {
+        let mut snap = JobProgressSnapshot {
+            job_id: "j1".into(),
+            kind: "produce".into(),
+            matter_id: "m".into(),
+            state: "succeeded".into(),
+            stage: None,
+            completed_count: 1,
+            total_hint: None,
+            message: None,
+            error_summary: Some("privilege log: disk full".into()),
+            updated_at: String::new(),
+        };
+        assert!(process_job_succeeded(&snap.state));
+        assert_eq!(
+            privilege_log_post_step_banner(&snap).as_deref(),
+            Some("privilege log: disk full")
+        );
+        snap.error_summary = None;
+        assert!(privilege_log_post_step_banner(&snap).is_none());
+    }
+
+    #[test]
+    fn hint_only_when_at_least_one() {
+        assert_eq!(
+            bates_start_from_next_seq_hint(Some(42)).as_deref(),
+            Some("42")
+        );
+        assert_eq!(bates_start_from_next_seq_hint(Some(0)), None);
+        assert_eq!(bates_start_from_next_seq_hint(None), None);
+    }
+
+    #[test]
+    fn finalize_view_wires_latch_not_start_result_ok() {
+        let src = include_str!("produce.rs");
+        assert!(
+            src.contains("finalize_blocked_by_volume_latch"),
+            "Finalize disabled must call the volume latch helper"
+        );
+        assert!(
+            src.contains("if start_busy.get() || volume_succeeded.get()"),
+            "Finalize click must no-op when latched"
+        );
+        assert!(
+            src.contains("volume_succeeded.set(false)"),
+            "matter switch must clear the latch"
+        );
+        assert!(
+            !src.contains("qc_busy.set(false);\n            start_busy.set(false)")
+                && !src.contains("start_busy.set(false);\n            qc_busy.set(false)"),
+            "matter switch must not force-clear busy flags as a pair"
+        );
+    }
+}
+
 fn is_busy_err(e: &str) -> bool {
     e.starts_with("busy:") || e.contains("matter is busy")
 }
@@ -84,8 +224,10 @@ pub fn ProducePage() -> impl IntoView {
     let qc_busy = RwSignal::new(false);
     let start_busy = RwSignal::new(false);
     let start_result = RwSignal::new(Option::<ProduceStart>::None);
+    let volume_succeeded = RwSignal::new(false);
     let overrides = RwSignal::new(HashMap::<String, (String, String)>::new());
     let busy_banner = RwSignal::new(Option::<String>::None);
+    let last_root = RwSignal::new(String::new());
 
     let home =
         move || params.with(|p| matter_home_href_from_param(&p.get("id").unwrap_or_default()));
@@ -96,11 +238,32 @@ pub fn ProducePage() -> impl IntoView {
             error.set(Some("Missing matter id in route.".into()));
             return;
         }
+        let switched = last_root.get_untracked() != root;
         root_sig.set(root.clone());
-        error.set(None);
+        if switched {
+            last_root.set(root.clone());
+            qc.set(None);
+            overrides.set(HashMap::new());
+            start_result.set(None);
+            volume_succeeded.set(false);
+            step.set(1);
+            entire_corpus.set(false);
+            bates_start.set(String::new());
+            busy_banner.set(None);
+            error.set(None);
+            // Do not reset start_busy / qc_busy: in-flight waits own those until they exit.
+        }
         leptos::task::spawn_local(async move {
-            match tauri_invoke::<ProducePageResponse, _>("produce_page", &RootArgs { root }).await {
+            match tauri_invoke::<ProducePageResponse, _>(
+                "produce_page",
+                &RootArgs { root: root.clone() },
+            )
+            .await
+            {
                 Ok(resp) => {
+                    if !wait_root_is_current(&root, &root_sig.get_untracked()) {
+                        return;
+                    }
                     prefix.set(resp.bates_prefix.clone());
                     if let Some(first) = resp.profiles.first() {
                         profile.set(first.slug.clone());
@@ -108,6 +271,9 @@ pub fn ProducePage() -> impl IntoView {
                     page.set(Some(resp));
                 }
                 Err(e) => {
+                    if !wait_root_is_current(&root, &root_sig.get_untracked()) {
+                        return;
+                    }
                     page.set(None);
                     error.set(Some(e));
                 }
@@ -139,50 +305,66 @@ pub fn ProducePage() -> impl IntoView {
             .await;
             match res {
                 Ok(r) => {
+                    if !wait_root_is_current(&root, &root_sig.get_untracked()) {
+                        qc_busy.set(false);
+                        return;
+                    }
                     if let Some(job_id) = r.job_id.clone() {
                         match wait_process_terminal(&root).await {
-                            Ok(snap) if snap.state == "failed" || snap.state == "paused" => {
-                                qc_busy.set(false);
-                                error.set(Some(
-                                    snap.error_summary
-                                        .unwrap_or_else(|| format!("QC {}", snap.state)),
-                                ));
-                                return;
-                            }
                             Err(e) => {
                                 qc_busy.set(false);
-                                error.set(Some(e));
+                                if wait_root_is_current(&root, &root_sig.get_untracked()) {
+                                    error.set(Some(e));
+                                }
                                 return;
                             }
-                            _ => {}
+                            Ok(snap) => {
+                                if !wait_root_is_current(&root, &root_sig.get_untracked()) {
+                                    qc_busy.set(false);
+                                    return;
+                                }
+                                if !process_job_succeeded(&snap.state) {
+                                    qc_busy.set(false);
+                                    error.set(Some(terminal_job_error("QC", &snap)));
+                                    return;
+                                }
+                            }
                         }
                         match tauri_invoke::<ProduceQcRun, _>(
                             "produce_qc_findings",
                             &ProduceQcFindingsArgs {
-                                root,
+                                root: root.clone(),
                                 job_id: Some(job_id),
                             },
                         )
                         .await
                         {
                             Ok(findings) => {
-                                overrides.set(HashMap::new());
-                                qc.set(Some(findings));
-                                start_result.set(None);
+                                if wait_root_is_current(&root, &root_sig.get_untracked()) {
+                                    overrides.set(HashMap::new());
+                                    qc.set(Some(findings));
+                                    start_result.set(None);
+                                }
                             }
-                            Err(e) => error.set(Some(e)),
+                            Err(e) => {
+                                if wait_root_is_current(&root, &root_sig.get_untracked()) {
+                                    error.set(Some(e));
+                                }
+                            }
                         }
-                    } else {
+                    } else if wait_root_is_current(&root, &root_sig.get_untracked()) {
                         overrides.set(HashMap::new());
                         qc.set(Some(r));
                         start_result.set(None);
                     }
                 }
                 Err(e) => {
-                    if is_busy_err(&e) {
-                        busy_banner.set(Some(e));
-                    } else {
-                        error.set(Some(e));
+                    if wait_root_is_current(&root, &root_sig.get_untracked()) {
+                        if is_busy_err(&e) {
+                            busy_banner.set(Some(e));
+                        } else {
+                            error.set(Some(e));
+                        }
                     }
                 }
             }
@@ -198,7 +380,7 @@ pub fn ProducePage() -> impl IntoView {
             error.set(Some("bates_start is required and must be >= 1".into()));
             return;
         };
-        if start_busy.get() {
+        if start_busy.get() || volume_succeeded.get() {
             return;
         }
         start_busy.set(true);
@@ -253,38 +435,82 @@ pub fn ProducePage() -> impl IntoView {
             .await;
             match res {
                 Ok(r) => {
+                    if !wait_root_is_current(&root, &root_sig.get_untracked()) {
+                        start_busy.set(false);
+                        return;
+                    }
                     if !r.ok {
                         start_result.set(Some(r));
                         error.set(Some("Finalize blocked — see pre-flight cards.".into()));
                     } else if r.job_id.is_some() {
                         match wait_process_terminal(&root).await {
-                            Ok(snap) if snap.state == "failed" || snap.state == "paused" => {
-                                error.set(Some(
-                                    snap.error_summary
-                                        .unwrap_or_else(|| format!("produce {}", snap.state)),
-                                ));
+                            Err(e) => {
+                                if wait_root_is_current(&root, &root_sig.get_untracked()) {
+                                    error.set(Some(e));
+                                }
                             }
-                            Err(e) => error.set(Some(e)),
-                            Ok(_) => {
-                                match tauri_invoke::<ProducePageResponse, _>(
-                                    "produce_page",
-                                    &RootArgs { root },
-                                )
-                                .await
-                                {
-                                    Ok(pg) => {
-                                        let mut filled = r.clone();
-                                        if let Some(set) = pg.sets.iter().rev().find(|s| {
-                                            s.output_root.as_ref().is_some_and(|p| !p.is_empty())
-                                        }) {
-                                            filled.output_root = set.output_root.clone();
-                                            filled.production_set_id = Some(set.id.clone());
-                                            filled.produced_count = pg.produced_count;
+                            Ok(snap) => {
+                                if !wait_root_is_current(&root, &root_sig.get_untracked()) {
+                                    start_busy.set(false);
+                                    return;
+                                }
+                                if !process_job_succeeded(&snap.state) {
+                                    error.set(Some(terminal_job_error("produce", &snap)));
+                                    volume_succeeded.update(|prev| {
+                                        *prev = volume_latch_after_produce_terminal(*prev, false);
+                                    });
+                                } else {
+                                    // Latch on job success even if produce_page refresh fails —
+                                    // Bates were already assigned; do not re-arm Finalize.
+                                    volume_succeeded.set(volume_latch_after_produce_terminal(
+                                        volume_succeeded.get_untracked(),
+                                        true,
+                                    ));
+                                    let log_err = privilege_log_post_step_banner(&snap);
+                                    match tauri_invoke::<ProducePageResponse, _>(
+                                        "produce_page",
+                                        &RootArgs { root: root.clone() },
+                                    )
+                                    .await
+                                    {
+                                        Ok(pg) => {
+                                            if !wait_root_is_current(
+                                                &root,
+                                                &root_sig.get_untracked(),
+                                            ) {
+                                                start_busy.set(false);
+                                                return;
+                                            }
+                                            if let Some(next) =
+                                                bates_start_from_next_seq_hint(pg.next_seq_hint)
+                                            {
+                                                bates_start.set(next);
+                                            }
+                                            let mut filled = r.clone();
+                                            if let Some(set) = pg.sets.iter().rev().find(|s| {
+                                                s.output_root
+                                                    .as_ref()
+                                                    .is_some_and(|p| !p.is_empty())
+                                            }) {
+                                                filled.output_root = set.output_root.clone();
+                                                filled.production_set_id = Some(set.id.clone());
+                                                filled.produced_count = pg.produced_count;
+                                            }
+                                            page.set(Some(pg));
+                                            start_result.set(Some(filled));
+                                            if let Some(e) = log_err {
+                                                error.set(Some(e));
+                                            }
                                         }
-                                        page.set(Some(pg));
-                                        start_result.set(Some(filled));
+                                        Err(e) => {
+                                            if wait_root_is_current(
+                                                &root,
+                                                &root_sig.get_untracked(),
+                                            ) {
+                                                error.set(Some(e));
+                                            }
+                                        }
                                     }
-                                    Err(e) => error.set(Some(e)),
                                 }
                             }
                         }
@@ -293,10 +519,12 @@ pub fn ProducePage() -> impl IntoView {
                     }
                 }
                 Err(e) => {
-                    if is_busy_err(&e) {
-                        busy_banner.set(Some(e));
-                    } else {
-                        error.set(Some(e));
+                    if wait_root_is_current(&root, &root_sig.get_untracked()) {
+                        if is_busy_err(&e) {
+                            busy_banner.set(Some(e));
+                        } else {
+                            error.set(Some(e));
+                        }
                     }
                 }
             }
@@ -715,7 +943,10 @@ pub fn ProducePage() -> impl IntoView {
                             <button
                                 class="primary"
                                 disabled=move || {
-                                    if start_busy.get() {
+                                    if finalize_blocked_by_volume_latch(
+                                        volume_succeeded.get(),
+                                        start_busy.get(),
+                                    ) {
                                         return true;
                                     }
                                     let start_ok = bates_start.get().trim().parse::<u64>().ok().is_some_and(|n| n >= 1);

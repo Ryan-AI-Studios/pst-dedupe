@@ -329,6 +329,22 @@ pub fn process_start_blocking(
     Ok(ProcessStartResponse { job_id })
 }
 
+/// Produce already succeeded; do not fail the progress poll on log-repair errors
+/// (Finalize latch needs `state==succeeded`). Genuine errors go on `error_summary`.
+fn apply_privilege_log_post_step(
+    mut snap: JobProgressSnapshot,
+    post: Result<(), CommandError>,
+) -> JobProgressSnapshot {
+    if let Err(e) = post {
+        let detail = format!("privilege log: {}", e.message);
+        snap.error_summary = Some(match snap.error_summary.take() {
+            Some(existing) if !existing.trim().is_empty() => format!("{existing}; {detail}"),
+            _ => detail,
+        });
+    }
+    snap
+}
+
 pub fn process_progress_blocking(
     runner: &ProcessRunner,
     root: &str,
@@ -340,7 +356,8 @@ pub fn process_progress_blocking(
         return Ok(JobProgressSnapshot::idle());
     }
     if snap.kind == "produce" && snap.state == "succeeded" {
-        crate::produce::ensure_privilege_log_after_produce(root)?;
+        let post = crate::produce::ensure_privilege_log_after_produce(root);
+        return Ok(apply_privilege_log_post_step(snap, post));
     }
     Ok(snap)
 }
@@ -438,6 +455,24 @@ mod tests {
     #[test]
     fn schema_stays_41() {
         assert_eq!(SCHEMA_VERSION, 41);
+    }
+
+    #[test]
+    fn produce_log_post_step_error_keeps_succeeded_snapshot() {
+        let mut snap = JobProgressSnapshot::idle();
+        snap.job_id = "job_prod".into();
+        snap.kind = "produce".into();
+        snap.state = "succeeded".into();
+        let out = apply_privilege_log_post_step(snap.clone(), Ok(()));
+        assert_eq!(out.state, "succeeded");
+        assert!(out.error_summary.is_none());
+        let out =
+            apply_privilege_log_post_step(snap, Err(CommandError::failed("encrypted volume path")));
+        assert_eq!(out.state, "succeeded");
+        assert_eq!(
+            out.error_summary.as_deref(),
+            Some("privilege log: encrypted volume path")
+        );
     }
 
     #[test]
