@@ -14,7 +14,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes image produce + `qc_image_opt_v1`. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-09-01); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is research only (layout is **0125**; shell tokens are **0123**).
-- **Status:** In progress
+- **Status:** Completed
 - **Depends on:** **0115 Completed** (PR **#121** / `19d0c1f`) · **0120 Completed** (do not retouch overlay/Burn counts) · schema **v41** (no bump)
 - **Spec authored:** 2026-09-01 (placeholder → Ready)
 - **Series:** O (Review chrome) — PR #121 image QC / eligibility residual
@@ -198,13 +198,13 @@ Reorder `sniff_kind` as §2.9. Tests in `crates/pdf-raster/tests/g4.rs`.
 
 Complete only when ALL hold:
 
-- [ ] **DoD-1 — Resume OPT:** QC on a **non-complete** image set (`running` / `partial` / `failed`) with persisted `production_image_pages` and no `IMAGE.opt` does **not** emit Error `opt_row_count_mismatch`. Chrome Finalize can pass `require_qc_pass`. Integration test next to `run_production_qc_image_pack_missing_opt_on_completed_volume`.
-- [ ] **DoD-2 — Completed OPT:** The existing complete-volume missing-OPT test still fails QC. Explicit `production_set_id` of that complete set (if used) still Errors.
-- [ ] **DoD-3 — Leftover / moved volume:** Two complete image sets; one `output_root` missing; overlapping `candidate_ids`; QC **without** that leftover as the only target does **not** Error `image_page_missing` / OPT from the missing folder. New Finalize of overlapping ids is not blocked by the leftover.
-- [ ] **DoD-4 — JPEG path:** Path `.jpg`/`.jpeg`/`.png` with Other sniff is **not** image-eligible. `native_image_page_count` is 0. Produce does not fail-closed. QC does not Error `image_page_missing` for that item solely from the extension.
-- [ ] **DoD-5 — TIFF magic:** Bytes with TIFF `II*`/`MM*` and MIME `image/jpeg` (or `image/png`) sniff as `Tiff`. `native_image_page_count` equals IFD count (fixture with ≥2 IFDs).
-- [ ] **DoD-6 — Hygiene:** No `unwrap`/`expect` in new production code. No schema bump. `qc_default_v1` and default DAT-only unchanged. Unused `looks_like_*_magic` helpers gone. `cargo test -p matter-qc` + `-p pdf-raster` + `-p matter-produce` + chrome host tests that construct `QcParams` / `intended_qc_params` (picker omits a non-intersecting `partial`). 0119 latch and 0120 overlay tests still pass.
-- [ ] **DoD-7 — Recorded:** `review.md`; registry **Completed**; CHANGELOG Unreleased sentence; `D-0121-image-opt-qc` closed; ledger committed (`BUGFIX`). **0122–0126** stay Proposed unless separately implemented.
+- [x] **DoD-1 — Resume OPT:** QC on a **non-complete** image set (`running` / `partial` / `failed`) with persisted `production_image_pages` and no `IMAGE.opt` does **not** emit Error `opt_row_count_mismatch`. Chrome Finalize can pass `require_qc_pass`. Integration test next to `run_production_qc_image_pack_missing_opt_on_completed_volume`.
+- [x] **DoD-2 — Completed OPT:** The existing complete-volume missing-OPT test still fails QC. Explicit `production_set_id` of that complete set (if used) still Errors.
+- [x] **DoD-3 — Leftover / moved volume:** Two complete image sets; one `output_root` missing; overlapping `candidate_ids`; QC **without** that leftover as the only target does **not** Error `image_page_missing` / OPT from the missing folder. New Finalize of overlapping ids is not blocked by the leftover.
+- [x] **DoD-4 — JPEG path:** Path `.jpg`/`.jpeg`/`.png` with Other sniff is **not** image-eligible. `native_image_page_count` is 0. Produce does not fail-closed. QC does not Error `image_page_missing` for that item solely from the extension.
+- [x] **DoD-5 — TIFF magic:** Bytes with TIFF `II*`/`MM*` and MIME `image/jpeg` (or `image/png`) sniff as `Tiff`. `native_image_page_count` equals IFD count (fixture with ≥2 IFDs).
+- [x] **DoD-6 — Hygiene:** No `unwrap`/`expect` in new production code. No schema bump. `qc_default_v1` and default DAT-only unchanged. Unused `looks_like_*_magic` helpers gone. `cargo test -p matter-qc` + `-p pdf-raster` + `-p matter-produce` + chrome host tests that construct `QcParams` / `intended_qc_params` (picker omits a non-intersecting `partial`). 0119 latch and 0120 overlay tests still pass.
+- [x] **DoD-7 — Recorded:** `review.md`; registry **Completed**; CHANGELOG Unreleased sentence; `D-0121-image-opt-qc` closed; ledger committed (`BUGFIX`). **0122–0126** stay Proposed unless separately implemented.
 
 ---
 

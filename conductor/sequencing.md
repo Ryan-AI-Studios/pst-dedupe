@@ -133,7 +133,7 @@
 | 74 | P3 O | **0118** ReviewWindowAsyncResiduals | ✅ Completed | PR #115 window Bugbot; PR **#127** / `74fd797` |
 | 75 | P3 O | **0119** ProduceChecklistResiduals | ✅ Completed | PR #117 produce Bugbot + PR #123 cancelled/idle; PR **#129** / `6a775b5` |
 | 76 | P3 O | **0120** PdfRasterUiResiduals | ✅ Completed | PR #119 Image-tab/Burn-count Bugbot; PR **#131** / `e87f4c1` |
-| 77 | P3 O | **0121** ImageOptQcResiduals | ⬜ Ready | PR #121 image QC/eligibility Bugbot (not 0116) |
+| 77 | P3 O | **0121** ImageOptQcResiduals | ✅ Completed | PR #121 image QC/eligibility Bugbot; PR **#135** / `600d6b3` |
 | 78 | P3 O | **0122** ProcessFoldResiduals | 📦 Proposed | PR #123 Process extract-all/orphan Bugbot (not 0117) |
 | 79 | P3 T | **0123** MatterShell | 📦 Proposed | Shared TopBar/StatusBar; Home under bar; Plex + navy |
 | 80 | P3 T | **0124** ReviewQueueChrome | 📦 Proposed | Rail + **column collision**/ellipsis; not 0117 math |
@@ -253,7 +253,7 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0122)
 
-**Series O** after Series S. **0110–0120 Completed**. **0121** Ready (PR #121 image QC Bugbot). **0122** Proposed (PR #123 Process Bugbot). **Series T 0123–0126 Proposed** (mockup fidelity; 0123 = Plex + navy, Home under bar).
+**Series O** after Series S. **0110–0121 Completed**. **0122** Proposed (PR #123 Process Bugbot). **Series T 0123–0126 Proposed** (mockup fidelity; 0123 = Plex + navy, Home under bar).
 
 | Order | Track | Notes |
 |---|---|---|
@@ -268,7 +268,7 @@
 | 9 | **0118** ReviewWindowAsyncResiduals | **Completed** — PR **#127** / `74fd797`; stale fetch guard + same-item codes refresh |
 | 10 | **0119** ProduceChecklistResiduals | **Completed** — PR **#129** / `6a775b5`; empty `Some([])` log; Finalize latch; matter QC reset; success only on `succeeded` |
 | 11 | **0120** PdfRasterUiResiduals | **Completed** — PR **#131** / `e87f4c1`; frame coords, draw cancel, Burn-set recount |
-| 12 | **0121** ImageOptQcResiduals | **Ready** — PR #121 OPT skip until complete, scoped QC, sniff magic-first; not Process |
+| 12 | **0121** ImageOptQcResiduals | **Completed** — PR **#135** / `600d6b3`; OPT skip until complete, scoped QC, sniff magic-first |
 | 13 | **0122** ProcessFoldResiduals | **Proposed** — PR #123 Process extract-all/orphan; not queue |
 
 ## Series T — Mockup chrome fidelity (0123–0126)
