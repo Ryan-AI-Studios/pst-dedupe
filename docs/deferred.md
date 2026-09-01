@@ -909,7 +909,7 @@ completion, but must not be lost. Update when fixed or when a track owns the wor
 | D-0063-04 | P3 | `openidconnect::ClientSecret` / bare `String` retains IdP client secret until client Drop; no zeroize API | **P3 residual** (dependency limitation; not a product control gap). Mitigated: `CoreClient` constructed only inside a tight exchange+verify block; route zeroizes local secret after `finish_authorization`. Heap residue only during exchange until allocator reuse. Full zeroize requires upstream `openidconnect` support. | residual / upstream |
 | D-0063-05 | P3 | Desk UI passphrase widgets are plain `String` (egui TextEdit) | Cleared after submit; heap residue residual. Production service/CLI unlock paths zeroize. Full zeroizing widgets would need egui field redesign. | residual polish |
 
-## Series O — Review chrome placeholders (0110–0122, minted/refreshed 2026-08-29; 0117–0118 Completed 2026-08-31; 0119 2026-08-30; 0115–0116 Completed 2026-08-31; 0121–0122 minted 2026-08-31)
+## Series O — Review chrome placeholders (0110–0122, minted/refreshed 2026-08-29; 0117–0121 Completed; **0122 Ready 2026-09-01**)
 
 Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs already occupied — do not remint. Expand with `/plan-track`, do not implement from this table.
 
@@ -942,7 +942,7 @@ Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs a
 | D-0119-produce-checklist-residuals | — | PR #117 Bugbot: Finalize re-arm / colliding Bates; empty `filter_ids` dumps privilege log; QC state survives matter change. Plus PR #123: cancelled/idle produce treated as success | **Closed in 0119** (PR **#129** / `6a775b5`) — `Some([])` empty-set; `volume_succeeded` latch; succeeded-only waits; matter-switch session clear. Residual first-paint Bates auto-fill **D-0060-03**. | **closed / 0119** |
 | D-0120-pdf-raster-ui | — | PR #119 Bugbot: overlay mouseup coords; draw state across pages; stale Burn counts | **Closed in 0120** (PR **#131** / `e87f4c1`) — frame-relative draw; in-flight cancel; set-scoped Need-burn recount. Owner HITL remaining (release EXE). | **closed / 0120** |
 | D-0121-image-opt-qc | — | PR #121 Bugbot: OPT-missing resume; QC all volumes; JPEG eligibility vs sniff; TIFF magic vs MIME | **Closed in 0121** (PR **#135** / `600d6b3`) — OPT skip until complete; intersecting set scope; leftover completes skipped; TIFF magic before MIME; path-only JPEG/PNG not eligible. Owner HITL remaining (release EXE). | **closed / 0121** |
-| D-0122-process-fold-residuals | P3 | PR #123 Bugbot: extract-all Busy wipes remaining PST queue; live running jobs painted as orphans at mount | Valid; process.rs only. Cancelled-produce stays **0119**. Visual jobs table is **0126**. | **0122** Proposed |
+| D-0122-process-fold-residuals | P3 | PR #123 Bugbot: extract-all Busy wipes remaining PST queue; live running jobs painted as orphans at mount | Valid; process.rs only. Cancelled-produce stays **0119**. Visual jobs table is **0126**. Ready 2026-09-01; fold-in: `busy_retry_pending` (do not auto-start after Pause). | **0122** In progress |
 
 ## Series T — Mockup chrome fidelity (0123–0126, minted 2026-08-31)
 

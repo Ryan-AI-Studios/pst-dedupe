@@ -571,6 +571,7 @@ mod tests {
         match second {
             Err(e) => {
                 assert_eq!(e.kind, "busy");
+                assert!(format!("{e}").starts_with("busy:"));
                 assert!(e.message.contains(&first.job_id));
             }
             Ok(_) => {
@@ -589,6 +590,7 @@ mod tests {
                 )
                 .expect_err("busy durable");
                 assert_eq!(again.kind, "busy");
+                assert!(format!("{again}").starts_with("busy:"));
             }
         }
         let _ = runner.cancel(&first.job_id);

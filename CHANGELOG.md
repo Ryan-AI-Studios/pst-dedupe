@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0122 — Process-fold residuals)
+
+- Extract all while a queue is draining or the runner is busy no longer empties the remaining PST queue. Busy `process_start` keeps the queue and retries `q.first()` only after an explicit Busy failure (not after Pause/Cancel). A live `running` job row reads Pause / counts from current `process_progress` instead of mount-time orphan/active bools.
+
 ### Fixed (0121 — Image OPT / QC residuals)
 
 - Image QC Errors `opt_row_count_mismatch` only on `complete` / `complete_with_errors` volumes. Optional `QcParams.production_set_id` scopes image rules to an intersecting set; two leftover completes are skipped so a moved `output_root` cannot poison a new Finalize. `sniff_kind` reads TIFF magic before JPEG/PNG MIME; path-only `.jpg`/`.png` without magic or MIME is not image-eligible.
