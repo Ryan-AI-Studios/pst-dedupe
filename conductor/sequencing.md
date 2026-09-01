@@ -130,8 +130,8 @@
 | 71 | P1 O | **0114** PdfRasterRedact | ✅ Completed | zpdf CPU raster + geometric burn; schema v40; PR **#119** / `5ed53bf` |
 | 72 | P2 O | **0115** ImageOptFactory | ✅ Completed | TIFF G4 + OPT; page-level Bates; PR **#121** / `19d0c1f` |
 | 73 | P2 O | **0116** ProcessFold | ✅ Completed | fold egui Process into Tauri; absorb D-0113-long-job; PR **#123** / `727c857` |
-| 74 | P3 O | **0118** ReviewWindowAsyncResiduals | ⬜ Ready | PR #115 window Bugbot (not 0113) |
-| 75 | P3 O | **0119** ProduceChecklistResiduals | 📦 Proposed | PR #117 produce Bugbot + PR #123 cancelled-produce (not 0114) |
+| 74 | P3 O | **0118** ReviewWindowAsyncResiduals | ✅ Completed | PR #115 window Bugbot; PR **#127** / `74fd797` |
+| 75 | P3 O | **0119** ProduceChecklistResiduals | ✅ Completed | PR #117 produce Bugbot + PR #123 cancelled/idle; PR **#129** / `6a775b5` |
 | 76 | P3 O | **0120** PdfRasterUiResiduals | 📦 Proposed | PR #119 Image-tab/Burn-count Bugbot (not 0115) |
 | 77 | P3 O | **0121** ImageOptQcResiduals | 📦 Proposed | PR #121 image QC/eligibility Bugbot (not 0116) |
 | 78 | P3 O | **0122** ProcessFoldResiduals | 📦 Proposed | PR #123 Process extract-all/orphan Bugbot (not 0117) |
@@ -249,7 +249,7 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0122)
 
-**Series O** after Series S. **0110–0118 Completed**. **0119** Proposed (PR #117 produce Bugbot + PR #123 cancelled-produce). **0120** Proposed (PR #119 raster UI Bugbot). **0121** Proposed (PR #121 image QC Bugbot). **0122** Proposed (PR #123 Process Bugbot).
+**Series O** after Series S. **0110–0119 Completed**. **0120** Proposed (PR #119 raster UI Bugbot). **0121** Proposed (PR #121 image QC Bugbot). **0122** Proposed (PR #123 Process Bugbot).
 
 | Order | Track | Notes |
 |---|---|---|
@@ -262,7 +262,7 @@
 | 7 | **0116** ProcessFold | **Completed** — swallow egui Process; process-runner + D-0113-long-job; PR **#123** / `727c857` |
 | 8 | **0117** QueueVirtualizationResiduals | **Completed** — PR **#125** / `199975c`; header sibling, vacant honesty, arrow scrollTop |
 | 9 | **0118** ReviewWindowAsyncResiduals | **Completed** — PR **#127** / `74fd797`; stale fetch guard + same-item codes refresh |
-| 10 | **0119** ProduceChecklistResiduals | **Proposed** — PR #117 produce Bugbot + PR #123 cancelled-produce; not raster |
+| 10 | **0119** ProduceChecklistResiduals | **Completed** — PR **#129** / `6a775b5`; empty `Some([])` log; Finalize latch; matter QC reset; success only on `succeeded` |
 | 11 | **0120** PdfRasterUiResiduals | **Proposed** — PR #119 Image-tab/Burn-count Bugbot; not OPT |
 | 12 | **0121** ImageOptQcResiduals | **Proposed** — PR #121 image QC Bugbot; not Process |
 | 13 | **0122** ProcessFoldResiduals | **Proposed** — PR #123 Process extract-all/orphan; not queue |
