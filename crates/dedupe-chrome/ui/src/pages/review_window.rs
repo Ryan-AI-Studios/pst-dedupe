@@ -18,7 +18,7 @@ use crate::invoke::{
     ReviewRasterPage, ReviewRasterPageArgs, ReviewUpsertNoteArgs, ReviewUpsertPrivilegeArgs,
     ReviewWindowApplyArgs, RootArgs,
 };
-use crate::path_id::{encode_matter_id, matter_home_href_from_param, review_doc_href};
+use crate::path_id::{encode_matter_id, review_doc_href};
 
 const BASIS_OPTIONS: &[(&str, &str)] = &[
     ("attorney_client", "Attorney-Client"),
@@ -398,8 +398,6 @@ pub fn ReviewWindow() -> impl IntoView {
     let drag_now = RwSignal::new(Option::<(f64, f64)>::None);
     let selected_geom = RwSignal::new(Option::<String>::None);
 
-    let home =
-        move || params.with(|p| matter_home_href_from_param(&p.get("id").unwrap_or_default()));
     let queue_href = move || {
         params.with(|p| {
             format!(
@@ -1078,7 +1076,6 @@ pub fn ReviewWindow() -> impl IntoView {
             }
         >
             <div class="toolbar">
-                <A href=home>"← Matter home"</A>
                 <A href=queue_href>"← Queue"</A>
             </div>
             <Show when=move || error.get().is_some()>

@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn process_ui_is_live_not_stub() {
-        let src = include_str!("../ui/src/pages/process.rs");
+        let src = include_str!("../ui/src/shell.rs");
         assert!(!src.contains("Process stays in Dedupe Desk until 0116."));
         assert!(src.contains(
             "Processing is deterministic. No prediction, no coding, no privilege calls here."

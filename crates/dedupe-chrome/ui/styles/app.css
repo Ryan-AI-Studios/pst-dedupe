@@ -78,21 +78,23 @@ textarea:focus-visible,
   font-size: 12px;
 }
 
-.top-bar .chord-hint {
-  margin-left: auto;
+.app-chord-hint {
+  position: fixed;
+  top: 8px;
+  right: 16px;
+  z-index: 2000;
   font-size: 12px;
   line-height: 16px;
   color: var(--surface);
   background: #1a1f24;
   border: 1px solid #3a424a;
-  border-radius: var(--radius-control);
   padding: 4px 8px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease-in;
 }
 
-.top-bar .chord-hint[data-visible="true"] {
+.app-chord-hint[data-visible="true"] {
   opacity: 1;
 }
 
@@ -112,8 +114,139 @@ textarea:focus-visible,
 
 .main-surface {
   flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--surface);
+  padding: 0;
+}
+
+.main-surface > * {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.matters-launcher {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#matters {
   padding: 20px 24px 32px;
+}
+
+.route-fallback {
+  padding: 20px 24px 32px;
+}
+
+.matter-shell {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 46px 1fr 30px;
+}
+
+.matter-topbar {
+  height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  background: var(--surface);
+  color: var(--ink);
+  border-bottom: 2px solid var(--ink);
+  border-radius: 0;
+}
+
+.matter-topbar .brand,
+.matter-topbar .matter-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.matter-topbar .meta {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.matter-topbar .leave-matter {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.workspace-tabs {
+  display: flex;
+  align-items: stretch;
+  height: 46px;
+  margin-left: 8px;
+}
+
+.workspace-tab,
+.workspace-tab-inert {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border-radius: 0;
+  font-weight: 600;
+}
+
+.workspace-tab.active {
+  background: var(--action);
+  color: var(--surface);
+}
+
+.workspace-tab-inert {
+  color: var(--muted);
+  cursor: default;
+}
+
+.workspace-tab-inert:hover {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.right-slot {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
+.right-slot:empty {
+  display: none;
+}
+
+.matter-shell-body {
+  overflow: auto;
+  min-height: 0;
+  padding: 20px 24px 32px;
+}
+
+.matter-statusbar {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  background: var(--surface);
+  color: var(--ink);
+  border-top: 2px solid var(--ink);
+  border-radius: 0;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.matter-statusbar .status-left:empty {
+  display: none;
+}
+
+.matter-statusbar .flag {
+  margin-left: auto;
 }
 
 h1,

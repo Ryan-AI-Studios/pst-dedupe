@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0123 — Matter shell)
+
+- Matter workspace routes share one 46px TopBar and 30px StatusBar (Home under the bar, not a fifth tab). Admin is an inert span. Recents JSON with a UTF-8 BOM still loads.
+
 ### Fixed (0122 — Process-fold residuals)
 
 - Extract all while a queue is draining or the runner is busy no longer empties the remaining PST queue. Busy `process_start` keeps the queue and retries `q.first()` only after an explicit Busy failure (not after Pause/Cancel). A live `running` job row reads Pause / counts from current `process_progress` instead of mount-time orphan/active bools.

@@ -41,12 +41,17 @@ fn normalize_matters(mut matters: Vec<RecentMatter>) -> Vec<RecentMatter> {
     matters
 }
 
+/// Strip a leading UTF-8 BOM so Notepad-saved recents still parse.
+fn strip_utf8_bom(raw: &str) -> &str {
+    raw.strip_prefix('\u{feff}').unwrap_or(raw)
+}
+
 pub fn recent_matters_list_in(dir: &Path) -> Result<Vec<RecentMatter>, CommandError> {
     let path = dir.join(FILE_NAME);
     match fs::read_to_string(&path) {
         Ok(raw) => {
-            let file: RecentsFile =
-                serde_json::from_str(&raw).map_err(|e| CommandError::failed(e.to_string()))?;
+            let file: RecentsFile = serde_json::from_str(strip_utf8_bom(&raw))
+                .map_err(|e| CommandError::failed(e.to_string()))?;
             Ok(normalize_matters(file.matters))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -126,6 +131,45 @@ mod tests {
         assert_eq!(list[0].root, "root-0");
         assert_eq!(list[19].root, "root-19");
         assert!(!list.iter().any(|m| m.root == "root-24"));
+    }
+
+    #[test]
+    fn bom_prefixed_json_loads() {
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let json = r#"{"matters":[{"root":"C:\\m","name":"Demo"}]}"#;
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(json.as_bytes());
+        fs::write(dir.join(FILE_NAME), bytes).expect("write");
+        let list = recent_matters_list_in(dir).expect("list");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].root, r"C:\m");
+        assert_eq!(list[0].name, "Demo");
+    }
+
+    #[test]
+    fn remember_write_has_no_utf8_bom() {
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path();
+        recent_matters_remember_in(dir, "r", "n").expect("rem");
+        let bytes = fs::read(dir.join(FILE_NAME)).expect("read");
+        assert!(
+            !bytes.starts_with(&[0xEF, 0xBB, 0xBF]),
+            "written recents must not start with UTF-8 BOM"
+        );
+        let list = recent_matters_list_in(dir).expect("list");
+        assert_eq!(list[0].root, "r");
+    }
+
+    #[test]
+    fn corrupt_after_bom_strip_still_errors() {
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"not-json");
+        fs::write(dir.join(FILE_NAME), bytes).expect("write");
+        let err = recent_matters_list_in(dir).expect_err("corrupt");
+        assert_eq!(err.kind, "failed");
     }
 
     #[test]
