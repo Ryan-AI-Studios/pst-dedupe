@@ -132,7 +132,7 @@
 | 73 | P2 O | **0116** ProcessFold | ✅ Completed | fold egui Process into Tauri; absorb D-0113-long-job; PR **#123** / `727c857` |
 | 74 | P3 O | **0118** ReviewWindowAsyncResiduals | ✅ Completed | PR #115 window Bugbot; PR **#127** / `74fd797` |
 | 75 | P3 O | **0119** ProduceChecklistResiduals | ✅ Completed | PR #117 produce Bugbot + PR #123 cancelled/idle; PR **#129** / `6a775b5` |
-| 76 | P3 O | **0120** PdfRasterUiResiduals | 📦 Proposed | PR #119 Image-tab/Burn-count Bugbot (not 0115) |
+| 76 | P3 O | **0120** PdfRasterUiResiduals | ✅ Completed | PR #119 Image-tab/Burn-count Bugbot; PR **#131** / `e87f4c1` |
 | 77 | P3 O | **0121** ImageOptQcResiduals | 📦 Proposed | PR #121 image QC/eligibility Bugbot (not 0116) |
 | 78 | P3 O | **0122** ProcessFoldResiduals | 📦 Proposed | PR #123 Process extract-all/orphan Bugbot (not 0117) |
 
@@ -249,7 +249,7 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0122)
 
-**Series O** after Series S. **0110–0119 Completed**. **0120** Proposed (PR #119 raster UI Bugbot). **0121** Proposed (PR #121 image QC Bugbot). **0122** Proposed (PR #123 Process Bugbot).
+**Series O** after Series S. **0110–0120 Completed**. **0121** Proposed (PR #121 image QC Bugbot). **0122** Proposed (PR #123 Process Bugbot).
 
 | Order | Track | Notes |
 |---|---|---|
@@ -263,6 +263,6 @@
 | 8 | **0117** QueueVirtualizationResiduals | **Completed** — PR **#125** / `199975c`; header sibling, vacant honesty, arrow scrollTop |
 | 9 | **0118** ReviewWindowAsyncResiduals | **Completed** — PR **#127** / `74fd797`; stale fetch guard + same-item codes refresh |
 | 10 | **0119** ProduceChecklistResiduals | **Completed** — PR **#129** / `6a775b5`; empty `Some([])` log; Finalize latch; matter QC reset; success only on `succeeded` |
-| 11 | **0120** PdfRasterUiResiduals | **Proposed** — PR #119 Image-tab/Burn-count Bugbot; not OPT |
+| 11 | **0120** PdfRasterUiResiduals | **Completed** — PR **#131** / `e87f4c1`; frame coords, draw cancel, Burn-set recount |
 | 12 | **0121** ImageOptQcResiduals | **Proposed** — PR #121 image QC Bugbot; not Process |
 | 13 | **0122** ProcessFoldResiduals | **Proposed** — PR #123 Process extract-all/orphan; not queue |
