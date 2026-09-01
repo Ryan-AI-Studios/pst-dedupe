@@ -478,6 +478,7 @@ fn finalize_success(
         matter,
         rules,
         &cursor.ordered_ids,
+        params.production_set_id.as_deref(),
     )?);
 
     let (error_count, warn_count) = recompute_severity_counts(&cursor.findings);

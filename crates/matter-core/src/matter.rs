@@ -4218,6 +4218,32 @@ impl Matter {
         Ok(out)
     }
 
+    /// True when any `production_items.item_id` for the set is in `item_ids`.
+    ///
+    /// Used by chrome QC to pass `production_set_id` only when it intersects
+    /// the current selection (track **0121**). Does not require Bates / skip
+    /// `SKIP_*` filtering.
+    pub fn production_set_intersects_item_ids(
+        &self,
+        production_set_id: &str,
+        item_ids: &[String],
+    ) -> Result<bool> {
+        if item_ids.is_empty() {
+            return Ok(false);
+        }
+        let wanted: HashSet<&str> = item_ids.iter().map(String::as_str).collect();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT item_id FROM production_items WHERE production_set_id = ?1")?;
+        let rows = stmt.query_map(params![production_set_id], |row| row.get::<_, String>(0))?;
+        for r in rows {
+            if wanted.contains(r?.as_str()) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Latest Bates/control number for `item_id` from a complete volume.
     ///
     /// Skips empty / `SKIP_*` control numbers and `failed` sets. Tie-break

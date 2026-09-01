@@ -1040,6 +1040,272 @@ fn run_production_qc_image_pack_missing_opt_on_completed_volume() {
 }
 
 #[test]
+fn run_production_qc_image_pack_missing_opt_explicit_set_id_still_errors() {
+    use sha2::{Digest, Sha256};
+    let (_tmp, matter) = temp_matter("0121-qc-no-opt-id");
+    let id = good_doc(&matter, "scan.pdf");
+    let vol = matter
+        .root()
+        .join("exports")
+        .join("productions")
+        .join("QCNOOPTID");
+    let tif_dir = vol.join("IMAGES").join("001");
+    fs::create_dir_all(tif_dir.as_std_path()).expect("dir");
+    let tif_bytes = b"II*\0fake-tif";
+    fs::write(tif_dir.join("PROD000001.TIF").as_std_path(), tif_bytes).expect("tif");
+    let sha = Sha256::digest(tif_bytes);
+    let sha_hex: String = sha.iter().map(|b| format!("{b:02x}")).collect();
+    let now = "2020-01-01T00:00:00Z";
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_sets \
+             (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, output_root, profile_slug) \
+             VALUES ('set_qc_noopt_id', ?1, 'QCNOOPTID', ?2, ?2, 'PROD', 2, 'complete', ?3, 'us_concordance_image_opt_v1')",
+            rusqlite::params![matter.id(), now, vol.as_str()],
+        )
+        .expect("set");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_items \
+             (production_set_id, item_id, control_number, status, produced_at, end_bates, page_count) \
+             VALUES ('set_qc_noopt_id', ?1, 'PROD000001', 'ok', ?2, 'PROD000001', 1)",
+            rusqlite::params![&id, now],
+        )
+        .expect("item");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_image_pages \
+             (production_set_id, item_id, page_index, bates, relpath, sha256) \
+             VALUES ('set_qc_noopt_id', ?1, 0, 'PROD000001', 'IMAGES\\001\\PROD000001.TIF', ?2)",
+            rusqlite::params![&id, sha_hex],
+        )
+        .expect("page");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let r = run_qc(
+        &matter,
+        &job.id,
+        &QcParams {
+            pack_id: Some(PACK_IMAGE_OPT_V1.into()),
+            production_set_id: Some("set_qc_noopt_id".into()),
+            ..Default::default()
+        },
+    );
+    assert!(!r.passed);
+    assert!(!findings_of(&r, RULE_OPT_ROW_COUNT_MISMATCH).is_empty());
+}
+
+fn seed_image_volume_with_pages(
+    matter: &Matter,
+    set_id: &str,
+    name: &str,
+    status: &str,
+    output_root: Option<&str>,
+    item_id: &str,
+    created_at: &str,
+) {
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_sets \
+             (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, output_root, profile_slug) \
+             VALUES (?1, ?2, ?3, ?4, ?4, 'PROD', 2, ?5, ?6, 'us_concordance_image_opt_v1')",
+            rusqlite::params![set_id, matter.id(), name, created_at, status, output_root],
+        )
+        .expect("set");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_items \
+             (production_set_id, item_id, control_number, status, produced_at, end_bates, page_count) \
+             VALUES (?1, ?2, 'PROD000001', 'ok', ?3, 'PROD000001', 1)",
+            rusqlite::params![set_id, item_id, created_at],
+        )
+        .expect("item");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_image_pages \
+             (production_set_id, item_id, page_index, bates, relpath, sha256) \
+             VALUES (?1, ?2, 0, 'PROD000001', 'IMAGES\\001\\PROD000001.TIF', \
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')",
+            rusqlite::params![set_id, item_id],
+        )
+        .expect("page");
+}
+
+#[test]
+fn run_production_qc_image_pack_skips_opt_until_complete() {
+    use sha2::{Digest, Sha256};
+    for status in ["partial", "running", "failed"] {
+        let (_tmp, matter) = temp_matter(&format!("0121-qc-resume-{status}"));
+        let id = good_doc(&matter, "scan.pdf");
+        let vol = matter
+            .root()
+            .join("exports")
+            .join("productions")
+            .join("QCRSM");
+        let tif_dir = vol.join("IMAGES").join("001");
+        fs::create_dir_all(tif_dir.as_std_path()).expect("vol");
+        let tif_bytes = b"II*\0fake-tif";
+        fs::write(tif_dir.join("PROD000001.TIF").as_std_path(), tif_bytes).expect("tif");
+        let sha_hex: String = Sha256::digest(tif_bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        seed_image_volume_with_pages(
+            &matter,
+            "set_qc_resume",
+            "QCRSM",
+            status,
+            Some(vol.as_str()),
+            &id,
+            "2020-01-01T00:00:00Z",
+        );
+        matter
+            .connection()
+            .execute(
+                "UPDATE production_image_pages SET sha256 = ?1 \
+                 WHERE production_set_id = 'set_qc_resume'",
+                rusqlite::params![sha_hex],
+            )
+            .expect("sha");
+        let job = matter.create_job(JOB_KIND_QC).expect("job");
+        let r = run_qc(
+            &matter,
+            &job.id,
+            &QcParams {
+                pack_id: Some(PACK_IMAGE_OPT_V1.into()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            r.passed,
+            "status {status} must pass QC without OPT: {:?}",
+            r.findings
+        );
+        assert!(
+            findings_of(&r, RULE_OPT_ROW_COUNT_MISMATCH).is_empty(),
+            "status {status} must skip OPT Error: {:?}",
+            r.findings
+        );
+    }
+}
+
+#[test]
+fn run_production_qc_image_pack_skips_leftover_complete_missing_root() {
+    let (_tmp, matter) = temp_matter("0121-qc-leftover");
+    let id = good_doc(&matter, "scan.pdf");
+    let keep = matter
+        .root()
+        .join("exports")
+        .join("productions")
+        .join("KEEP");
+    fs::create_dir_all(keep.as_std_path()).expect("keep");
+    fs::write(
+        keep.join("IMAGE.opt").as_std_path(),
+        "VOL001,IMAGES\\001\\PROD000001.TIF,Y,,,PROD000001,\r\n",
+    )
+    .expect("opt");
+    seed_image_volume_with_pages(
+        &matter,
+        "set_keep",
+        "KEEP",
+        "complete",
+        Some(keep.as_str()),
+        &id,
+        "2020-01-01T00:00:00Z",
+    );
+    seed_image_volume_with_pages(
+        &matter,
+        "set_stale",
+        "STALE",
+        "complete",
+        Some("C:\\missing\\0121-stale-volume"),
+        &id,
+        "2020-02-01T00:00:00Z",
+    );
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let r = run_qc(
+        &matter,
+        &job.id,
+        &QcParams {
+            pack_id: Some(PACK_IMAGE_OPT_V1.into()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        findings_of(&r, RULE_IMAGE_PAGE_MISSING).is_empty(),
+        "leftover missing root must not Error: {:?}",
+        r.findings
+    );
+    assert!(
+        findings_of(&r, RULE_OPT_ROW_COUNT_MISMATCH).is_empty(),
+        "leftover must not emit OPT Error: {:?}",
+        r.findings
+    );
+}
+
+#[test]
+fn run_production_qc_image_pack_path_only_jpg_not_missing() {
+    let (_tmp, matter) = temp_matter("0121-qc-jpg");
+    let id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("photo.jpg".into()),
+            native_sha256: Some(put_native(&matter, b"not-jpeg")),
+            text_sha256: Some(put_text(&matter, "caption")),
+            mime_type: None,
+            file_category: Some("document".into()),
+            size_bytes: Some(8),
+            ..Default::default()
+        },
+    );
+    let vol = matter
+        .root()
+        .join("exports")
+        .join("productions")
+        .join("QCJPG");
+    fs::create_dir_all(vol.as_std_path()).expect("vol");
+    fs::write(vol.join("IMAGE.opt").as_std_path(), "").expect("opt");
+    let now = "2020-01-01T00:00:00Z";
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_sets \
+             (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, output_root, profile_slug) \
+             VALUES ('set_qc_jpg', ?1, 'QCJPG', ?2, ?2, 'PROD', 2, 'complete', ?3, 'us_concordance_image_opt_v1')",
+            rusqlite::params![matter.id(), now, vol.as_str()],
+        )
+        .expect("set");
+    matter
+        .connection()
+        .execute(
+            "INSERT INTO production_items \
+             (production_set_id, item_id, control_number, status, produced_at, end_bates, page_count) \
+             VALUES ('set_qc_jpg', ?1, 'PROD000001', 'ok', ?2, 'PROD000001', 0)",
+            rusqlite::params![&id, now],
+        )
+        .expect("item");
+    let job = matter.create_job(JOB_KIND_QC).expect("job");
+    let r = run_qc(
+        &matter,
+        &job.id,
+        &QcParams {
+            pack_id: Some(PACK_IMAGE_OPT_V1.into()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        findings_of(&r, RULE_IMAGE_PAGE_MISSING).is_empty(),
+        "path-only jpg must not be image-eligible: {:?}",
+        r.findings
+    );
+}
+
+#[test]
 fn run_production_qc_image_pack_zero_page_pdf_is_missing() {
     let (_tmp, matter) = temp_matter("0115-qc-zero-pc");
     let id = good_doc(&matter, "scan.pdf");

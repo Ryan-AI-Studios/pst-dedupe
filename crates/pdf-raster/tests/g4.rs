@@ -274,3 +274,74 @@ fn gray16_second_ifd_decodes() {
         .expect("encode");
     assert_eq!(pages.len(), 2);
 }
+
+#[test]
+fn sniff_tiff_magic_beats_jpeg_mime_multi_ifd() {
+    let p0 = vec![200u8; 8 * 8];
+    let p1 = vec![30u8; 8 * 8];
+    let tiff = gray8_tiff_pages(&[p0, p1], 8, 8);
+    assert!(looks_like_tiff(&tiff));
+    assert_eq!(
+        pdf_raster::sniff_kind(Some("photo.jpg"), Some("image/jpeg"), &tiff),
+        NativeKind::Tiff
+    );
+    assert_eq!(
+        pdf_raster::sniff_kind(None, Some("image/png"), &tiff),
+        NativeKind::Tiff
+    );
+    assert_eq!(
+        native_image_page_count(&tiff, Some("photo.jpg"), Some("image/jpeg")).expect("n"),
+        2
+    );
+}
+
+#[test]
+fn path_only_jpg_without_magic_or_mime_is_not_eligible() {
+    let garbage = b"not-a-jpeg-or-png";
+    assert_eq!(
+        pdf_raster::sniff_kind(Some("scan.jpg"), None, garbage),
+        NativeKind::Other
+    );
+    assert!(!pdf_raster::is_image_eligible_native(
+        Some("scan.jpg"),
+        None,
+        garbage
+    ));
+    assert!(!pdf_raster::is_image_eligible_native(
+        Some("scan.jpeg"),
+        None,
+        garbage
+    ));
+    assert!(!pdf_raster::is_image_eligible_native(
+        Some("scan.png"),
+        None,
+        garbage
+    ));
+    assert_eq!(
+        native_image_page_count(garbage, Some("scan.jpg"), None).expect("n"),
+        0
+    );
+    assert!(!pdf_raster::is_image_eligible_native(
+        Some("scan.jpg"),
+        Some(""),
+        garbage
+    ));
+    assert!(!pdf_raster::is_image_eligible_native(
+        Some("scan.jpg"),
+        Some("   "),
+        garbage
+    ));
+    assert_eq!(
+        native_image_page_count(garbage, Some("scan.jpg"), Some("")).expect("n"),
+        0
+    );
+}
+
+#[test]
+fn png_path_beats_tiff_mime_when_no_magic() {
+    let garbage = b"not-image-bytes";
+    assert_eq!(
+        pdf_raster::sniff_kind(Some("diagram.png"), Some("image/tiff"), garbage),
+        NativeKind::Png
+    );
+}

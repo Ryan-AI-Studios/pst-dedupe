@@ -95,6 +95,11 @@ pub struct QcParams {
     /// treated as the pack id (with legacy alias normalization).
     #[serde(default)]
     pub pack_id: Option<String>,
+    /// Optional production-set id to scope image-volume rules (track **0121**).
+    /// Absent / null uses the unset heuristic. Skip-serialize when None so
+    /// existing fingerprints stay stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_set_id: Option<String>,
 }
 
 fn default_scope() -> String {
@@ -116,6 +121,7 @@ impl Default for QcParams {
             report_dir: None,
             profile: default_profile(),
             pack_id: None,
+            production_set_id: None,
         }
     }
 }
@@ -200,6 +206,12 @@ mod tests {
         assert!(p.rules.is_empty());
         assert_eq!(p.profile, PACK_DEFAULT_V1);
         assert_eq!(p.resolved_pack_id(), PACK_DEFAULT_V1);
+        assert!(p.production_set_id.is_none());
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(
+            !json.contains("production_set_id"),
+            "None must omit the field: {json}"
+        );
     }
 
     #[test]
