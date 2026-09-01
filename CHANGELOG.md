@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0121 — Image OPT / QC residuals)
+
+- Image QC Errors `opt_row_count_mismatch` only on `complete` / `complete_with_errors` volumes. Optional `QcParams.production_set_id` scopes image rules to an intersecting set; two leftover completes are skipped so a moved `output_root` cannot poison a new Finalize. `sniff_kind` reads TIFF magic before JPEG/PNG MIME; path-only `.jpg`/`.png` without magic or MIME is not image-eligible.
+
 ### Fixed (0120 — Pdf-raster UI residuals)
 
 - Image-tab draw uses `.image-frame` `clientX/Y − getBoundingClientRect` (not `offsetX` over overlays). In-flight drag clears on document/page/pane leave and frame `mouseleave`. Produce Burn-step Need burn / Burned fresh come from a set-scoped recount on the burn response.

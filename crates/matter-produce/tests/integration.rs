@@ -3176,6 +3176,51 @@ fn dod3_native_only_xlsx_zero_opt_warn() {
 }
 
 #[test]
+fn path_only_jpg_does_not_fail_closed() {
+    let (_tmp, matter) = temp_matter("0121-jpg-native");
+    let job = matter.create_job(JOB_KIND_PRODUCE).expect("job");
+    let pdf = pdf_raster::synthetic_text_pdf(&[("P", 0)]);
+    let pdf_id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("a.pdf".into()),
+            native_sha256: Some(put_native(&matter, &pdf)),
+            text_sha256: Some(put_text(&matter, "p")),
+            mime_type: Some("application/pdf".into()),
+            file_category: Some("pdf".into()),
+            ..Default::default()
+        },
+    );
+    let jpg_id = insert_review_item(
+        &matter,
+        ItemInput {
+            path: Some("photo.jpg".into()),
+            native_sha256: Some(put_native(&matter, b"not-a-jpeg")),
+            text_sha256: Some(put_text(&matter, "caption")),
+            mime_type: None,
+            file_category: Some("document".into()),
+            ..Default::default()
+        },
+    );
+    let s = run_ok(
+        &matter,
+        &job.id,
+        &image_produce_params("JPGNAT", vec![pdf_id, jpg_id.clone()]),
+    );
+    assert_eq!(s.produced_count, 2);
+    let root = camino::Utf8Path::new(&s.output_root);
+    let opt = fs::read_to_string(root.join("IMAGE.opt").as_std_path()).expect("opt");
+    let opt_lines: Vec<_> = opt.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(opt_lines.len(), 1, "path-only jpg must not appear in OPT");
+    let jpg_row = parse_dat_row(&s.output_root, 1);
+    assert!(
+        jpg_row[21].contains("NATIVES\\"),
+        "jpg native path {}",
+        jpg_row[21]
+    );
+}
+
+#[test]
 fn dod4_burn_required_then_token_absent_from_g4() {
     use pdf_raster::{burn_native, search_hit_rects};
     let (_tmp, matter) = temp_matter("0115-dod4");

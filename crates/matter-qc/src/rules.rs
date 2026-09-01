@@ -437,7 +437,12 @@ pub fn evaluate_candidates_with_cancel(
         findings.push(f);
     }
 
-    findings.extend(evaluate_image_volume_rules(matter, rules, candidate_ids)?);
+    findings.extend(evaluate_image_volume_rules(
+        matter,
+        rules,
+        candidate_ids,
+        None,
+    )?);
 
     Ok(findings)
 }
@@ -474,46 +479,7 @@ fn is_qc_image_eligible(item: &Item, bytes: &[u8]) -> bool {
     if is_image_native_only_kind(item) {
         return false;
     }
-    let path = item.path.as_deref().unwrap_or("").to_ascii_lowercase();
-    let mime = item.mime_type.as_deref().unwrap_or("").to_ascii_lowercase();
-    if path.ends_with(".pdf")
-        || path.ends_with(".tif")
-        || path.ends_with(".tiff")
-        || path.ends_with(".jpg")
-        || path.ends_with(".jpeg")
-        || path.ends_with(".png")
-        || mime.contains("application/pdf")
-        || mime.contains("image/tiff")
-        || mime.contains("image/tif")
-        || mime.contains("image/jpeg")
-        || mime.contains("image/jpg")
-        || mime.contains("image/png")
-    {
-        return true;
-    }
-    looks_like_pdf_magic(bytes)
-        || looks_like_jpeg_magic(bytes)
-        || looks_like_png_magic(bytes)
-        || looks_like_tiff_magic(bytes)
-}
-
-fn looks_like_pdf_magic(bytes: &[u8]) -> bool {
-    let n = bytes.len().min(16);
-    bytes[..n].windows(5).any(|w| w == b"%PDF-")
-}
-
-fn looks_like_jpeg_magic(bytes: &[u8]) -> bool {
-    bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8
-}
-
-fn looks_like_png_magic(bytes: &[u8]) -> bool {
-    bytes.len() >= 4 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47
-}
-
-fn looks_like_tiff_magic(bytes: &[u8]) -> bool {
-    bytes.len() >= 4
-        && ((bytes[0] == b'I' && bytes[1] == b'I' && bytes[2] == 0x2A && bytes[3] == 0)
-            || (bytes[0] == b'M' && bytes[1] == b'M' && bytes[2] == 0 && bytes[3] == 0x2A))
+    pdf_raster::is_image_eligible_native(item.path.as_deref(), item.mime_type.as_deref(), bytes)
 }
 
 /// Post-volume image rules. Skip when no production volume / OPT exists so
@@ -522,6 +488,7 @@ pub(crate) fn evaluate_image_volume_rules(
     matter: &Matter,
     rules: &ResolvedRules,
     candidate_ids: &[String],
+    production_set_id: Option<&str>,
 ) -> Result<Vec<QcFinding>> {
     let need_span = rules.is_enabled(RULE_BEG_END_BATES_SPAN);
     let need_missing = rules.is_enabled(RULE_IMAGE_PAGE_MISSING);
@@ -535,29 +502,16 @@ pub(crate) fn evaluate_image_volume_rules(
     if candidate_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut stmt = matter.connection().prepare(
-        "SELECT id, output_root, bates_prefix, profile_slug FROM production_sets WHERE matter_id = ?1",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![matter.id()], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-        ))
-    })?;
+    let selected = select_image_volume_sets(matter, candidate_ids, production_set_id)?;
     let mut findings = Vec::new();
-    for r in rows {
-        let (set_id, output_root, prefix, profile_slug) = r?;
-        if !production_set_has_images(matter, &set_id, profile_slug.as_deref())? {
-            continue;
-        }
+    for row in selected {
         findings.extend(evaluate_one_image_volume(
             matter,
             rules,
-            &set_id,
-            output_root.as_deref(),
-            &prefix,
+            &row.id,
+            row.output_root.as_deref(),
+            &row.prefix,
+            &row.status,
             candidate_ids,
             need_span,
             need_missing,
@@ -566,6 +520,110 @@ pub(crate) fn evaluate_image_volume_rules(
         )?);
     }
     Ok(findings)
+}
+
+#[derive(Clone)]
+struct ImageSetRow {
+    id: String,
+    output_root: Option<String>,
+    prefix: String,
+    status: String,
+}
+
+fn image_set_status_is_complete(status: &str) -> bool {
+    matches!(status, "complete" | "complete_with_errors")
+}
+
+fn volume_root_for_disk(root: Option<&str>) -> Option<&str> {
+    let r = root.map(str::trim).filter(|s| !s.is_empty())?;
+    let path = std::path::Path::new(r);
+    if path.is_dir() && std::fs::read_dir(path).is_ok() {
+        Some(r)
+    } else {
+        None
+    }
+}
+
+fn production_set_intersects_candidates(
+    matter: &Matter,
+    set_id: &str,
+    candidate_ids: &[String],
+) -> Result<bool> {
+    if candidate_ids.is_empty() {
+        return Ok(false);
+    }
+    let wanted: HashSet<&str> = candidate_ids.iter().map(String::as_str).collect();
+    let mut stmt = matter
+        .connection()
+        .prepare("SELECT item_id FROM production_items WHERE production_set_id = ?1")?;
+    let rows = stmt.query_map(rusqlite::params![set_id], |row| row.get::<_, String>(0))?;
+    for r in rows {
+        if wanted.contains(r?.as_str()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn load_image_set_rows(matter: &Matter) -> Result<Vec<ImageSetRow>> {
+    let mut stmt = matter.connection().prepare(
+        "SELECT id, output_root, bates_prefix, profile_slug, status \
+         FROM production_sets WHERE matter_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![matter.id()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        let (id, output_root, prefix, profile_slug, status) = r?;
+        if !production_set_has_images(matter, &id, profile_slug.as_deref())? {
+            continue;
+        }
+        out.push(ImageSetRow {
+            id,
+            output_root,
+            prefix,
+            status,
+        });
+    }
+    Ok(out)
+}
+
+fn select_image_volume_sets(
+    matter: &Matter,
+    candidate_ids: &[String],
+    production_set_id: Option<&str>,
+) -> Result<Vec<ImageSetRow>> {
+    let all = load_image_set_rows(matter)?;
+    if let Some(id) = production_set_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(row) = all.iter().find(|r| r.id == id) {
+            if production_set_intersects_candidates(matter, &row.id, candidate_ids)? {
+                return Ok(vec![row.clone()]);
+            }
+        }
+    }
+    let mut in_progress = Vec::new();
+    for row in &all {
+        if image_set_status_is_complete(&row.status) {
+            continue;
+        }
+        if production_set_intersects_candidates(matter, &row.id, candidate_ids)? {
+            in_progress.push(row.clone());
+        }
+    }
+    if !in_progress.is_empty() {
+        return Ok(in_progress);
+    }
+    if all.len() == 1 {
+        return Ok(all);
+    }
+    Ok(Vec::new())
 }
 
 /// Image volume rules apply only to image-profile sets (or leftover image pages).
@@ -594,6 +652,7 @@ fn evaluate_one_image_volume(
     set_id: &str,
     output_root: Option<&str>,
     prefix: &str,
+    set_status: &str,
     candidate_ids: &[String],
     need_span: bool,
     need_missing: bool,
@@ -681,7 +740,7 @@ fn evaluate_one_image_volume(
                     message: "image-eligible page missing TIF or OPT row".into(),
                 });
             }
-            if let Some(root) = output_root.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(root) = volume_root_for_disk(output_root) {
                 let mut pip = matter.connection().prepare(
                     "SELECT relpath, sha256 FROM production_image_pages \
                      WHERE production_set_id = ?1 AND item_id = ?2",
@@ -718,6 +777,7 @@ fn evaluate_one_image_volume(
         }
     }
 
+    let opt_complete = image_set_status_is_complete(set_status);
     let opt_path = output_root.and_then(|root| {
         let p = std::path::Path::new(root).join("IMAGE.opt");
         if p.is_file() {
@@ -727,7 +787,7 @@ fn evaluate_one_image_volume(
         }
     });
 
-    if need_opt && !out_of_scope_image_item {
+    if need_opt && opt_complete && !out_of_scope_image_item {
         let n_lines = if let Some(path) = opt_path.as_ref() {
             let text = std::fs::read_to_string(path).unwrap_or_default();
             text.lines().filter(|l| !l.trim().is_empty()).count() as u64
@@ -749,7 +809,7 @@ fn evaluate_one_image_volume(
     }
 
     if need_multi && any_image_pages {
-        if let Some(root) = output_root.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(root) = volume_root_for_disk(output_root) {
             let mut pip = matter.connection().prepare(
                 "SELECT item_id, relpath FROM production_image_pages WHERE production_set_id = ?1",
             )?;

@@ -582,6 +582,55 @@ pub(crate) fn intended_qc_params(ordered: &[String], pack_id: &str) -> QcParams 
     }
 }
 
+pub(crate) fn pick_qc_production_set_id(
+    matter: &Matter,
+    ordered: &[String],
+) -> Result<Option<String>, CommandError> {
+    let sets = matter.list_production_sets_thin().map_err(map_core)?;
+    let mut intersecting: Vec<&ProductionSetThin> = Vec::new();
+    for set in &sets {
+        if matter
+            .production_set_intersects_item_ids(&set.id, ordered)
+            .map_err(map_core)?
+        {
+            intersecting.push(set);
+        }
+    }
+    if let Some(set) = intersecting
+        .iter()
+        .find(|s| s.status != "complete" && s.status != "complete_with_errors")
+    {
+        return Ok(Some(set.id.clone()));
+    }
+    for set in intersecting {
+        if set.status != "complete" && set.status != "complete_with_errors" {
+            continue;
+        }
+        let Some(root) = set
+            .output_root
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+        else {
+            continue;
+        };
+        if std::path::Path::new(root).is_dir() {
+            return Ok(Some(set.id.clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn intended_qc_params_for_matter(
+    matter: &Matter,
+    ordered: &[String],
+    pack_id: &str,
+) -> Result<QcParams, CommandError> {
+    let mut params = intended_qc_params(ordered, pack_id);
+    params.production_set_id = pick_qc_production_set_id(matter, ordered)?;
+    Ok(params)
+}
+
 fn serialize_produce_params(params: &ProduceParams) -> Result<serde_json::Value, CommandError> {
     serde_json::to_value(params)
         .map_err(|e| CommandError::failed(format!("produce params serialize failed: {e}")))
@@ -757,7 +806,7 @@ pub fn produce_qc_run_blocking(
         });
     }
 
-    let qc_params = intended_qc_params(&ordered, &pack_id);
+    let qc_params = intended_qc_params_for_matter(&matter, &ordered, &pack_id)?;
     let params_json = serialize_qc_params(&qc_params)?;
     drop(matter);
     let utf8 = utf8_root(&args.root)?;
@@ -2203,6 +2252,80 @@ mod tests {
         let qc_json = serialize_qc_params(&qc).expect("ser qc");
         let qc_back = QcParams::from_json(&qc_json).expect("from_json qc");
         assert_eq!(qc, qc_back);
+        assert!(qc.production_set_id.is_none());
+    }
+
+    #[test]
+    fn pick_qc_production_set_id_omits_non_intersecting_partial() {
+        let tmp = tempdir().expect("tmp");
+        let base = utf8_tmp(&tmp);
+        let root = create_matter_under(&base, "pick0121").expect("create");
+        let matter = Matter::open(&root).expect("open");
+        matter
+            .insert_item(ItemInput {
+                id: Some("itm_keep".into()),
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                in_review: Some(1),
+                path: Some("keep.pdf".into()),
+                ..Default::default()
+            })
+            .expect("keep");
+        matter
+            .insert_item(ItemInput {
+                id: Some("itm_stale".into()),
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                in_review: Some(1),
+                path: Some("stale.pdf".into()),
+                ..Default::default()
+            })
+            .expect("stale");
+        let keep_root = root.join("exports").join("productions").join("KEEP");
+        fs::create_dir_all(keep_root.as_std_path()).expect("keep dir");
+        matter
+            .connection()
+            .execute(
+                "INSERT INTO production_sets \
+                 (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, output_root, profile_slug) \
+                 VALUES ('set_keep', ?1, 'KEEP', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', 'PROD', 2, 'complete', ?2, 'us_concordance_image_opt_v1')",
+                rusqlite::params![matter.id(), keep_root.as_str()],
+            )
+            .expect("keep set");
+        matter
+            .connection()
+            .execute(
+                "INSERT INTO production_items \
+                 (production_set_id, item_id, control_number, status, produced_at, end_bates, page_count) \
+                 VALUES ('set_keep', 'itm_keep', 'PROD000001', 'ok', '2020-01-01T00:00:00Z', 'PROD000001', 1)",
+                [],
+            )
+            .expect("keep item");
+        matter
+            .connection()
+            .execute(
+                "INSERT INTO production_sets \
+                 (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status, output_root, profile_slug) \
+                 VALUES ('set_partial', ?1, 'PARTIAL', '2020-06-01T00:00:00Z', '2020-06-01T00:00:00Z', 'PROD', 2, 'partial', NULL, 'us_concordance_image_opt_v1')",
+                rusqlite::params![matter.id()],
+            )
+            .expect("partial set");
+        matter
+            .connection()
+            .execute(
+                "INSERT INTO production_items \
+                 (production_set_id, item_id, control_number, status, produced_at, end_bates, page_count) \
+                 VALUES ('set_partial', 'itm_stale', 'PROD000099', 'ok', '2020-06-01T00:00:00Z', 'PROD000099', 1)",
+                [],
+            )
+            .expect("stale item");
+        let ordered = vec!["itm_keep".to_string()];
+        let picked = pick_qc_production_set_id(&matter, &ordered).expect("pick");
+        assert_eq!(picked.as_deref(), Some("set_keep"));
+        assert_ne!(picked.as_deref(), Some("set_partial"));
+        let params =
+            intended_qc_params_for_matter(&matter, &ordered, "qc_image_opt_v1").expect("params");
+        assert_eq!(params.production_set_id.as_deref(), Some("set_keep"));
     }
 
     #[test]

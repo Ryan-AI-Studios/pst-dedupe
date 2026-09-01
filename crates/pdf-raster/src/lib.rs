@@ -184,54 +184,64 @@ pub fn looks_like_png(bytes: &[u8]) -> bool {
     bytes.len() >= 4 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47
 }
 
+fn sniff_path_kind(path: Option<&str>) -> Option<NativeKind> {
+    let l = path?.to_ascii_lowercase();
+    if l.ends_with(".tif") || l.ends_with(".tiff") {
+        return Some(NativeKind::Tiff);
+    }
+    if l.ends_with(".jpg") || l.ends_with(".jpeg") {
+        return Some(NativeKind::Jpeg);
+    }
+    if l.ends_with(".png") {
+        return Some(NativeKind::Png);
+    }
+    None
+}
+
+fn sniff_mime_kind(mime: Option<&str>) -> Option<NativeKind> {
+    match mime.map(|m| m.to_ascii_lowercase()).as_deref() {
+        Some("image/tiff") | Some("image/tif") => Some(NativeKind::Tiff),
+        Some("image/jpeg") | Some("image/jpg") => Some(NativeKind::Jpeg),
+        Some("image/png") => Some(NativeKind::Png),
+        _ => None,
+    }
+}
+
 pub fn sniff_kind(path: Option<&str>, mime: Option<&str>, bytes: &[u8]) -> NativeKind {
     if detect_pdf(path, mime, Some(bytes)) || looks_like_pdf(bytes) {
         return NativeKind::Pdf;
     }
-    if looks_like_jpeg(bytes)
-        || matches!(
-            mime.map(|m| m.to_ascii_lowercase()).as_deref(),
-            Some("image/jpeg") | Some("image/jpg")
-        )
-    {
+    if g4::looks_like_tiff(bytes) {
+        return NativeKind::Tiff;
+    }
+    if looks_like_jpeg(bytes) {
         return NativeKind::Jpeg;
     }
-    if looks_like_png(bytes)
-        || matches!(
-            mime.map(|m| m.to_ascii_lowercase()).as_deref(),
-            Some("image/png")
-        )
-    {
+    if looks_like_png(bytes) {
         return NativeKind::Png;
     }
-    if g4::looks_like_tiff(bytes)
-        || matches!(
-            mime.map(|m| m.to_ascii_lowercase()).as_deref(),
-            Some("image/tiff") | Some("image/tif")
-        )
-        || path
-            .map(|p| {
-                let l = p.to_ascii_lowercase();
-                l.ends_with(".tif") || l.ends_with(".tiff")
-            })
-            .unwrap_or(false)
-    {
-        return NativeKind::Tiff;
+    let mime = mime.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(kind) = sniff_path_kind(path) {
+        // TIFF path always. JPEG/PNG path after magic beats MIME when a MIME
+        // is present; path-only `.jpg`/`.png` without magic or MIME stays Other
+        // so native-only garbage files are not image-eligible (track **0121**).
+        match kind {
+            NativeKind::Tiff => return kind,
+            NativeKind::Jpeg | NativeKind::Png if mime.is_some() => return kind,
+            _ => {}
+        }
+    }
+    if let Some(kind) = sniff_mime_kind(mime) {
+        return kind;
     }
     NativeKind::Other
 }
 
-/// True when path, MIME, or magic identifies a PDF/JPEG/PNG/TIFF native
-/// that the image profile must rasterize (not native-only DAT).
+/// True when sniff identifies a PDF/JPEG/PNG/TIFF native the image profile
+/// must rasterize (not native-only DAT). Path-only JPEG/PNG without magic
+/// or MIME is not eligible.
 pub fn is_image_eligible_native(path: Option<&str>, mime: Option<&str>, bytes: &[u8]) -> bool {
-    if !matches!(sniff_kind(path, mime, bytes), NativeKind::Other) {
-        return true;
-    }
-    path.map(|p| {
-        let l = p.to_ascii_lowercase();
-        l.ends_with(".jpg") || l.ends_with(".jpeg") || l.ends_with(".png")
-    })
-    .unwrap_or(false)
+    !matches!(sniff_kind(path, mime, bytes), NativeKind::Other)
 }
 
 fn reject_size(len: usize) -> Result<()> {

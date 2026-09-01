@@ -14,7 +14,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes image produce + `qc_image_opt_v1`. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-09-01); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is research only (layout is **0125**; shell tokens are **0123**).
-- **Status:** Ready — not started
+- **Status:** In progress
 - **Depends on:** **0115 Completed** (PR **#121** / `19d0c1f`) · **0120 Completed** (do not retouch overlay/Burn counts) · schema **v41** (no bump)
 - **Spec authored:** 2026-09-01 (placeholder → Ready)
 - **Series:** O (Review chrome) — PR #121 image QC / eligibility residual
@@ -22,7 +22,9 @@
 > **Closes / absorbs:** `D-0121-image-opt-qc` (this track). Does **not** close D-0122–D-0126, D-0115-lfp / D-0115-color / D-0115-email-print, D-0114-pdfium-sidecar, D-0114-xform-text, D-0062-codesign.
 > **HITL:** owner launches the **release** chrome EXE on a synthetic image-profile matter: (1) cancel an in-flight image produce (`production_sets.status` `partial` / `running` / `failed` with `production_image_pages` and no `IMAGE.opt`) → QC / Finalize must **not** Error `opt_row_count_mismatch`; (2) complete volume, move/rename `output_root`, new Finalize of overlapping ids must **not** Error `image_page_missing` from the leftover; (3) a `.jpg` that is not JPEG magic ships native-only (no fail-closed); (4) a multi-IFD TIFF tagged `image/jpeg` produces one G4 page per IFD. INC* unique-pst is **not** a gate. Codesign is **D-0062-codesign**.
 >
-> **Last-PR fold-in (2026-09-01):** PRs **#132, #131, #130, #129**. Disposition in §2.8. No new mint. Next free ID **0127**.
+> **Last-PR fold-in (2026-09-01):** PRs **#133, #132, #131, #130, #129**. Disposition in §2.8. No new mint. Next free ID **0127**.
+>
+> **Harness fold-in (2026-09-01):** `opencode-review.md` + `agy-review.md`. Centerpiece: chrome (and explicit) `production_set_id` must **intersect** the QC selection; delete unused `looks_like_*_magic` helpers after QC delegates to `pdf-raster`. Status stays **Ready — not started**.
 >
 > **Stack lock (inherit 0110–0120):** Tauri **2** + Leptos **0.8 CSR** on **stable** Rust. Plex / paper / cool chrome. Red = privilege / withhold / blocker / draft redact overlay only. No daemon. No schema bump. `ui/` stays workspace-excluded. One pipeline. 0114 `redact_page` → rewrite unchanged. 0115 `wrap_g4_le_ifd` / `fax::tiff::wrap` forbidden on produce unchanged. 0119 `volume_succeeded` unchanged. Default DAT-only profile and `qc_default_v1` unchanged.
 
@@ -44,9 +46,9 @@ This is **correctness**. A QC Error that cannot pass on a resumable image job is
 
 0115 already said: skip `opt_row_count_mismatch` on preflight when OPT is not written yet; Error when a **completed** image volume has pages and no OPT. Live code treats any persisted image pages + missing OPT as 0 lines then Error, which fires on resume.
 
-### 2.2 Live APIs (plan-time 2026-09-01, HEAD `dff19e5`; re-verify at execute)
+### 2.2 Live APIs (plan-time 2026-09-01, HEAD `dff19e5`; review-time `f3d7a7c`; re-verify at execute)
 
-Plan-time branch was `docs/series-t-and-how-to-build` with unrelated Series T / how-to-build dirt. Product crates for these four bugs match **0115** `19d0c1f` + **0120** `e87f4c1`. Re-verify line numbers on the execute branch.
+Plan-time branch was `docs/series-t-and-how-to-build`. Review-time HEAD `f3d7a7c` is two docs commits later (PR **#133** Series T mint + 0121 Ready). `git diff dff19e5..f3d7a7c -- crates` was **empty** — product pins below still match. Re-verify line numbers on the execute branch.
 
 | Surface | Fact |
 |---|---|
@@ -86,11 +88,11 @@ Image profile: TIFF G4 + OPT. Produce checklist still `require_qc_pass`. Do not 
 
 Ran from `C:\dev\Dedupe`:
 
-- `ai-brains preflight --summary` (inited; **4173** pinned).
-- Sync/recall: 0115 Ready/Completed (`ccbf7f15`, `8cc35214`) — opt-in G4 + OPT, schema v41, default DAT-only, `wrap_g4_le_ifd`. Semantic recall on this query drifted to unique-eml; live 0115 decisions are the load-bearing ones.
-- `ledgerful doctor --json` `readyForPublish: true`; warns phantom-promote, sig-pin, sig-version, completion-unreachable. `"impact-stale"` not emitted.
-- Ledger compact at plan-time: Docs tx `f4bc7a9f` entity `series-t-how-to-build` was pending (unrelated). That tx landed in PR **#133** / `6a69256`. 0 unaudited drift after that merge. Execute starts `0121-image-opt-qc-residuals` **BUGFIX**.
-- `ledgerful scan --impact` **LOW** (“Minimal changes detected”) on Series T / how-to-build dirt, not 0121 crates. Re-scan at execute after product edits. Federated scan hit the 5000-file budget under `output/` — ignore.
+- `ai-brains preflight --summary` (inited; **4174** pinned at fold-in; plan-time recorded 4173 — cosmetic +1).
+- Sync/recall: 0115 Ready/Completed (`ccbf7f15`, `8cc35214`) — opt-in G4 + OPT, schema v41, default DAT-only, `wrap_g4_le_ifd`. 0121 Ready pin `341e108d`.
+- `ledgerful doctor --json` `readyForPublish: true`; warns phantom-promote, sig-pin, sig-version. `"completion-unreachable"` is not currently emitted. `"impact-stale"` may appear until the next scan — ignore.
+- Ledger compact at fold-in: **0 pending / 0 unaudited drift**. Plan-time Docs tx `f4bc7a9f` landed in PR **#133** / `6a69256`. Execute starts `0121-image-opt-qc-residuals` **BUGFIX**.
+- `ledgerful scan --impact` **LOW** on docs dirt at plan-time. Re-scan at execute after product edits. Federated scan hit the 5000-file budget under `output/` — ignore.
 
 ### 2.6 What we could not verify
 
@@ -102,7 +104,7 @@ See §9. Absorb **D-0121-image-opt-qc**. Remain D-0115-lfp / color / email-print
 
 ### 2.8 Last-PR Cursor comments (2026-09-01)
 
-PRs **#132, #131, #130, #129**. Inline review comments empty. Issue comments are Bugbot **usage-limit** only (no findings). **Decline** as product input.
+PRs **#133, #132, #131, #130, #129**. Inline review comments empty. Issue comments are Bugbot **usage-limit** only (no findings). **Decline** as product input. **#133** landed after the first Ready pass (Series T mint / `6a69256`); same usage-limit notice, no product finding.
 
 Origin PR **#121** still has the four items this track owns (live-verified at §2.2; PR-branch line numbers drifted from `99b054b`).
 
@@ -112,7 +114,7 @@ Origin PR **#121** still has the four items this track owns (live-verified at §
 | #121 High — QC walks every `production_sets` row | **Absorb** |
 | #121 Medium — JPEG path vs sniff vs fail-closed | **Absorb** |
 | #121 Medium — MIME wins over TIFF magic | **Absorb** |
-| #132–#129 usage-limit | **Decline** |
+| #133–#129 usage-limit | **Decline** |
 
 No new mint. Next free ID **0127**.
 
@@ -125,14 +127,14 @@ No new mint. Next free ID **0127**.
 1. Add optional `production_set_id: Option<String>` on `QcParams` (`#[serde(default, skip_serializing_if = "Option::is_none")]`). JSON additive. **No schema bump.** Absent field must deserialize as None so existing fingerprints stay stable.
 2. Pass it from `run.rs` into `evaluate_image_volume_rules`. `evaluate_candidates*` may pass `None`.
 3. Selection:
-   - If `production_set_id` is Some and that row is an image set (`production_set_has_images`): evaluate **that set only**. If the id is unknown or not an image set: **ignore the id** and use the unset heuristic (do not skip image QC entirely).
+   - If `production_set_id` is Some and that row is an image set (`production_set_has_images`) **and** it intersects `candidate_ids` (any `production_items.item_id` on that set is in the selection; Bates/`SKIP_*` not required): evaluate **that set only**. If the id is unknown, not an image set, or **does not intersect** the selection: **ignore the id** and use the unset heuristic (do not skip image QC entirely; do not scope to a stale `partial` / unrelated running volume).
    - If unset: evaluate non-complete image sets that intersect `candidate_ids` (resume). If none: evaluate complete image sets **only when there is exactly one** image set in the matter (legacy single-volume audit + existing unit test). If two or more complete image sets and no in-progress set: **skip** post-volume disk/OPT/span/multi-tiff rules (new Finalize must not inherit leftover volumes).
 4. Always skip a set whose `output_root` is missing/unreadable for **disk** TIFF checks. A complete leftover with a moved folder must not emit `image_page_missing`.
-5. Chrome: `intended_qc_params` / `produce_qc_run_blocking` pass a set id when known — prefer a non-complete thin set, else the latest complete thin set (`list_production_sets_thin` is newest first) whose `output_root` exists on disk. This is host wiring, **not** 0125 canvas and **not** 0119 latch. DAT-only `qc_default_v1` runs still omit image rules; do not change pack mapping.
+5. Chrome: `intended_qc_params` / `produce_qc_run_blocking` pass a set id only when that set **intersects `ordered`**. Prefer a non-complete intersecting thin set, else the latest complete intersecting thin set (`list_production_sets_thin` is newest first) whose `output_root` exists on disk, else omit (`None`) and let the unset heuristic decide. Intersection: any `production_items.item_id` for the set is in `ordered` (host may query; `list_ok_production_controls` is acceptable if it still intersects resume rows). This is host wiring, **not** 0125 canvas and **not** 0119 latch. DAT-only `qc_default_v1` runs still omit image rules; do not change pack mapping.
 
 **JPEG eligibility (Medium 3).** `is_image_eligible_native` is true only when `sniff_kind` is not Other. **Remove** the path-only `.jpg`/`.jpeg`/`.png` fallback. Path-only without magic or MIME → native-only, not fail-closed. Align `is_qc_image_eligible` with that function after the native-only kind check (add `pdf-raster` dep to `matter-qc`; do not keep a path-first duplicate). Keep native-only EML/xlsx/csv/pptx as today.
 
-**TIFF vs MIME (Medium 4).** `sniff_kind` order after PDF (`detect_pdf` / `looks_like_pdf` stays first): **TIFF magic** (`II*`/`MM*`), **JPEG magic**, **PNG magic**, then **path** (`.tif`/`.tiff`, `.jpg`/`.jpeg`, `.png`), then **MIME**. TIFF magic before JPEG/PNG MIME. A multi-IFD TIFF tagged `image/jpeg` is `NativeKind::Tiff` and `native_image_page_count` is the IFD count.
+**TIFF vs MIME (Medium 4).** `sniff_kind` order after PDF (`detect_pdf` / `looks_like_pdf` stays first): **TIFF magic** (`II*`/`MM*`), **JPEG magic**, **PNG magic**, then **path** (`.tif`/`.tiff`, `.jpg`/`.jpeg`, `.png`), then **MIME**. TIFF magic before JPEG/PNG MIME. A multi-IFD TIFF tagged `image/jpeg` is `NativeKind::Tiff` and `native_image_page_count` is the IFD count. After magic, **path beats MIME** (a `.png` named file with MIME `image/tiff` sniffs Png). That case is not DoD-5; do not invent a MIME-over-path exception.
 
 Do not change 0114 burn compose, 0115 G4 wrap, Highlights-never-burn, privilege-in-set, `fail_if_withheld`, `require_qc_pass`, 0119 `volume_succeeded`, 0120 overlay/Burn recount, or default DAT-only / `qc_default_v1`.
 
@@ -148,11 +150,11 @@ Image QC set selection + OPT skip-until-complete; `sniff_kind` / eligibility ali
 
 ### 3.2 Scope image QC to the current job
 
-`evaluate_image_volume_rules` selects sets per §2.9. SELECT must include `status`. Chrome passes `production_set_id` when resolvable from thin rows.
+`evaluate_image_volume_rules` selects sets per §2.9. SELECT must include `status`. Chrome passes `production_set_id` only for a thin set that **intersects** `ordered`.
 
 ### 3.3 Eligibility matches page prediction
 
-One `sniff_kind`. `is_image_eligible_native` has no path-only JPEG/PNG override. QC helper calls it. `check_image_fail_closed` then agrees with `native_image_page_count == 0`.
+One `sniff_kind`. `is_image_eligible_native` has no path-only JPEG/PNG override. QC helper calls it after the native-only kind check. **Delete** the now-unused `looks_like_{pdf,jpeg,png,tiff}_magic` helpers in `rules.rs` (clippy `-D warnings` / `dead_code` otherwise). `check_image_fail_closed` then agrees with `native_image_page_count == 0`.
 
 ### 3.4 Magic before MIME
 
@@ -184,7 +186,8 @@ Reorder `sniff_kind` as §2.9. Tests in `crates/pdf-raster/tests/g4.rs`.
 
 | Risk | Mitigation |
 |---|---|
-| Skipping all complete sets hides a real missing OPT on the volume just produced | Chrome passes latest complete set id with existing root; produce-internal fail-closed still runs at job end; single-complete heuristic covers CLI/tests without set id. |
+| Skipping all complete sets hides a real missing OPT on the volume just produced | Chrome passes latest **intersecting** complete set id with existing root; produce-internal fail-closed still runs at job end; single-complete heuristic covers CLI/tests without set id. |
+| Chrome picks a stale `partial` / unrelated running set and scopes QC off the selection's volume | §2.9.3 + §2.9.5: set id only if it intersects `ordered` / `candidate_ids`; else omit and use the unset heuristic. |
 | `production_set_id` in QcParams changes fingerprints | Skip serializing when None; absent key == None. |
 | `pdf-raster` dep pulls zpdf into matter-qc | Acceptable; one eligibility function. Do not reimplement a second sniff order. |
 | Disk checks on in-progress volumes | Skip disk when root missing; keep DB page-count vs `production_image_pages` for in-scope items. |
@@ -200,7 +203,7 @@ Complete only when ALL hold:
 - [ ] **DoD-3 — Leftover / moved volume:** Two complete image sets; one `output_root` missing; overlapping `candidate_ids`; QC **without** that leftover as the only target does **not** Error `image_page_missing` / OPT from the missing folder. New Finalize of overlapping ids is not blocked by the leftover.
 - [ ] **DoD-4 — JPEG path:** Path `.jpg`/`.jpeg`/`.png` with Other sniff is **not** image-eligible. `native_image_page_count` is 0. Produce does not fail-closed. QC does not Error `image_page_missing` for that item solely from the extension.
 - [ ] **DoD-5 — TIFF magic:** Bytes with TIFF `II*`/`MM*` and MIME `image/jpeg` (or `image/png`) sniff as `Tiff`. `native_image_page_count` equals IFD count (fixture with ≥2 IFDs).
-- [ ] **DoD-6 — Hygiene:** No `unwrap`/`expect` in new production code. No schema bump. `qc_default_v1` and default DAT-only unchanged. `cargo test -p matter-qc` + `-p pdf-raster` + `-p matter-produce` + chrome host tests that construct `QcParams` / `intended_qc_params`. 0119 latch and 0120 overlay tests still pass.
+- [ ] **DoD-6 — Hygiene:** No `unwrap`/`expect` in new production code. No schema bump. `qc_default_v1` and default DAT-only unchanged. Unused `looks_like_*_magic` helpers gone. `cargo test -p matter-qc` + `-p pdf-raster` + `-p matter-produce` + chrome host tests that construct `QcParams` / `intended_qc_params` (picker omits a non-intersecting `partial`). 0119 latch and 0120 overlay tests still pass.
 - [ ] **DoD-7 — Recorded:** `review.md`; registry **Completed**; CHANGELOG Unreleased sentence; `D-0121-image-opt-qc` closed; ledger committed (`BUGFIX`). **0122–0126** stay Proposed unless separately implemented.
 
 ---
@@ -240,9 +243,24 @@ Do **not** `git add` operator PSTs or `output/`.
 | **D-0032-08** | Decline (operator GUI smoke). |
 | **D-0020-01** | Decline (operator GUI smoke). |
 | **D-0062-codesign** | Remain. |
-| Bugbot usage-limit on #129–#132 | **Decline** — not a product finding. |
+| Bugbot usage-limit on #129–#133 | **Decline** — not a product finding. |
 | PR #121 four QC/eligibility items | **Absorb** (this track; live-verified). |
 | BCC-default | Never. |
+| Fold-in 2026-09-01 (`opencode-review.md` + `agy-review.md`) | See table below. |
+
+#### Harness fold-in (2026-09-01)
+
+| Id | Disposition |
+|---|---|
+| opencode-M1 | **Agree — fold.** Chrome + explicit `production_set_id` must intersect the QC selection; else ignore id / omit and use the unset heuristic. |
+| opencode-m1 | **Agree — fold.** Delete unused `looks_like_*_magic` helpers after QC delegates to `pdf-raster`. |
+| opencode-m2 | **Agree — fold.** Pins: preflight **4174**; last-PR window includes **#133**; product crates unchanged `dff19e5..f3d7a7c`. |
+| opencode-O1 | **Decline.** Silent skip of ≥2 complete sets is required by DoD-3. A new Warn “skipped N volumes” finding expands `qc_image_opt_v1` and is not this DoD. |
+| opencode-O2 | **Already covered.** §8: do not `git add` stray `agy-review.md` / `fixtures/keep_set_summary.json`. |
+| opencode-O3 | **Agree — fold.** Path-after-magic beats MIME; not a DoD-5 exception. |
+| agy-M1 / M2 / M3 | **Already covered.** §2.9 OPT-until-complete / set scope / TIFF magic-first. |
+| agy-m1 / m2 | **Already covered.** Path-only JPEG fallback removal + `pdf-raster` delegate. |
+| agy-O1 | **Already covered.** Single-complete unset fallback. |
 
 ---
 
