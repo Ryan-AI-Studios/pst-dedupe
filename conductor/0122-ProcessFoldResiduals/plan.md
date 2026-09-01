@@ -39,9 +39,9 @@
 - [x] `cargo clippy --workspace --all-targets -- -D warnings`
 - [x] `cargo test --workspace` (or ledgerful verify --scope full)
 - [x] CHANGELOG Unreleased sentence.
-- [ ] Write `review.md` (commands, HITL second Extract all, Pause must not auto-restart remaining queue, row Pause vs orphan Resume).
-- [ ] Update `../conductor.md` → **Completed**. Close `D-0122-process-fold-residuals` in `docs/deferred.md`.
-- [ ] Commit the BUGFIX ledger transaction.
+- [x] Write `review.md` (commands, HITL second Extract all, Pause must not auto-restart remaining queue, row Pause vs orphan Resume).
+- [x] Update `../conductor.md` → **Completed**. Close `D-0122-process-fold-residuals` in `docs/deferred.md`.
+- [x] Commit the BUGFIX ledger transaction.
 - [ ] Owner HITL: release EXE, ≥2 inventory PSTs.
 
 ---
