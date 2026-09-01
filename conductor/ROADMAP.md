@@ -435,7 +435,7 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 | **0118** | ReviewWindowAsyncResiduals | **Completed** | **P3 O** | PR #115 window Bugbot. PR **#127** `74fd797`. Spec: `0118-ReviewWindowAsyncResiduals/`. |
 | **0119** | ProduceChecklistResiduals | **Completed** | **P3 O** | PR #117 produce Bugbot + PR #123 cancelled/idle-as-success. PR **#129** `6a775b5`. Spec: `0119-ProduceChecklistResiduals/`. |
 | **0120** | PdfRasterUiResiduals | **Completed** | **P3 O** | PR #119 Bugbot (overlay mouseup frame coords, draw cancel, Burn-set recount). Not OPT. PR **#131** `e87f4c1`. Spec: `0120-PdfRasterUiResiduals/`. |
-| **0121** | ImageOptQcResiduals | **Proposed** | **P3 O** | PR #121 Bugbot: OPT-missing resume; QC all volumes; JPEG eligibility vs sniff; TIFF magic vs MIME. Not Process. |
+| **0121** | ImageOptQcResiduals | **Ready** | **P3 O** | PR #121 Bugbot: OPT skip until complete; scoped image QC; JPEG eligibility vs sniff; TIFF magic vs MIME. Not Process. Spec: `0121-ImageOptQcResiduals/`. |
 | **0122** | ProcessFoldResiduals | **Proposed** | **P3 O** | PR #123 Bugbot: extract-all Busy wipes queue; live jobs as orphans. Not 0117. |
 | **0123** | MatterShell | **Proposed** | **P3 T** | Shared TopBar/StatusBar; Home under bar; Plex + ink-navy. Spec: `0123-MatterShell/`. |
 | **0124** | ReviewQueueChrome | **Proposed** | **P3 T** | Rail + column collision (ellipsis). Spec: `0124-ReviewQueueChrome/`. |
