@@ -253,7 +253,7 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0122)
 
-**Series O** after Series S. **0110–0121 Completed**. **0122 In progress** (PR #123 Process Bugbot). **Series T 0123–0126 Proposed** (mockup fidelity; 0123 = Plex + navy, Home under bar).
+**Series O** after Series S. **0110–0122 Completed**. **Series T 0123–0126 Proposed** (mockup fidelity; 0123 = Plex + navy, Home under bar).
 
 | Order | Track | Notes |
 |---|---|---|

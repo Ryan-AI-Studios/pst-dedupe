@@ -13,7 +13,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes Process workspace. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-09-01); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is research only (jobs **table** is **0126**; shell tokens are **0123**).
-- **Status:** In progress
+- **Status:** Completed
 - **Depends on:** **0116 Completed** (PR **#123** / `727c857`) · **0119 Completed** (do not retouch cancelled-produce) · schema **v41** (no bump)
 - **Spec authored:** 2026-09-01 (placeholder → Ready)
 - **Series:** O (Review chrome) — PR #123 Process extract-all / orphan-row residual
@@ -176,10 +176,10 @@ Reactive Pause / Resume / counts as §2.9. Keep `is_orphan_running` table tests 
 
 Complete only when ALL hold:
 
-- [ ] **DoD-1 — Extract-all Busy:** Second Extract all while a queue is draining or the runner is busy does **not** empty `extract_queue` and does **not** reset totals/notes. Remaining PSTs still dispatch after the in-flight job. Drain next-start Busy does not wipe the rest. Pause/cancel mid-batch does **not** auto-start `q.first()`. ui unit tests for Busy keep-queue **and** the `busy_retry_pending` state machine (`is_busy_invoke_err` matches `busy:` / `matter is busy`).
-- [ ] **DoD-2 — Live row Pause:** A `running` job whose snapshot `job_id` matches the row shows **row** Pause (not orphan Resume, not only the status-bar Pause) once progress has polled. `orphan`/`active`/`counts` are not mount-time bools. `is_orphan_running` unit tests still cover true orphans.
-- [ ] **DoD-3 — Hygiene:** No `unwrap`/`expect` in new production code. No schema bump. `process-runner` Busy unchanged. Host Busy `kind == "busy"` tests still pass; if `CommandError::busy` Display is untested, add one `starts_with("busy:")` assert (do not change runner). `cargo test --manifest-path crates/dedupe-chrome/ui/Cargo.toml` + `cargo test -p dedupe-chrome`. 0119 latch tests still pass.
-- [ ] **DoD-4 — Recorded:** `review.md`; registry **Completed**; CHANGELOG Unreleased sentence; `D-0122-process-fold-residuals` closed; ledger committed (`BUGFIX`). **0123–0126** stay Proposed unless separately implemented.
+- [x] **DoD-1 — Extract-all Busy:** Second Extract all while a queue is draining or the runner is busy does **not** empty `extract_queue` and does **not** reset totals/notes. Remaining PSTs still dispatch after the in-flight job. Drain next-start Busy does not wipe the rest. Pause/cancel mid-batch does **not** auto-start `q.first()`. ui unit tests for Busy keep-queue **and** the `busy_retry_pending` state machine (`is_busy_invoke_err` matches `busy:` / `matter is busy`).
+- [x] **DoD-2 — Live row Pause:** A `running` job whose snapshot `job_id` matches the row shows **row** Pause (not orphan Resume, not only the status-bar Pause) once progress has polled. `orphan`/`active`/`counts` are not mount-time bools. `is_orphan_running` unit tests still cover true orphans.
+- [x] **DoD-3 — Hygiene:** No `unwrap`/`expect` in new production code. No schema bump. `process-runner` Busy unchanged. Host Busy `kind == "busy"` tests still pass; if `CommandError::busy` Display is untested, add one `starts_with("busy:")` assert (do not change runner). `cargo test --manifest-path crates/dedupe-chrome/ui/Cargo.toml` + `cargo test -p dedupe-chrome`. 0119 latch tests still pass.
+- [x] **DoD-4 — Recorded:** `review.md`; registry **Completed**; CHANGELOG Unreleased sentence; `D-0122-process-fold-residuals` closed; ledger committed (`BUGFIX`). **0123–0126** stay Proposed unless separately implemented.
 
 ---
 
