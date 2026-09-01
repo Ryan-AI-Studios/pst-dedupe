@@ -524,6 +524,9 @@ pub struct ProduceBurnSetResponse {
     pub burned: u64,
     pub skipped: u64,
     pub errors: Vec<String>,
+    pub need_burn: u64,
+    pub burned_fresh: u64,
+    pub unmapped_text: u64,
 }
 
 pub fn produce_burn_set_blocking(
@@ -531,6 +534,7 @@ pub fn produce_burn_set_blocking(
 ) -> Result<ProduceBurnSetResponse, CommandError> {
     let matter = open_matter_write(&args.root)?;
     let ids = args.item_ids.unwrap_or_default();
+    let recount_ids = ids.clone();
     let mut burned = 0u64;
     let mut skipped = 0u64;
     let mut errors = Vec::new();
@@ -565,10 +569,18 @@ pub fn produce_burn_set_blocking(
             Err(e) => errors.push(format!("{id}: {e}")),
         }
     }
+    let (need_burn, burned_fresh, unmapped_text) = if recount_ids.is_empty() {
+        (0, 0, 0)
+    } else {
+        burn_counts_for_ids(&matter, &recount_ids)?
+    };
     Ok(ProduceBurnSetResponse {
         burned,
         skipped,
         errors,
+        need_burn,
+        burned_fresh,
+        unmapped_text,
     })
 }
 
@@ -1104,6 +1116,80 @@ mod tests {
             open_matter_read(root.as_str()).is_err(),
             "encrypted matter must reject open_root"
         );
+    }
+
+    #[test]
+    fn empty_burn_set_skips_recount_counts_stay_zero() {
+        let tmp = tempdir().expect("tmp");
+        let parent = utf8_tmp(&tmp);
+        let root = create_matter_under(&parent, "EmptyBurnSet").expect("create");
+        let none = produce_burn_set_blocking(ProduceBurnSetArgs {
+            root: root.to_string(),
+            item_ids: None,
+        })
+        .expect("none");
+        assert_eq!(none.burned, 0);
+        assert_eq!(none.skipped, 0);
+        assert!(none.errors.is_empty());
+        assert_eq!(none.need_burn, 0);
+        assert_eq!(none.burned_fresh, 0);
+        assert_eq!(none.unmapped_text, 0);
+        let empty = produce_burn_set_blocking(ProduceBurnSetArgs {
+            root: root.to_string(),
+            item_ids: Some(Vec::new()),
+        })
+        .expect("empty");
+        assert_eq!(empty.need_burn, 0);
+        assert_eq!(empty.burned_fresh, 0);
+        assert_eq!(empty.unmapped_text, 0);
+    }
+
+    #[test]
+    fn produce_burn_set_response_need_burn_matches_set_after_burn() {
+        let tmp = tempdir().expect("tmp");
+        let parent = utf8_tmp(&tmp);
+        let root = create_matter_under(&parent, "BurnSetRecount").expect("create");
+        let pdf = synthetic_text_pdf(&[("SECRET_TOKEN_0120", 0)]);
+        seed_pdf_item(&root, "itm_b", &pdf);
+        let page = review_raster_page_blocking(ReviewRasterPageArgs {
+            root: root.to_string(),
+            item_id: "itm_b".into(),
+            page_index: Some(0),
+            dpi: Some(DPI_REVIEW),
+            generation: Some(1),
+        })
+        .expect("raster");
+        review_geom_upsert_blocking(ReviewGeomUpsertArgs {
+            root: root.to_string(),
+            item_id: "itm_b".into(),
+            page_index: 0,
+            px: 8.0,
+            py: 8.0,
+            pw: 200.0,
+            ph: 40.0,
+            raster_width: f64::from(page.width),
+            raster_height: f64::from(page.height),
+            reason: Some("privilege".into()),
+            label: None,
+            source: Some("draw".into()),
+            generation: None,
+        })
+        .expect("geom");
+        let ids = vec!["itm_b".to_string()];
+        let resp = produce_burn_set_blocking(ProduceBurnSetArgs {
+            root: root.to_string(),
+            item_ids: Some(ids.clone()),
+        })
+        .expect("burn set");
+        assert!(resp.errors.is_empty(), "errors={:?}", resp.errors);
+        assert!(resp.burned >= 1);
+        assert_eq!(resp.need_burn, 0);
+        let matter = Matter::open_for_read(&root).expect("read");
+        let (need, fresh, unmapped) = burn_counts_for_ids(&matter, &ids).expect("counts");
+        assert_eq!(resp.need_burn, need);
+        assert_eq!(resp.burned_fresh, fresh);
+        assert_eq!(resp.unmapped_text, unmapped);
+        assert!(fresh >= 1);
     }
 
     #[test]

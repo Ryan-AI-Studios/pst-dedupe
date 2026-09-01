@@ -565,6 +565,12 @@ pub struct ProduceBurnSet {
     pub burned: u64,
     pub skipped: u64,
     pub errors: Vec<String>,
+    #[serde(default)]
+    pub need_burn: u64,
+    #[serde(default)]
+    pub burned_fresh: u64,
+    #[serde(default)]
+    pub unmapped_text: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

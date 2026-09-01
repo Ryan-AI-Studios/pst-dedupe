@@ -92,12 +92,23 @@ fn privilege_log_post_step_banner(snap: &JobProgressSnapshot) -> Option<String> 
         .cloned()
 }
 
+fn patch_qc_burn_counts(
+    qc: &mut ProduceQcRun,
+    need_burn: u64,
+    burned_fresh: u64,
+    unmapped_text: u64,
+) {
+    qc.need_burn = need_burn;
+    qc.burned_fresh = burned_fresh;
+    qc.unmapped_text = unmapped_text;
+}
+
 #[cfg(test)]
 mod process_job_succeeded_tests {
     use super::{
-        bates_start_from_next_seq_hint, finalize_blocked_by_volume_latch,
+        bates_start_from_next_seq_hint, finalize_blocked_by_volume_latch, patch_qc_burn_counts,
         privilege_log_post_step_banner, process_job_succeeded, volume_latch_after_produce_terminal,
-        wait_root_is_current, JobProgressSnapshot,
+        wait_root_is_current, ChromeQcFinding, JobProgressSnapshot, ProduceQcRun,
     };
 
     #[test]
@@ -188,6 +199,47 @@ mod process_job_succeeded_tests {
                 && !src.contains("start_busy.set(false);\n            qc_busy.set(false)"),
             "matter switch must not force-clear busy flags as a pair"
         );
+    }
+
+    #[test]
+    fn burn_ok_patches_qc_counts_without_dropping_set() {
+        let mut qc = ProduceQcRun {
+            ordered_ids: vec!["itm_a".into(), "itm_b".into()],
+            pack_id: "pack".into(),
+            scope: "selected".into(),
+            findings: vec![ChromeQcFinding {
+                item_id: Some("itm_a".into()),
+                rule_id: "need_burn".into(),
+                severity: "warn".into(),
+                message: "needs burn".into(),
+            }],
+            extras: vec![],
+            error_count: 0,
+            warn_count: 1,
+            passed: true,
+            qc_run_id: "qc1".into(),
+            need_burn: 2,
+            burned_fresh: 0,
+            unmapped_text: 1,
+            job_id: Some("j1".into()),
+        };
+        let ordered = qc.ordered_ids.clone();
+        let findings = qc.findings.clone();
+        patch_qc_burn_counts(&mut qc, 0, 2, 0);
+        assert_eq!(qc.need_burn, 0);
+        assert_eq!(qc.burned_fresh, 2);
+        assert_eq!(qc.unmapped_text, 0);
+        assert_eq!(qc.ordered_ids, ordered);
+        assert_eq!(qc.findings, findings);
+        assert_eq!(qc.qc_run_id, "qc1");
+        let src = include_str!("produce.rs");
+        assert!(
+            src.contains("patch_qc_burn_counts"),
+            "Burn Ok must patch qc counts from the set response"
+        );
+        assert!(src.contains("r.need_burn"));
+        assert!(src.contains("r.burned_fresh"));
+        assert!(src.contains("r.unmapped_text"));
     }
 }
 
@@ -832,6 +884,16 @@ pub fn ProducePage() -> impl IntoView {
                                                             if !r.errors.is_empty() {
                                                                 error.set(Some(r.errors.join("; ")));
                                                             }
+                                                            let mut q = qc.get();
+                                                            if let Some(ref mut inner) = q {
+                                                                patch_qc_burn_counts(
+                                                                    inner,
+                                                                    r.need_burn,
+                                                                    r.burned_fresh,
+                                                                    r.unmapped_text,
+                                                                );
+                                                            }
+                                                            qc.set(q);
                                                             match tauri_invoke::<ProducePageResponse, _>(
                                                                 "produce_page",
                                                                 &RootArgs { root },
