@@ -950,7 +950,7 @@ From `C:\dev\deviations.md` vs `C:\dev\dedupe-frontend` (research only). Expand 
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
-| D-0123-matter-shell | P3 | Shared TopBar + StatusBar; Home under the bar; tabs on Produce/Admin; Admin inert; recents UTF-8 BOM | Live `app.rs` header is Dedupe Desk; Produce/Admin drop tabs. Tokens: Plex + ink-navy `#1b3049`. `recents.rs` `from_str` fails on BOM. Ready 2026-09-01; fold-in: `app.rs` inside Router (no stacked bars); Review tab stays active on `:docId`. | **0123** In progress |
+| D-0123-matter-shell | — | Shared TopBar + StatusBar; Home under the bar; tabs on Produce/Admin; Admin inert; recents UTF-8 BOM | **Closed in 0123** (PR **#139** / `fce416e`) — shared 46/30 shell; Home under bar; Admin inert span; BOM strip. Owner HITL remaining (release EXE). | **closed / 0123** |
 | D-0124-review-queue-chrome | P3 | Review left rail + toolbar + bulk + row range. **Column text collides** (no ellipsis; X500 From overflows Fam/Resp; 32px rows must not wrap) | Live `app.css` `.queue-row` tracks; viewport `overflow-x: hidden`. Keep 0111 Control# / PRIV locks. | **0124** Proposed |
 | D-0125-produce-canvas | P3 | Un-wizard produce: five steps visible + protocol + Stage pane; split Stage vs Finalize | Live tabbed `step` Show. 0119 Bugbot (re-arm / empty log / cancelled) stays. | **0125** Proposed |
 | D-0126-process-chrome-visual | P3 | Process jobs table, locked profile, drop copy, strip `\\?\`, minus-stack; absorb D-0116-report if 0039 is a one-liner | Live chips + error_groups exist. **0122** extract-all Busy stays. D-0116-drop may remain if only copy ships. | **0126** Proposed |
