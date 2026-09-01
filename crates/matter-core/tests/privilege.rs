@@ -277,6 +277,54 @@ fn export_csv_two_items_headers() {
     assert_eq!(v["blank_description_count"], 0);
     assert_eq!(v["withheld_count"], 2);
     assert_eq!(v["scope"], SCOPE_REVIEW_CORPUS);
+
+    let empty_out = root.join("exports").join("priv_log_empty.csv");
+    let empty = matter
+        .export_privilege_log(PrivilegeLogExportParams {
+            scope: SCOPE_REVIEW_CORPUS.into(),
+            path: empty_out.clone(),
+            filter_ids: Some(vec![]),
+            control_numbers: None,
+        })
+        .expect("export empty filter");
+    assert_eq!(empty.row_count, 0, "Some([]) is empty-set, not unfiltered");
+    assert_eq!(empty.blank_description_count, 0);
+    let empty_text = std::fs::read_to_string(empty_out.as_std_path()).expect("read empty csv");
+    let empty_data: Vec<_> = empty_text
+        .lines()
+        .skip(1)
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert!(empty_data.is_empty());
+    assert_eq!(
+        matter
+            .count_privilege_log_blank_descriptions(SCOPE_REVIEW_CORPUS, Some(&[]))
+            .expect("count empty"),
+        0
+    );
+
+    let one_out = root.join("exports").join("priv_log_one.csv");
+    let one = matter
+        .export_privilege_log(PrivilegeLogExportParams {
+            scope: SCOPE_REVIEW_CORPUS.into(),
+            path: one_out.clone(),
+            filter_ids: Some(vec![a.id.clone()]),
+            control_numbers: None,
+        })
+        .expect("export one id");
+    assert_eq!(one.row_count, 1);
+    let one_text = std::fs::read_to_string(one_out.as_std_path()).expect("read one csv");
+    assert!(one_text.contains(&a.id));
+    assert!(!one_text.contains(&b.id));
+    assert_eq!(
+        matter
+            .count_privilege_log_blank_descriptions(
+                SCOPE_REVIEW_CORPUS,
+                Some(std::slice::from_ref(&a.id))
+            )
+            .expect("count one"),
+        0
+    );
     assert_eq!(v["review_only"], true);
     // Recompute expected hash (scope + empty filter_ids + full path).
     let expected_preimage = format!(
@@ -285,6 +333,45 @@ fn export_csv_two_items_headers() {
     );
     let expected = matter_core::sha256_hex(expected_preimage.as_bytes());
     assert_eq!(hash, expected);
+}
+
+#[test]
+fn empty_filter_ids_does_not_count_corpus_blanks() {
+    let (_tmp, base) = utf8_tempdir();
+    let root = base.join("matter-priv-empty-filter");
+    let matter = Matter::create(&root, "Priv").expect("create");
+    let item = insert_item(&matter, "BlankLog");
+    matter
+        .ensure_item_privilege(&item.id, "exp")
+        .expect("ensure");
+    matter
+        .upsert_item_privilege(UpsertItemPrivilegeInput {
+            item_id: item.id.clone(),
+            basis: "attorney_client".into(),
+            description: String::new(),
+            status: "asserted".into(),
+            withhold: true,
+            include_on_log: true,
+            actor: "exp".into(),
+            expected_version: None,
+        })
+        .expect("upsert blank");
+
+    let corpus = matter
+        .count_privilege_log_blank_descriptions(SCOPE_REVIEW_CORPUS, None)
+        .expect("none is unfiltered");
+    assert_eq!(corpus, 1);
+    let empty = matter
+        .count_privilege_log_blank_descriptions(SCOPE_REVIEW_CORPUS, Some(&[]))
+        .expect("some empty");
+    assert_eq!(empty, 0);
+    let one = matter
+        .count_privilege_log_blank_descriptions(
+            SCOPE_REVIEW_CORPUS,
+            Some(std::slice::from_ref(&item.id)),
+        )
+        .expect("some one");
+    assert_eq!(one, 1);
 }
 
 #[test]

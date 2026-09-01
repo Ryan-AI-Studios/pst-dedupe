@@ -2114,6 +2114,58 @@ mod tests {
             )
             .expect("audit count");
         assert_eq!(n, 0, "QC extras must not write a privilege-log export");
+        runner.shutdown();
+    }
+
+    #[test]
+    fn empty_union_privilege_log_blank_is_zero_not_corpus() {
+        let tmp = tempdir().expect("tempdir");
+        let parent = utf8_tmp(&tmp);
+        let root = create_matter_under(&parent, "EmptyUnionBlank").expect("create");
+        let matter = Matter::open(&root).expect("open");
+        let set = matter
+            .ensure_default_review_set(DEFAULT_REVIEW_SET_NAME)
+            .expect("set");
+        matter.seed_default_codes().expect("seed");
+        matter
+            .insert_item(ItemInput {
+                id: Some("itm_blank".into()),
+                status: item_status::EXTRACTED.into(),
+                role: Some(item_role::STANDALONE.into()),
+                subject: Some("blank".into()),
+                from_addr: Some("a@example.com".into()),
+                mime_type: Some("message/rfc822".into()),
+                file_category: Some("email".into()),
+                in_review: Some(1),
+                review_set_id: Some(set.id),
+                review_order: Some(0),
+                path: Some("blank.eml".into()),
+                ..Default::default()
+            })
+            .expect("item");
+        put_native_text(&matter, "itm_blank");
+        matter
+            .upsert_item_privilege(UpsertItemPrivilegeInput {
+                item_id: "itm_blank".into(),
+                basis: "attorney_client".into(),
+                description: String::new(),
+                status: "asserted".into(),
+                withhold: false,
+                include_on_log: true,
+                actor: "chrome".into(),
+                expected_version: None,
+            })
+            .expect("blank priv");
+        let spec = default_produce_filter();
+        let extra = privilege_log_blank_blocker(&matter, &spec, &[]).expect("blocker");
+        assert!(
+            extra.is_none(),
+            "empty union must not count corpus blanks: {extra:?}"
+        );
+        let corpus = matter
+            .count_privilege_log_blank_descriptions(&spec.scope, None)
+            .expect("corpus");
+        assert_eq!(corpus, 1);
     }
 
     #[test]

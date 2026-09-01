@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0119 — Produce checklist residuals)
+
+- Privilege-log `filter_ids: Some([])` is an empty set (0 rows / 0 blanks); `None` stays unfiltered. Produce Finalize stays disabled after `state==succeeded` (`volume_succeeded` latch; QC re-run does not re-arm). A genuine privilege-log post-step error surfaces on the succeeded snapshot and does not re-arm Finalize. Matter switch clears wizard QC/overrides. Cancelled/idle/paused produce or QC waits are not treated as a successful volume.
+
 ### Fixed (0118 — Review window async)
 
 - Stale `review_document` / `review_document_body` replies no longer overwrite the current item after Save & Next or `[` `]`. End-of-queue save re-fetches codes/notes so a follow-up un-privilege actually removes.

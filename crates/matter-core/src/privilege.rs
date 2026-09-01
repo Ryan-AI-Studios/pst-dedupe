@@ -487,6 +487,28 @@ fn yn(flag: bool) -> &'static str {
 // Matter API
 // ---------------------------------------------------------------------------
 
+/// `None` = unfiltered (Desk/CLI whole-scope). `Some([])` = empty set (0 rows).
+/// `Some(non-empty)` = `IN (…)` as today.
+fn apply_privilege_log_id_filter(
+    sql: &mut String,
+    bind: &mut Vec<Value>,
+    filter_ids: Option<&[String]>,
+) {
+    match filter_ids {
+        None => {}
+        Some([]) => {
+            sql.push_str(" AND 0");
+        }
+        Some(ids) => {
+            let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+            sql.push_str(&format!(" AND i.id IN ({ph})"));
+            for id in ids {
+                bind.push(Value::Text(id.clone()));
+            }
+        }
+    }
+}
+
 impl Matter {
     /// Ensure privilege claim for an item (asserted, withhold=1, include_on_log=1).
     ///
@@ -925,15 +947,7 @@ impl Matter {
         if scope == SCOPE_REVIEW_CORPUS {
             sql.push_str(" AND i.in_review = 1");
         }
-        if let Some(ids) = filter_ids {
-            if !ids.is_empty() {
-                let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-                sql.push_str(&format!(" AND i.id IN ({ph})"));
-                for id in ids {
-                    bind.push(Value::Text(id.clone()));
-                }
-            }
-        }
+        apply_privilege_log_id_filter(&mut sql, &mut bind, filter_ids);
         let n: i64 = self
             .connection()
             .query_row(&sql, params_from_iter(bind), |row| row.get(0))?;
@@ -984,15 +998,7 @@ impl Matter {
         if scope == SCOPE_REVIEW_CORPUS {
             sql.push_str(" AND i.in_review = 1");
         }
-        if let Some(ref ids) = params.filter_ids {
-            if !ids.is_empty() {
-                let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-                sql.push_str(&format!(" AND i.id IN ({ph})"));
-                for id in ids {
-                    bind.push(Value::Text(id.clone()));
-                }
-            }
-        }
+        apply_privilege_log_id_filter(&mut sql, &mut bind, params.filter_ids.as_deref());
         // sent_at ASC NULLS LAST, path, id
         sql.push_str(
             " ORDER BY (i.sent_at IS NULL), i.sent_at ASC, \
