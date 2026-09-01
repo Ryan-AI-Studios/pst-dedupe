@@ -153,18 +153,55 @@ fn css_point_to_raster(
     (css_x * raster_w / display_w, css_y * raster_h / display_h)
 }
 
-fn event_to_raster(ev: &MouseEvent, raster_w: f64, raster_h: f64) -> Option<(f64, f64)> {
+/// Viewport client point → CSS inside `.image-frame` (`getBoundingClientRect`).
+fn frame_css_point(
+    client_x: f64,
+    client_y: f64,
+    rect_left: f64,
+    rect_top: f64,
+    rect_w: f64,
+    rect_h: f64,
+) -> (f64, f64) {
+    let max_x = rect_w.max(0.0);
+    let max_y = rect_h.max(0.0);
+    (
+        (client_x - rect_left).clamp(0.0, max_x),
+        (client_y - rect_top).clamp(0.0, max_y),
+    )
+}
+
+fn event_frame_rect(ev: &MouseEvent) -> Option<(f64, f64, f64, f64)> {
     let el = ev.current_target()?.dyn_into::<web_sys::Element>().ok()?;
-    let dw = f64::from(el.client_width());
-    let dh = f64::from(el.client_height());
-    Some(css_point_to_raster(
-        f64::from(ev.offset_x()),
-        f64::from(ev.offset_y()),
-        dw,
-        dh,
-        raster_w,
-        raster_h,
+    let rect = el.get_bounding_client_rect();
+    Some((rect.left(), rect.top(), rect.width(), rect.height()))
+}
+
+fn event_to_frame_css(ev: &MouseEvent) -> Option<(f64, f64)> {
+    let (left, top, width, height) = event_frame_rect(ev)?;
+    Some(frame_css_point(
+        f64::from(ev.client_x()),
+        f64::from(ev.client_y()),
+        left,
+        top,
+        width,
+        height,
     ))
+}
+
+fn event_to_raster(ev: &MouseEvent, raster_w: f64, raster_h: f64) -> Option<(f64, f64)> {
+    let (_left, _top, dw, dh) = event_frame_rect(ev)?;
+    let (css_x, css_y) = event_to_frame_css(ev)?;
+    Some(css_point_to_raster(css_x, css_y, dw, dh, raster_w, raster_h))
+}
+
+fn clear_in_flight_draw(
+    drawing: RwSignal<bool>,
+    drag_origin: RwSignal<Option<(f64, f64)>>,
+    drag_now: RwSignal<Option<(f64, f64)>>,
+) {
+    drawing.set(false);
+    drag_origin.set(None);
+    drag_now.set(None);
 }
 
 /// Overlay box as **percent of the displayed image** so CSS `max-width` scaling
@@ -229,13 +266,49 @@ fn geom_to_overlay_pct(g: &GeomDto, raster: &ReviewRasterPage) -> (f64, f64, f64
 
 #[cfg(test)]
 mod overlay_scale_tests {
-    use super::css_point_to_raster;
+    use super::{css_point_to_raster, frame_css_point};
 
     #[test]
     fn displayed_scale_maps_midpoint_to_raster() {
         let (x, y) = css_point_to_raster(200.0, 130.0, 400.0, 520.0, 1275.0, 1650.0);
         assert!((x - 637.5).abs() < 0.01);
         assert!((y - 412.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn frame_css_point_subtracts_rect_origin() {
+        let (x, y) = frame_css_point(150.0, 80.0, 100.0, 50.0, 400.0, 300.0);
+        assert!((x - 50.0).abs() < 0.01);
+        assert!((y - 30.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn frame_css_point_clamps_to_rect() {
+        let (x, y) = frame_css_point(99.0, 400.0, 100.0, 50.0, 200.0, 100.0);
+        assert!((x - 0.0).abs() < 0.01);
+        assert!((y - 100.0).abs() < 0.01);
+        let (x2, y2) = frame_css_point(500.0, 40.0, 100.0, 50.0, 200.0, 100.0);
+        assert!((x2 - 200.0).abs() < 0.01);
+        assert!((y2 - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn draw_handlers_use_frame_client_coords_not_offset() {
+        let src = include_str!("review_window.rs");
+        let offset_x = ["ev.offset", "_x"].concat();
+        let offset_y = ["ev.offset", "_y"].concat();
+        assert!(!src.contains(&offset_x), "draw must not use MouseEvent.offsetX");
+        assert!(!src.contains(&offset_y), "draw must not use MouseEvent.offsetY");
+        assert!(src.contains("get_bounding_client_rect"));
+        assert!(src.contains("frame_css_point"));
+        assert!(src.contains("on:mouseleave"));
+        let mouseout = ["on:mouse", "out"].concat();
+        assert!(!src.contains(&mouseout));
+        assert!(
+            src.contains("if pane.get() != \"image\""),
+            "pane-leave clear must be its own Effect, not only the raster early-return"
+        );
+        assert!(src.contains("if pw < 2.0 || ph < 2.0"), "keep 2 raster-px min-drag");
     }
 }
 
@@ -494,7 +567,14 @@ pub fn ReviewWindow() -> impl IntoView {
         geoms.set(Vec::new());
         selected_geom.set(None);
         raster_error.set(None);
+        clear_in_flight_draw(drawing, drag_origin, drag_now);
         let _ = id;
+    });
+
+    Effect::new(move |_| {
+        if pane.get() != "image" {
+            clear_in_flight_draw(drawing, drag_origin, drag_now);
+        }
     });
 
     Effect::new(move |_| {
@@ -505,6 +585,7 @@ pub fn ReviewWindow() -> impl IntoView {
         if root.is_empty() || id.is_empty() || pane_now != "image" {
             return;
         }
+        clear_in_flight_draw(drawing, drag_origin, drag_now);
         let gen = raster_generation.get_untracked() + 1;
         raster_generation.set(gen);
         raster.set(None);
@@ -843,9 +924,7 @@ pub fn ReviewWindow() -> impl IntoView {
                 if ev.key() == "Escape" {
                     if drawing.get() || drag_origin.get().is_some() {
                         ev.prevent_default();
-                        drawing.set(false);
-                        drag_origin.set(None);
-                        drag_now.set(None);
+                        clear_in_flight_draw(drawing, drag_origin, drag_now);
                         return;
                     }
                     if help_open.get() {
@@ -1289,33 +1368,40 @@ pub fn ReviewWindow() -> impl IntoView {
                                                 </div>
                                                 <div class="image-frame"
                                                     on:mousedown=move |ev: MouseEvent| {
+                                                        let Some(pt) = event_to_frame_css(&ev) else { return; };
                                                         drawing.set(true);
-                                                        drag_origin.set(Some((ev.offset_x() as f64, ev.offset_y() as f64)));
-                                                        drag_now.set(Some((ev.offset_x() as f64, ev.offset_y() as f64)));
+                                                        drag_origin.set(Some(pt));
+                                                        drag_now.set(Some(pt));
                                                     }
                                                     on:mousemove=move |ev: MouseEvent| {
                                                         if drawing.get() {
-                                                            drag_now.set(Some((ev.offset_x() as f64, ev.offset_y() as f64)));
+                                                            if let Some(pt) = event_to_frame_css(&ev) {
+                                                                drag_now.set(Some(pt));
+                                                            }
                                                         }
+                                                    }
+                                                    on:mouseleave=move |_| {
+                                                        clear_in_flight_draw(drawing, drag_origin, drag_now);
                                                     }
                                                     on:mouseup=move |ev: MouseEvent| {
                                                         if !drawing.get() { return; }
                                                         drawing.set(false);
                                                         let Some((x0, y0)) = drag_origin.get() else { return; };
-                                                        let x1 = ev.offset_x() as f64;
-                                                        let y1 = ev.offset_y() as f64;
+                                                        let Some((x1, y1)) = event_to_frame_css(&ev) else {
+                                                            drag_origin.set(None);
+                                                            drag_now.set(None);
+                                                            return;
+                                                        };
                                                         drag_origin.set(None);
                                                         drag_now.set(None);
-                                                        let (dw, dh) = ev
-                                                            .current_target()
-                                                            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-                                                            .map(|el| {
-                                                                (f64::from(el.client_width()), f64::from(el.client_height()))
-                                                            })
+                                                        let (dw, dh) = event_frame_rect(&ev)
+                                                            .map(|(_l, _t, w, h)| (w, h))
                                                             .unwrap_or((rw, rh));
                                                         let (ox, oy) = css_point_to_raster(x0, y0, dw, dh, rw, rh);
                                                         let (cx, cy) = event_to_raster(&ev, rw, rh)
-                                                            .unwrap_or_else(|| css_point_to_raster(x1, y1, dw, dh, rw, rh));
+                                                            .unwrap_or_else(|| {
+                                                                css_point_to_raster(x1, y1, dw, dh, rw, rh)
+                                                            });
                                                         let px = ox.min(cx);
                                                         let py = oy.min(cy);
                                                         let pw = (cx - ox).abs();
