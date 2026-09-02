@@ -52,6 +52,14 @@ pub struct QueueChromeCtx {
     pub goto_miss: RwSignal<Option<String>>,
 }
 
+/// Produce-route chrome for the reserved TopBar right slot and StatusBar left.
+/// Labels only — Finalize / QC / latch stay inside `ProducePage`.
+#[derive(Clone, Copy)]
+pub struct ProduceChromeCtx {
+    pub right_label: RwSignal<String>,
+    pub status_left: RwSignal<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueRange {
     pub offset: u64,
@@ -154,6 +162,7 @@ fn TopBar(
     };
     let processed_meta = move || overview.get().map(|o| format!("Processed {}", o.processed));
     let queue_chrome = use_context::<QueueChromeCtx>();
+    let produce_chrome = use_context::<ProduceChromeCtx>();
     let goto_draft = RwSignal::new(String::new());
 
     view! {
@@ -207,8 +216,8 @@ fn TopBar(
                     "Admin"
                 </span>
             </nav>
-            {match queue_chrome {
-                Some(ctx) => {
+            {match (queue_chrome, produce_chrome) {
+                (Some(ctx), _) => {
                     view! {
                         <div class="right-slot">
                             <input
@@ -237,7 +246,11 @@ fn TopBar(
                     }
                     .into_any()
                 }
-                None => view! { <div class="right-slot"></div> }.into_any(),
+                (None, Some(ctx)) => view! {
+                    <div class="right-slot">{move || ctx.right_label.get()}</div>
+                }
+                .into_any(),
+                (None, None) => view! { <div class="right-slot"></div> }.into_any(),
             }}
         </header>
     }
@@ -246,10 +259,11 @@ fn TopBar(
 #[component]
 fn StatusBar(flag: &'static str) -> impl IntoView {
     let queue_chrome = use_context::<QueueChromeCtx>();
+    let produce_chrome = use_context::<ProduceChromeCtx>();
     view! {
         <footer class="matter-statusbar">
-            {match queue_chrome {
-                Some(ctx) => view! {
+            {match (queue_chrome, produce_chrome) {
+                (Some(ctx), _) => view! {
                     <div class="status-left">
                         {move || {
                             ctx.queue_range
@@ -260,7 +274,11 @@ fn StatusBar(flag: &'static str) -> impl IntoView {
                     </div>
                 }
                 .into_any(),
-                None => view! { <div class="status-left"></div> }.into_any(),
+                (None, Some(ctx)) => view! {
+                    <div class="status-left">{move || ctx.status_left.get()}</div>
+                }
+                .into_any(),
+                (None, None) => view! { <div class="status-left"></div> }.into_any(),
             }}
             <div class="flag">{flag}</div>
         </footer>

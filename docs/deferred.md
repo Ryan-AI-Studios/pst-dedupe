@@ -946,13 +946,13 @@ Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs a
 
 ## Series T — Mockup chrome fidelity (0123–0126, minted 2026-08-31)
 
-From `C:\dev\deviations.md` vs `C:\dev\dedupe-frontend` (research only). **0123 Completed**. **0124 Completed**. Expand **0125–0126** with `/plan-track`. Do not steal 0119–0122 Bugbot. **0123 locks (2026-09-01):** Plex + ink-navy `#1b3049` (blue theme); Home under the shared bar. Do not port Archivo/coral.
+From `C:\dev\deviations.md` vs `C:\dev\dedupe-frontend` (research only). **0123 Completed**. **0124 Completed**. **0125 In progress**. Expand **0126** with `/plan-track`. Do not steal 0119–0122 Bugbot. **0123 locks (2026-09-01):** Plex + ink-navy `#1b3049` (blue theme); Home under the shared bar. Do not port Archivo/coral.
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
 | D-0123-matter-shell | — | Shared TopBar + StatusBar; Home under the bar; tabs on Produce/Admin; Admin inert; recents UTF-8 BOM | **Closed in 0123** (PR **#139** / `fce416e`) — shared 46/30 shell; Home under bar; Admin inert span; BOM strip. Owner HITL remaining (release EXE). | **closed / 0123** |
 | D-0124-review-queue-chrome | — | Review left rail + toolbar + bulk + row range. Cell ellipsis so X500 From never paints on Fam/Resp/PRIV. | **Closed in 0124** (PR **#141** / `ff8b0ea`) — `minmax(0,…)` + ellipsis + `title`; 244px rail; `#queue-goto`; SQL-page `Rows a–b of N`. Owner HITL remaining (release EXE). Residual: first paint mounts ~8 overscan rows until `#queue` is measured. | **closed / 0124** |
-| D-0125-produce-canvas | P3 | Un-wizard produce: five steps visible + protocol + Stage pane; split Stage vs Finalize | Live tabbed `step` Show. 0119 Bugbot (re-arm / empty log / cancelled) stays. | **0125** Proposed |
+| D-0125-produce-canvas | P3 | Un-wizard produce: five steps visible + protocol + Stage pane; split Stage vs Finalize | Live tabbed `step` Show; two-column CSS. Absorb in **0125**: un-wizard first; 0119 latch frozen; protocol “none on file”; no fake snapshot/ACME. | **0125** In progress |
 | D-0126-process-chrome-visual | P3 | Process jobs table, locked profile, drop copy, strip `\\?\`, minus-stack; absorb D-0116-report if 0039 is a one-liner | Live chips + error_groups exist. **0122** extract-all Busy stays. D-0116-drop may remain if only copy ships. | **0126** Proposed |
 
 **Not minted (v1.1 / never as next IDs):** local AI first-pass job, clawback packet, LFP default, native spreadsheet redact, legal hold, TAR-as-primary, cluster wheel, StoryBuilder, auto-privilege, BCC-default, `D-0108-keepset-crc-retaint`, `D-0067-embedded-depth` matter children. Mock Archivo/coral declined 2026-09-01 (0123 = Plex + ink-navy). Next free ID **0127**.
