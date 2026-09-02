@@ -7,6 +7,10 @@
 # Local agent skills/rules (`.claude/` is a junction to `.agents/`). Force-add if a skill must be shared.
 .agents/
 .claude/
+# Root-level harness dump; canonical reviews live under conductor/<track>/agy-review.md
+/agy-review.md
+# unique-pst keep-set JSON written next to a PST; tests copy fixtures to tempfile first.
+fixtures/keep_set_summary.json
 *.html
 # Synthetic Teams HTML fixtures (track 0055) must be tracked for CI/tests.
 !fixtures/teams/
