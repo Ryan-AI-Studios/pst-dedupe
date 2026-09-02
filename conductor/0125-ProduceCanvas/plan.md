@@ -33,17 +33,17 @@
 
 - [x] `cargo test --manifest-path crates/dedupe-chrome/ui/Cargo.toml` (must include `shell_source_locks`)
 - [x] `cargo test -p dedupe-chrome` (0119 latch + privilege-in-set + empty-union + 0124 queue locks)
-- [ ] trunk / chrome-ui still builds.
+- [x] trunk / chrome-ui still builds.
 
 ## Phase 4 — Finalize → DoD-5
 
-- [ ] `cargo fmt --all --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace` (or ledgerful verify --scope full)
-- [ ] CHANGELOG Unreleased sentence.
-- [ ] Write `review.md` (commands, HITL five-visible + latch + none-on-file).
-- [ ] Update `../conductor.md` → **Completed**. Close `D-0125-produce-canvas`.
-- [ ] Commit the FEATURE ledger transaction.
+- [x] `cargo fmt --all --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo test --workspace` (or ledgerful verify --scope full)
+- [x] CHANGELOG Unreleased sentence.
+- [x] Write `review.md` (commands, HITL five-visible + latch + none-on-file).
+- [x] Update `../conductor.md` → **Completed**. Close `D-0125-produce-canvas`.
+- [x] Commit the FEATURE ledger transaction.
 - [ ] Owner HITL: release EXE.
 
 ---

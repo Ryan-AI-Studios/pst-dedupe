@@ -137,7 +137,7 @@
 | 78 | P3 O | **0122** ProcessFoldResiduals | ✅ Completed | PR #123 Process extract-all/orphan Bugbot; PR **#137** / `f1810fe` |
 | 79 | P3 T | **0123** MatterShell | ✅ Completed | Shared TopBar/StatusBar; Home under bar; PR **#139** / `fce416e` |
 | 80 | P3 T | **0124** ReviewQueueChrome | ✅ Completed | Ellipsis; 244px rail; Go-to + SQL-page range; PR **#141** / `ff8b0ea` |
-| 81 | P3 T | **0125** ProduceCanvas | 🔄 In progress | Un-wizard + Stage; 0119 latch frozen |
+| 81 | P3 T | **0125** ProduceCanvas | ✅ Completed | Un-wizard + Stage; 0119 latch frozen; PR **#143** / `1fbc22a` |
 | 82 | P3 T | **0126** ProcessChromeVisual | 📦 Proposed | Jobs table / minus-stack; 0122 Bugbot stays |
 
 ## Series K spine (clean unique export)
@@ -253,7 +253,7 @@
 
 ## Series O — Review chrome Tauri 2 + Leptos (0110–0122)
 
-**Series O** after Series S. **0110–0122 Completed**. **0123 Completed**. **0124 Completed**. **0125 In progress**. **0126 Proposed** (mockup fidelity; 0123 = Plex + navy, Home under bar).
+**Series O** after Series S. **0110–0122 Completed**. **0123 Completed**. **0124 Completed**. **0125 Completed**. **0126 Proposed** (mockup fidelity; 0123 = Plex + navy, Home under bar).
 
 | Order | Track | Notes |
 |---|---|---|
@@ -279,5 +279,5 @@ After **0119–0122** Bugbot. Steal layout from `C:\dev\dedupe-frontend`; do not
 |---|---|---|
 | 1 | **0123** MatterShell | **Completed** — TopBar/StatusBar; Home under bar; Plex + ink-navy; recents BOM; PR **#139** / `fce416e` |
 | 2 | **0124** ReviewQueueChrome | **Completed** — ellipsis; 244px rail; Go-to + row range; PR **#141** / `ff8b0ea` |
-| 3 | **0125** ProduceCanvas | **In progress** — un-wizard + Stage; not 0119 latch |
+| 3 | **0125** ProduceCanvas | **Completed** — un-wizard + Stage; not 0119 latch; PR **#143** / `1fbc22a` |
 | 4 | **0126** ProcessChromeVisual | **Proposed** — jobs table; not 0122 |

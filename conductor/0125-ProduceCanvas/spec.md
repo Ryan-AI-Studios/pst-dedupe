@@ -12,7 +12,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes produce checklist. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-09-01); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is **layout research only** (three panes `236px 1fr 320px`). Do not port Archivo, coral, fake `ACME` Bates ranges, unimplemented categorical log, or PDF-as-image.
-- **Status:** In progress
+- **Status:** Completed
 - **Depends on:** **0113 / 0115 / 0119 Completed** · **0123 Completed** (PR **#139** / `fce416e`) · **0124 Completed** (PR **#141** / `ff8b0ea`) · schema **v41** (no bump)
 - **Spec authored:** 2026-09-01 (placeholder → Ready)
 - **Series:** T (mockup chrome fidelity)
@@ -206,7 +206,7 @@ Complete only when ALL hold:
 - [ ] **DoD-2 — Protocol + sets:** Protocol block always present; empty 502 notes render **none on file**. **New** is busy-guarded and clears `bates_start`. Set rows use live `ProductionSetThin` only. UI DTO new fields `#[serde(default)]`.
 - [ ] **DoD-3 — Stage + Finalize:** 320px Stage pane; Finalize lives there; disabled while 0119 latch **or** `qc` None **or** pre-flight blockers **or** missing Bates **or** incomplete warn overrides. Stage snapshot not a fake success. Export paths match the selected profile. Pad width from Thin. Prefix hint uses live prefix. Enter/produce still `fail_if_withheld` / `require_qc_pass`.
 - [ ] **DoD-4 — Hygiene:** No `unwrap`/`expect` in new production code. No schema bump. 0119 latch tests + host privilege-in-set / empty-union tests still pass. Plex / `#1b3049` / no Archivo/coral. `cargo test --manifest-path crates/dedupe-chrome/ui/Cargo.toml` + `cargo test -p dedupe-chrome`. trunk chrome-ui builds.
-- [ ] **DoD-5 — Recorded:** `review.md`; registry **Completed**; CHANGELOG Unreleased; `D-0125-produce-canvas` closed; ledger committed (`FEATURE`). **0126** stays Proposed unless separately implemented.
+- [x] **DoD-5 — Recorded:** `review.md`; registry **Completed**; CHANGELOG Unreleased; `D-0125-produce-canvas` closed; ledger committed (`FEATURE`). **0126** stays Proposed unless separately implemented.
 
 ---
 
