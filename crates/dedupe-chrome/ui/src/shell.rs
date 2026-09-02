@@ -3,6 +3,7 @@
 use leptos::prelude::*;
 use leptos_router::components::A;
 use leptos_router::hooks::use_params_map;
+use web_sys::KeyboardEvent;
 
 use crate::invoke::{tauri_invoke, MatterOverview, RootArgs};
 use crate::path_id::encode_matter_id;
@@ -40,6 +41,36 @@ pub struct MatterShellCtx {
     pub root: RwSignal<String>,
     pub overview: RwSignal<Option<MatterOverview>>,
     pub error: RwSignal<Option<String>>,
+}
+
+/// Queue-route chrome for the reserved TopBar right slot and StatusBar left.
+/// Provided by `WrapReview` only — not the review window route.
+#[derive(Clone, Copy)]
+pub struct QueueChromeCtx {
+    pub queue_range: RwSignal<Option<QueueRange>>,
+    pub goto_request: RwSignal<Option<String>>,
+    pub goto_miss: RwSignal<Option<String>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueRange {
+    pub offset: u64,
+    pub fetched: usize,
+    pub total: u64,
+}
+
+impl QueueRange {
+    pub fn status_label(self) -> String {
+        if self.fetched > 0 {
+            let start = self.offset.saturating_add(1);
+            let end = self.offset.saturating_add(self.fetched as u64);
+            format!("Rows {start}–{end} of {}", self.total)
+        } else if self.total > 0 {
+            "This page has no rows, but the queue still has items. Use Prev/Next.".into()
+        } else {
+            "0 in queue".into()
+        }
+    }
 }
 
 pub fn fallback_matter_name(root: &str) -> String {
@@ -122,6 +153,8 @@ fn TopBar(
             .unwrap_or_else(|| fallback_matter_name(&root.get()))
     };
     let processed_meta = move || overview.get().map(|o| format!("Processed {}", o.processed));
+    let queue_chrome = use_context::<QueueChromeCtx>();
+    let goto_draft = RwSignal::new(String::new());
 
     view! {
         <header class="matter-topbar">
@@ -174,16 +207,61 @@ fn TopBar(
                     "Admin"
                 </span>
             </nav>
-            <div class="right-slot"></div>
+            {match queue_chrome {
+                Some(ctx) => {
+                    view! {
+                        <div class="right-slot">
+                            <input
+                                id="queue-goto"
+                                type="search"
+                                placeholder="Go to Control# or subject"
+                                aria-label="Go to Control# or subject"
+                                prop:value=move || goto_draft.get()
+                                on:input=move |ev| {
+                                    goto_draft.set(event_target_value(&ev));
+                                    ctx.goto_miss.set(None);
+                                }
+                                on:keydown=move |ev: KeyboardEvent| {
+                                    if ev.key() == "Enter" {
+                                        ev.prevent_default();
+                                        ctx.goto_request.set(Some(goto_draft.get()));
+                                    }
+                                }
+                            />
+                            <Show when=move || ctx.goto_miss.get().is_some()>
+                                <span class="queue-goto-miss" role="status">
+                                    {move || ctx.goto_miss.get().unwrap_or_default()}
+                                </span>
+                            </Show>
+                        </div>
+                    }
+                    .into_any()
+                }
+                None => view! { <div class="right-slot"></div> }.into_any(),
+            }}
         </header>
     }
 }
 
 #[component]
 fn StatusBar(flag: &'static str) -> impl IntoView {
+    let queue_chrome = use_context::<QueueChromeCtx>();
     view! {
         <footer class="matter-statusbar">
-            <div class="status-left"></div>
+            {match queue_chrome {
+                Some(ctx) => view! {
+                    <div class="status-left">
+                        {move || {
+                            ctx.queue_range
+                                .get()
+                                .map(QueueRange::status_label)
+                                .unwrap_or_default()
+                        }}
+                    </div>
+                }
+                .into_any(),
+                None => view! { <div class="status-left"></div> }.into_any(),
+            }}
             <div class="flag">{flag}</div>
         </footer>
     }
@@ -219,5 +297,49 @@ mod tests {
             "Admin must not be a workspace tab link"
         );
         assert!(prod.contains("<span class=\"workspace-tab-inert\""));
+        assert!(prod.contains("id=\"queue-goto\""));
+        assert!(prod.contains("class=\"right-slot\""));
+        assert!(prod.contains("class=\"status-left\""));
+        assert!(prod.contains(REVIEW_FLAG));
+    }
+
+    #[test]
+    fn queue_range_status_label_is_sql_page() {
+        assert_eq!(
+            QueueRange {
+                offset: 0,
+                fetched: 500,
+                total: 1200
+            }
+            .status_label(),
+            "Rows 1–500 of 1200"
+        );
+        assert_eq!(
+            QueueRange {
+                offset: 500,
+                fetched: 200,
+                total: 700
+            }
+            .status_label(),
+            "Rows 501–700 of 700"
+        );
+        assert_eq!(
+            QueueRange {
+                offset: 500,
+                fetched: 0,
+                total: 400
+            }
+            .status_label(),
+            "This page has no rows, but the queue still has items. Use Prev/Next."
+        );
+        assert_eq!(
+            QueueRange {
+                offset: 0,
+                fetched: 0,
+                total: 0
+            }
+            .status_label(),
+            "0 in queue"
+        );
     }
 }

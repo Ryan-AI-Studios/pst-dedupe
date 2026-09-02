@@ -10,7 +10,7 @@ use web_sys::MouseEvent;
 use crate::pages::{
     AdminStub, MatterHome, MattersList, ProcessPage, ProducePage, ReviewQueue, ReviewWindow,
 };
-use crate::shell::{MatterShell, WorkspaceTab};
+use crate::shell::{MatterShell, QueueChromeCtx, WorkspaceTab};
 
 static CTRL_K_ONCE: Once = Once::new();
 
@@ -51,7 +51,17 @@ fn install_ctrl_k_once() {
                     return;
                 }
             }
-            // Search not mounted (matter home / stubs): visible no-op per spec §3.2.
+            if let Some(el) = doc.get_element_by_id("queue-goto") {
+                if let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>() {
+                    ev.prevent_default();
+                    let _ = input.focus();
+                    if let Some(hint) = doc.get_element_by_id("ctrl-k-hint") {
+                        let _ = hint.remove_attribute("data-visible");
+                    }
+                    return;
+                }
+            }
+            // Search / Go-to not mounted (matter home / stubs / review window): visible no-op.
             ev.prevent_default();
             show_ctrl_k_hint(&doc);
         }) as Box<dyn FnMut(_)>);
@@ -111,12 +121,22 @@ fn wrap_process() -> impl IntoView {
     }
 }
 
-fn wrap_review() -> impl IntoView {
+#[component]
+fn WrapReview() -> impl IntoView {
+    provide_context(QueueChromeCtx {
+        queue_range: RwSignal::new(None),
+        goto_request: RwSignal::new(None),
+        goto_miss: RwSignal::new(None),
+    });
     view! {
         <MatterShell tab=WorkspaceTab::Review>
             <ReviewQueue/>
         </MatterShell>
     }
+}
+
+fn wrap_review() -> impl IntoView {
+    view! { <WrapReview/> }
 }
 
 fn wrap_review_window() -> impl IntoView {
@@ -190,7 +210,7 @@ pub fn App() -> impl IntoView {
                 </a>
             </div>
             <div id="ctrl-k-hint" class="chord-hint app-chord-hint" role="status" aria-live="polite">
-                "Ctrl+K focuses matter search on the Matters list."
+                "Ctrl+K focuses matter search on the Matters list, or Go-to on the review queue."
             </div>
             <div
                 id="chrome-status"
@@ -219,5 +239,34 @@ pub fn App() -> impl IntoView {
                 </Router>
             </main>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ctrl_k_prefers_matter_search_then_queue_goto() {
+        let src = include_str!("app.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let search_at = prod
+            .find("get_element_by_id(\"matter-search\")")
+            .expect("matter-search");
+        let goto_at = prod
+            .find("get_element_by_id(\"queue-goto\")")
+            .expect("queue-goto");
+        assert!(search_at < goto_at, "matter-search must win when mounted");
+        let window_fn = prod
+            .split("fn wrap_review_window()")
+            .nth(1)
+            .expect("wrap_review_window");
+        let window_fn = window_fn
+            .split("fn wrap_produce()")
+            .next()
+            .unwrap_or(window_fn);
+        assert!(
+            !window_fn.contains("QueueChromeCtx"),
+            "review window must not provide queue chrome"
+        );
+        assert!(prod.contains("provide_context(QueueChromeCtx"));
     }
 }

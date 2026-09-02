@@ -191,7 +191,9 @@ fn event_to_frame_css(ev: &MouseEvent) -> Option<(f64, f64)> {
 fn event_to_raster(ev: &MouseEvent, raster_w: f64, raster_h: f64) -> Option<(f64, f64)> {
     let (_left, _top, dw, dh) = event_frame_rect(ev)?;
     let (css_x, css_y) = event_to_frame_css(ev)?;
-    Some(css_point_to_raster(css_x, css_y, dw, dh, raster_w, raster_h))
+    Some(css_point_to_raster(
+        css_x, css_y, dw, dh, raster_w, raster_h,
+    ))
 }
 
 fn clear_in_flight_draw(
@@ -297,8 +299,14 @@ mod overlay_scale_tests {
         let src = include_str!("review_window.rs");
         let offset_x = ["ev.offset", "_x"].concat();
         let offset_y = ["ev.offset", "_y"].concat();
-        assert!(!src.contains(&offset_x), "draw must not use MouseEvent.offsetX");
-        assert!(!src.contains(&offset_y), "draw must not use MouseEvent.offsetY");
+        assert!(
+            !src.contains(&offset_x),
+            "draw must not use MouseEvent.offsetX"
+        );
+        assert!(
+            !src.contains(&offset_y),
+            "draw must not use MouseEvent.offsetY"
+        );
         assert!(src.contains("get_bounding_client_rect"));
         assert!(src.contains("frame_css_point"));
         assert!(src.contains("on:mouseleave"));
@@ -308,7 +316,10 @@ mod overlay_scale_tests {
             src.contains("if pane.get() != \"image\""),
             "pane-leave clear must be its own Effect, not only the raster early-return"
         );
-        assert!(src.contains("if pw < 2.0 || ph < 2.0"), "keep 2 raster-px min-drag");
+        assert!(
+            src.contains("if pw < 2.0 || ph < 2.0"),
+            "keep 2 raster-px min-drag"
+        );
     }
 }
 

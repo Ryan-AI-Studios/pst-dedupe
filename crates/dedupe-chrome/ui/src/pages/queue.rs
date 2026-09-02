@@ -1,11 +1,16 @@
 //! First-pass virtualized review queue (track 0111).
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::sync::Once;
 
 use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_params_map};
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::{Event, HtmlElement, HtmlInputElement, KeyboardEvent, MouseEvent};
+
+use crate::shell::{QueueChromeCtx, QueueRange};
 
 use crate::invoke::{
     tauri_invoke, CodeCatalogEntry, QueueRow, ReviewApplyCodesArgs, ReviewCodesPreview,
@@ -39,12 +44,150 @@ fn control_number(order: Option<i64>) -> String {
     }
 }
 
-fn resp_display(resp: &Option<String>) -> String {
-    resp.clone().unwrap_or_else(|| "—".into())
+fn blank_field(value: Option<&str>) -> bool {
+    value.map(str::trim).filter(|s| !s.is_empty()).is_none()
 }
 
-fn format_date(d: &Option<String>) -> String {
-    d.as_deref().unwrap_or("—").to_string()
+/// Display From as stored (SMTP or X500). Do not parse `/O=` into a guessed SMTP.
+fn display_from(from_addr: Option<&str>) -> String {
+    from_addr
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("—")
+        .to_string()
+}
+
+fn display_or_dash(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("—")
+        .to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FamilyCells {
+    date: String,
+    from: String,
+    subject: String,
+}
+
+/// If the row is a child with empty date/from/subject, copy the parent when that
+/// parent is on this SQL page; otherwise the subject cell is `"— attachment"`.
+fn family_cell_text(
+    parent_item_id: Option<&str>,
+    date: Option<&str>,
+    from_addr: Option<&str>,
+    subject: Option<&str>,
+    parent: Option<(Option<&str>, Option<&str>, Option<&str>)>,
+) -> FamilyCells {
+    if parent_item_id.is_some()
+        && blank_field(date)
+        && blank_field(from_addr)
+        && blank_field(subject)
+    {
+        if let Some((parent_date, parent_from, parent_subject)) = parent {
+            return FamilyCells {
+                date: display_or_dash(parent_date),
+                from: display_from(parent_from),
+                subject: display_or_dash(parent_subject),
+            };
+        }
+        return FamilyCells {
+            date: "—".into(),
+            from: "—".into(),
+            subject: "— attachment".into(),
+        };
+    }
+    FamilyCells {
+        date: display_or_dash(date),
+        from: display_from(from_addr),
+        subject: display_or_dash(subject),
+    }
+}
+
+fn subject_contains_json(needle: &str, include_family: bool) -> String {
+    serde_json::json!({
+        "version": 1,
+        "scope": "review_corpus",
+        "include_family": include_family,
+        "conditions": [{
+            "field": "subject",
+            "op": "contains",
+            "value": needle,
+        }]
+    })
+    .to_string()
+}
+
+fn queue_title_text(chip: &str, total: u64, saved: &[SavedSearchDto]) -> String {
+    let name = match chip {
+        "unreviewed" => "Unreviewed",
+        "privileged" => "Privileged",
+        "responsive" => "Responsive",
+        "goto-subject" => "Subject",
+        other => saved
+            .iter()
+            .find(|s| s.id == other)
+            .map(|s| s.name.as_str())
+            .unwrap_or("Queue"),
+    };
+    format!("{name} {total} docs")
+}
+
+fn control_not_on_page(n: i64, meta: Option<(u64, u64, usize)>) -> String {
+    let span = match meta {
+        Some((offset, _total, fetched)) if fetched > 0 => {
+            let start = offset.saturating_add(1);
+            let end = offset.saturating_add(fetched as u64);
+            format!("Rows {start}–{end}")
+        }
+        Some((_, total, _)) => format!("Rows — of {total}"),
+        None => "Rows —".into(),
+    };
+    format!("Control# {n} not found in current page ({span})")
+}
+
+fn measure_queue_viewport(viewport_h: RwSignal<f64>) {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let Some(el) = doc.get_element_by_id("queue") else {
+        return;
+    };
+    let Ok(html) = el.dyn_into::<HtmlElement>() else {
+        return;
+    };
+    let height = html.client_height() as f64;
+    if height > 0.0 {
+        viewport_h.set(height);
+    }
+}
+
+fn install_queue_resize_once() {
+    static QUEUE_RESIZE_ONCE: Once = Once::new();
+    QUEUE_RESIZE_ONCE.call_once(|| {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let cb = Closure::<dyn FnMut()>::new(|| {
+            QUEUE_VIEWPORT_H.with(|cell| {
+                if let Some(vh) = cell.get() {
+                    measure_queue_viewport(vh);
+                }
+            });
+        });
+        let _ = window.add_event_listener_with_callback("resize", cb.as_ref().unchecked_ref());
+        cb.forget();
+    });
+}
+
+thread_local! {
+    static QUEUE_VIEWPORT_H: Cell<Option<RwSignal<f64>>> = const { Cell::new(None) };
+}
+
+fn resp_display(resp: &Option<String>) -> String {
+    resp.clone().unwrap_or_else(|| "—".into())
 }
 
 /// Checkbox is authoritative: always write `include_family` true or false.
@@ -168,7 +311,7 @@ pub fn ReviewQueue() -> impl IntoView {
     let selected = RwSignal::new(HashSet::<String>::new());
     let current_idx = RwSignal::new(0usize);
     let scroll_top = RwSignal::new(0.0f64);
-    let viewport_h = RwSignal::new(640.0f64);
+    let viewport_h = RwSignal::new(0.0f64);
     let last_fetch_meta = RwSignal::new(Option::<(u64, u64, usize)>::None);
 
     let reset_queue_navigation = move || {
@@ -333,10 +476,112 @@ pub fn ReviewQueue() -> impl IntoView {
         }
     });
 
+    let chrome = use_context::<QueueChromeCtx>();
+
+    Effect::new(move |_| {
+        let Some(ctx) = chrome else {
+            return;
+        };
+        ctx.queue_range.set(
+            last_fetch_meta
+                .get()
+                .map(|(offset, total, fetched)| QueueRange {
+                    offset,
+                    fetched,
+                    total,
+                }),
+        );
+    });
+
+    Effect::new(move |_| {
+        let Some(ctx) = chrome else {
+            return;
+        };
+        let Some(raw) = ctx.goto_request.get() else {
+            return;
+        };
+        ctx.goto_request.set(None);
+        let q = raw.trim().to_string();
+        if q.is_empty() {
+            return;
+        }
+        ctx.goto_miss.set(None);
+        if let Ok(n) = q.parse::<i64>() {
+            if let Some(p) = page.get() {
+                if let Some((idx, row)) = p
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .find(|(_, r)| r.review_order == Some(n))
+                {
+                    current_idx.set(idx);
+                    reveal_row(idx, scroll_top, viewport_h);
+                    let root = root_sig.get();
+                    let fj = filter_json.get();
+                    let fam = include_family.get();
+                    let kw = keyword.get();
+                    let fam_filter = with_include_family(&fj, fam).unwrap_or(fj);
+                    let href = review_doc_href(&root, &row.id, Some(&fam_filter), Some(&kw));
+                    navigate.with_value(|nav| {
+                        nav(&href, Default::default());
+                    });
+                    return;
+                }
+            }
+            ctx.goto_miss
+                .set(Some(control_not_on_page(n, last_fetch_meta.get())));
+            return;
+        }
+        active_chip.set("goto-subject".into());
+        filter_json.set(subject_contains_json(&q, include_family.get()));
+        keyword.set(String::new());
+        keyword_draft.set(String::new());
+        offset.set(0);
+        selected.set(HashSet::new());
+        current_idx.set(0);
+        scroll_top.set(0.0);
+        set_queue_dom_scroll_top(0.0);
+    });
+
+    on_cleanup(move || {
+        if let Some(ctx) = chrome {
+            ctx.queue_range.set(None);
+            ctx.goto_miss.set(None);
+        }
+    });
+
+    QUEUE_VIEWPORT_H.with(|cell| cell.set(Some(viewport_h)));
+    install_queue_resize_once();
+    on_cleanup(|| {
+        QUEUE_VIEWPORT_H.with(|cell| cell.set(None));
+    });
+
+    Effect::new(move |_| {
+        let _ = page.get();
+        measure_queue_viewport(viewport_h);
+        install_queue_resize_once();
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let cb = Closure::once(Box::new(move || {
+            measure_queue_viewport(viewport_h);
+        }) as Box<dyn FnOnce()>);
+        let _ = window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), 0);
+        cb.forget();
+    });
+
     view! {
         <section
             class="queue-page"
             tabindex="-1"
+            attr:aria-label=move || {
+                queue_title_text(
+                    &active_chip.get(),
+                    page.get().map(|p| p.total).unwrap_or(0),
+                    &saved.get(),
+                )
+            }
             on:keydown=move |ev: KeyboardEvent| {
                 if field_focused.get() || queue_shortcut_blocked(&ev) {
                     // Esc is exempt from the focus gate: close overlays and clear bulk selection.
@@ -449,83 +694,159 @@ pub fn ReviewQueue() -> impl IntoView {
                 }
             }
         >
-            <h1>"Review"</h1>
-
-            <div class="filter-bar">
-                <div class="chip-row" role="toolbar" aria-label="Queue filters">
-                    <button
-                        class=move || if active_chip.get() == "unreviewed" { "chip-btn active" } else { "chip-btn" }
-                        on:click=move |_| {
-                            active_chip.set("unreviewed".into());
-                            filter_json.set(preset_uncoded_json());
-                            include_family.set(false);
-                            offset.set(0);
-                            selected.set(HashSet::new());
-                            reset_queue_navigation();
-                        }
-                    >"Unreviewed"</button>
-                    <button
-                        class=move || if active_chip.get() == "privileged" { "chip-btn active" } else { "chip-btn" }
-                        on:click=move |_| {
-                            active_chip.set("privileged".into());
-                            filter_json.set(preset_privilege_json());
-                            include_family.set(false);
-                            offset.set(0);
-                            selected.set(HashSet::new());
-                            reset_queue_navigation();
-                        }
-                    >"Privileged"</button>
-                    <button
-                        class=move || if active_chip.get() == "responsive" { "chip-btn active" } else { "chip-btn" }
-                        on:click=move |_| {
-                            active_chip.set("responsive".into());
-                            filter_json.set(preset_responsive_json());
-                            include_family.set(false);
-                            offset.set(0);
-                            selected.set(HashSet::new());
-                            reset_queue_navigation();
-                        }
-                    >"Responsive"</button>
-                    <For
-                        each=move || saved.get()
-                        key=|s| s.id.clone()
-                        children=move |s| {
-                            let name = s.name.clone();
-                            let fj = s.filter_json.clone();
-                            let kw = s.keyword.clone().unwrap_or_default();
-                            let sid = s.id.clone();
-                            let sid_class = sid.clone();
-                            let sid_label = sid.clone();
-                            view! {
-                                <button
-                                    class=move || if active_chip.get() == sid_class { "chip-btn active" } else { "chip-btn" }
-                                    on:click={
-                                        let fj = fj.clone();
-                                        let kw = kw.clone();
-                                        let sid = sid.clone();
-                                        move |_| {
-                                            active_chip.set(sid.clone());
-                                            include_family.set(read_include_family(&fj));
-                                            filter_json.set(fj.clone());
-                                            keyword.set(kw.clone());
-                                            keyword_draft.set(kw.clone());
-                                            offset.set(0);
-                                            selected.set(HashSet::new());
-                                            reset_queue_navigation();
-                                        }
-                                    }
-                                >{
-                                    move || {
-                                        match saved_totals.get().get(&sid_label) {
-                                            Some(t) => format!("{name} ({t})"),
-                                            None => name.clone(),
-                                        }
-                                    }
-                                }</button>
+            <div class="queue-layout">
+                <nav class="queue-rail" aria-label="Queues">
+                    <div class="queue-rail-list" role="toolbar" aria-label="Queue filters">
+                        <button
+                            class=move || if active_chip.get() == "unreviewed" { "chip-btn active" } else { "chip-btn" }
+                            on:click=move |_| {
+                                active_chip.set("unreviewed".into());
+                                filter_json.set(preset_uncoded_json());
+                                include_family.set(false);
+                                offset.set(0);
+                                selected.set(HashSet::new());
+                                reset_queue_navigation();
                             }
-                        }
-                    />
-                </div>
+                        >
+                            <span>"Unreviewed"</span>
+                            <span>
+                                {move || {
+                                    if active_chip.get() == "unreviewed" {
+                                        page.get().map(|p| p.total.to_string()).unwrap_or_default()
+                                    } else {
+                                        String::new()
+                                    }
+                                }}
+                            </span>
+                        </button>
+                        <button
+                            class=move || if active_chip.get() == "privileged" { "chip-btn active" } else { "chip-btn" }
+                            on:click=move |_| {
+                                active_chip.set("privileged".into());
+                                filter_json.set(preset_privilege_json());
+                                include_family.set(false);
+                                offset.set(0);
+                                selected.set(HashSet::new());
+                                reset_queue_navigation();
+                            }
+                        >
+                            <span>"Privileged"</span>
+                            <span>
+                                {move || {
+                                    if active_chip.get() == "privileged" {
+                                        page.get().map(|p| p.total.to_string()).unwrap_or_default()
+                                    } else {
+                                        String::new()
+                                    }
+                                }}
+                            </span>
+                        </button>
+                        <button
+                            class=move || if active_chip.get() == "responsive" { "chip-btn active" } else { "chip-btn" }
+                            on:click=move |_| {
+                                active_chip.set("responsive".into());
+                                filter_json.set(preset_responsive_json());
+                                include_family.set(false);
+                                offset.set(0);
+                                selected.set(HashSet::new());
+                                reset_queue_navigation();
+                            }
+                        >
+                            <span>"Responsive"</span>
+                            <span>
+                                {move || {
+                                    if active_chip.get() == "responsive" {
+                                        page.get().map(|p| p.total.to_string()).unwrap_or_default()
+                                    } else {
+                                        String::new()
+                                    }
+                                }}
+                            </span>
+                        </button>
+                    </div>
+                    <div class="queue-rail-heading">"Saved searches"</div>
+                    <div class="queue-rail-list">
+                        <For
+                            each=move || saved.get()
+                            key=|s| s.id.clone()
+                            children=move |s| {
+                                let name = s.name.clone();
+                                let fj = s.filter_json.clone();
+                                let kw = s.keyword.clone().unwrap_or_default();
+                                let sid = s.id.clone();
+                                let sid_class = sid.clone();
+                                let sid_label = sid.clone();
+                                view! {
+                                    <button
+                                        class=move || if active_chip.get() == sid_class { "chip-btn active" } else { "chip-btn" }
+                                        on:click={
+                                            let fj = fj.clone();
+                                            let kw = kw.clone();
+                                            let sid = sid.clone();
+                                            move |_| {
+                                                active_chip.set(sid.clone());
+                                                include_family.set(read_include_family(&fj));
+                                                filter_json.set(fj.clone());
+                                                keyword.set(kw.clone());
+                                                keyword_draft.set(kw.clone());
+                                                offset.set(0);
+                                                selected.set(HashSet::new());
+                                                reset_queue_navigation();
+                                            }
+                                        }
+                                    >
+                                        <span>{name.clone()}</span>
+                                        <span>
+                                            {move || {
+                                                saved_totals
+                                                    .get()
+                                                    .get(&sid_label)
+                                                    .map(|t| t.to_string())
+                                                    .unwrap_or_default()
+                                            }}
+                                        </span>
+                                    </button>
+                                }
+                            }
+                        />
+                    </div>
+                    <div class="queue-rail-heading">"Later · no filter yet"</div>
+                    <div
+                        class="queue-rail-inert"
+                        title="no filter yet"
+                        aria-disabled="true"
+                    >
+                        <span>"Needs decision"</span>
+                        <span>"0"</span>
+                    </div>
+                    <div
+                        class="queue-rail-inert"
+                        title="no filter yet"
+                        aria-disabled="true"
+                    >
+                        <span>"Redaction QC"</span>
+                        <span>"0"</span>
+                    </div>
+                    <div
+                        class="queue-rail-inert"
+                        title="no filter yet"
+                        aria-disabled="true"
+                    >
+                        <span>"Consistency"</span>
+                        <span>"0"</span>
+                    </div>
+                </nav>
+                <div class="queue-main">
+            <div class="queue-toolbar">
+                <h1>
+                    {move || {
+                        queue_title_text(
+                            &active_chip.get(),
+                            page.get().map(|p| p.total).unwrap_or(0),
+                            &saved.get(),
+                        )
+                    }}
+                </h1>
                 <div class="filter-controls">
                     <input
                         id="queue-keyword"
@@ -622,7 +943,7 @@ pub fn ReviewQueue() -> impl IntoView {
                                 Err(e) => save_error.set(Some(format!("Save failed: {e}"))),
                             }
                         });
-                    }>"Save"</button>
+                    }>"Save search"</button>
                 </div>
                 <Show when=move || save_error.get().is_some()>
                     <p class="error">{move || save_error.get().unwrap_or_default()}</p>
@@ -636,8 +957,22 @@ pub fn ReviewQueue() -> impl IntoView {
                 <p class="empty">"Loading…"</p>
             </Show>
 
-            <Show when=move || !selected.get().is_empty()>
-                <div class="bulk-bar" role="region" aria-label="Bulk tag">
+            <div class="bulk-bar" role="region" aria-label="Bulk tag">
+                <button
+                    on:click=move |_| {
+                        if let Some(p) = page.get() {
+                            selected.set(p.rows.iter().map(|r| r.id.clone()).collect());
+                        }
+                    }
+                >
+                    {move || {
+                        format!(
+                            "Select page ({})",
+                            page.get().map(|p| p.rows.len()).unwrap_or(0)
+                        )
+                    }}
+                </button>
+                <Show when=move || !selected.get().is_empty()>
                     <span>{move || format!("{} selected", selected.get().len())}</span>
                     <button on:click=move |_| tag_open.update(|v| *v = !*v)>"Tag…"</button>
                     <Show when=move || tag_open.get()>
@@ -688,8 +1023,8 @@ pub fn ReviewQueue() -> impl IntoView {
                     <Show when=move || bulk_error.get().is_some()>
                         <p class="error">{move || bulk_error.get().unwrap_or_default()}</p>
                     </Show>
-                </div>
-            </Show>
+                </Show>
+            </div>
 
             <Show when=move || confirm_priv.get().is_some()>
                 {move || confirm_priv.get().map(|(code_id, n)| {
@@ -721,6 +1056,7 @@ pub fn ReviewQueue() -> impl IntoView {
                         <li>"Enter / Shift+↓ — open review window"</li>
                         <li>"Space — toggle checkbox"</li>
                         <li>"/ — focus keyword"</li>
+                        <li>"Ctrl+K — focus Go-to (Control# or subject)"</li>
                         <li>"? — this overlay"</li>
                         <li>"Esc — close overlay / clear selection"</li>
                         <li>"1 2 3 p r [ ] — coding shortcuts land in the review window (0112)"</li>
@@ -829,6 +1165,19 @@ pub fn ReviewQueue() -> impl IntoView {
                                     let cur = current_idx.get();
                                     let sel = selected.get();
                                     let top_pad = start as f64 * ROW_HEIGHT;
+                                    let parent_fields: HashMap<
+                                        String,
+                                        (Option<String>, Option<String>, Option<String>),
+                                    > = p
+                                        .rows
+                                        .iter()
+                                        .map(|r| {
+                                            (
+                                                r.id.clone(),
+                                                (r.date.clone(), r.from_addr.clone(), r.subject.clone()),
+                                            )
+                                        })
+                                        .collect();
                                     let visible: Vec<(usize, QueueRow)> = p.rows[start..end]
                                         .iter()
                                         .cloned()
@@ -855,11 +1204,27 @@ pub fn ReviewQueue() -> impl IntoView {
                                                 let priv_coded = row.privilege_coded;
                                                 let withhold = row.withhold;
                                                 let conf = row.confidential.unwrap_or(false);
-                                                let from = row.from_addr.clone().unwrap_or_else(|| "—".into());
-                                                let subject = row.subject.clone().unwrap_or_else(|| "—".into());
-                                                let custodian = row.custodian.clone().unwrap_or_else(|| "—".into());
+                                                let parent = row.parent_item_id.as_ref().and_then(|pid| {
+                                                    parent_fields.get(pid).map(|(d, f, s)| {
+                                                        (d.as_deref(), f.as_deref(), s.as_deref())
+                                                    })
+                                                });
+                                                let cells = family_cell_text(
+                                                    row.parent_item_id.as_deref(),
+                                                    row.date.as_deref(),
+                                                    row.from_addr.as_deref(),
+                                                    row.subject.as_deref(),
+                                                    parent,
+                                                );
+                                                let from = cells.from.clone();
+                                                let from_title = from.clone();
+                                                let subject = cells.subject.clone();
+                                                let subject_title = subject.clone();
+                                                let date = cells.date;
+                                                let custodian =
+                                                    row.custodian.clone().unwrap_or_else(|| "—".into());
+                                                let custodian_title = custodian.clone();
                                                 let ctrl = control_number(row.review_order);
-                                                let date = format_date(&row.date);
                                                 let fam = row.family_size.to_string();
                                                 let resp = resp_display(&row.resp);
                                                 view! {
@@ -909,11 +1274,16 @@ pub fn ReviewQueue() -> impl IntoView {
                                                         </span>
                                                         <span role="gridcell" title=tip>{ctrl}</span>
                                                         <span role="gridcell">{date}</span>
-                                                        <span role="gridcell">{from}</span>
+                                                        <span role="gridcell" title=from_title>
+                                                            {from}
+                                                        </span>
                                                         <span
                                                             role="gridcell"
                                                             class=if indent { "subject indented" } else { "subject" }
-                                                        >{subject}</span>
+                                                            title=subject_title
+                                                        >
+                                                            {subject}
+                                                        </span>
                                                         <span role="gridcell">{fam}</span>
                                                         <span role="gridcell">{resp}</span>
                                                         <span role="gridcell">
@@ -924,7 +1294,9 @@ pub fn ReviewQueue() -> impl IntoView {
                                                             }}
                                                         </span>
                                                         <Show when=move || show_extras>
-                                                            <span role="gridcell">{custodian.clone()}</span>
+                                                            <span role="gridcell" title=custodian_title.clone()>
+                                                                {custodian.clone()}
+                                                            </span>
                                                             <span role="gridcell">
                                                                 {if withhold {
                                                                     view! { <span class="priv-pill">"WITHHOLD"</span> }.into_any()
@@ -957,6 +1329,133 @@ pub fn ReviewQueue() -> impl IntoView {
                     }
                 }}
             </div>
+                </div>
+            </div>
         </section>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_from_keeps_smtp_and_x500() {
+        assert_eq!(display_from(None), "—");
+        assert_eq!(display_from(Some("")), "—");
+        assert_eq!(display_from(Some("  ")), "—");
+        assert_eq!(display_from(Some("ada@example.com")), "ada@example.com");
+        assert_eq!(
+            display_from(Some(
+                "/O=EXCH/OU=FIRST ADMINISTRATIVE GROUP/CN=RECIPIENTS/CN=ADA"
+            )),
+            "/O=EXCH/OU=FIRST ADMINISTRATIVE GROUP/CN=RECIPIENTS/CN=ADA"
+        );
+    }
+
+    #[test]
+    fn family_cell_text_copies_parent_or_attachment() {
+        let own = family_cell_text(None, Some("2020-01-01"), Some("a@b.c"), Some("Hello"), None);
+        assert_eq!(own.subject, "Hello");
+        assert_eq!(own.from, "a@b.c");
+
+        let missing_parent = family_cell_text(Some("parent"), None, None, None, None);
+        assert_eq!(missing_parent.subject, "— attachment");
+        assert_eq!(missing_parent.from, "—");
+
+        let copied = family_cell_text(
+            Some("parent"),
+            None,
+            None,
+            None,
+            Some((Some("2020-01-01"), Some("ada@ex.com"), Some("Parent subj"))),
+        );
+        assert_eq!(copied.date, "2020-01-01");
+        assert_eq!(copied.from, "ada@ex.com");
+        assert_eq!(copied.subject, "Parent subj");
+
+        let not_blank = family_cell_text(
+            Some("parent"),
+            None,
+            None,
+            Some("Child subject"),
+            Some((Some("2020-01-01"), Some("ada@ex.com"), Some("Parent subj"))),
+        );
+        assert_eq!(not_blank.subject, "Child subject");
+    }
+
+    #[test]
+    fn subject_contains_json_uses_existing_filterspec_shape() {
+        let json = subject_contains_json("invoice \"Q1\"", true);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(v["version"], 1);
+        assert_eq!(v["scope"], "review_corpus");
+        assert_eq!(v["include_family"], true);
+        assert_eq!(v["conditions"][0]["field"], "subject");
+        assert_eq!(v["conditions"][0]["op"], "contains");
+        assert_eq!(v["conditions"][0]["value"], "invoice \"Q1\"");
+    }
+
+    #[test]
+    fn queue_title_and_goto_miss_copy() {
+        assert_eq!(
+            queue_title_text("unreviewed", 12, &[]),
+            "Unreviewed 12 docs"
+        );
+        assert_eq!(
+            control_not_on_page(850, Some((0, 1200, 500))),
+            "Control# 850 not found in current page (Rows 1–500)"
+        );
+        assert_eq!(
+            control_not_on_page(12, None),
+            "Control# 12 not found in current page (Rows —)"
+        );
+    }
+
+    #[test]
+    fn css_queue_cells_ellipsis_and_rail() {
+        let css = include_str!("../../styles/app.css");
+        assert!(css.contains("grid-template-columns: 244px 1fr"));
+        let cell_block = css
+            .split(".queue-header [role=\"columnheader\"]")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or("");
+        assert!(
+            cell_block.contains(".queue-row [role=\"gridcell\"]"),
+            "ellipsis lock must target queue gridcells, not a later rule"
+        );
+        assert!(cell_block.contains("min-width: 0"));
+        assert!(cell_block.contains("overflow: hidden"));
+        assert!(cell_block.contains("text-overflow: ellipsis"));
+        assert!(cell_block.contains("white-space: nowrap"));
+        assert!(css.contains("minmax(0, 32px)"));
+        assert!(css.contains(
+            "minmax(0, 32px) minmax(0, 72px) minmax(0, 110px) minmax(0, 140px) minmax(0, 1fr) minmax(0, 56px) minmax(0, 48px) minmax(0, 72px);"
+        ));
+        assert!(css.contains(
+            "minmax(0, 32px) minmax(0, 72px) minmax(0, 110px) minmax(0, 140px) minmax(0, 1fr) minmax(0, 56px) minmax(0, 48px) minmax(0, 72px) minmax(0, 100px) minmax(0, 80px) minmax(0, 40px) minmax(0, 72px)"
+        ));
+        assert!(
+            !css.contains("height: 640px"),
+            "flex pane must not keep a magic 640px height"
+        );
+        assert!(!css.contains("Archivo"));
+        assert!(!css.contains("#ec3013"));
+    }
+
+    #[test]
+    fn control_number_is_review_order() {
+        assert_eq!(control_number(Some(42)), "42");
+        assert_eq!(control_number(None), "—");
+        let src = include_str!("queue.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(prod.contains("title=tip"));
+        assert!(prod.contains("title=from_title"));
+        assert!(prod.contains("title=subject_title"));
+        assert!(prod.contains("Select page ("));
+        assert!(prod.contains("id=\"queue-keyword\""));
+        assert!(prod.contains("Save search"));
+        assert!(!prod.contains("ACME0001"));
     }
 }
