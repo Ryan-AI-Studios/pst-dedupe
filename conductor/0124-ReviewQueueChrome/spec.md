@@ -11,7 +11,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes first-pass queue. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-09-01); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is **layout research only** (244px rail, nowrap cells). Do not port Archivo, coral, REDACT/WITHHOLD privilege pills, or fake `ACME0001` Control#.
-- **Status:** In progress
+- **Status:** Completed
 - **Depends on:** **0111 / 0117 Completed** · **0123 Completed** (PR **#139** / `fce416e`) · schema **v41** (no bump)
 - **Spec authored:** 2026-09-01 (placeholder → Ready)
 - **Series:** T (mockup chrome fidelity)
