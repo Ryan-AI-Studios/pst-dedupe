@@ -328,6 +328,16 @@ pub struct ProductionProfileThin {
     pub include_images: bool,
     #[serde(default)]
     pub bates_mode: String,
+    #[serde(default)]
+    pub pad_width: u32,
+    #[serde(default)]
+    pub layout_data: String,
+    #[serde(default)]
+    pub layout_natives: String,
+    #[serde(default)]
+    pub layout_text: String,
+    #[serde(default)]
+    pub layout_images: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
@@ -379,6 +389,12 @@ pub struct ProducePageResponse {
     pub unmapped_text: u64,
     #[serde(default)]
     pub ordered_ids: Vec<String>,
+    #[serde(default)]
+    pub protocol_log_format: String,
+    #[serde(default)]
+    pub protocol_fre_502d_note: Option<String>,
+    #[serde(default)]
+    pub protocol_fre_502e_note: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

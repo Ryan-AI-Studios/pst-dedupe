@@ -1,4 +1,4 @@
-﻿//! Chrome produce checklist (track 0113): QC + DAT-only produce.
+//! Chrome produce checklist (track 0113): QC + DAT-only produce.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -31,6 +31,11 @@ pub struct ProductionProfileThin {
     pub qc_pack_id: String,
     pub include_images: bool,
     pub bates_mode: String,
+    pub pad_width: u32,
+    pub layout_data: String,
+    pub layout_natives: String,
+    pub layout_text: String,
+    pub layout_images: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -78,6 +83,9 @@ pub struct ProducePageResponse {
     pub burned_fresh: u64,
     pub unmapped_text: u64,
     pub ordered_ids: Vec<String>,
+    pub protocol_log_format: String,
+    pub protocol_fre_502d_note: Option<String>,
+    pub protocol_fre_502e_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -754,8 +762,14 @@ pub fn produce_page_blocking(root: &str) -> Result<ProducePageResponse, CommandE
             qc_pack_id: matter_core::normalize_qc_pack_id(&p.body.qc.pack_id),
             include_images: p.body.packaging.include_images,
             bates_mode: p.body.bates.mode.clone(),
+            pad_width: p.body.bates.pad_width,
+            layout_data: p.body.layout.data.clone(),
+            layout_natives: p.body.layout.natives.clone(),
+            layout_text: p.body.layout.text.clone(),
+            layout_images: p.body.layout.images.clone(),
         })
         .collect();
+    let protocol = matter.get_privilege_protocol().map_err(map_core)?;
     let (need_burn, burned_fresh, unmapped_text) =
         crate::raster::burn_counts_for_ids(&matter, &ordered)?;
     Ok(ProducePageResponse {
@@ -771,6 +785,9 @@ pub fn produce_page_blocking(root: &str) -> Result<ProducePageResponse, CommandE
         burned_fresh,
         unmapped_text,
         ordered_ids: ordered,
+        protocol_log_format: protocol.log_format,
+        protocol_fre_502d_note: protocol.fre_502d_note,
+        protocol_fre_502e_note: protocol.fre_502e_note,
     })
 }
 
@@ -1365,6 +1382,24 @@ mod tests {
         assert_eq!(
             page.default_count, 3,
             "include_family pulls withheld child into the default set"
+        );
+        assert!(
+            page.profiles
+                .iter()
+                .all(|p| p.pad_width >= 1 && p.pad_width <= 12),
+            "pad_width comes from profile body, not a display resolve"
+        );
+        assert!(
+            page.profiles.iter().any(|p| {
+                p.slug == DEFAULT_PROFILE
+                    && p.layout_natives == "NATIVES"
+                    && p.layout_data == "DATA"
+            }),
+            "layout folders come from profile body"
+        );
+        assert!(
+            !page.protocol_log_format.is_empty(),
+            "protocol fields are additive on produce_page"
         );
         let spec: FilterSpec = serde_json::from_str(&page.default_filter_json).expect("json");
         assert!(spec.include_family);

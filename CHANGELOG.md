@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0125 — Produce canvas)
+
+- Produce is one canvas: all five steps stay visible, protocol notes render **none on file** when empty, and Finalize lives in a 320px Stage pane. QC does not auto-run; Stage snapshot stays disabled. 0119 Finalize latch and privilege-in-set are unchanged.
+
 ### Added (0124 — Review queue chrome)
 
 - First-pass queue cells ellipsis instead of painting on Fam/Resp/PRIV. A 244px rail holds Unreviewed / Privileged / Responsive and saved searches. Go-to sits in the TopBar right slot; StatusBar left shows the SQL-page row range. Select page tags only the current page.

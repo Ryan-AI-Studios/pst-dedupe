@@ -12,6 +12,9 @@ use crate::invoke::{
     ProduceStart, ProduceStartArgs, ProductionSetThin, RootArgs, WarningOverride,
 };
 use crate::path_id::review_doc_href;
+use crate::shell::ProduceChromeCtx;
+
+const QC_NOT_YET_RUN: &str = "QC not yet run — click Re-run QC";
 
 fn override_key(rule_id: &str, item_id: Option<&str>) -> String {
     match item_id.map(str::trim).filter(|s| !s.is_empty()) {
@@ -107,8 +110,10 @@ fn patch_qc_burn_counts(
 mod process_job_succeeded_tests {
     use super::{
         bates_start_from_next_seq_hint, finalize_blocked_by_volume_latch, patch_qc_burn_counts,
-        privilege_log_post_step_banner, process_job_succeeded, volume_latch_after_produce_terminal,
-        wait_root_is_current, ChromeQcFinding, JobProgressSnapshot, ProduceQcRun,
+        privilege_log_post_step_banner, process_job_succeeded, projected_last_doc_bates,
+        protocol_note_display, protocol_log_format_radio, volume_latch_after_produce_terminal, wait_root_is_current,
+        ChromeQcFinding, JobProgressSnapshot, ProduceQcRun, DAT_ONLY_PROFILE, export_path_list,
+        layout_seg,
     };
 
     #[test]
@@ -241,6 +246,84 @@ mod process_job_succeeded_tests {
         assert!(src.contains("r.burned_fresh"));
         assert!(src.contains("r.unmapped_text"));
     }
+
+    #[test]
+    fn empty_protocol_notes_are_none_on_file() {
+        assert_eq!(protocol_note_display(None), "none on file");
+        assert_eq!(protocol_note_display(Some("")), "none on file");
+        assert_eq!(protocol_note_display(Some("   ")), "none on file");
+        assert_eq!(protocol_note_display(Some("Order Dkt. 42")), "Order Dkt. 42");
+        assert_eq!(
+            protocol_log_format_radio("automated_metadata"),
+            "automated_metadata"
+        );
+        assert_eq!(protocol_log_format_radio(""), "standard");
+        assert_eq!(protocol_log_format_radio("  STANDARD  "), "standard");
+    }
+
+    #[test]
+    fn projected_last_omits_unknown_counts() {
+        assert_eq!(projected_last_doc_bates("ACME", 10, 0, 6), None);
+        assert_eq!(
+            projected_last_doc_bates("PROD", 1, 3, 6).as_deref(),
+            Some("PROD000003")
+        );
+    }
+
+    #[test]
+    fn export_paths_use_profile_layout_or_defaults() {
+        assert_eq!(layout_seg("", "NATIVES"), "NATIVES");
+        assert_eq!(layout_seg("  DOCS  ", "NATIVES"), "DOCS");
+        assert!(export_path_list(&None, DAT_ONLY_PROFILE)
+            .contains("NATIVES/ · TEXT/ · DATA/load.dat · privilege-log.csv"));
+        assert!(!export_path_list(&None, DAT_ONLY_PROFILE).contains("IMAGE.opt"));
+    }
+
+    #[test]
+    fn produce_canvas_unwizard_and_stage_locks() {
+        let src = include_str!("produce.rs");
+        let start = src
+            .rfind("pub fn ProducePage() -> impl IntoView {")
+            .expect("ProducePage fn");
+        let page = &src[start..];
+        assert!(
+            !page.contains("Show when=move || step.get() == 1"),
+            "step bodies must not be exclusive Show when=step==N"
+        );
+        assert!(!page.contains("Show when=move || step.get() == 2"));
+        assert!(!page.contains("Show when=move || step.get() == 3"));
+        assert!(!page.contains("Show when=move || step.get() == 4"));
+        assert!(!page.contains("Show when=move || step.get() == 5"));
+        assert!(
+            !page.contains("if qc.get().is_none() && !qc_busy.get()"),
+            "step-5 tab must not auto-run QC"
+        );
+        assert!(page.contains("id=\"step-1-set\""));
+        assert!(page.contains("id=\"step-2-number\""));
+        assert!(page.contains("id=\"step-3-format\""));
+        assert!(page.contains("id=\"step-4-burn\""));
+        assert!(page.contains("id=\"step-5-preflight\""));
+        assert!(page.contains("class=\"produce-stage\""));
+        assert!(src.contains("QC not yet run — click Re-run QC"));
+        assert!(page.contains("if start_busy.get() || qc_busy.get()"));
+        assert!(src.contains("bates_start.set(String::new())"));
+        assert!(src.contains("none on file"));
+        assert!(page.contains("Finalize production"));
+        assert!(page.contains("not this track"));
+        assert!(page.contains("log_format.set(protocol_log_format_radio"));
+        assert!(src.contains("layout_natives"));
+        assert!(src.contains("pad_width"));
+        let step_panels = page.matches("class=\"produce-step\"").count();
+        assert!(
+            step_panels >= 5,
+            "five step panels must stay visible, found {step_panels}"
+        );
+        let css = include_str!("../../styles/app.css");
+        assert!(
+            css.contains("236px minmax(0, 1fr) 320px"),
+            "produce layout must be three panes"
+        );
+    }
 }
 
 fn is_busy_err(e: &str) -> bool {
@@ -260,13 +343,118 @@ fn selected_profile_flags(page: &Option<ProducePageResponse>, slug: &str) -> (bo
     (p.include_images, p.bates_mode.eq_ignore_ascii_case("page"))
 }
 
+fn protocol_log_format_radio(value: &str) -> String {
+    match value.trim() {
+        "automated_metadata" => "automated_metadata".into(),
+        _ => "standard".into(),
+    }
+}
+
+fn protocol_note_display(note: Option<&str>) -> String {
+    match note.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => s.to_string(),
+        None => "none on file".into(),
+    }
+}
+
+fn format_bates(prefix: &str, seq: u64, pad: u32) -> String {
+    let w = pad.clamp(1, 12) as usize;
+    format!("{prefix}{seq:0width$}", width = w)
+}
+
+fn layout_seg(value: &str, fallback: &str) -> String {
+    let t = value.trim();
+    if t.is_empty() {
+        fallback.to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+fn export_path_list(page: &Option<ProducePageResponse>, slug: &str) -> String {
+    let p = page
+        .as_ref()
+        .and_then(|pg| pg.profiles.iter().find(|x| x.slug == slug));
+    let natives = p
+        .map(|x| layout_seg(&x.layout_natives, "NATIVES"))
+        .unwrap_or_else(|| "NATIVES".into());
+    let text = p
+        .map(|x| layout_seg(&x.layout_text, "TEXT"))
+        .unwrap_or_else(|| "TEXT".into());
+    let data = p
+        .map(|x| layout_seg(&x.layout_data, "DATA"))
+        .unwrap_or_else(|| "DATA".into());
+    let images = p
+        .map(|x| layout_seg(&x.layout_images, "IMAGES"))
+        .unwrap_or_else(|| "IMAGES".into());
+    let include_images = p.map(|x| x.include_images).unwrap_or(false);
+    if include_images {
+        format!("{natives}/ · {text}/ · {data}/load.dat · privilege-log.csv · {images}/ · IMAGE.opt")
+    } else {
+        format!("{natives}/ · {text}/ · {data}/load.dat · privilege-log.csv")
+    }
+}
+
+fn selected_pad_width(page: &Option<ProducePageResponse>, slug: &str) -> u32 {
+    page.as_ref()
+        .and_then(|pg| pg.profiles.iter().find(|x| x.slug == slug))
+        .map(|p| p.pad_width)
+        .filter(|w| *w >= 1)
+        .unwrap_or(6)
+}
+
+fn live_next_seq(page: &ProducePageResponse, prefix: &str) -> Option<u64> {
+    page.sets
+        .iter()
+        .find(|s| s.bates_prefix == prefix)
+        .map(|s| s.next_seq)
+        .or_else(|| {
+            if prefix == page.bates_prefix {
+                page.next_seq_hint
+            } else {
+                None
+            }
+        })
+}
+
+fn projected_last_doc_bates(prefix: &str, start: u64, n: u64, pad: u32) -> Option<String> {
+    if n == 0 || start < 1 {
+        None
+    } else {
+        Some(format_bates(
+            prefix,
+            start.saturating_add(n.saturating_sub(1)),
+            pad,
+        ))
+    }
+}
+
+fn withheld_stage_display(qc: &Option<ProduceQcRun>) -> String {
+    let Some(r) = qc else {
+        return "—".into();
+    };
+    let n = r
+        .findings
+        .iter()
+        .filter(|f| f.rule_id.contains("withheld"))
+        .count()
+        + r.extras
+            .iter()
+            .filter(|e| e.kind.contains("withheld"))
+            .count();
+    if n == 0 {
+        "—".into()
+    } else {
+        n.to_string()
+    }
+}
+
 #[component]
 pub fn ProducePage() -> impl IntoView {
     let params = use_params_map();
     let root_sig = RwSignal::new(String::new());
     let error = RwSignal::new(Option::<String>::None);
     let page = RwSignal::new(Option::<ProducePageResponse>::None);
-    let step = RwSignal::new(1u8);
     let entire_corpus = RwSignal::new(false);
     let prefix = RwSignal::new("PROD".to_string());
     let bates_start = RwSignal::new(String::new());
@@ -280,6 +468,7 @@ pub fn ProducePage() -> impl IntoView {
     let overrides = RwSignal::new(HashMap::<String, (String, String)>::new());
     let busy_banner = RwSignal::new(Option::<String>::None);
     let last_root = RwSignal::new(String::new());
+    let chrome = use_context::<ProduceChromeCtx>();
 
     Effect::new(move |_| {
         let root = params.with(|p| p.get("id").unwrap_or_default());
@@ -295,7 +484,6 @@ pub fn ProducePage() -> impl IntoView {
             overrides.set(HashMap::new());
             start_result.set(None);
             volume_succeeded.set(false);
-            step.set(1);
             entire_corpus.set(false);
             bates_start.set(String::new());
             busy_banner.set(None);
@@ -314,6 +502,7 @@ pub fn ProducePage() -> impl IntoView {
                         return;
                     }
                     prefix.set(resp.bates_prefix.clone());
+                    log_format.set(protocol_log_format_radio(&resp.protocol_log_format));
                     if let Some(first) = resp.profiles.first() {
                         profile.set(first.slug.clone());
                     }
@@ -581,6 +770,38 @@ pub fn ProducePage() -> impl IntoView {
         });
     };
 
+    Effect::new(move |_| {
+        let Some(ctx) = chrome else {
+            return;
+        };
+        let pref = prefix.get();
+        let start = bates_start.get();
+        ctx.right_label.set(if start.trim().is_empty() {
+            format!("Draft · {pref}")
+        } else {
+            format!("{pref} {start}")
+        });
+        ctx.status_left.set(match qc.get() {
+            None => QC_NOT_YET_RUN.to_string(),
+            Some(r) => format!("{} docs in QC set", r.ordered_ids.len()),
+        });
+    });
+
+    let new_draft = move |_| {
+        if start_busy.get() || qc_busy.get() {
+            return;
+        }
+        qc.set(None);
+        overrides.set(HashMap::new());
+        start_result.set(None);
+        volume_succeeded.set(false);
+        bates_start.set(String::new());
+        profile.set(DAT_ONLY_PROFILE.to_string());
+        entire_corpus.set(false);
+        error.set(None);
+        busy_banner.set(None);
+    };
+
     view! {
         <section class="produce-page">
             <h1>"Produce"</h1>
@@ -599,13 +820,19 @@ pub fn ProducePage() -> impl IntoView {
                 {move || page.get().map(|pg| {
                     let count = pg.default_count;
                     let produced = pg.produced_count;
-                    let hint = pg.next_seq_hint;
                     let gate = pg.qc_gate.clone();
+                    let protocol_log = pg.protocol_log_format.clone();
+                    let protocol_d = protocol_note_display(pg.protocol_fre_502d_note.as_deref());
+                    let protocol_e = protocol_note_display(pg.protocol_fre_502e_note.as_deref());
                     view! {
                         <div class="produce-layout">
                             <aside class="produce-sets">
                                 <h2>"Production sets"</h2>
                                 <p class="empty">{format!("{produced} produced item(s)")}</p>
+                                <button
+                                    on:click=new_draft
+                                    disabled=move || start_busy.get() || qc_busy.get()
+                                >"New"</button>
                                 <Show when=move || page.get().map(|p| p.sets.is_empty()).unwrap_or(true)>
                                     <p class="empty">"No volumes yet."</p>
                                 </Show>
@@ -616,41 +843,33 @@ pub fn ProducePage() -> impl IntoView {
                                         view! {
                                             <div class="set-row">
                                                 <div class="name">{s.name}</div>
-                                                <div class="empty">{format!("{} · {} ok · next {}", s.status, s.produced_ok_count, s.next_seq)}</div>
+                                                <div class="empty">{format!("{} · {} ok · next {} · {}", s.status, s.produced_ok_count, s.next_seq, s.bates_prefix)}</div>
                                             </div>
                                         }
                                     }
                                 />
+                                <div class="produce-protocol">
+                                    <h2>"Privilege protocol"</h2>
+                                    <p class="empty">{format!("Log format: {protocol_log}")}</p>
+                                    <p>{format!("FRE 502(d): {protocol_d}")}</p>
+                                    <p>{format!("FRE 502(e): {protocol_e}")}</p>
+                                    <p class="empty">"Overrides are written to the audit log."</p>
+                                </div>
                             </aside>
                             <div class="produce-center">
                                 <ol class="produce-steps" start="1">
-                                    <li class=move || if step.get() == 1 { "active" } else { "" }>
-                                        <button on:click=move |_| { step.set(1); }>"1 Set"</button>
-                                    </li>
-                                    <li class=move || if step.get() == 2 { "active" } else { "" }>
-                                        <button on:click=move |_| { step.set(2); }>"2 Number"</button>
-                                    </li>
-                                    <li class=move || if step.get() == 3 { "active" } else { "" }>
-                                        <button on:click=move |_| { step.set(3); }>"3 Format"</button>
-                                    </li>
-                                    <li class=move || if step.get() == 4 { "active" } else { "" }>
-                                        <button on:click=move |_| { step.set(4); }>"4 Burn"</button>
-                                    </li>
-                                    <li class=move || if step.get() == 5 { "active" } else { "" }>
-                                        <button on:click=move |_| {
-                                            step.set(5);
-                                            if qc.get().is_none() && !qc_busy.get() {
-                                                run_qc();
-                                            }
-                                        }>"5 Pre-flight"</button>
-                                    </li>
+                                    <li><a href="#step-1-set">"1 Set"</a></li>
+                                    <li><a href="#step-2-number">"2 Number"</a></li>
+                                    <li><a href="#step-3-format">"3 Format"</a></li>
+                                    <li><a href="#step-4-burn">"4 Burn"</a></li>
+                                    <li><a href="#step-5-preflight">"5 Pre-flight"</a></li>
                                 </ol>
+                                <div class="produce-steps-123">
 
-                                <Show when=move || step.get() == 1>
-                                    <div class="produce-step">
+                                <div class="produce-step" id="step-1-set">
                                         <h2>"Set"</h2>
                                         <p>"Default search: Responsive NOT withheld."</p>
-                                        <p>{if entire_corpus.get() {
+                                        <p>{move || if entire_corpus.get() {
                                             "Source: entire review corpus (withhold = false, family together). Count refreshes at QC."
                                         } else {
                                             "Source: responsive AND NOT withheld (family together)."
@@ -674,10 +893,8 @@ pub fn ProducePage() -> impl IntoView {
                                         </label>
                                         <p class="empty">"QC gate: " {gate.status.clone()} " — " {gate.message.clone()}</p>
                                     </div>
-                                </Show>
 
-                                <Show when=move || step.get() == 2>
-                                    <div class="produce-step">
+                                <div class="produce-step" id="step-2-number">
                                         <h2>"Number"</h2>
                                         <label>
                                             "Prefix "
@@ -704,9 +921,40 @@ pub fn ProducePage() -> impl IntoView {
                                                 }
                                             />
                                         </label>
-                                        <p class="empty">{match hint {
-                                            Some(n) => format!("Next sequence hint for PROD: {n}"),
-                                            None => "No prior PROD volume.".into(),
+                                        <p class="empty">{move || {
+                                            let live_pref = prefix.get();
+                                            match page.get().as_ref().and_then(|p| live_next_seq(p, &live_pref)) {
+                                                Some(n) => format!("Next sequence hint for {live_pref}: {n}"),
+                                                None => format!("No prior {live_pref} volume."),
+                                            }
+                                        }}</p>
+                                        <p class="empty">{move || {
+                                            format!(
+                                                "Pad width: {}",
+                                                selected_pad_width(&page.get(), &profile.get())
+                                            )
+                                        }}</p>
+                                        <p class="empty">{move || {
+                                            let start = bates_start
+                                                .get()
+                                                .trim()
+                                                .parse::<u64>()
+                                                .ok()
+                                                .filter(|n| *n >= 1);
+                                            let n = match qc.get() {
+                                                Some(r) => r.ordered_ids.len() as u64,
+                                                None if entire_corpus.get() => 0,
+                                                None => page
+                                                    .get()
+                                                    .map(|p| p.ordered_ids.len() as u64)
+                                                    .unwrap_or(0),
+                                            };
+                                            let pad = selected_pad_width(&page.get(), &profile.get());
+                                            let pref = prefix.get();
+                                            match start.and_then(|s| projected_last_doc_bates(&pref, s, n, pad)) {
+                                                Some(b) => format!("Projected last Bates (document count): {b}"),
+                                                None => String::new(),
+                                            }
                                         }}</p>
                                         <label>
                                             <input type="checkbox" prop:checked=true prop:disabled=true />
@@ -761,10 +1009,8 @@ pub fn ProducePage() -> impl IntoView {
                                             }
                                         }}</p>
                                     </div>
-                                </Show>
 
-                                <Show when=move || step.get() == 3>
-                                    <div class="produce-step">
+                                <div class="produce-step" id="step-3-format">
                                         <h2>"Format"</h2>
                                         <p>"NATIVES + TEXT + DATA/load.dat on."</p>
                                         <p class="empty">{move || {
@@ -779,6 +1025,7 @@ pub fn ProducePage() -> impl IntoView {
                                         <label>
                                             "Production profile "
                                             <select
+                                                prop:value=move || profile.get()
                                                 on:change=move |ev| {
                                                     if let Some(el) = ev.target().and_then(|t| t.dyn_into::<HtmlSelectElement>().ok()) {
                                                         profile.set(el.value());
@@ -824,10 +1071,9 @@ pub fn ProducePage() -> impl IntoView {
                                             </label>
                                         </fieldset>
                                     </div>
-                                </Show>
+                                </div>
 
-                                <Show when=move || step.get() == 4>
-                                    <div class="produce-step">
+                                <div class="produce-step" id="step-4-burn">
                                         <h2>"Burn"</h2>
                                         {move || {
                                             let p = page.get();
@@ -902,15 +1148,16 @@ pub fn ProducePage() -> impl IntoView {
                                             }
                                         >"Burn selected set"</button>
                                     </div>
-                                </Show>
 
-                                <Show when=move || step.get() == 5>
-                                    <div class="produce-step">
+                                <div class="produce-step" id="step-5-preflight">
                                         <h2>"Pre-flight"</h2>
                                         <button
                                             on:click=move |_| run_qc()
                                             disabled=move || qc_busy.get()
                                         >{move || if qc_busy.get() { "Running…" } else { "Re-run QC" }}</button>
+                                        <Show when=move || qc.get().is_none()>
+                                            <p class="empty">{QC_NOT_YET_RUN}</p>
+                                        </Show>
                                         {move || qc.get().map(|r| {
                                             let findings = r.findings.clone();
                                             let extras = r.extras.clone();
@@ -992,11 +1239,82 @@ pub fn ProducePage() -> impl IntoView {
                                             }
                                         })}
                                     </div>
-                                </Show>
                             </div>
-                        </div>
-                        <div class="produce-foot">
-                            <button
+                            <aside class="produce-stage">
+                                <h2>"Stage"</h2>
+                                {move || {
+                                    let p = page.get();
+                                    let q = qc.get();
+                                    let (docs, docs_label) = match q.as_ref() {
+                                        Some(r) => (r.ordered_ids.len() as u64, "from QC"),
+                                        None if entire_corpus.get() => {
+                                            (0, "count refreshes at QC")
+                                        }
+                                        None => {
+                                            let n = p.as_ref().map(|x| x.ordered_ids.len() as u64).unwrap_or(0);
+                                            if n > 0 {
+                                                (n, "from page ordered ids")
+                                            } else {
+                                                (
+                                                    p.as_ref().map(|x| x.default_count).unwrap_or(0),
+                                                    "default set count",
+                                                )
+                                            }
+                                        }
+                                    };
+                                    let docs_cell = if q.is_none() && entire_corpus.get() {
+                                        "— (count refreshes at QC)".to_string()
+                                    } else {
+                                        format!("{docs} ({docs_label})")
+                                    };
+                                    let need = q
+                                        .as_ref()
+                                        .map(|r| r.need_burn)
+                                        .or_else(|| p.as_ref().map(|x| x.need_burn))
+                                        .unwrap_or(0);
+                                    let export = export_path_list(&p, &profile.get());
+                                    let withheld = withheld_stage_display(&q);
+                                    view! {
+                                        <dl class="produce-stage-rows">
+                                            <dt>"Documents"</dt>
+                                            <dd>{docs_cell}</dd>
+                                            <dt>"Pages"</dt>
+                                            <dd>"—"</dd>
+                                            <dt>"Natives"</dt>
+                                            <dd>{if q.is_none() && entire_corpus.get() {
+                                                "—".to_string()
+                                            } else {
+                                                format!("{docs}")
+                                            }}</dd>
+                                            <dt>"Slipsheets"</dt>
+                                            <dd>"— · not this track"</dd>
+                                            <dt>"Marks to burn"</dt>
+                                            <dd>{format!("{need}")}</dd>
+                                            <dt>"Withheld"</dt>
+                                            <dd>{withheld}</dd>
+                                        </dl>
+                                        <p class="empty">{format!("Export: {export}")}</p>
+                                    }
+                                }}
+                                <p class="empty">{move || {
+                                    match qc.get() {
+                                        None => QC_NOT_YET_RUN.to_string(),
+                                        Some(r) => {
+                                            let extra_blockers = r
+                                                .extras
+                                                .iter()
+                                                .filter(|e| e.severity == "blocker")
+                                                .count() as u64;
+                                            format!(
+                                                "Blocked until {} blocker(s) and {} warn(s) are cleared.",
+                                                r.error_count.saturating_add(extra_blockers),
+                                                r.warn_count
+                                            )
+                                        }
+                                    }
+                                }}</p>
+                                <button disabled=true>"Stage & snapshot — not this track"</button>
+                                <button
                                 class="primary"
                                 disabled=move || {
                                     if finalize_blocked_by_volume_latch(
@@ -1030,7 +1348,7 @@ pub fn ProducePage() -> impl IntoView {
                                     }
                                 }
                                 on:click=finalize
-                            >{move || if start_busy.get() { "Finalizing…" } else { "Finalize" }}</button>
+                            >{move || if start_busy.get() { "Finalizing…" } else { "Finalize production" }}</button>
                             {move || start_result.get().and_then(|r| {
                                 if r.ok {
                                     Some(view! { <p>"Volume " <code>{r.output_root.unwrap_or_default()}</code></p> })
@@ -1038,6 +1356,7 @@ pub fn ProducePage() -> impl IntoView {
                                     None
                                 }
                             })}
+                            </aside>
                         </div>
                     }
                 })}

@@ -10,7 +10,7 @@ use web_sys::MouseEvent;
 use crate::pages::{
     AdminStub, MatterHome, MattersList, ProcessPage, ProducePage, ReviewQueue, ReviewWindow,
 };
-use crate::shell::{MatterShell, QueueChromeCtx, WorkspaceTab};
+use crate::shell::{MatterShell, ProduceChromeCtx, QueueChromeCtx, WorkspaceTab};
 
 static CTRL_K_ONCE: Once = Once::new();
 
@@ -148,6 +148,15 @@ fn wrap_review_window() -> impl IntoView {
 }
 
 fn wrap_produce() -> impl IntoView {
+    view! { <WrapProduce/> }
+}
+
+#[component]
+fn WrapProduce() -> impl IntoView {
+    provide_context(ProduceChromeCtx {
+        right_label: RwSignal::new(String::new()),
+        status_left: RwSignal::new(String::new()),
+    });
     view! {
         <MatterShell tab=WorkspaceTab::Produce>
             <ProducePage/>
@@ -268,5 +277,15 @@ mod tests {
             "review window must not provide queue chrome"
         );
         assert!(prod.contains("provide_context(QueueChromeCtx"));
+        assert!(prod.contains("provide_context(ProduceChromeCtx"));
+        let produce_fn = prod
+            .split("fn WrapProduce()")
+            .nth(1)
+            .expect("WrapProduce");
+        assert!(
+            !produce_fn.contains("QueueChromeCtx"),
+            "produce must not steal QueueChromeCtx"
+        );
+        assert!(!produce_fn.contains("id=\"queue-goto\""));
     }
 }
