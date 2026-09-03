@@ -2,15 +2,22 @@ use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_params_map};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use web_sys::HtmlSelectElement;
 
 use crate::invoke::{
     tauri_invoke, BuiltinProfileFlags, JobProgressSnapshot, ProcessCancelArgs, ProcessErrorGroup,
-    ProcessJobRow, ProcessPageArgs, ProcessPageResponse, ProcessPstRow, ProcessResumeArgs,
-    ProcessSourceRow, ProcessStartArgs, ProcessStartResponse, RootArgs,
+    ProcessExportReportArgs, ProcessExportReportResponse, ProcessJobRow, ProcessPageArgs,
+    ProcessPageResponse, ProcessPstRow, ProcessResumeArgs, ProcessSourceRow, ProcessStartArgs,
+    ProcessStartResponse, RootArgs,
 };
 use crate::path_id::encode_matter_id;
+use crate::shell::ProcessChromeCtx;
 
 const DEFAULT_PROFILE: &str = "builtin:standard";
+const DROP_COPY_KINDS: &str = "PST · ZIP · Purview package · folder";
+const DROP_COPY_HASH: &str = "Hashed on arrival.";
+const DENIST_NSRL_NOTE: &str = "optional local hash-list (NSRL RDS not this track).";
+const EXCEPTIONS_NOT_THIS_TRACK: &str = "Retry / exclude / password vault: not this track.";
 
 fn ingest_params(path: &str) -> String {
     serde_json::json!({ "path": path }).to_string()
@@ -92,12 +99,85 @@ fn dash(v: Option<u64>) -> String {
     }
 }
 
-fn job_indent(parent: &Option<String>) -> &'static str {
-    if parent.is_some() {
-        "job-row child"
+fn strip_extended_path(path: &str) -> String {
+    const UNC: &str = r"\\?\UNC\";
+    const PREFIX: &str = r"\\?\";
+    if let Some(rest) = path.strip_prefix(UNC) {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(PREFIX) {
+        rest.to_string()
     } else {
-        "job-row"
+        path.to_string()
     }
+}
+
+fn truncate_error(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let taken: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{taken}…")
+    } else {
+        taken
+    }
+}
+
+fn job_source_class(parent: &Option<String>) -> &'static str {
+    if parent.is_some() {
+        "jobs-source child"
+    } else {
+        "jobs-source"
+    }
+}
+
+fn source_shows_extract_progress(
+    source: &ProcessSourceRow,
+    extract_current_name: &str,
+    snap: &JobProgressSnapshot,
+    inventory: &[ProcessPstRow],
+) -> bool {
+    if extract_current_name.is_empty() || snap.kind != "extract_pst" {
+        return false;
+    }
+    let want = strip_extended_path(extract_current_name);
+    if strip_extended_path(&source.path) == want {
+        return true;
+    }
+    inventory.iter().any(|p| {
+        p.source_id.as_deref() == Some(source.id.as_str())
+            && p.path
+                .as_deref()
+                .map(|path| strip_extended_path(path) == want)
+                .unwrap_or(false)
+    })
+}
+
+fn jobs_head_summary(jobs: &[ProcessJobRow], snap: &JobProgressSnapshot) -> String {
+    let complete = jobs.iter().filter(|j| j.state == "succeeded").count();
+    let mut running = jobs.iter().filter(|j| j.state == "running").count();
+    if snapshot_busy(snap)
+        && !jobs
+            .iter()
+            .any(|j| j.id == snap.job_id && j.state == "running")
+    {
+        running = running.saturating_add(1);
+    }
+    format!("{complete} complete · {running} running")
+}
+
+fn grouped_error_sum(groups: &[ProcessErrorGroup]) -> u64 {
+    groups.iter().map(|g| g.count).sum()
+}
+
+fn selected_flags(
+    page: Option<ProcessPageResponse>,
+    selected: &str,
+) -> Option<BuiltinProfileFlags> {
+    let builtins = page?.builtins;
+    builtins
+        .iter()
+        .find(|b| b.id == selected)
+        .cloned()
+        .or_else(|| builtins.iter().find(|b| b.id == DEFAULT_PROFILE).cloned())
 }
 
 fn snapshot_busy(snap: &JobProgressSnapshot) -> bool {
@@ -251,6 +331,10 @@ pub fn ProcessPage() -> impl IntoView {
     let extract_note = RwSignal::new(Option::<String>::None);
     let extract_current_name = RwSignal::new(String::new());
     let busy_retry_pending = RwSignal::new(false);
+    let exporting = RwSignal::new(false);
+    let export_note = RwSignal::new(Option::<String>::None);
+    let selected_exception = RwSignal::new(Option::<String>::None);
+    let chrome = use_context::<ProcessChromeCtx>();
 
     let id_encoded = move || encode_matter_id(&root_sig.get());
 
@@ -585,6 +669,59 @@ pub fn ProcessPage() -> impl IntoView {
         );
     };
 
+    let export_report = move |_| {
+        if exporting.get() {
+            return;
+        }
+        let root = root_sig.get();
+        if root.is_empty() {
+            return;
+        }
+        exporting.set(true);
+        leptos::task::spawn_local(async move {
+            match tauri_invoke::<ProcessExportReportResponse, _>(
+                "process_export_report",
+                &ProcessExportReportArgs { root },
+            )
+            .await
+            {
+                Ok(resp) => {
+                    error.set(None);
+                    export_note.set(Some(format!(
+                        "Wrote {} file(s) to {}",
+                        resp.files_written.len(),
+                        resp.output_dir
+                    )));
+                }
+                Err(e) => {
+                    export_note.set(None);
+                    error.set(Some(e));
+                }
+            }
+            exporting.set(false);
+        });
+    };
+
+    Effect::new(move |_| {
+        let Some(ctx) = chrome else {
+            return;
+        };
+        let jobs = page.get().map(|p| p.jobs).unwrap_or_default();
+        let snap = progress.get();
+        ctx.right_label.set(jobs_head_summary(&jobs, &snap));
+        ctx.status_left.set(if snapshot_busy(&snap) {
+            format!(
+                "{} {} · {} · {}",
+                snap.kind,
+                snap.state,
+                snap.stage.unwrap_or_else(|| "—".into()),
+                snap.message.unwrap_or_default()
+            )
+        } else {
+            String::new()
+        });
+    });
+
     view! {
         <section class="process-page">
             <h1>"Process"</h1>
@@ -594,6 +731,10 @@ pub fn ProcessPage() -> impl IntoView {
             <div class="process-layout">
                 <aside class="process-pane">
                     <h2>"Sources"</h2>
+                    <div class="drop-zone" aria-label="Accepted ingest kinds">
+                        <p>{DROP_COPY_KINDS}</p>
+                        <p class="empty">{DROP_COPY_HASH}</p>
+                    </div>
                     <div class="cta-row">
                         <button on:click=add_folder>"Add folder"</button>
                         <button on:click=add_zip_pst>"Add ZIP / PST"</button>
@@ -605,10 +746,29 @@ pub fn ProcessPage() -> impl IntoView {
                         each=move || page.get().map(|p| p.sources).unwrap_or_default()
                         key=|s: &ProcessSourceRow| s.id.clone()
                         children=move |s| {
+                            let source = s.clone();
                             view! {
                                 <div class="set-row">
-                                    <div class="name">{s.path}</div>
+                                    <div class="name">{strip_extended_path(&s.path)}</div>
                                     <div class="empty">{format!("{} · {}", s.kind, s.status)}</div>
+                                    <Show when=move || {
+                                        let snap = progress.get();
+                                        let inventory = page
+                                            .get()
+                                            .map(|p| p.pst_inventory)
+                                            .unwrap_or_default();
+                                        source_shows_extract_progress(
+                                            &source,
+                                            &extract_current_name.get(),
+                                            &snap,
+                                            &inventory,
+                                        ) && snap.total_hint.filter(|t| *t > 0).is_some()
+                                    }>
+                                        <progress
+                                            max=move || progress.get().total_hint.unwrap_or(1)
+                                            value=move || progress.get().completed_count
+                                        />
+                                    </Show>
                                 </div>
                             }
                         }
@@ -623,6 +783,11 @@ pub fn ProcessPage() -> impl IntoView {
                         children=move |p| {
                             let id = p.id.clone();
                             let id_sel = id.clone();
+                            let label = p
+                                .path
+                                .as_deref()
+                                .map(strip_extended_path)
+                                .unwrap_or_else(|| p.id.clone());
                             view! {
                                 <label class="set-row">
                                     <input
@@ -631,11 +796,94 @@ pub fn ProcessPage() -> impl IntoView {
                                         prop:checked=move || selected_pst.get().as_deref() == Some(id.as_str())
                                         on:change=move |_| selected_pst.set(Some(id_sel.clone()))
                                     />
-                                    <span>{p.path.clone().unwrap_or_else(|| p.id.clone())}</span>
+                                    <span>{label}</span>
                                 </label>
                             }
                         }
                     />
+                    <h2>"Profile"</h2>
+                    <label>
+                        "Builtin "
+                        <select
+                            prop:value=move || selected_profile.get()
+                            on:change=move |ev| {
+                                if let Some(el) = ev
+                                    .target()
+                                    .and_then(|t| t.dyn_into::<HtmlSelectElement>().ok())
+                                {
+                                    selected_profile.set(el.value());
+                                }
+                            }
+                        >
+                            <For
+                                each=move || page.get().map(|p| p.builtins).unwrap_or_default()
+                                key=|b: &BuiltinProfileFlags| b.id.clone()
+                                children=move |b| {
+                                    let id = b.id.clone();
+                                    view! { <option value=id>{b.name}</option> }
+                                }
+                            />
+                        </select>
+                    </label>
+                    <ul class="profile-checklist">
+                        <li>{move || {
+                            let on = selected_flags(page.get(), &selected_profile.get())
+                                .map(|b| b.classify)
+                                .unwrap_or(false);
+                            format!("{} classify", if on { "✓" } else { "○" })
+                        }}</li>
+                        <li>{move || {
+                            let on = selected_flags(page.get(), &selected_profile.get())
+                                .map(|b| b.office_extract || b.pdf_extract || b.ics_extract)
+                                .unwrap_or(false);
+                            format!("{} office-pdf-ics", if on { "✓" } else { "○" })
+                        }}</li>
+                        <li>{move || {
+                            let on = selected_flags(page.get(), &selected_profile.get())
+                                .map(|b| b.ocr)
+                                .unwrap_or(false);
+                            format!("{} OCR", if on { "✓" } else { "○" })
+                        }}</li>
+                        <li>{move || {
+                            let on = selected_flags(page.get(), &selected_profile.get())
+                                .map(|b| b.fts)
+                                .unwrap_or(false);
+                            format!("{} FTS", if on { "✓" } else { "○" })
+                        }}</li>
+                        <li>{move || {
+                            let on = selected_flags(page.get(), &selected_profile.get())
+                                .map(|b| b.dedupe)
+                                .unwrap_or(false);
+                            format!("{} dedupe", if on { "✓" } else { "○" })
+                        }}</li>
+                        <li>{move || {
+                            let on = selected_flags(page.get(), &selected_profile.get())
+                                .map(|b| b.thread)
+                                .unwrap_or(false);
+                            format!("{} thread", if on { "✓" } else { "○" })
+                        }}</li>
+                        <li>{move || {
+                            let on = selected_flags(page.get(), &selected_profile.get())
+                                .map(|b| b.neardup)
+                                .unwrap_or(false);
+                            format!("{} neardup", if on { "✓" } else { "○" })
+                        }}</li>
+                        <li>{move || {
+                            let on = selected_flags(page.get(), &selected_profile.get())
+                                .map(|b| b.cull)
+                                .unwrap_or(false);
+                            format!(
+                                "{} DeNIST/cull — {DENIST_NSRL_NOTE}",
+                                if on { "✓" } else { "○" }
+                            )
+                        }}</li>
+                        <li>{move || {
+                            let on = selected_flags(page.get(), &selected_profile.get())
+                                .map(|b| b.promote)
+                                .unwrap_or(false);
+                            format!("{} promote", if on { "✓" } else { "○" })
+                        }}</li>
+                    </ul>
                     <div class="cta-row">
                         <button on:click=extract_selected>"Extract selected"</button>
                         <button
@@ -646,95 +894,118 @@ pub fn ProcessPage() -> impl IntoView {
                         >
                             "Extract all"
                         </button>
+                        <button class="primary" on:click=run_profile>"Run profile"</button>
                     </div>
                     <Show when=move || extract_note.get().is_some()>
                         <p class="empty">{move || extract_note.get().unwrap_or_default()}</p>
                     </Show>
-                    <h2>"Profile"</h2>
-                    <For
-                        each=move || page.get().map(|p| p.builtins).unwrap_or_default()
-                        key=|b: &BuiltinProfileFlags| b.id.clone()
-                        children=move |b| {
-                            let id = b.id.clone();
-                            let id_click = id.clone();
-                            let checks = [
-                                ("classify", b.classify),
-                                ("office/pdf/ics", b.office_extract || b.pdf_extract || b.ics_extract),
-                                ("OCR", b.ocr),
-                                ("FTS", b.fts),
-                                ("dedupe", b.dedupe),
-                                ("thread", b.thread),
-                                ("neardup", b.neardup),
-                                ("cull", b.cull),
-                                ("promote", b.promote),
-                            ];
-                            view! {
-                                <button
-                                    class=move || if selected_profile.get() == id { "chip-btn active" } else { "chip-btn" }
-                                    on:click=move |_| selected_profile.set(id_click.clone())
-                                >
-                                    {b.name.clone()}
-                                </button>
-                                <p class="empty">
-                                    {checks.into_iter().map(|(label, on)| {
-                                        format!("{}{label}  ", if on { "✓ " } else { "○ " })
-                                    }).collect::<String>()}
-                                </p>
-                            }
-                        }
-                    />
-                    <button class="primary" on:click=run_profile>"Run profile"</button>
                 </aside>
                 <div class="process-pane">
                     <h2>"Jobs"</h2>
+                    <Show when=move || page.get().map(|p| !p.jobs.is_empty()).unwrap_or(false)>
+                        <p class="empty">{move || {
+                            let jobs = page.get().map(|p| p.jobs).unwrap_or_default();
+                            jobs_head_summary(&jobs, &progress.get())
+                        }}</p>
+                    </Show>
                     <Show when=move || page.get().map(|p| p.jobs.is_empty()).unwrap_or(true)>
                         <p class="empty">"No jobs yet. Ingest or run a profile."</p>
                     </Show>
-                    <For
-                        each=move || page.get().map(|p| p.jobs).unwrap_or_default()
-                        key=|j: &ProcessJobRow| j.id.clone()
-                        children=move |j| {
-                            let job_for_orphan = j.clone();
-                            let job_id_for_counts = j.id.clone();
-                            let job_id_for_active = j.id.clone();
-                            let job_id = StoredValue::new(j.id.clone());
-                            view! {
-                                <div class=job_indent(&j.parent_job_id)>
-                                    <div class="name">{format!("{} · {}", j.kind, j.state)}</div>
-                                    <div class="empty">{move || {
-                                        let snap = progress.get();
-                                        if snap.job_id == job_id_for_counts {
-                                            format!(
-                                                "{}/{}",
-                                                snap.completed_count,
-                                                snap.total_hint.map(|n| n.to_string()).unwrap_or_else(|| "—".into())
-                                            )
-                                        } else {
-                                            "—".into()
+                    <div class="jobs-table-wrap">
+                        <table class="jobs-table">
+                            <thead>
+                                <tr>
+                                    <th>"Source"</th>
+                                    <th class="num">"Items"</th>
+                                    <th class="num">"Dupes"</th>
+                                    <th class="num">"NIST"</th>
+                                    <th class="num">"Families"</th>
+                                    <th class="num">"Except."</th>
+                                    <th class="status">"Status"</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <For
+                                    each=move || page.get().map(|p| p.jobs).unwrap_or_default()
+                                    key=|j: &ProcessJobRow| j.id.clone()
+                                    children=move |j| {
+                                        let job_for_orphan = j.clone();
+                                        let job_id_for_counts = j.id.clone();
+                                        let job_id_for_active = j.id.clone();
+                                        let job_id_for_status = j.id.clone();
+                                        let job_state = j.state.clone();
+                                        let job_id = StoredValue::new(j.id.clone());
+                                        let err = j
+                                            .error_summary
+                                            .as_deref()
+                                            .filter(|s| !s.is_empty())
+                                            .map(|s| truncate_error(s, 80));
+                                        view! {
+                                            <tr>
+                                                <td class=job_source_class(&j.parent_job_id)>
+                                                    <div>{j.kind.clone()}</div>
+                                                    {err.map(|e| view! { <div class="empty">{e}</div> })}
+                                                </td>
+                                                <td class="num">{move || {
+                                                    let snap = progress.get();
+                                                    if snap.job_id == job_id_for_counts {
+                                                        format!(
+                                                            "{}/{}",
+                                                            snap.completed_count,
+                                                            snap.total_hint.map(|n| n.to_string()).unwrap_or_else(|| "—".into())
+                                                        )
+                                                    } else {
+                                                        "—".into()
+                                                    }
+                                                }}</td>
+                                                <td class="num">"—"</td>
+                                                <td class="num">"—"</td>
+                                                <td class="num">"—"</td>
+                                                <td class="num">"—"</td>
+                                                <td class="status">{move || {
+                                                    let snap = progress.get();
+                                                    if snap.job_id == job_id_for_status {
+                                                        if snapshot_busy(&snap) {
+                                                            if let Some(total) = snap.total_hint {
+                                                                if total > 0 {
+                                                                    let pct = snap.completed_count.saturating_mul(100) / total;
+                                                                    return format!("{} · {pct}%", snap.state);
+                                                                }
+                                                            }
+                                                        }
+                                                        snap.state
+                                                    } else {
+                                                        job_state.clone()
+                                                    }
+                                                }}</td>
+                                                <td class="jobs-actions">
+                                                    <Show when=move || {
+                                                        let snap = progress.get();
+                                                        snap.job_id == job_id_for_active && snapshot_busy(&snap)
+                                                    }>
+                                                        <button on:click=move |_| {
+                                                            spawn_cancel(job_id.get_value());
+                                                        }>"Pause"</button>
+                                                    </Show>
+                                                    <Show when=move || {
+                                                        is_orphan_running(&job_for_orphan, &progress.get())
+                                                    }>
+                                                        <button class="primary" on:click=move |_| {
+                                                            spawn_resume(root_sig.get(), job_id.get_value());
+                                                        }>"Resume"</button>
+                                                        <button on:click=move |_| {
+                                                            spawn_cancel(job_id.get_value());
+                                                        }>"Cancel"</button>
+                                                    </Show>
+                                                </td>
+                                            </tr>
                                         }
-                                    }}</div>
-                                    <Show when=move || {
-                                        let snap = progress.get();
-                                        snap.job_id == job_id_for_active && snapshot_busy(&snap)
-                                    }>
-                                        <button on:click=move |_| {
-                                            spawn_cancel(job_id.get_value());
-                                        }>"Pause"</button>
-                                    </Show>
-                                    <Show when=move || {
-                                        is_orphan_running(&job_for_orphan, &progress.get())
-                                    }>
-                                        <button class="primary" on:click=move |_| {
-                                            spawn_resume(root_sig.get(), job_id.get_value());
-                                        }>"Resume"</button>
-                                        <button on:click=move |_| {
-                                            spawn_cancel(job_id.get_value());
-                                        }>"Cancel"</button>
-                                    </Show>
-                                </div>
-                            }
-                        }
-                    />
+                                    }
+                                />
+                            </tbody>
+                        </table>
+                    </div>
                     <Show when=move || snapshot_busy(&progress.get())>
                         <p class="empty">{move || {
                             let s = progress.get();
@@ -750,7 +1021,10 @@ pub fn ProcessPage() -> impl IntoView {
                             spawn_cancel(progress.get_untracked().job_id);
                         }>"Pause"</button>
                     </Show>
-                    <h2>"Exceptions"</h2>
+                    <h2>{move || format!(
+                        "Exceptions ({})",
+                        page.get().map(|p| p.exceptions).unwrap_or(0)
+                    )}</h2>
                     <p class="empty">"Exceptions hold their items; they do not stall sibling extract."</p>
                     <Show when=move || page.get().map(|p| p.error_groups.is_empty()).unwrap_or(true)>
                         <p class="empty">"No item_errors recorded."</p>
@@ -759,47 +1033,94 @@ pub fn ProcessPage() -> impl IntoView {
                         each=move || page.get().map(|p| p.error_groups).unwrap_or_default()
                         key=|g: &ProcessErrorGroup| g.code.clone()
                         children=move |g| {
+                            let code = g.code.clone();
+                            let code_sel = code.clone();
                             view! {
-                                <div class="set-row">
+                                <button
+                                    class="set-row exception-group"
+                                    on:click=move |_| selected_exception.set(Some(code_sel.clone()))
+                                >
                                     <div class="name">{format!("{} · {}", g.code, g.count)}</div>
-                                    <div class="empty">{g.sample_message}</div>
-                                </div>
+                                </button>
                             }
                         }
                     />
+                    <Show when=move || selected_exception.get().is_some()>
+                        <div class="exception-detail">
+                            {move || {
+                                let code = selected_exception.get().unwrap_or_default();
+                                page.get()
+                                    .and_then(|p| p.error_groups.into_iter().find(|g| g.code == code))
+                                    .map(|g| {
+                                        view! {
+                                            <div>
+                                                <div class="name">{format!("code {}", g.code)}</div>
+                                                <div class="empty">{format!("count {}", g.count)}</div>
+                                                <div class="empty">{format!("sample_message {}", g.sample_message)}</div>
+                                            </div>
+                                        }
+                                    })
+                            }}
+                        </div>
+                    </Show>
+                    <Show when=move || {
+                        page.get()
+                            .map(|p| p.exceptions > grouped_error_sum(&p.error_groups))
+                            .unwrap_or(false)
+                    }>
+                        <p class="empty">{move || {
+                            let p = page.get();
+                            let grouped = p.as_ref().map(|x| grouped_error_sum(&x.error_groups)).unwrap_or(0);
+                            let total = p.map(|x| x.exceptions).unwrap_or(0);
+                            format!(
+                                "Grouped counts cover {grouped} of {total} exceptions (recent 100 item_errors)."
+                            )
+                        }}</p>
+                    </Show>
+                    <p class="empty">{EXCEPTIONS_NOT_THIS_TRACK}</p>
                 </div>
                 <aside class="process-pane">
                     <h2>"Running report"</h2>
-                    <div class="chip-strip">
-                        <div class="chip">
-                            <span class="label">"Discovered"</span>
-                            <span class="value">{move || page.get().map(|p| p.discovered).unwrap_or(0)}</span>
+                    <dl class="minus-stack">
+                        <div>
+                            <dt>"Discovered"</dt>
+                            <dd>{move || page.get().map(|p| p.discovered).unwrap_or(0)}</dd>
                         </div>
-                        <div class="chip">
-                            <span class="label">"Exceptions"</span>
-                            <span class="value">{move || page.get().map(|p| p.exceptions).unwrap_or(0)}</span>
+                        <div>
+                            <dt>"− DeNIST/cull suppressed"</dt>
+                            <dd>{move || dash(page.get().and_then(|p| p.denist))}</dd>
                         </div>
-                        <div class="chip">
-                            <span class="label">"Review-ready"</span>
-                            <span class="value">{move || page.get().map(|p| p.in_review).unwrap_or(0)}</span>
+                        <div>
+                            <dt>"− duplicate instances"</dt>
+                            <dd>{move || dash(page.get().and_then(|p| p.dupes))}</dd>
                         </div>
-                        <div class="chip">
-                            <span class="label">"Still processing"</span>
-                            <span class="value">{move || page.get().map(|p| p.still_processing).unwrap_or(0)}</span>
+                        <div>
+                            <dt>"− quarantined"</dt>
+                            <dd>{move || page.get().map(|p| p.exceptions).unwrap_or(0)}</dd>
                         </div>
-                        <div class="chip">
-                            <span class="label">"Unaccounted-for"</span>
-                            <span class="value">{move || page.get().map(|p| p.unaccounted_for).unwrap_or(0)}</span>
+                        <div>
+                            <dt>"Review-ready"</dt>
+                            <dd>{move || page.get().map(|p| p.in_review).unwrap_or(0)}</dd>
                         </div>
-                        <div class="chip">
-                            <span class="label">"DeNIST"</span>
-                            <span class="value">{move || dash(page.get().and_then(|p| p.denist))}</span>
+                        <div>
+                            <dt>"Unaccounted-for"</dt>
+                            <dd>{move || page.get().map(|p| p.unaccounted_for).unwrap_or(0)}</dd>
                         </div>
-                        <div class="chip">
-                            <span class="label">"Dupes"</span>
-                            <span class="value">{move || dash(page.get().and_then(|p| p.dupes))}</span>
+                        <div>
+                            <dt>"Still processing"</dt>
+                            <dd>{move || page.get().map(|p| p.still_processing).unwrap_or(0)}</dd>
                         </div>
-                    </div>
+                    </dl>
+                    <p class="empty">{move || format!(
+                        "Families {}",
+                        page.get().map(|p| p.families).unwrap_or(0)
+                    )}</p>
+                    <Show when=move || page.get().map(|p| p.pdf_needs_ocr > 0).unwrap_or(false)>
+                        <p class="empty">{move || format!(
+                            "{} items need OCR",
+                            page.get().map(|p| p.pdf_needs_ocr).unwrap_or(0)
+                        )}</p>
+                    </Show>
                     <button
                         class="primary"
                         disabled=move || page.get().map(|p| p.in_review == 0).unwrap_or(true)
@@ -812,6 +1133,15 @@ pub fn ProcessPage() -> impl IntoView {
                     >
                         "Open review-ready"
                     </button>
+                    <button
+                        disabled=move || exporting.get()
+                        on:click=export_report
+                    >
+                        "Download report"
+                    </button>
+                    <Show when=move || export_note.get().is_some()>
+                        <p class="empty">{move || export_note.get().unwrap_or_default()}</p>
+                    </Show>
                     <p class="empty">{move || format!("Profile {}", selected_profile.get())}</p>
                     <p class="empty">"Identity is SHA-256."</p>
                 </aside>
@@ -1062,5 +1392,102 @@ mod extract_all_busy_tests {
             prod.contains("is_orphan_running(&job_for_orphan, &progress.get())"),
             "orphan Show must read live progress"
         );
+    }
+
+    #[test]
+    fn strip_extended_path_drive_and_unc() {
+        assert_eq!(strip_extended_path(r"\\?\C:\x"), r"C:\x");
+        assert_eq!(
+            strip_extended_path(r"\\?\UNC\server\share"),
+            r"\\server\share"
+        );
+        assert_eq!(strip_extended_path(r"C:\plain"), r"C:\plain");
+    }
+
+    #[test]
+    fn drop_copy_names_honest_ingest_kinds() {
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(prod.contains(DROP_COPY_KINDS));
+        assert!(prod.contains(DROP_COPY_HASH));
+        let drop = prod.split("drop-zone").nth(1).unwrap_or("");
+        let drop = drop.split("</div>").next().unwrap_or(drop);
+        assert!(
+            !drop.contains("OST"),
+            "drop-zone copy must not advertise OST"
+        );
+        assert!(
+            !drop.contains("MBOX"),
+            "drop-zone copy must not advertise MBOX"
+        );
+    }
+
+    #[test]
+    fn jobs_table_emdash_per_row_columns() {
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let jobs = prod.split("\"Jobs\"").nth(1).unwrap_or("");
+        assert!(jobs.contains("<table"));
+        assert!(jobs.contains("Dupes"));
+        assert!(jobs.contains("NIST"));
+        assert!(jobs.contains("Families"));
+        assert!(jobs.contains("Except."));
+        let row = jobs.split("children=move |j|").nth(1).unwrap_or("");
+        assert!(
+            row.contains("{j.kind.clone()}"),
+            "Source column must be live job kind, not a fake PST name"
+        );
+        let dashes = row.matches(r#""—""#).count();
+        assert!(
+            dashes >= 4,
+            "each job row must paint em-dash for Dupes/NIST/Families/Except.; got {dashes}"
+        );
+        assert!(
+            !row.contains("page.dupes"),
+            "must not copy matter-wide dupes onto job rows"
+        );
+        assert!(jobs.contains("jobs-table-wrap"));
+        let css = include_str!("../../styles/app.css");
+        assert!(css.contains("overflow-x: auto"));
+        assert!(css.contains("280px minmax(0, 1fr) 320px"));
+        assert!(css.contains("white-space: nowrap"));
+        assert!(!css.contains("Archivo"));
+        assert!(!css.contains("#ec3013"));
+    }
+
+    #[test]
+    fn minus_stack_labels_and_denist_zero_vs_dash() {
+        assert_eq!(dash(None), "—");
+        assert_eq!(dash(Some(0)), "0");
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(prod.contains("minus-stack"));
+        assert!(prod.contains("Discovered"));
+        assert!(prod.contains("DeNIST/cull suppressed"));
+        assert!(prod.contains("duplicate instances"));
+        assert!(prod.contains("quarantined"));
+        assert!(prod.contains("Review-ready"));
+        assert!(prod.contains("Unaccounted-for"));
+        assert!(prod.contains("Still processing"));
+        let export = prod.split("let export_report = move |_|").nth(1).unwrap_or("");
+        assert!(
+            export.contains("export_note.set(None)"),
+            "export failure must clear a previous success note"
+        );
+    }
+
+    #[test]
+    fn wrap_process_and_shell_consume_process_chrome_ctx() {
+        let app = include_str!("../app.rs");
+        let app_prod = app.split("#[cfg(test)]").next().unwrap_or(app);
+        assert!(app_prod.contains("fn WrapProcess()"));
+        assert!(app_prod.contains("provide_context(ProcessChromeCtx"));
+        let shell = include_str!("../shell.rs");
+        let shell_prod = shell.split("#[cfg(test)]").next().unwrap_or(shell);
+        let top = shell_prod.split("fn TopBar").nth(1).unwrap_or("");
+        let top = top.split("fn StatusBar").next().unwrap_or(top);
+        assert!(top.contains("ProcessChromeCtx"));
+        let status = shell_prod.split("fn StatusBar").nth(1).unwrap_or("");
+        assert!(status.contains("ProcessChromeCtx"));
     }
 }

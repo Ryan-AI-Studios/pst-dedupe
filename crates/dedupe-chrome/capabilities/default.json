@@ -30,6 +30,7 @@
     "allow-process-progress",
     "allow-process-cancel",
     "allow-process-resume",
+    "allow-process-export-report",
     "allow-review-raster-page",
     "allow-review-geom-list",
     "allow-review-geom-upsert",

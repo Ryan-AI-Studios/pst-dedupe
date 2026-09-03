@@ -1055,7 +1055,7 @@ button.secondary {
 
 .process-layout {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.4fr) minmax(220px, 1fr);
+  grid-template-columns: 280px minmax(0, 1fr) 320px;
   gap: 12px;
   align-items: start;
 }
@@ -1080,6 +1080,112 @@ button.secondary {
 
 .job-row.child {
   padding-left: 16px;
+}
+
+.process-page button.primary {
+  background: var(--action);
+  border-color: var(--action);
+  color: #fff;
+}
+
+.drop-zone {
+  border: 1px dashed var(--border);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--coding-pane);
+}
+
+.drop-zone p {
+  margin: 0;
+}
+
+.profile-checklist {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.profile-checklist li {
+  margin: 2px 0;
+}
+
+.jobs-table-wrap {
+  overflow-x: auto;
+}
+
+.jobs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.jobs-table th,
+.jobs-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.jobs-table .num,
+.jobs-table .status {
+  white-space: nowrap;
+}
+
+.jobs-table .jobs-source.child {
+  padding-left: 20px;
+}
+
+.jobs-actions {
+  white-space: nowrap;
+}
+
+.jobs-actions button {
+  margin-right: 4px;
+}
+
+.minus-stack {
+  margin: 0 0 12px;
+}
+
+.minus-stack > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.minus-stack dt {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.minus-stack dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.exception-group {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin-bottom: 4px;
+}
+
+.exception-detail {
+  border: 1px solid var(--border);
+  padding: 8px;
+  margin: 8px 0;
+  background: var(--coding-pane);
+}
+
+.process-page progress {
+  width: 100%;
+  margin-top: 4px;
 }
 
 .process-status {

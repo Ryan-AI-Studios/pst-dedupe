@@ -701,6 +701,21 @@ pub struct ProcessPageResponse {
     pub denist: Option<u64>,
     pub dupes: Option<u64>,
     pub families: u64,
+    #[serde(default)]
+    pub pdf_needs_ocr: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProcessExportReportArgs {
+    pub root: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct ProcessExportReportResponse {
+    #[serde(default)]
+    pub output_dir: String,
+    #[serde(default)]
+    pub files_written: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
