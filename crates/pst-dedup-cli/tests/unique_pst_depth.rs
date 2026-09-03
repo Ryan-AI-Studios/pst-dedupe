@@ -210,6 +210,10 @@ fn default_depth_3_fails_fourth_nest() {
         "expected ATTACH_DEPTH_LIMIT at default 3; stdout={stdout} stderr={stderr}"
     );
     assert!(
+        stderr.contains("--max-embedded-depth=3"),
+        "0127 hint must name configured cap 3; stderr={stderr}"
+    );
+    assert!(
         method5_nest_depth(&out) < 4,
         "4th nest must be absent at default 3; depth={}",
         method5_nest_depth(&out)
@@ -281,17 +285,21 @@ fn ceiling_8_fails_at_7_succeeds_at_8() {
         "7",
     ]);
     let stdout7 = String::from_utf8_lossy(&fail.stdout);
+    let stderr7 = String::from_utf8_lossy(&fail.stderr);
     let v7: serde_json::Value = serde_json::from_str(&stdout7).unwrap_or_else(|_| {
         panic!(
-            "json @7; exit={:?} stderr={} stdout={stdout7}",
-            fail.status.code(),
-            String::from_utf8_lossy(&fail.stderr)
+            "json @7; exit={:?} stderr={stderr7} stdout={stdout7}",
+            fail.status.code()
         )
     });
     assert_eq!(v7["export"]["max_embedded_depth"].as_u64(), Some(7));
     assert!(
         depth_limit_count(&v7) >= 1,
         "expected ATTACH_DEPTH_LIMIT at 7; stdout={stdout7}"
+    );
+    assert!(
+        stderr7.contains("--max-embedded-depth=7"),
+        "0127 hint must name configured cap 7; stderr={stderr7}"
     );
     assert!(
         method5_nest_depth(&out7) < 8,
@@ -357,6 +365,16 @@ fn clap_rejects_zero_nine_and_non_integer() {
             "expected clap range text '1 to 8' for {bad}: {combined}"
         );
     }
+    let help = run_unique_pst(&["unique-pst", "--help"]);
+    let help_txt = format!(
+        "{}{}",
+        String::from_utf8_lossy(&help.stdout),
+        String::from_utf8_lossy(&help.stderr)
+    );
+    assert!(
+        help_txt.contains("identity-safe") && help_txt.contains("often need 8"),
+        "0127 clap help; {help_txt}"
+    );
 }
 
 #[test]

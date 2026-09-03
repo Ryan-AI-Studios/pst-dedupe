@@ -477,6 +477,8 @@ enum Commands {
         ledger_path_mode: pst_dedup_cli::unique_export_report::LedgerPathMode,
         /// Nested ATTACH_EMBEDDED_MSG extract/write depth (0106).
         /// Default 3; valid 1–8. Deeper nests ledger ATTACH_DEPTH_LIMIT.
+        /// INC*-class / deep method-5 Purview nests often need 8; default 3 is
+        /// identity-safe, not always enough.
         #[arg(
             long = "max-embedded-depth",
             default_value_t = 3,

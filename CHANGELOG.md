@@ -7,6 +7,30 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0127 — Embedded-depth operator hint)
+
+- unique-pst and unique-eml emit `--max-embedded-depth=<configured>` on stderr when `ATTACH_DEPTH_LIMIT` fires. Default remains **3** (identity-safe). Clap help notes INC*-class / deep method-5 nests often need **8**.
+
+### Added (0128 — Export-risk advisory copy)
+
+- Complete unique-pst with `re_export_recommended` solely from keyed non-poly degrade gets `export_risk.operator_note` plus stderr `note:` naming BODY_UNAVAILABLE — not “100% CRC.” Gate vocabulary and the 0.02 threshold are unchanged; `--fail-on-export-risk` still exits 65.
+
+### Added (0129 — also-eml phase timings)
+
+- `phase_timings.also_eml_ms` clocks `--also-eml` wall time (0 when omitted) and is included in `accounted_ms()`. Unaccounted is still `total − Σ(phases)`.
+
+### Added (0130 — QC sample cost)
+
+- QC complete paths emit `qc_ms=` on stderr (`qc ok:` and `qc hard findings:`). Default `--qc-level` remains `sample`.
+
+### Changed (0131 — Recoverable Items operator hint)
+
+- Runbook: `--prefer-folder-class` stays opt-in; Purview dumps often keep Recoverable Items / Purges winners (~20% on INC* without the flag). Hint still names the flag.
+
+### Changed (0132 — CLI progress vs PowerShell)
+
+- Runbook §2b: `cmd /c … 2>` and `Start-Process` capture recipes so unique-pst stderr progress is not a wall of `NativeCommandError`. JSON stays stdout.
+
 ### Added (0126 — Process chrome visual)
 
 - Process jobs render as a table; sources name PST · ZIP · Purview package · folder; reconciliation is a minus-stack with honest DeNIST/dupes (0 after those stages); Download writes a 0039 CSV pack without blocking on Busy.

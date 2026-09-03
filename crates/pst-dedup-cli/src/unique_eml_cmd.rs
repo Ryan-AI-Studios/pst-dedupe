@@ -189,6 +189,8 @@ pub struct WriteEmlPackFromKeepSetResult {
     pub exit_reasons: Vec<String>,
     pub cancelled: bool,
     pub fidelity: crate::export_outcome::ExportFidelity,
+    /// Writer/extract `ATTACH_DEPTH_LIMIT` events this pack (0127).
+    pub depth_limit_events: u64,
 }
 
 fn eml_pack_cancel_requested(cancel: Option<&AtomicBool>) -> bool {
@@ -419,6 +421,19 @@ pub fn rewrite_quarantined_eml_summary(
     Ok(())
 }
 
+/// Stderr ATTACH_DEPTH_LIMIT line. Called from inner before Ok and late Err
+/// (manifest `?` / summary write) so `--json` and helper hard-fail still disclose.
+fn emit_unique_eml_depth_limit_hint(depth_limit_events: u64, max_embedded_depth: u32) {
+    if depth_limit_events == 0 {
+        return;
+    }
+    let _ = writeln!(
+        std::io::stderr(),
+        "unique-eml: {}",
+        crate::unique_pst_cmd::embedded_depth_limit_operator_line(max_embedded_depth)
+    );
+}
+
 /// Write a unique-EML pack from an in-memory keep-set (no scan/resolve).
 pub fn write_eml_pack_from_keep_set(
     input: WriteEmlPackFromKeepSetInput<'_>,
@@ -472,6 +487,7 @@ pub fn write_eml_pack_from_keep_set(
                     exit_reasons: vec![crate::export_outcome::reason::CANCELLED.to_string()],
                     cancelled: true,
                     fidelity: crate::export_outcome::ExportFidelity::Failed,
+                    depth_limit_events: 0,
                 });
             }
             Err(err)
@@ -569,6 +585,7 @@ fn write_eml_pack_from_keep_set_inner(
         paths.iter().map(|p| p.display().to_string()).collect(),
     );
     let mut write_errors: Vec<String> = Vec::new();
+    let mut depth_limit_events = 0u64;
 
     for entry in &keep_set.winners {
         if eml_pack_cancel_requested(input.cancel) {
@@ -601,6 +618,11 @@ fn write_eml_pack_from_keep_set_inner(
 
         match write_canonical_eml(&abs_path, &msg, input.attach_src, &write_opts) {
             Ok(wres) => {
+                for ev in &wres.attachment_events {
+                    if ev.reason_code == "ATTACH_DEPTH_LIMIT" {
+                        depth_limit_events = depth_limit_events.saturating_add(1);
+                    }
+                }
                 let fidelity_reasons = msg
                     .fidelity
                     .degraded_reasons
@@ -670,6 +692,10 @@ fn write_eml_pack_from_keep_set_inner(
             }
         }
     }
+
+    // Before both Ok and late Err (manifest/summary write). Covers helper
+    // hard-fail so run_unique_eml must not emit again (would print twice).
+    emit_unique_eml_depth_limit_hint(depth_limit_events, nested_depth);
 
     if eml_pack_cancel_requested(input.cancel) {
         cancelled = true;
@@ -887,6 +913,7 @@ fn write_eml_pack_from_keep_set_inner(
             .collect(),
         cancelled,
         fidelity: classified.fidelity,
+        depth_limit_events,
     })
 }
 
@@ -1092,6 +1119,8 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         manifest_json: Some(&manifest_path),
         materialized_count,
     })?;
+
+    // Depth hint is emitted inside write_eml_pack_from_keep_set_inner (Ok and Err).
 
     // Stitch optional artifact paths into the on-disk/stdout summary JSON.
     let mut v = pack.summary_json;

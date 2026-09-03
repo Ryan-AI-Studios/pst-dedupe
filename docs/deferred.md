@@ -957,7 +957,21 @@ From `C:\dev\deviations.md` vs `C:\dev\dedupe-frontend` (research only). **0123 
 | D-0125-pad-fallback | P3 | Stage pad display falls back to 6 if Thin `pad_width` is 0 | Host copies live body; tests assert 1..=12. | residual polish |
 | D-0126-process-chrome-visual | — | Process jobs table, locked profile, drop copy, strip `\\?\`, minus-stack; absorb D-0116-report | **Closed in 0126** (PR **#145** / `73c0496`) — jobs table; honest drop copy; minus-stack; 0039 download. **0122** Busy frozen. Owner HITL remaining (release EXE). D-0116-drop remains (copy only). | **closed / 0126** |
 
-**Not minted (v1.1 / never as next IDs):** local AI first-pass job, clawback packet, LFP default, native spreadsheet redact, legal hold, TAR-as-primary, cluster wheel, StoryBuilder, auto-privilege, BCC-default, `D-0108-keepset-crc-retaint`, `D-0067-embedded-depth` matter children. Mock Archivo/coral declined 2026-09-01 (0123 = Plex + ink-navy). Next free ID **0127**.
+**Not minted (v1.1 / never as next IDs):** local AI first-pass job, clawback packet, LFP default, native spreadsheet redact, legal hold, TAR-as-primary, cluster wheel, StoryBuilder, auto-privilege, BCC-default, `D-0108-keepset-crc-retaint`, `D-0067-embedded-depth` matter children. Mock Archivo/coral declined 2026-09-01 (0123 = Plex + ink-navy). Next free ID **0133**.
+
+## Series U — Unique-export INC* HITL residuals (0127–0132, minted 2026-09-02)
+
+Operator unique-pst smoke **2026-09-02** after Series T (`f8cb240` release CLI) on Desktop `INC0102784.pst` (4.00 GiB) + `INC0102784-2.pst` (537 MiB), one Purview search split at 4GB. Flags: `--source-rank INC0102784.pst --source-rank INC0102784-2.pst --max-embedded-depth 8 --also-eml <dir>`. Wall **1043 s**. Exit **0**; fidelity `complete`; 4055/4055; `folder_tree_match` true; QC sample 64/312, defect=0, known_gap=51 (BCC-by-design). `ATTACH_DEPTH_LIMIT` **0**; `attachments_failed` **0**; also-eml 4055 / 446 nested / attach_failed 0. Body-cloud: 3 kept, 62 window-capped, truncated CSV 0. Source-rank: all 8 cross-file MID groups kept the primary file. `export_risk=re_export_recommended` on `effective_degraded_winner_rate=0.031>0.02` (124 `BODY_UNAVAILABLE`; 3931 poly-only discounted). Pack: `output/inc0102784-post-0126/` (gitignored). Compare 0107 HITL 787 s — not an SLA. Specs **Ready — not started** 2026-09-03 (`/plan-track 127-132`).
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0126-inc-cli-hitl | — | Post-0126 unique-pst INC* CLI smoke | **Closed 2026-09-02 HITL** — structurally green (see Series U intro). Follow-ups minted 0127–0132. | **closed / HITL** |
+| D-0127-embedded-depth-operator-hint | P1 | Default `--max-embedded-depth 3` still exit-64 / `ATTACH_DEPTH_LIMIT` on INC*-class nests | Flag shipped in **0101** (cap 8). Do **not** raise default here; do **not** close `D-0067-embedded-depth` matter children. Hint + runbook. | **0127** Ready |
+| D-0128-export-risk-advisory-copy | P1 | Complete unique still reads as `re_export_recommended` | 0108 effective rate works; trip is 3% `BODY_UNAVAILABLE`. Do not discount bodies; do not restrip keep-set CRC. | **0128** Ready |
+| D-0129-also-eml-phase-timings | P2 | `phase_timings` has no `also_eml_ms`; HITL ~393 s `unaccounted_ms` | Additive field; do not fudge unaccounted to 0. | **0129** Ready |
+| D-0130-qc-sample-cost | P3 | QC sample ~407 s (~39% of INC* wall) | Default stays `sample`. Docs + stderr `qc_ms`. Sample-speedup declined this track. | **0130** Ready |
+| D-0131-recoverable-items-operator-hint | P3 | 826/4055 winners from Recoverable Items / Purges | `--prefer-folder-class` already opt-in (0075). Runbook; do not default-on. | **0131** Ready |
+| D-0132-cli-progress-powershell | P3 | PowerShell treats unique-pst stderr progress as `NativeCommandError` | JSON stays stdout. Runbook / wrapper. | **0132** Ready |
 
 ## Hygiene
 

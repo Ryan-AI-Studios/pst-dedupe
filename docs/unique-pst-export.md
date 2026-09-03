@@ -172,6 +172,8 @@ Additive fields (always present; older tools may ignore):
 | `phase_timings.write_ms` | Streaming PST write (includes final-hash wall inside writer) |
 | `phase_timings.report_ms` | Report pack flush |
 | `phase_timings.verify_ms` | Phase 5 volume verify |
+| `phase_timings.qc_ms` | Source-differential / external QC (0080/0130). 0 when `--qc-level off` |
+| `phase_timings.also_eml_ms` | Co-export `--also-eml` wall (0129). **0** when the flag is omitted |
 | `phase_timings.quarantine_ms` | Cancel quarantine rename (0 when not cancelled) |
 | `phase_timings.unaccounted_ms` | `total_ms − Σ(phases)` — **computed, never fudged to 0** |
 | `phase_timings.total_ms` | Wall from orchestration start |

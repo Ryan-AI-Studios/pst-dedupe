@@ -6277,7 +6277,12 @@ mod tests {
         )
         .expect("build");
         assert_eq!(ks.stats.winners_from_recoverable_items, 1);
-        assert!(recoverable_items_hint(ks.stats.winners_from_recoverable_items).is_some());
+        let hint = recoverable_items_hint(ks.stats.winners_from_recoverable_items).expect("hint");
+        assert!(
+            hint.contains("--prefer-folder-class"),
+            "hint must name the opt-in flag: {hint}"
+        );
+        assert!(!hint.contains('\n'), "hint must stay one line: {hint}");
         assert_eq!(ks.winners[0].locus.nid, 1);
 
         // With ladder on, same sole member still wins (nothing to demote against).

@@ -128,6 +128,15 @@ fn default_depth_3_fails_fourth_nest() {
         depth_limit_in_summary(&v) >= 1 || depth_limit_in_csv(&out),
         "expected ATTACH_DEPTH_LIMIT at default 3; summary={v} stdout={stdout} stderr={stderr}"
     );
+    assert!(
+        stderr.contains("--max-embedded-depth=3"),
+        "0127 unique-eml hint must name configured cap 3; stderr={stderr}"
+    );
+    assert_eq!(
+        stderr.matches("--max-embedded-depth=3").count(),
+        1,
+        "0127 unique-eml hint must appear once (not twice); stderr={stderr}"
+    );
     let eml = pack_eml_text(&out);
     assert!(
         eml.contains("Subject: Depth 4"),
@@ -206,6 +215,15 @@ fn ceiling_8_fails_at_7_succeeds_at_8() {
         depth_limit_in_summary(&v7) >= 1 || depth_limit_in_csv(&out7),
         "expected ATTACH_DEPTH_LIMIT at 7; summary={v7}"
     );
+    assert!(
+        stderr7.contains("--max-embedded-depth=7"),
+        "0127 unique-eml hint must name configured cap 7; stderr={stderr7}"
+    );
+    assert_eq!(
+        stderr7.matches("--max-embedded-depth=7").count(),
+        1,
+        "0127 unique-eml hint must appear once (not twice); stderr={stderr7}"
+    );
     let eml7 = pack_eml_text(&out7);
     assert!(
         !eml7.contains("Subject: Leaf"),
@@ -266,4 +284,14 @@ fn clap_rejects_zero_nine_and_non_integer() {
             "expected clap range text '1 to 8' for {bad}: {combined}"
         );
     }
+    let help = run_unique_eml(&["unique-eml", "--help"]);
+    let help_txt = format!(
+        "{}{}",
+        String::from_utf8_lossy(&help.stdout),
+        String::from_utf8_lossy(&help.stderr)
+    );
+    assert!(
+        help_txt.contains("identity-safe") && help_txt.contains("often need 8"),
+        "0127 unique-eml clap help; {help_txt}"
+    );
 }
