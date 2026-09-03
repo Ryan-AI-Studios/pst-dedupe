@@ -139,6 +139,12 @@
 | 80 | P3 T | **0124** ReviewQueueChrome | ✅ Completed | Ellipsis; 244px rail; Go-to + SQL-page range; PR **#141** / `ff8b0ea` |
 | 81 | P3 T | **0125** ProduceCanvas | ✅ Completed | Un-wizard + Stage; 0119 latch frozen; PR **#143** / `1fbc22a` |
 | 82 | P3 T | **0126** ProcessChromeVisual | ✅ Completed | Jobs table / minus-stack / 0039 download; 0122 Busy frozen; PR **#145** / `73c0496` |
+| 83 | P1 U | **0127** EmbeddedDepthOperatorHint | ✅ Completed | depth-limit hint; default stays 3; PR **#147** / `9082761` |
+| 84 | P1 U | **0128** ExportRiskAdvisoryCopy | ✅ Completed | `operator_note` keyed BODY_UNAVAILABLE; PR **#147** / `9082761` |
+| 85 | P2 U | **0129** AlsoEmlPhaseTimings | ✅ Completed | `also_eml_ms`; PR **#147** / `9082761` |
+| 86 | P3 U | **0130** QcSampleCost | ✅ Completed | stderr `qc_ms=`; default sample; PR **#147** / `9082761` |
+| 87 | P3 U | **0131** RecoverableItemsOperatorHint | ✅ Completed | RI/Purges opt-in folder-class runbook; HITL skipped; PR **#147** / `9082761` |
+| 88 | P3 U | **0132** CliProgressPowershell | ✅ Completed | PowerShell stderr progress; PR **#147** / `9082761` |
 
 ## Series K spine (clean unique export)
 
@@ -281,3 +287,16 @@ After **0119–0122** Bugbot. Steal layout from `C:\dev\dedupe-frontend`; do not
 | 2 | **0124** ReviewQueueChrome | **Completed** — ellipsis; 244px rail; Go-to + row range; PR **#141** / `ff8b0ea` |
 | 3 | **0125** ProduceCanvas | **Completed** — un-wizard + Stage; not 0119 latch; PR **#143** / `1fbc22a` |
 | 4 | **0126** ProcessChromeVisual | **Completed** — jobs table; not 0122; PR **#145** / `73c0496` |
+
+## Series U — Unique-export INC* HITL residuals (0127–0132)
+
+Shipped `/implement-track 127-132` (2026-09-03). PR **#147** / `9082761`. No BCC. No keep-set CRC restrip. No D-0067 matter children.
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0127** EmbeddedDepthOperatorHint | **Completed** — ATTACH_DEPTH_LIMIT hint; default 3 held; PR **#147** / `9082761` |
+| 2 | **0128** ExportRiskAdvisoryCopy | **Completed** — do not discount BODY_UNAVAILABLE; no fourth risk value; PR **#147** / `9082761` |
+| 3 | **0129** AlsoEmlPhaseTimings | **Completed** — additive `also_eml_ms`; never fudge unaccounted; PR **#147** / `9082761` |
+| 4 | **0130** QcSampleCost | **Completed** — default sample stays; stderr `qc_ms=`; PR **#147** / `9082761` |
+| 5 | **0131** RecoverableItemsOperatorHint | **Completed** — folder-class stays opt-in; owner HITL skipped; PR **#147** / `9082761` |
+| 6 | **0132** CliProgressPowershell | **Completed** — JSON stays stdout; docs + timing-script comment; PR **#147** / `9082761` |
