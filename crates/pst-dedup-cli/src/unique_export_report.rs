@@ -565,6 +565,9 @@ pub struct ExportRiskInputs {
     /// Telemetry: winners excluded as poly-only CRC degrade on poly-class sources.
     #[serde(default)]
     pub degraded_winners_poly_only: u64,
+    /// Keep-set winners whose integrity includes `BodyUnavailable` (0128).
+    #[serde(default)]
+    pub body_unavailable_winners: u64,
 }
 
 impl Default for ExportRiskInputs {
@@ -584,6 +587,7 @@ impl Default for ExportRiskInputs {
             poly_class_crc_sources: 0,
             effective_degraded_winner_rate: None,
             degraded_winners_poly_only: 0,
+            body_unavailable_winners: 0,
         }
     }
 }
@@ -618,6 +622,10 @@ pub struct ExportRisk {
     pub reasons: Vec<String>,
     pub inputs: ExportRiskInputs,
     pub thresholds: ExportRiskThresholds,
+    /// Advisory copy when complete fidelity is `re_export_recommended` solely
+    /// from keyed non-poly degrade (0128). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_note: Option<String>,
 }
 
 /// Compute `export_risk`: max(scan preflight, post-export evaluation).
@@ -796,7 +804,42 @@ pub fn compute_export_risk_with_thresholds(
         reasons,
         inputs: inputs_out,
         thresholds: thresholds.clone(),
+        operator_note: None,
     }
+}
+
+/// Operator note when complete unique-pst is advisory solely due to keyed
+/// non-poly degrade (0128). Not a fourth risk enum.
+pub fn export_risk_operator_note(fidelity: ExportFidelity, risk: &ExportRisk) -> Option<String> {
+    if fidelity != ExportFidelity::Complete {
+        return None;
+    }
+    if risk.level != PreflightRecommendation::ReExportRecommended {
+        return None;
+    }
+    let mut keyed_rate_fragment: Option<&str> = None;
+    for r in &risk.reasons {
+        if let Some(rest) = r.strip_prefix("effective_degraded_winner_rate=") {
+            keyed_rate_fragment = Some(rest);
+            continue;
+        }
+        if let Some(rest) = r.strip_prefix("degraded_winner_rate=") {
+            keyed_rate_fragment = Some(rest);
+            continue;
+        }
+        if r == "poly_class_crc_discounted" {
+            continue;
+        }
+        return None;
+    }
+    let keyed_rate = keyed_rate_fragment?;
+    if risk.inputs.body_unavailable_winners == 0 {
+        return None;
+    }
+    Some(format!(
+        "BODY_UNAVAILABLE / non-poly degrade: {} winner(s) missing bodies (keyed rate={keyed_rate}; not 100% CRC)",
+        risk.inputs.body_unavailable_winners
+    ))
 }
 
 /// Per-phase wall-clock timings for unique-pst (track 0079).
@@ -817,6 +860,8 @@ pub struct PhaseTimings {
     pub verify_ms: u64,
     /// Source-differential / external QC wall time (0080).
     pub qc_ms: u64,
+    /// Co-export `--also-eml` wall time (0129). 0 when the flag is omitted.
+    pub also_eml_ms: u64,
     pub quarantine_ms: u64,
     /// `total_ms − Σ(phases)`. Non-zero is a gap in instrumentation, not noise.
     pub unaccounted_ms: u64,
@@ -835,6 +880,7 @@ impl PhaseTimings {
             .saturating_add(self.report_ms)
             .saturating_add(self.verify_ms)
             .saturating_add(self.qc_ms)
+            .saturating_add(self.also_eml_ms)
             .saturating_add(self.quarantine_ms)
     }
 
@@ -3184,6 +3230,10 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r == "poly_class_crc_discounted"));
+        assert!(
+            export_risk_operator_note(ExportFidelity::Complete, &risk).is_none(),
+            "poly-only (effective degrade 0) must not carry operator_note"
+        );
     }
 
     #[test]
@@ -3335,6 +3385,42 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r == "poly_class_crc_discounted"));
+        inputs.body_unavailable_winners = 2;
+        let risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        let note = export_risk_operator_note(ExportFidelity::Complete, &risk);
+        assert!(
+            note.as_ref().is_some_and(|n| n.contains("BODY_UNAVAILABLE")
+                && n.contains("non-poly degrade")
+                && n.contains('2')
+                && n.contains("0.049")
+                && n.contains("not 100% CRC")),
+            "note={note:?} reasons={:?}",
+            risk.reasons
+        );
+        assert!(
+            export_risk_operator_note(ExportFidelity::Partial, &risk).is_none(),
+            "partial fidelity must not carry the advisory note"
+        );
+        assert!(
+            export_risk_operator_note(ExportFidelity::Failed, &risk).is_none(),
+            "failed fidelity must not carry the advisory note"
+        );
+        let mut with_attach = inputs.clone();
+        with_attach.attach_fail_rate = 0.10;
+        let spiked = compute_export_risk(&PreflightRecommendation::Ok, &with_attach);
+        assert!(
+            spiked
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("attach_fail_rate=")),
+            "reasons={:?}",
+            spiked.reasons
+        );
+        assert!(
+            export_risk_operator_note(ExportFidelity::Complete, &spiked).is_none(),
+            "attach-fail spike must suppress the note; reasons={:?}",
+            spiked.reasons
+        );
     }
 
     #[test]
@@ -3366,6 +3452,10 @@ mod tests {
                 .any(|r| r.starts_with("effective_degraded_winner_rate=")),
             "reasons={:?}",
             risk.reasons
+        );
+        assert!(
+            export_risk_operator_note(ExportFidelity::Complete, &risk).is_none(),
+            "CRC-only keyed degrade with 0 BODY_UNAVAILABLE must not carry the bodies note"
         );
     }
 
@@ -3639,5 +3729,18 @@ mod tests {
             REASON_BODY_CLOUD_LINK_MAX_LINKS_EXCEEDED
         );
         assert!(body_cloud_honesty_reason(false, false, false).is_empty());
+    }
+
+    #[test]
+    fn accounted_ms_includes_also_eml_ms() {
+        let mut t = PhaseTimings {
+            also_eml_ms: 42,
+            qc_ms: 7,
+            ..Default::default()
+        };
+        assert_eq!(t.accounted_ms(), 49);
+        t.finalize(100);
+        assert_eq!(t.unaccounted_ms, 51);
+        assert_ne!(t.unaccounted_ms, 0);
     }
 }

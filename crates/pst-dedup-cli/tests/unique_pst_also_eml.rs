@@ -218,6 +218,12 @@ fn aspose_also_eml_count_and_manifest() {
         eml_written, unique,
         "also_eml_eml_written must equal unique"
     );
+    let also_ms = v["phase_timings"]["also_eml_ms"].as_u64().unwrap_or(0);
+    assert!(
+        also_ms > 0,
+        "also_eml_ms must be > 0 when co-export ran; phase_timings={:?}",
+        v["phase_timings"]
+    );
 
     let man_path = also.join("manifest.json");
     assert!(man_path.is_file(), "manifest.json missing");
@@ -225,6 +231,44 @@ fn aspose_also_eml_count_and_manifest() {
         serde_json::from_str(&fs::read_to_string(&man_path).expect("man")).expect("man json");
     assert_eq!(man["schema"].as_str(), Some("eml_pack_v1"));
     assert_eq!(count_eml_files(&also), eml_written);
+}
+
+#[test]
+fn also_eml_ms_zero_when_flag_omitted() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+    let result = Command::new(bin())
+        .args([
+            "unique-pst",
+            sample.to_str().expect("utf8"),
+            "--out",
+            out.to_str().expect("utf8"),
+            "--report-dir",
+            report.to_str().expect("utf8"),
+            "--qc-level",
+            "off",
+            "--no-attachments",
+            "--json",
+            "--allow-partial-fidelity",
+        ])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "stderr={stderr} stdout={stdout}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    assert_eq!(
+        v["phase_timings"]["also_eml_ms"].as_u64(),
+        Some(0),
+        "omitted --also-eml must clock 0; phase_timings={:?}",
+        v["phase_timings"]
+    );
 }
 
 #[test]
@@ -1288,6 +1332,148 @@ fn summary_write_failure_returns_err() {
         materialized_count: 1,
     });
     assert!(result.is_err(), "summary write failure must return Err");
+}
+
+/// Inner emit covers late Err: depth events are counted before summary.json write.
+/// CLI spawn cannot plant a blocked summary after `prepare_out_dir` without `--overwrite`
+/// wiping it; this helper path is the cheap proof that ATTACH_DEPTH_LIMIT happened then Err.
+#[test]
+fn summary_write_failure_after_depth_limit_returns_err() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src.pst");
+    write_method5_source(&src, 4);
+    let mut pst = pst_reader::PstFile::open(&src).expect("open");
+    let nid = pst
+        .folders()
+        .expect("folders")
+        .iter()
+        .flat_map(|f| f.message_nids.iter().copied())
+        .next()
+        .expect("nid")
+        .0;
+    let src_display = src.display().to_string();
+    let keep_set = KeepSet {
+        schema: "keep_set_v1".into(),
+        policy: KeepPolicy::FirstSeen,
+        family_policy: FamilyPolicy::ParentsOnly,
+        created_from: None,
+        identity_level: None,
+        dedupe_scope: None,
+        winners: vec![KeepEntry {
+            locus: MessageLocus {
+                source_path: src_display,
+                source_pst: "src.pst".into(),
+                folder_path: "Inbox".into(),
+                nid,
+                is_orphaned: false,
+            },
+            message_id_norm: Some("<d1@ex.com>".into()),
+            content_hash: [0u8; 32],
+            edrm_mih_hex: None,
+            integrity: RecoverableIntegrity::clean(),
+            size: 10,
+            promoted_from_failure: false,
+            folder_class: None,
+            decided_by: None,
+            duplicate_source_count: 0,
+            duplicate_sources: vec![],
+            duplicate_sources_truncated: false,
+        }],
+        stats: KeepSetStats {
+            unique: 1,
+            recoverable: 1,
+            ..KeepSetStats::default()
+        },
+    };
+    let pack_out = dir.path().join("pack");
+    fs::create_dir_all(&pack_out).expect("mkdir");
+    fs::create_dir_all(pack_out.join("summary.json")).expect("summary as dir");
+    let mut mat = PstMaterializer::new(FamilyPolicy::ParentsOnly);
+    let mut attach_src = PstAttachStreamSource::new();
+    let preflight = dedup_engine::integrity::compute_preflight(
+        &dedup_engine::integrity::PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            1,
+            0,
+            0,
+            0,
+            1,
+            dedup_engine::integrity::IntegrityThresholds::default(),
+        ),
+    );
+    let scan = pst_dedup_cli::scan::ScanSummary {
+        schema: "scan_integrity_v1".into(),
+        mode: ScanMode::BestEffort,
+        files: vec![],
+        total_messages: 1,
+        unique: 1,
+        duplicates: 0,
+        tier1_hits: 0,
+        tier2_hits: 0,
+        savings_bytes: 0,
+        skipped: 0,
+        skipped_by_reason: Default::default(),
+        recoverable_messages: 1,
+        degraded_messages: 0,
+        degraded_by_reason: Default::default(),
+        orphaned_messages: 0,
+        failed_files: 0,
+        partial_files: 0,
+        opened_files: 1,
+        duration_secs: 0.0,
+        preflight,
+        skips: vec![],
+        integrity_csv: None,
+        grouping: Default::default(),
+        page_crc_mismatches: 0,
+        block_crc_mismatches: 0,
+        block_bid_mismatches: 0,
+        distinct_bad_bids: 0,
+        distinct_bad_bids_exact: true,
+        crc_suspect_messages: 0,
+        page_reads: 0,
+        block_reads: 0,
+        block_crc_rate: 0.0,
+        block_crc_read_rate: 0.0,
+        poly_class_crc_sources: 0,
+    };
+    let result = write_eml_pack_from_keep_set(WriteEmlPackFromKeepSetInput {
+        keep_set: &keep_set,
+        paths: std::slice::from_ref(&src),
+        out: &pack_out,
+        policy: KeepPolicy::FirstSeen,
+        family_policy: FamilyPolicy::ParentsOnly,
+        write_opts: dedup_engine::EmlWriteOpts {
+            family_policy: FamilyPolicy::ParentsOnly,
+            max_embedded_depth: 3,
+        },
+        files_per_volume: 10_000,
+        volume_prefix: "VOL".into(),
+        attach_ledger: AttachLedgerMode::Off,
+        attach_ledger_max_rows: 500_000,
+        ledger_path_mode: LedgerPathMode::Full,
+        soft_skip_attach_records: &[],
+        scan,
+        scan_ok: true,
+        fail_on_partial_fidelity: false,
+        allow_partial_fidelity: true,
+        risk_gate: pst_dedup_cli::export_outcome::RiskGate::Off,
+        export_risk: dedup_engine::integrity::PreflightRecommendation::Ok,
+        cancel: None,
+        mat: &mut mat,
+        attach_src: &mut attach_src,
+        manifest_json: None,
+        materialized_count: 1,
+    });
+    assert!(
+        result.is_err(),
+        "summary write failure after ATTACH_DEPTH_LIMIT must return Err"
+    );
+    let vol = pack_out.join("VOL001");
+    assert!(
+        vol.is_dir(),
+        "EML write (and depth-limit counting) must run before summary Err"
+    );
 }
 
 #[test]

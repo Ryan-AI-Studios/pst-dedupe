@@ -71,17 +71,20 @@ Recommended counsel-grade sequence:
 2. **`scan --json`** — integrity + CRC telemetry; capture preflight recommendation.
 3. **Optional deep-attach** — `--deep-attach-preflight` when attachment fidelity is matter-critical.
 4. **Optional Mode A promote** — `--promote-on-attach-fail` when a complete peer copy should win over an incomplete first-ranked peer (default off; see §2a).
-5. **`unique-pst`** — keep-set resolve → streaming write → report pack.
-6. **Exit / report** — read process exit + `summary.json` (`fidelity`, `export_risk`, `exit_reason`, `phase_timings`).
-7. **QC / ScanPST-on-copy** — default `--qc-level sample`; optional `--qc-scanpst` / external reader; ScanPST only on a copy (§5).
+5. **`unique-pst`** — keep-set resolve → streaming write → report pack. Progress is on **stderr** (so `--json` stdout stays a document). PowerShell wraps native stderr as `NativeCommandError` — capture with the recipes in §2b, not `2>` on the `pst-dedup` process itself from PowerShell.
+6. **Exit / report** — read process exit + `summary.json` (`fidelity`, `export_risk`, `exit_reason`, `phase_timings`). `export_risk=re_export_recommended` with complete fidelity can be keyed non-poly `BODY_UNAVAILABLE` (see §5) rather than a failed write.
+7. **QC / ScanPST-on-copy** — default `--qc-level sample` (source-differential; stderr includes `qc_ms=`). Use `structure` for throughput smoke; `off` is **not** a substitute for sample on counsel unique; `full` is exhaustive. Optional `--qc-scanpst` / external reader; ScanPST only on a copy (§5).
 8. **Handoff** — unique PST volume(s) + report pack subset; apply basename only if Matter Archive mapping is retained (§7).
 9. **Disposition** — after hold release, purge workstation intermediates per firm policy (§8).
+
+**Recoverable Items / Purges (opt-in):** Purview mailbox searches often include Recoverable Items. Without `--prefer-folder-class`, unique-pst **keeps those copies** when they win `first_seen` / source-rank (INC* 2026-09-02: ~20% of winners from RI/Purges — expected, not a miss of live mail). unique-pst always `emit_log`s `recoverable_items_hint` when the count is > 0; unique-eml `eprintln!`s the same hint when **not** `--json`. The flag stays **opt-in** because it changes the keep-set (prefers live-mailbox folder class over dumpster-like folders).
 
 Day-1 CLI sketch:
 
 ```powershell
 .\pst-dedup.exe inspect C:\evidence\custA.pst --top 20
 .\pst-dedup.exe scan C:\evidence\custA.pst C:\evidence\custB.pst --json | Set-Content -Encoding utf8 scan.json
+# Progress lives on stderr. PowerShell `2>` on pst-dedup wraps it as NativeCommandError — see §2b.
 .\pst-dedup.exe unique-pst C:\evidence\custA.pst C:\evidence\custB.pst `
   --out C:\work\unique.pst `
   --report-dir C:\work\unique_report `
@@ -91,6 +94,31 @@ Day-1 CLI sketch:
 ```
 
 Optional timing harness (no client paths baked in): [`scripts/unique-pst-timing.ps1`](../scripts/unique-pst-timing.ps1).
+
+---
+
+## 2b. Capturing unique-pst progress on Windows PowerShell (0132)
+
+`--json` stays on **stdout**. Progress (`unique-pst: stage=…`) stays on **stderr**. Interactive PowerShell records that stderr as `NativeCommandError` (`FullyQualifiedErrorId: NativeCommandError`). Harmless; not a failed export.
+
+Do **not** use `&&`. Capture recipes:
+
+```cmd
+cmd /c "pst-dedup.exe unique-pst C:\evidence\a.pst --out C:\work\unique.pst --report-dir C:\work\report --json --overwrite 2> C:\work\progress.log"
+```
+
+```powershell
+# Start-Process does not wrap native stderr as NativeCommandError.
+# Same pattern as scripts/unique-pst-timing.ps1 (RedirectStandardError = $false).
+$p = Start-Process -FilePath '.\pst-dedup.exe' -ArgumentList @(
+  'unique-pst', 'C:\evidence\a.pst',
+  '--out', 'C:\work\unique.pst',
+  '--report-dir', 'C:\work\report',
+  '--json', '--overwrite'
+) -NoNewWindow -Wait -PassThru
+```
+
+Day-1 `scan --json | Set-Content` is stdout-only and does **not** apply to unique-pst progress. For unique-pst JSON, keep stdout as the document (pipe or `Set-Content` on stdout) and capture stderr with `cmd /c … 2>` or the timing harness.
 
 ---
 
@@ -143,13 +171,13 @@ Default keep-set grouping unites messages **across custodians** (global scope). 
 | Situation | Guidance |
 |---|---|
 | Multi-file / multi-custodian | Prefer `--source-rank` (best-first) so keep-set winners favor the intended collection tier. |
-| Recoverable Items / dumpster-like folders | `--prefer-folder-class` (and/or custom `--folder-rank`) when purging soft-deleted noise is matter policy. |
+| `--prefer-folder-class` | Opt-in. Prefers live-mailbox folder class over Recoverable Items / Purges. unique-pst `emit_log`s the RI hint always; unique-eml prints it when not `--json`. |
 | Sender-copy completeness | `--prefer-bcc-copy` when BCC-bearing copies are preferred for **keep-set winner choice**. |
 | BCC on the **deliverable** | Default **suppresses** Bcc TC rows / `PidTagDisplayBcc` (disclosure). Use `--include-bcc-recipients` only under counsel instruction when full-fidelity BCC must appear in the written PST. |
 | Chronological winner | `--policy earliest_date` prefers earliest submit time (delivery fallback); missing dates rank last — disclose when used. |
 | `first_seen` honesty | Default `first_seen` is **sorted input-path order**, not chronological send time. |
 | Per-source isolation | `--dedupe-scope per-source` when cross-mailbox collapse is not authorized. |
-| Nested `.msg` deeper than 3 | If `export_attachments.csv` / histogram shows `ATTACH_DEPTH_LIMIT`, re-run with `--max-embedded-depth 8` (product ceiling). Remaining rows stay disclosed; leftover exit 64 is not a parser bug. INC* HITL **2026-08-29:** `output/inc0102784-post-0107/` (operator-local; never commit) — depth 8 cleared `ATTACH_DEPTH_LIMIT` (exit 0; also-eml 4055/446). |
+| Nested `.msg` deeper than 3 | Default `--max-embedded-depth` is **3** (identity-safe). If unique-pst/unique-eml stderr or `export_attachments.csv` / histogram shows `ATTACH_DEPTH_LIMIT`, re-run with `--max-embedded-depth 8` (product ceiling). Remaining rows stay disclosed; leftover exit 64 is not a parser bug. INC* HITL **2026-08-29:** `output/inc0102784-post-0107/` — depth 8 cleared `ATTACH_DEPTH_LIMIT`. **2026-09-02:** `output/inc0102784-post-0126/` (operator-local; never commit) — same: depth 8, `ATTACH_DEPTH_LIMIT=0`, exit 0. |
 
 Full flag table: [`unique-pst-export.md`](unique-pst-export.md).
 
@@ -205,7 +233,10 @@ Product defaults (CLI-configurable vs fixed product constants — do **not** ass
 
 ## 5. Remediation
 
-1. **Prefer Purview (or enterprise) re-export** when integrity/`export_risk` says `re_export_recommended` or `not_export_ready` and the collection path is M365.  
+1. **`export_risk` is not automatically “re-run Purview.”** Vocabulary stays `ok` \| `re_export_recommended` \| `not_export_ready` (no fourth enum). `--fail-on-export-risk re_export_recommended` still exits **65**.
+   - **Poly-class CRC only** (effective degrade 0; `poly_class_crc_discounted`): do **not** re-export a Permute store for “100% CRC.” The advisory is discounted noise.
+   - **Keyed non-poly degrade / `BODY_UNAVAILABLE`** (`effective_degraded_winner_rate=` or `degraded_winner_rate=` above 0.02; stderr `note:` names missing bodies): inspect missing bodies; prefer Purview/enterprise re-export when the collection path is M365 **and** bodies are actually missing — not because poly CRC was discounted.
+   - **`not_export_ready`**, attach-fail spikes, failed volumes, scan not-ready: treat as a collection/export problem; prefer re-export when the path is M365.
 2. **Unindexed items ≠ CRC failure** — do not equate search-index gaps with block CRC corruption.  
 3. **ScanPST on a copy only** — never on originals. After repair, compare message counts with the two-command workflow:
 
@@ -345,8 +376,10 @@ What accumulates on the workstation:
 
 | Control | Default / note |
 |---|---|
-| `--qc-level` | Default **`sample`** (also `off` / `structure` / `full`) |
+| `--qc-level` | Default **`sample`** (source-differential). Also `off` / `structure` / `full`. |
 | `--qc-sample-max` | Default **64** risk-weighted sample |
+| QC cost (stderr) | Both complete paths emit `qc_ms=` (`qc ok:` and `qc hard findings:`). |
+| `sample` vs `structure` vs `off` vs `full` | **sample** — counsel unique / handoff (compares source vs unique). **structure** — throughput smoke (no source-differential). **off** — not a substitute for sample on counsel unique. **full** — exhaustive (expensive). |
 | `--qc-scanpst` | Optional; requires discoverable classic `scanpst.exe`; runs on a **temp copy** |
 | `--qc-external-reader` | BYOB `pffinfo` / `readpst` counts only — never auto-download |
 | COM | **Not used** |

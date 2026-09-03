@@ -279,6 +279,8 @@ pub struct UniquePstClapArgs {
     pub promote_on_attach_fail: bool,
     /// Nested ATTACH_EMBEDDED_MSG extract/write depth (0094/0101).
     /// Default 3; valid 1–8. Deeper nests ledger ATTACH_DEPTH_LIMIT.
+    /// INC*-class / deep method-5 Purview nests often need 8; default 3 is
+    /// identity-safe, not always enough.
     #[arg(
         long = "max-embedded-depth",
         default_value_t = 3,
@@ -890,6 +892,13 @@ fn cancel_requested(cancel: &Option<Arc<AtomicBool>>) -> bool {
         .as_ref()
         .map(|c| c.load(Ordering::SeqCst))
         .unwrap_or(false)
+}
+
+/// Operator line when extract/write hit `ATTACH_DEPTH_LIMIT` (0127).
+pub fn embedded_depth_limit_operator_line(configured_cap: u32) -> String {
+    format!(
+        "ATTACH_DEPTH_LIMIT: deeper nests skipped; --max-embedded-depth={configured_cap} (INC*-class / deep method-5 Purview nests often need 8; default 3 is identity-safe)"
+    )
 }
 
 /// Emit a stage/log line to stderr (optional) and `on_log`.
@@ -2285,6 +2294,7 @@ pub fn run_unique_pst_with_options(
     let mut failed_volume_index: Option<u32> = None;
     let mut cursor = 0usize;
     let mut volume_index: u32 = 0;
+    let mut embedded_depth_limit_hits = 0u64;
     let mut messages_written_prior: u64 = 0;
 
     let protected: Vec<PathBuf> = paths.clone();
@@ -2543,6 +2553,8 @@ pub fn run_unique_pst_with_options(
 
         match write_result {
             Ok(report) => {
+                embedded_depth_limit_hits =
+                    embedded_depth_limit_hits.saturating_add(report.embedded_depth_limit_hits);
                 // Commit volume attach events into global ledger (if any).
                 if let Some(ledger) = attach_ledger.as_mut() {
                     vol_attach_buf.commit_into(ledger);
@@ -2761,6 +2773,13 @@ pub fn run_unique_pst_with_options(
     }
 
     phase_timings.write_ms = t_write.elapsed().as_millis() as u64;
+    if embedded_depth_limit_hits > 0 {
+        emit_log(
+            stderr,
+            &on_log,
+            &embedded_depth_limit_operator_line(nested_extract_depth),
+        );
+    }
 
     // Empty keep-set (or loop never entered): still honour cancel so outcome
     // is not reported as a successful zero-message export when the user aborted.
@@ -3014,8 +3033,10 @@ pub fn run_unique_pst_with_options(
                 stderr,
                 &on_log,
                 &format!(
-                    "qc hard findings: defect={} unexplained_loss={}",
-                    qc_report.findings.defect, qc_report.findings.unexplained_loss
+                    "qc hard findings: qc_ms={} defect={} unexplained_loss={}",
+                    phase_timings.qc_ms,
+                    qc_report.findings.defect,
+                    qc_report.findings.unexplained_loss
                 ),
             );
         } else {
@@ -3023,8 +3044,11 @@ pub fn run_unique_pst_with_options(
                 stderr,
                 &on_log,
                 &format!(
-                    "qc ok: level={} messages_compared={} known_gap={}",
-                    qc_report.qc_level, qc_report.messages_compared, qc_report.findings.known_gap
+                    "qc ok: level={} qc_ms={} messages_compared={} known_gap={}",
+                    qc_report.qc_level,
+                    phase_timings.qc_ms,
+                    qc_report.messages_compared,
+                    qc_report.findings.known_gap
                 ),
             );
         }
@@ -3086,6 +3110,7 @@ pub fn run_unique_pst_with_options(
                 max_embedded_depth: nested_extract_depth,
             };
             let cancel_flag = cancel.as_deref();
+            let t_also_eml = Instant::now();
             match crate::unique_eml_cmd::write_eml_pack_from_keep_set(
                 crate::unique_eml_cmd::WriteEmlPackFromKeepSetInput {
                     keep_set: &keep_set,
@@ -3215,6 +3240,7 @@ pub fn run_unique_pst_with_options(
                     }
                 }
             }
+            phase_timings.also_eml_ms = t_also_eml.elapsed().as_millis() as u64;
         }
     }
 
@@ -3320,7 +3346,16 @@ pub fn run_unique_pst_with_options(
         &outcome.summary.files,
         crc_adj.poly_class_crc_discounted,
     );
-    let export_risk = crate::unique_export_report::compute_export_risk(
+    let body_unavailable_winners = keep_set
+        .winners
+        .iter()
+        .filter(|w| {
+            w.integrity
+                .degraded_reasons
+                .contains(&IntegrityReason::BodyUnavailable)
+        })
+        .count() as u64;
+    let mut export_risk = crate::unique_export_report::compute_export_risk(
         &outcome.summary.preflight.recommendation,
         &crate::unique_export_report::ExportRiskInputs {
             attach_fail_rate,
@@ -3337,6 +3372,7 @@ pub fn run_unique_pst_with_options(
             poly_class_crc_sources: crc_adj.poly_class_crc_sources,
             effective_degraded_winner_rate: deg_adj.effective_degraded_winner_rate,
             degraded_winners_poly_only: deg_adj.degraded_winners_poly_only,
+            body_unavailable_winners,
         },
     );
 
@@ -3347,6 +3383,7 @@ pub fn run_unique_pst_with_options(
         fail_on_partial,
         cancelled,
     );
+    // operator_note is computed after finalize_unique_pst_classify (combined fidelity).
     let bytes_written =
         messages_written_total > 0 || volumes.iter().any(|v| v.bytes > 0) || out.exists();
     let artifact_state =
@@ -3417,6 +3454,8 @@ pub fn run_unique_pst_with_options(
         .collect();
     classified.reasons = combined_static_reasons;
     classified = crate::export_outcome::finalize_unique_pst_classify(classified, also_eml_fidelity);
+    export_risk.operator_note =
+        crate::unique_export_report::export_risk_operator_note(classified.fidelity, &export_risk);
 
     // ok follows fidelity (0078); exit 0 can still be partial under --allow-partial-fidelity.
     let ok = classified.fidelity == crate::export_outcome::ExportFidelity::Complete
@@ -3500,7 +3539,7 @@ pub fn run_unique_pst_with_options(
         decision_csv: decision_csv_out.clone(),
         keep_set_json: keep_set_json_out.clone(),
         error: summary_error.clone(),
-        export_risk,
+        export_risk: export_risk.clone(),
         bcc_suppressed_message_count,
         sent_message_with_no_recipients_count,
         retryable,
@@ -3578,6 +3617,11 @@ pub fn run_unique_pst_with_options(
             &classified.reasons,
             summary_error.as_ref().map(|e| e.code.as_str()),
         );
+        export_risk.operator_note = crate::unique_export_report::export_risk_operator_note(
+            classified.fidelity,
+            &export_risk,
+        );
+        summary.export_risk.operator_note = export_risk.operator_note.clone();
         // Best-effort rewrite with corrected fields.
         let _ = write_summary_json(&summary_path, &summary);
     }
@@ -3635,6 +3679,10 @@ pub fn run_unique_pst_with_options(
         0,
         winners_total,
     );
+
+    if let Some(note) = summary.export_risk.operator_note.as_ref() {
+        emit_log(stderr, &on_log, &format!("note: {note}"));
+    }
 
     // ── Phase 6: exit (CLI stdout) ──────────────────────────────────────────
     if args.json {
@@ -4473,6 +4521,52 @@ mod tests {
         );
     }
 
+    /// 0128 P2-1: operator_note uses combined fidelity after also-eml finalize.
+    #[test]
+    fn operator_note_after_also_eml_combine_not_pst_only() {
+        use crate::export_outcome::{
+            classify_export, finalize_unique_pst_classify, ExportFidelity, RiskGate,
+        };
+        use crate::unique_export_report::{
+            compute_export_risk, export_risk_operator_note, ExportRiskInputs,
+        };
+        use dedup_engine::integrity::PreflightRecommendation;
+
+        let inputs = ExportRiskInputs {
+            degraded_winner_rate: 1.0,
+            effective_degraded_winner_rate: Some(0.049),
+            body_unavailable_winners: 2,
+            poly_class_crc_discounted: true,
+            ..Default::default()
+        };
+        let export_risk = compute_export_risk(&PreflightRecommendation::Ok, &inputs);
+        assert_eq!(
+            export_risk.level,
+            PreflightRecommendation::ReExportRecommended
+        );
+
+        let pst_only = classify_export(ok_base(), export_risk.level, RiskGate::Off, false, false);
+        assert_eq!(pst_only.fidelity, ExportFidelity::Complete);
+        assert!(
+            export_risk_operator_note(pst_only.fidelity, &export_risk).is_some(),
+            "PST-only Complete would carry the note"
+        );
+
+        let combined = finalize_unique_pst_classify(pst_only, Some(ExportFidelity::Failed));
+        assert_eq!(combined.fidelity, ExportFidelity::Failed);
+        assert!(
+            export_risk_operator_note(combined.fidelity, &export_risk).is_none(),
+            "after combine, non-complete fidelity must clear operator_note"
+        );
+
+        let partial = finalize_unique_pst_classify(
+            classify_export(ok_base(), export_risk.level, RiskGate::Off, false, false),
+            Some(ExportFidelity::Partial),
+        );
+        assert_eq!(partial.fidelity, ExportFidelity::Partial);
+        assert!(export_risk_operator_note(partial.fidelity, &export_risk).is_none());
+    }
+
     /// 0082 DoD-10: zero-recip anomaly boundaries.
     #[test]
     fn zero_recip_anomaly_sent_counts_draft_skips_missing_flags_skip() {
@@ -4628,7 +4722,7 @@ mod tests {
             allow_partial_fidelity: false,
             fail_on_export_risk: None,
             max_open_psts: DEFAULT_MAX_OPEN_PSTS,
-            qc_level: crate::unique_pst_qc::QcLevel::Off,
+            qc_level: crate::unique_pst_qc::QcLevel::Sample,
             qc_sample_max: 64,
             qc_external_reader: None,
             qc_scanpst: false,
@@ -4665,6 +4759,10 @@ mod tests {
         assert!(
             !log_lines.iter().any(|l| l.contains("not implemented")),
             "unimplemented also-eml warning must be gone: {log_lines:?}"
+        );
+        assert!(
+            log_lines.iter().any(|l| l.contains("qc_ms=")),
+            "expected qc_ms= in logs: {log_lines:?}"
         );
         let vol = also_eml.join("VOL001");
         let eml_count = fs::read_dir(&vol)

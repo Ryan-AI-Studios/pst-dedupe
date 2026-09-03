@@ -3,6 +3,12 @@
 # Measures wall time for unique-pst (and optionally a prior scan) with no hardcoded
 # client or case paths. Complements summary.json phase_timings; does not replace them.
 #
+# Progress is on stderr so --json stdout stays a document. This harness sets
+# RedirectStandardError = $false so PowerShell does not wrap unique-pst: stage=
+# lines as NativeCommandError. For cmd.exe capture see runbook §2b
+# (docs/unique-pst-ediscovery-runbook.md): cmd /c "... 2> progress.log".
+# Do not add --progress-file; JSON stays stdout.
+#
 # Usage examples:
 #   .\scripts\unique-pst-timing.ps1 `
 #     -InputPaths @('C:\evidence\a.pst','C:\evidence\b.pst') `
@@ -96,6 +102,8 @@ function Invoke-TimedProcess {
     $psi.FileName = $Exe
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $false
+    # Leave stderr on the console: RedirectStandardError = $true would make
+    # PowerShell wrap unique-pst progress as NativeCommandError. See runbook §2b.
     $psi.RedirectStandardError = $false
     # ProcessStartInfo.Arguments is a single string; quote paths with spaces.
     $quoted = @()
