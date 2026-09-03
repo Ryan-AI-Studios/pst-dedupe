@@ -581,6 +581,18 @@ fn process_resume(
 }
 
 #[tauri::command]
+fn process_export_report(
+    root: String,
+) -> Result<process::ProcessExportReportResponse, CommandError> {
+    join_worker(
+        "process_export_report",
+        std::thread::spawn(move || {
+            process::process_export_report_blocking(process::ProcessExportReportArgs { root })
+        }),
+    )
+}
+
+#[tauri::command]
 fn review_upsert_privilege(
     root: String,
     item_id: String,
@@ -633,6 +645,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             process_progress,
             process_cancel,
             process_resume,
+            process_export_report,
             review_raster_page,
             review_geom_list,
             review_geom_upsert,

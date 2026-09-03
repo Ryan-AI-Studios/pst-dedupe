@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-process-export-report"
+description = "Enables the process_export_report command without any pre-configured scope."
+commands.allow = ["process_export_report"]
+
+[[permission]]
+identifier = "deny-process-export-report"
+description = "Denies the process_export_report command without any pre-configured scope."
+commands.deny = ["process_export_report"]

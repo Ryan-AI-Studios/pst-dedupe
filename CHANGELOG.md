@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0126 — Process chrome visual)
+
+- Process jobs render as a table; sources name PST · ZIP · Purview package · folder; reconciliation is a minus-stack with honest DeNIST/dupes (0 after those stages); Download writes a 0039 CSV pack without blocking on Busy.
+
 ### Added (0125 — Produce canvas)
 
 - Produce is one canvas: all five steps stay visible, protocol notes render **none on file** when empty, and Finalize lives in a 320px Stage pane. QC does not auto-run; Stage snapshot stays disabled. 0119 Finalize latch and privilege-in-set are unchanged.

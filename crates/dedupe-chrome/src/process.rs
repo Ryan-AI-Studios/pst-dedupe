@@ -4,10 +4,11 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use matter_core::{
-    builtin_profiles, load_case_overview_on, Job, JobState, Matter, OverviewOptions, Source,
+    builtin_profiles, default_matter_report_dir, export_matter_report, load_case_overview_on, Job,
+    JobState, Matter, MatterReportParams, OverviewOptions, Source,
 };
 use process_runner::{JobParams, JobProgressSnapshot, ProcessRunner};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{map_core, map_runner, CommandError};
 use crate::open_root::{open_matter_read, reject_encrypted, utf8_root};
@@ -102,6 +103,18 @@ pub struct ProcessPageResponse {
     pub denist: Option<u64>,
     pub dupes: Option<u64>,
     pub families: u64,
+    pub pdf_needs_ocr: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ProcessExportReportArgs {
+    pub root: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProcessExportReportResponse {
+    pub output_dir: String,
+    pub files_written: Vec<String>,
 }
 
 fn stage_enabled(body: &matter_core::ProfileBody, kind: &str) -> bool {
@@ -286,9 +299,14 @@ pub fn process_page_blocking(
         in_review: ov.review.in_review,
         still_processing,
         unaccounted_for: unaccounted_for(&inventory_ids, &extracted_ids, failed_unlogged, idle),
-        denist: None,
+        denist: if ov.cull.never_run {
+            None
+        } else {
+            Some(ov.cull.culled)
+        },
         dupes,
         families: ov.totals.families_total,
+        pdf_needs_ocr: ov.ocr.pdf_needs_ocr,
     })
 }
 
@@ -376,6 +394,30 @@ pub fn process_resume_blocking(
     runner.resume(&utf8, job_id).map_err(map_runner)
 }
 
+/// 0039 CSV pack. Encrypted / `open_for_read` only — do not gate on Busy.
+pub fn process_export_report_blocking(
+    args: ProcessExportReportArgs,
+) -> Result<ProcessExportReportResponse, CommandError> {
+    let root = args.root.as_str();
+    let _matter = open_matter_read(root)?;
+    let utf8 = utf8_root(root)?;
+    let output_dir = default_matter_report_dir(&utf8);
+    let result = export_matter_report(
+        &utf8,
+        MatterReportParams {
+            output_dir,
+            overview_opts: OverviewOptions::default(),
+            include_pdf: false,
+            export_all_jobs: true,
+        },
+    )
+    .map_err(map_core)?;
+    Ok(ProcessExportReportResponse {
+        output_dir: result.output_dir.into_string(),
+        files_written: result.files_written,
+    })
+}
+
 pub fn new_managed_runner() -> Arc<ProcessRunner> {
     let mut runner = ProcessRunner::new(process_runner::RunnerConfig::default());
     process_runner::register_default_handlers(&mut runner);
@@ -402,7 +444,10 @@ mod tests {
     use super::*;
     use crate::create::create_matter_under;
     use camino::{Utf8Path, Utf8PathBuf};
-    use matter_core::{is_encrypted_matter, JobState, Matter, SCHEMA_VERSION};
+    use matter_core::{
+        is_encrypted_matter, item_cull_status, item_role, item_status, ItemInput, JobState, Matter,
+        SCHEMA_VERSION,
+    };
     use process_runner::{register_default_handlers, ProcessRunner, RunnerConfig};
     use std::collections::HashSet;
     use std::fs::File;
@@ -862,5 +907,140 @@ mod tests {
             1,
             "extracting A twice must not zero-out missing B"
         );
+    }
+
+    #[test]
+    fn denist_none_until_cull_has_run_then_some_culled() {
+        let tmp = tempdir().expect("tempdir");
+        let parent = utf8_tmp(&tmp);
+        let root = create_matter_under(&parent, "Denist").expect("create");
+        let runner = test_runner();
+        let page = process_page_blocking(&runner, root.as_str()).expect("page");
+        assert_eq!(page.schema_version, 41);
+        assert_eq!(
+            page.denist, None,
+            "cull never_run must be dash-equivalent None"
+        );
+        assert_eq!(page.pdf_needs_ocr, 0);
+
+        {
+            let matter = Matter::open(&root).expect("open");
+            matter
+                .insert_item(ItemInput {
+                    id: Some("itm_included".into()),
+                    status: item_status::EXTRACTED.into(),
+                    role: Some(item_role::STANDALONE.into()),
+                    cull_status: Some(item_cull_status::INCLUDED.into()),
+                    ..Default::default()
+                })
+                .expect("included");
+        }
+        let page0 = process_page_blocking(&runner, root.as_str()).expect("page0");
+        assert_eq!(
+            page0.denist,
+            Some(0),
+            "cull has run with 0 culled must be Some(0), not None"
+        );
+
+        {
+            let matter = Matter::open(&root).expect("open");
+            matter
+                .insert_item(ItemInput {
+                    id: Some("itm_culled".into()),
+                    status: item_status::EXTRACTED.into(),
+                    role: Some(item_role::STANDALONE.into()),
+                    cull_status: Some(item_cull_status::CULLED.into()),
+                    ..Default::default()
+                })
+                .expect("culled");
+            matter
+                .connection()
+                .execute(
+                    "UPDATE items SET pdf_needs_ocr = 1 WHERE id = 'itm_included'",
+                    [],
+                )
+                .expect("ocr");
+        }
+        let page1 = process_page_blocking(&runner, root.as_str()).expect("page1");
+        assert_eq!(page1.denist, Some(1));
+        assert_eq!(page1.pdf_needs_ocr, 1);
+        runner.shutdown();
+    }
+
+    #[test]
+    fn allow_permission_files_exist() {
+        let toml = include_str!("../permissions/autogenerated/process_export_report.toml");
+        assert!(toml.contains("allow-process-export-report"));
+        assert!(toml.contains("deny-process-export-report"));
+        let caps = include_str!("../capabilities/default.json");
+        assert!(caps.contains("allow-process-export-report"));
+    }
+
+    #[test]
+    fn process_export_report_encrypted_refused_and_writes_pack() {
+        let tmp = tempdir().expect("tempdir");
+        let parent = utf8_tmp(&tmp);
+        let root = create_matter_under(&parent, "ReportPack").expect("create");
+
+        let enc_root = parent.join("EncReport");
+        {
+            let _m = Matter::create_encrypted(&enc_root, "EncReport", "test-passphrase-0126")
+                .expect("enc");
+        }
+        assert!(is_encrypted_matter(&enc_root));
+        let enc_err = process_export_report_blocking(ProcessExportReportArgs {
+            root: enc_root.to_string(),
+        })
+        .expect_err("enc");
+        assert_eq!(enc_err.kind, "encrypted");
+
+        let args = ProcessExportReportArgs {
+            root: root.to_string(),
+        };
+        let first = process_export_report_blocking(args).expect("export");
+        assert!(
+            !first.files_written.is_empty(),
+            "0039 pack must write files"
+        );
+        let out = Utf8PathBuf::from(&first.output_dir);
+        assert!(out.exists(), "output_dir must exist after export");
+
+        let clobber = export_matter_report(
+            &root,
+            MatterReportParams {
+                output_dir: out.clone(),
+                overview_opts: OverviewOptions::default(),
+                include_pdf: false,
+                export_all_jobs: true,
+            },
+        )
+        .expect_err("fail-closed");
+        let msg = clobber.to_string();
+        assert!(
+            msg.contains("already exists") || msg.contains("refusing"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn process_export_report_does_not_call_reject_if_busy() {
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let export_fn = prod
+            .split("fn process_export_report_blocking")
+            .nth(1)
+            .expect("export fn");
+        let export_fn = export_fn
+            .split("pub fn new_managed_runner")
+            .next()
+            .unwrap_or(export_fn);
+        assert!(
+            !export_fn.contains("reject_if_busy"),
+            "Download must work while extract runs"
+        );
+        assert!(export_fn.contains("export_matter_report"));
+        assert!(export_fn.contains("include_pdf: false"));
+        assert!(export_fn.contains("export_all_jobs: true"));
+        assert!(export_fn.contains("open_matter_read"));
     }
 }

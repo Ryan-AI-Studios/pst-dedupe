@@ -10,7 +10,7 @@ use web_sys::MouseEvent;
 use crate::pages::{
     AdminStub, MatterHome, MattersList, ProcessPage, ProducePage, ReviewQueue, ReviewWindow,
 };
-use crate::shell::{MatterShell, ProduceChromeCtx, QueueChromeCtx, WorkspaceTab};
+use crate::shell::{MatterShell, ProcessChromeCtx, ProduceChromeCtx, QueueChromeCtx, WorkspaceTab};
 
 static CTRL_K_ONCE: Once = Once::new();
 
@@ -114,6 +114,15 @@ fn wrap_home() -> impl IntoView {
 }
 
 fn wrap_process() -> impl IntoView {
+    view! { <WrapProcess/> }
+}
+
+#[component]
+fn WrapProcess() -> impl IntoView {
+    provide_context(ProcessChromeCtx {
+        right_label: RwSignal::new(String::new()),
+        status_left: RwSignal::new(String::new()),
+    });
     view! {
         <MatterShell tab=WorkspaceTab::Process>
             <ProcessPage/>
@@ -278,14 +287,26 @@ mod tests {
         );
         assert!(prod.contains("provide_context(QueueChromeCtx"));
         assert!(prod.contains("provide_context(ProduceChromeCtx"));
-        let produce_fn = prod
-            .split("fn WrapProduce()")
-            .nth(1)
-            .expect("WrapProduce");
+        assert!(prod.contains("provide_context(ProcessChromeCtx"));
+        let produce_fn = prod.split("fn WrapProduce()").nth(1).expect("WrapProduce");
         assert!(
             !produce_fn.contains("QueueChromeCtx"),
             "produce must not steal QueueChromeCtx"
         );
         assert!(!produce_fn.contains("id=\"queue-goto\""));
+        let process_fn = prod.split("fn WrapProcess()").nth(1).expect("WrapProcess");
+        let process_fn = process_fn
+            .split("fn WrapReview()")
+            .next()
+            .unwrap_or(process_fn);
+        assert!(
+            !process_fn.contains("QueueChromeCtx"),
+            "process must not steal QueueChromeCtx"
+        );
+        assert!(
+            !process_fn.contains("ProduceChromeCtx"),
+            "process must not steal ProduceChromeCtx"
+        );
+        assert!(process_fn.contains("ProcessChromeCtx"));
     }
 }

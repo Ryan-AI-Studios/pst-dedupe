@@ -25,6 +25,7 @@ fn main() {
             "process_progress",
             "process_cancel",
             "process_resume",
+            "process_export_report",
             "review_raster_page",
             "review_geom_list",
             "review_geom_upsert",

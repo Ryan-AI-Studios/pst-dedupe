@@ -60,6 +60,14 @@ pub struct ProduceChromeCtx {
     pub status_left: RwSignal<String>,
 }
 
+/// Process-route chrome for the reserved TopBar right slot and StatusBar left.
+/// Labels only — extract-all Busy / Pause stay inside `ProcessPage`.
+#[derive(Clone, Copy)]
+pub struct ProcessChromeCtx {
+    pub right_label: RwSignal<String>,
+    pub status_left: RwSignal<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueRange {
     pub offset: u64,
@@ -163,6 +171,7 @@ fn TopBar(
     let processed_meta = move || overview.get().map(|o| format!("Processed {}", o.processed));
     let queue_chrome = use_context::<QueueChromeCtx>();
     let produce_chrome = use_context::<ProduceChromeCtx>();
+    let process_chrome = use_context::<ProcessChromeCtx>();
     let goto_draft = RwSignal::new(String::new());
 
     view! {
@@ -216,8 +225,8 @@ fn TopBar(
                     "Admin"
                 </span>
             </nav>
-            {match (queue_chrome, produce_chrome) {
-                (Some(ctx), _) => {
+            {match (queue_chrome, produce_chrome, process_chrome) {
+                (Some(ctx), _, _) => {
                     view! {
                         <div class="right-slot">
                             <input
@@ -246,11 +255,15 @@ fn TopBar(
                     }
                     .into_any()
                 }
-                (None, Some(ctx)) => view! {
+                (None, Some(ctx), _) => view! {
                     <div class="right-slot">{move || ctx.right_label.get()}</div>
                 }
                 .into_any(),
-                (None, None) => view! { <div class="right-slot"></div> }.into_any(),
+                (None, None, Some(ctx)) => view! {
+                    <div class="right-slot">{move || ctx.right_label.get()}</div>
+                }
+                .into_any(),
+                (None, None, None) => view! { <div class="right-slot"></div> }.into_any(),
             }}
         </header>
     }
@@ -260,10 +273,11 @@ fn TopBar(
 fn StatusBar(flag: &'static str) -> impl IntoView {
     let queue_chrome = use_context::<QueueChromeCtx>();
     let produce_chrome = use_context::<ProduceChromeCtx>();
+    let process_chrome = use_context::<ProcessChromeCtx>();
     view! {
         <footer class="matter-statusbar">
-            {match (queue_chrome, produce_chrome) {
-                (Some(ctx), _) => view! {
+            {match (queue_chrome, produce_chrome, process_chrome) {
+                (Some(ctx), _, _) => view! {
                     <div class="status-left">
                         {move || {
                             ctx.queue_range
@@ -274,11 +288,15 @@ fn StatusBar(flag: &'static str) -> impl IntoView {
                     </div>
                 }
                 .into_any(),
-                (None, Some(ctx)) => view! {
+                (None, Some(ctx), _) => view! {
                     <div class="status-left">{move || ctx.status_left.get()}</div>
                 }
                 .into_any(),
-                (None, None) => view! { <div class="status-left"></div> }.into_any(),
+                (None, None, Some(ctx)) => view! {
+                    <div class="status-left">{move || ctx.status_left.get()}</div>
+                }
+                .into_any(),
+                (None, None, None) => view! { <div class="status-left"></div> }.into_any(),
             }}
             <div class="flag">{flag}</div>
         </footer>
@@ -319,6 +337,18 @@ mod tests {
         assert!(prod.contains("class=\"right-slot\""));
         assert!(prod.contains("class=\"status-left\""));
         assert!(prod.contains(REVIEW_FLAG));
+        assert!(prod.contains("use_context::<ProcessChromeCtx>()"));
+        let top = prod.split("fn TopBar").nth(1).unwrap_or("");
+        let top = top.split("fn StatusBar").next().unwrap_or(top);
+        assert!(
+            top.contains("ProcessChromeCtx"),
+            "TopBar must consume ProcessChromeCtx"
+        );
+        let status = prod.split("fn StatusBar").nth(1).unwrap_or("");
+        assert!(
+            status.contains("ProcessChromeCtx"),
+            "StatusBar must consume ProcessChromeCtx"
+        );
     }
 
     #[test]
