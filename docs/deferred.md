@@ -933,10 +933,10 @@ Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs a
 | D-0115-lfp | P3 | IPRO LFP writer | OPT is the default image load file; LFP not this DoD | residual |
 | D-0115-color | P3 | Colour JPEG image pages | v1 is 1-bit G4 only | residual |
 | D-0115-email-print | P3 | EML/OOXML print-to-TIFF | Native-only + Warn in 0115 | residual |
-| D-0116-process-fold | — | Swallow egui Process into the Tauri window | **Closed in 0116** (PR **#123** / `727c857`) — chrome Process workspace + `process-runner`. Residuals **D-0116-workflow** / **D-0116-drop** / **D-0116-report**. | **closed / 0116** |
+| D-0116-process-fold | — | Swallow egui Process into the Tauri window | **Closed in 0116** (PR **#123** / `727c857`) — chrome Process workspace + `process-runner`. Residuals **D-0116-workflow** / **D-0116-drop**. **D-0116-report** closed in **0126**. | **closed / 0116** |
 | D-0116-workflow | P3 | Chrome Process has no `workflow_run` picker | Builtins only (`profile_run`); workflow UI skipped | residual / after **0116** |
-| D-0116-drop | P3 | Process ingest is dialog picker only | No drag-drop onto the sources pane. Drop-zone **copy** is **0126**; actual Tauri drop may remain. | residual / **0126** copy |
-| D-0116-report | P3 | No reconciliation report download on Process | 0039 CSV pack; absorb into **0126** (`process_export_report`). | residual / **0126** In progress |
+| D-0116-drop | P3 | Process ingest is dialog picker only | Drop-zone **copy** shipped in **0126**. Actual Tauri file drop remains. | residual (Tauri drop) |
+| D-0116-report | — | No reconciliation report download on Process | **Closed in 0126** (PR **#145** / `73c0496`) — `process_export_report` 0039 CSV pack; encrypted/`open_for_read`; no Busy gate. | **closed / 0126** |
 | D-0031-09 | — | Court e-file / load-file Bates on privilege log | Chrome 0113 volume log joins Bates when `production_items` exist; Desk/CLI still item_id | residual (Desk/CLI) |
 | D-0040-04 | — | Privilege log co-export into volume `PRIVILEGE/` | Chrome 0113 writes `privilege-log.csv` at volume root; folder layout residual | residual (`PRIVILEGE/` folder) |
 | D-0119-produce-checklist-residuals | — | PR #117 Bugbot: Finalize re-arm / colliding Bates; empty `filter_ids` dumps privilege log; QC state survives matter change. Plus PR #123: cancelled/idle produce treated as success | **Closed in 0119** (PR **#129** / `6a775b5`) — `Some([])` empty-set; `volume_succeeded` latch; succeeded-only waits; matter-switch session clear. Residual first-paint Bates auto-fill **D-0060-03**. | **closed / 0119** |
@@ -946,7 +946,7 @@ Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs a
 
 ## Series T — Mockup chrome fidelity (0123–0126, minted 2026-08-31)
 
-From `C:\dev\deviations.md` vs `C:\dev\dedupe-frontend` (research only). **0123 Completed**. **0124 Completed**. **0125 Completed**. **0126 In progress**. Do not steal 0119–0122 Bugbot. **0123 locks (2026-09-01):** Plex + ink-navy `#1b3049` (blue theme); Home under the shared bar. Do not port Archivo/coral.
+From `C:\dev\deviations.md` vs `C:\dev\dedupe-frontend` (research only). **0123 Completed**. **0124 Completed**. **0125 Completed**. **0126 Completed**. Do not steal 0119–0122 Bugbot. **0123 locks (2026-09-01):** Plex + ink-navy `#1b3049` (blue theme); Home under the shared bar. Do not port Archivo/coral.
 
 | ID | Severity | Item | Notes | Owner |
 |---|---|---|---|---|
@@ -955,7 +955,7 @@ From `C:\dev\deviations.md` vs `C:\dev\dedupe-frontend` (research only). **0123 
 | D-0125-produce-canvas | — | Un-wizard produce: five steps visible + protocol + Stage pane; split Stage vs Finalize | **Closed in 0125** (PR **#143** / `1fbc22a`) — un-wizard; 0119 latch frozen; protocol “none on file”; no fake snapshot/ACME. Owner HITL remaining (release EXE). | **closed / 0125** |
 | D-0125-dead-css | P3 | Dead `.produce-foot` and `.produce-steps li.active button` CSS | Finalize moved to Stage; step nav is `#step-N` hrefs. Cosmetic leftover in `app.css`. | residual polish |
 | D-0125-pad-fallback | P3 | Stage pad display falls back to 6 if Thin `pad_width` is 0 | Host copies live body; tests assert 1..=12. | residual polish |
-| D-0126-process-chrome-visual | P3 | Process jobs table, locked profile, drop copy, strip `\\?\`, minus-stack; absorb D-0116-report | Live chips + error_groups exist. Per-row Dupes/NIST stay `—` (job grain). **0122** extract-all Busy stays. D-0116-drop remains copy-only. | **0126** In progress |
+| D-0126-process-chrome-visual | — | Process jobs table, locked profile, drop copy, strip `\\?\`, minus-stack; absorb D-0116-report | **Closed in 0126** (PR **#145** / `73c0496`) — jobs table; honest drop copy; minus-stack; 0039 download. **0122** Busy frozen. Owner HITL remaining (release EXE). D-0116-drop remains (copy only). | **closed / 0126** |
 
 **Not minted (v1.1 / never as next IDs):** local AI first-pass job, clawback packet, LFP default, native spreadsheet redact, legal hold, TAR-as-primary, cluster wheel, StoryBuilder, auto-privilege, BCC-default, `D-0108-keepset-crc-retaint`, `D-0067-embedded-depth` matter children. Mock Archivo/coral declined 2026-09-01 (0123 = Plex + ink-navy). Next free ID **0127**.
 

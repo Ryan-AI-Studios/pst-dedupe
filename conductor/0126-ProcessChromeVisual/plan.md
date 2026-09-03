@@ -40,9 +40,9 @@
 - [x] `cargo clippy --workspace --all-targets -- -D warnings`
 - [x] `cargo test --workspace` (or ledgerful verify --scope full)
 - [x] CHANGELOG Unreleased sentence.
-- [ ] Write `review.md` (commands, HITL table + minus-stack + 0122 Pause + Download).
-- [ ] Update `../conductor.md` → **Completed**. Close `D-0126-process-chrome-visual` and `D-0116-report`.
-- [ ] Commit the FEATURE ledger transaction.
+- [x] Write `review.md` (commands, HITL table + minus-stack + 0122 Pause + Download).
+- [x] Update `../conductor.md` → **Completed**. Close `D-0126-process-chrome-visual` and `D-0116-report`.
+- [x] Commit the FEATURE ledger transaction.
 - [ ] Owner HITL: release EXE.
 
 ---

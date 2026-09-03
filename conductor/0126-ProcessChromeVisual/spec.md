@@ -12,7 +12,7 @@
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** Hermes Process workspace. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-09-02); do **not** chase it at execute.
 - **Cross-repo contract:** mock at `C:\dev\dedupe-frontend` is **layout research only** (three panes `280 / 1fr / 320`, jobs table, minus-stack). Do not port Archivo, coral, fake `j.reyes.pst` / OST / NSRL 2026.08 / ACME, password vault, or “threading is not inside processing.”
-- **Status:** In progress
+- **Status:** Completed
 - **Depends on:** **0116 Completed** (PR **#123** / `727c857`) · **0122 Completed** (PR **#137** / `f1810fe`) · **0123 Completed** (PR **#139** / `fce416e`) · **0125 Completed** (PR **#143** / `1fbc22a`) · schema **v41** (no bump)
 - **Spec authored:** 2026-09-02 (placeholder → Ready)
 - **Series:** T (mockup chrome fidelity)
@@ -218,7 +218,7 @@ Complete only when ALL hold:
 - [ ] **DoD-2 — Sources + profile:** Drop-zone copy names **PST · ZIP · Purview package · folder** (not OST/MBOX); pickers stay; display paths strip `\\?\`. One locked checklist from the selected builtin; near-dup off unless chosen. No OST/MBOX/NSRL engines.
 - [ ] **DoD-3 — Minus-stack + report:** Reconciliation is a minus-stack. DeNIST/dupes show **0** after those stages have run (`cull.never_run` / empty dedup roles still `—`). Unaccounted-for still uses the 0116 rule. Download writes a 0039 pack and shows the path (capability allow listed). `D-0116-report` closed. Exceptions footnote when `exceptions` > grouped sum.
 - [ ] **DoD-4 — Hygiene:** No `unwrap`/`expect` in new production code. No schema bump. 0122 Busy tests + `shell_source_locks` still pass. Process export permission test. Plex / `#1b3049` / no Archivo/coral. `cargo test --manifest-path crates/dedupe-chrome/ui/Cargo.toml` + `cargo test -p dedupe-chrome`. trunk chrome-ui builds (`trunk build --release --config Trunk.toml` from `crates/dedupe-chrome/ui`).
-- [ ] **DoD-5 — Recorded:** `review.md`; registry **Completed**; CHANGELOG Unreleased; `D-0126-process-chrome-visual` closed; ledger committed (`FEATURE`).
+- [x] **DoD-5 — Recorded:** `review.md`; registry **Completed**; CHANGELOG Unreleased; `D-0126-process-chrome-visual` closed; ledger committed (`FEATURE`).
 
 ---
 
