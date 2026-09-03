@@ -440,9 +440,9 @@ Structural INC* soak 2026-08-29 is green. Series S **0108–0109** Completed (po
 | **0123** | MatterShell | **Completed** | **P3 T** | Shared TopBar/StatusBar; Home under bar; Plex + ink-navy `#1b3049`; Admin span; recents BOM. PR **#139** / `fce416e`. Spec: `0123-MatterShell/`. |
 | **0124** | ReviewQueueChrome | **Completed** | **P3 T** | Ellipsis first (X500 From); 244px rail; Go-to + SQL-page range in 0123 slots. PR **#141** / `ff8b0ea`. Spec: `0124-ReviewQueueChrome/`. |
 | **0125** | ProduceCanvas | **Completed** | **P3 T** | Un-wizard + protocol + Stage; 0119 latch frozen. PR **#143** / `1fbc22a`. Spec: `0125-ProduceCanvas/`. |
-| **0126** | ProcessChromeVisual | **In progress** | **P3 T** | Jobs table / minus-stack / 0039 download; 0122 Busy frozen. Spec: `0126-ProcessChromeVisual/`. |
+| **0126** | ProcessChromeVisual | **Completed** | **P3 T** | Jobs table / minus-stack / 0039 download; 0122 Busy frozen. PR **#145** / `73c0496`. Spec: `0126-ProcessChromeVisual/`. |
 
-**Order:** **0110** → **0111** → **0112** → **0113**; **0114** after window; **0115 Completed**; **0116 Completed**. **0117 Completed**. **0118 Completed**. **0119 Completed**. **0120 Completed**. **0121 Completed**. **0122 Completed**. **0123 Completed**. **Series T:** **0124 Completed**; **0125 Completed**; **0126** after shell.
+**Order:** **0110** → **0111** → **0112** → **0113**; **0114** after window; **0115 Completed**; **0116 Completed**. **0117 Completed**. **0118 Completed**. **0119 Completed**. **0120 Completed**. **0121 Completed**. **0122 Completed**. **0123 Completed**. **Series T:** **0124 Completed**; **0125 Completed**; **0126 Completed**.
 
 ### What each step is for
 
