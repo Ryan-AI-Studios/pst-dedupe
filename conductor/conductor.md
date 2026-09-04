@@ -331,7 +331,7 @@ Operator unique-pst smoke **2026-09-02** on Desktop `INC0102784.pst` + `INC01027
 | [0128-ExportRiskAdvisoryCopy](0128-ExportRiskAdvisoryCopy/spec.md) | **Completed** | `operator_note` after also-eml combine when keyed BODY_UNAVAILABLE trips 0.02; no fourth enum. PR **#147** / `9082761`. |
 | [0129-AlsoEmlPhaseTimings](0129-AlsoEmlPhaseTimings/spec.md) | **Completed** | `phase_timings.also_eml_ms` in `accounted_ms()`; never fudge unaccounted. PR **#147** / `9082761`. |
 | [0130-QcSampleCost](0130-QcSampleCost/spec.md) | **Completed** | stderr `qc_ms=` on ok and hard-fail; default **sample**. PR **#147** / `9082761`. |
-| [0131-RecoverableItemsOperatorHint](0131-RecoverableItemsOperatorHint/spec.md) | **Completed** | Runbook `--prefer-folder-class` opt-in; owner HITL with flag **skipped**. PR **#147** / `9082761`. |
+| [0131-RecoverableItemsOperatorHint](0131-RecoverableItemsOperatorHint/spec.md) | **Completed** | Runbook `--prefer-folder-class` opt-in; HITL 2026-09-03 RI **826 → 821**. PR **#147** / `9082761`. |
 | [0132-CliProgressPowershell](0132-CliProgressPowershell/spec.md) | **Completed** | Runbook `cmd /c` + `Start-Process`; timing-script stderr comment. JSON stdout. PR **#147** / `9082761`. |
 
 **Suggested order:** **0127 Completed**. **0128 Completed**. **0129 Completed**. **0130 Completed**. **0131 Completed**. **0132 Completed**. Next free ID **0133**.

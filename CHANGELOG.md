@@ -9,7 +9,7 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ### Added (0127 — Embedded-depth operator hint)
 
-- unique-pst and unique-eml emit `--max-embedded-depth=<configured>` on stderr when `ATTACH_DEPTH_LIMIT` fires. Default remains **3** (identity-safe). Clap help notes INC*-class / deep method-5 nests often need **8**.
+- unique-pst and unique-eml emit `--max-embedded-depth=<configured>` on stderr when `ATTACH_DEPTH_LIMIT` fires. Default remains **3** (identity-safe). Clap help notes INC*-class / deep method-5 nests often need **8**. unique-pst `--also-eml` prints the unique-pst line once (the nested unique-eml helper stays silent).
 
 ### Added (0128 — Export-risk advisory copy)
 

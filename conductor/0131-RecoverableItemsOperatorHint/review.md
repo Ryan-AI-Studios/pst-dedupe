@@ -10,7 +10,7 @@ Golden-flow docs for Recoverable Items / Purges winners: unique-pst keeps those 
 |---|---|---|
 | DoD-1 Runbook | PASS | Runbook `--prefer-folder-class` opt-in; prefers Sent/live over RI/Purges; INC*-class dumps can keep ~20% RI winners without the flag. unique-pst vs unique-eml hint channels documented. |
 | DoD-2 Ranking + hint | PASS | `keepset.rs` `winners_from_recoverable_signal_only` asserts `--prefer-folder-class` and no newline. Flag stays opt-in. Default ranking unchanged. |
-| DoD-3 Owner HITL | SKIPPED | Spec allows; this review records the skip. Never commit INC* PSTs. |
+| DoD-3 Owner HITL | PASS | 2026-09-03 operator-local INC* split. `--prefer-folder-class` moved RI winners **826 → 821** (5 MID groups had a live peer). Unique stayed **4055**. Flag still opt-in. Never commit INC* PSTs. |
 | DoD-4 Tests | PASS | targeted `dedup-engine` recoverable tests; workspace fmt/clippy/test. |
 | DoD-5 Recorded | PASS | This file; registry Completed; CHANGELOG; ledger FEATURE committed on the product squash (`75d98b69-96b3-4514-889d-2c6a7aef8183`, merge `9082761`). Docs-class work in the same squash. |
 
@@ -33,15 +33,13 @@ Golden-flow docs for Recoverable Items / Purges winners: unique-pst keeps those 
 
 ## HITL (owner)
 
-Owner HITL with `--prefer-folder-class` is **SKIPPED** (spec allows; not a CI gate). Owner INC* re-smoke is optional. Never commit INC* PSTs. Codesign is **D-0062-codesign**.
+2026-09-03 Desktop `INC0102784.pst` + `INC0102784-2.pst` (gitignored packs under `output/inc0102784-hygiene-*`). `--prefer-folder-class` on the same flags as the depth-8 baseline: exit 0, fidelity complete, 4055/4055. RI winners **826 → 821**. Most RI copies have no live-mailbox peer, so they stay. Hint then names 821. Codesign is **D-0062-codesign**.
 
 ## Residual lows (deferred)
 
 | ID | Item |
 |---|---|
-| 0131 owner HITL | SKIPPED with `--prefer-folder-class` (spec allows) |
-| Owner INC* re-smoke | optional, not a gate |
-| D-0127-* / D-0067 | see 0127 |
+| D-0067-embedded-depth | remains (matter children) |
 
 ## Publish
 

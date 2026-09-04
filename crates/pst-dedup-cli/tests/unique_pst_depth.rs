@@ -451,3 +451,44 @@ fn cancel_summary_echoes_effective_depth() {
         );
     }
 }
+
+/// unique-pst `--also-eml` must not also print the `unique-eml:` depth line.
+#[test]
+fn also_eml_depth_hint_is_unique_pst_only() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src4.pst");
+    let out = dir.path().join("unique.pst");
+    let report = dir.path().join("report");
+    let also = dir.path().join("also_eml");
+    write_source(&src, 4);
+
+    let result = run_unique_pst(&[
+        "unique-pst",
+        src.to_str().expect("utf8"),
+        "--out",
+        out.to_str().expect("utf8"),
+        "--report-dir",
+        report.to_str().expect("utf8"),
+        "--also-eml",
+        also.to_str().expect("utf8"),
+        "--json",
+        "--qc-level",
+        "off",
+        "--allow-partial-fidelity",
+    ]);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("--max-embedded-depth=3"),
+        "0127 unique-pst hint must name cap 3; stderr={stderr} stdout={stdout}"
+    );
+    assert_eq!(
+        stderr.matches("--max-embedded-depth=3").count(),
+        1,
+        "also-eml must not duplicate the depth hint; stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("unique-eml:"),
+        "nested pack helper must stay silent; stderr={stderr}"
+    );
+}

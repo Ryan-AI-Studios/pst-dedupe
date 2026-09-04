@@ -3136,6 +3136,7 @@ pub fn run_unique_pst_with_options(
                     attach_src: &mut attach_src,
                     manifest_json: None,
                     materialized_count: keep_set.stats.unique,
+                    emit_depth_limit_hint: false,
                 },
             ) {
                 Ok(pack) => {
