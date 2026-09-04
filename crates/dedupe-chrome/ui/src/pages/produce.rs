@@ -112,7 +112,7 @@ mod process_job_succeeded_tests {
         bates_start_from_next_seq_hint, finalize_blocked_by_volume_latch, patch_qc_burn_counts,
         privilege_log_post_step_banner, process_job_succeeded, projected_last_doc_bates,
         protocol_note_display, protocol_log_format_radio, volume_latch_after_produce_terminal, wait_root_is_current,
-        ChromeQcFinding, JobProgressSnapshot, ProduceQcRun, DAT_ONLY_PROFILE, export_path_list,
+        extra_in_page_href, ChromeQcFinding, JobProgressSnapshot, ProduceQcRun, DAT_ONLY_PROFILE, export_path_list,
         layout_seg,
     };
 
@@ -303,6 +303,7 @@ mod process_job_succeeded_tests {
         assert!(page.contains("id=\"step-3-format\""));
         assert!(page.contains("id=\"step-4-burn\""));
         assert!(page.contains("id=\"step-5-preflight\""));
+        assert!(page.contains("id=\"privilege-protocol\""));
         assert!(page.contains("class=\"produce-stage\""));
         assert!(src.contains("QC not yet run — click Re-run QC"));
         assert!(page.contains("if start_busy.get() || qc_busy.get()"));
@@ -323,6 +324,50 @@ mod process_job_succeeded_tests {
             css.contains("236px minmax(0, 1fr) 320px"),
             "produce layout must be three panes"
         );
+    }
+
+    #[test]
+    fn extra_kind_dispatch_hashes_or_review_or_none() {
+        assert_eq!(
+            extra_in_page_href("empty_selection", None),
+            Some("#step-1-set")
+        );
+        assert_eq!(
+            extra_in_page_href("privilege_log_blank", None),
+            Some("#privilege-protocol")
+        );
+        assert_eq!(extra_in_page_href("qc_gate", None), None);
+        assert_eq!(extra_in_page_href("unknown_kind", None), None);
+        assert_eq!(
+            extra_in_page_href("empty_selection", Some("itm_1")),
+            None,
+            "item_id extras use review_doc_href, not an in-page hash"
+        );
+        let href = crate::path_id::review_doc_href(r"C:\Matters\acme", "itm_1", None, None);
+        assert!(href.contains("/matters/"));
+        assert!(href.contains("/review/"));
+        let src = include_str!("produce.rs");
+        assert!(src.contains("id=\"privilege-protocol\""));
+        assert!(src.contains("extra_in_page_href"));
+        assert!(src.contains("href=h"));
+        let start = src
+            .rfind("pub fn ProducePage() -> impl IntoView {")
+            .expect("ProducePage fn");
+        let extras = src[start..]
+            .split("each=move || extras.clone()")
+            .nth(1)
+            .unwrap_or("");
+        let extras = extras
+            .split("each=move || findings.clone()")
+            .next()
+            .unwrap_or(extras);
+        assert!(
+            !extras.contains("#step-5-preflight"),
+            "qc_gate extras must not add a self-hash to step-5"
+        );
+        assert!(extras.contains("extra_in_page_href"));
+        assert!(extras.contains("<A href=h>"));
+        assert!(extras.contains("<a href=h>"));
     }
 }
 
@@ -354,6 +399,26 @@ fn protocol_note_display(note: Option<&str>) -> String {
     match note.map(str::trim).filter(|s| !s.is_empty()) {
         Some(s) => s.to_string(),
         None => "none on file".into(),
+    }
+}
+
+/// In-page hash for extras that have no `item_id`. Review links stay on `review_doc_href`.
+fn extra_in_page_href(kind: &str, item_id: Option<&str>) -> Option<&'static str> {
+    if item_id.map(str::trim).filter(|s| !s.is_empty()).is_some() {
+        return None;
+    }
+    match kind {
+        "empty_selection" => Some("#step-1-set"),
+        "privilege_log_blank" => Some("#privilege-protocol"),
+        _ => None,
+    }
+}
+
+fn extra_in_page_label(kind: &str) -> &'static str {
+    match kind {
+        "empty_selection" => "Go to Set",
+        "privilege_log_blank" => "Privilege protocol",
+        _ => "Open panel",
     }
 }
 
@@ -848,7 +913,7 @@ pub fn ProducePage() -> impl IntoView {
                                         }
                                     }
                                 />
-                                <div class="produce-protocol">
+                                <div class="produce-protocol" id="privilege-protocol">
                                     <h2>"Privilege protocol"</h2>
                                     <p class="empty">{format!("Log format: {protocol_log}")}</p>
                                     <p>{format!("FRE 502(d): {protocol_d}")}</p>
@@ -1167,14 +1232,17 @@ pub fn ProducePage() -> impl IntoView {
                                                     each=move || extras.clone()
                                                     key=|e: &ChromeExtra| format!("{}:{}", e.kind, e.item_id.clone().unwrap_or_default())
                                                     children=move |e| {
-                                                        let href = e.item_id.as_ref().map(|id| review_doc_href(&root_sig.get(), id, None, None));
+                                                        let review_href = e.item_id.as_ref().filter(|id| !id.is_empty()).map(|id| review_doc_href(&root_sig.get(), id, None, None));
+                                                        let hash = extra_in_page_href(&e.kind, e.item_id.as_deref());
+                                                        let hash_label = extra_in_page_label(&e.kind);
                                                         let is_block = e.severity == "blocker";
                                                         view! {
                                                             <div class=if is_block { "card blocker" } else { "card warn" }>
                                                                 <strong>{e.kind}</strong>
                                                                 <span class="empty">{e.severity.clone()}</span>
                                                                 <p>{e.message}</p>
-                                                                {href.map(|h| view! { <A href=h>"Open in review"</A> })}
+                                                                {review_href.map(|h| view! { <A href=h>"Open in review"</A> })}
+                                                                {hash.map(|h| view! { <a href=h>{hash_label}</a> })}
                                                             </div>
                                                         }
                                                     }

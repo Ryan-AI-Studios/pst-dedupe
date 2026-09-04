@@ -1,6 +1,6 @@
 //! Chrome Process workspace: host `process-runner` + page/start/progress/cancel/resume.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use matter_core::{
@@ -28,15 +28,18 @@ pub struct ProcessSourceRow {
     pub path: String,
     pub kind: String,
     pub status: String,
+    pub size_bytes: Option<u64>,
 }
 
 impl From<Source> for ProcessSourceRow {
     fn from(s: Source) -> Self {
+        let size_bytes = source_size_bytes(&s.path);
         Self {
             id: s.id,
             path: s.path,
             kind: s.kind,
             status: s.status,
+            size_bytes,
         }
     }
 }
@@ -58,6 +61,7 @@ pub struct ProcessJobRow {
     pub error_summary: Option<String>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    pub source_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -65,6 +69,8 @@ pub struct ProcessErrorGroup {
     pub code: String,
     pub count: u64,
     pub sample_message: String,
+    pub sample_job_id: Option<String>,
+    pub sample_item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -104,6 +110,8 @@ pub struct ProcessPageResponse {
     pub dupes: Option<u64>,
     pub families: u64,
     pub pdf_needs_ocr: u64,
+    pub unextracted_psts: Vec<ProcessPstRow>,
+    pub failed_unlogged: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -202,6 +210,135 @@ fn failed_jobs_without_item_errors(matter: &Matter, jobs: &[Job]) -> Result<u64,
     Ok(n)
 }
 
+fn source_size_bytes(path: &str) -> Option<u64> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.is_file() {
+        Some(meta.len())
+    } else {
+        None
+    }
+}
+
+fn path_basename(path: &str) -> String {
+    const UNC: &str = r"\\?\UNC\";
+    const PREFIX: &str = r"\\?\";
+    let stripped = if let Some(rest) = path.strip_prefix(UNC) {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(PREFIX) {
+        rest.to_string()
+    } else {
+        path.to_string()
+    };
+    stripped
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(stripped.as_str())
+        .to_string()
+}
+
+fn json_str(v: &serde_json::Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_source_label(cursor: &serde_json::Value, inventory: &[ProcessPstRow]) -> Option<String> {
+    if let Some(pst_path) = json_str(cursor, "pst_path") {
+        return Some(path_basename(&pst_path));
+    }
+    if let Some(id) = json_str(cursor, "pst_item_id") {
+        if let Some(label) = inventory
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|p| p.path.as_deref())
+            .map(path_basename)
+        {
+            return Some(label);
+        }
+    }
+    None
+}
+
+fn job_source_labels(
+    matter: &Matter,
+    jobs: &[Job],
+    sources: &[Source],
+    inventory: &[ProcessPstRow],
+) -> Result<HashMap<String, String>, CommandError> {
+    let mut labels: HashMap<String, String> = HashMap::new();
+    let mut claimed: HashSet<String> = HashSet::new();
+    for job in jobs {
+        match job.kind.as_str() {
+            "ingest" => {
+                if let Some(cp) = matter.get_checkpoint(&job.id, "expand").map_err(map_core)? {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cp.cursor_json) {
+                        if let Some(sid) = json_str(&v, "source_id") {
+                            if let Some(src) = sources.iter().find(|s| s.id == sid) {
+                                labels.insert(job.id.clone(), path_basename(&src.path));
+                                claimed.insert(sid);
+                            }
+                        }
+                    }
+                }
+            }
+            "extract_pst" => {
+                if let Some(cp) = matter
+                    .get_checkpoint(&job.id, PST_EXTRACT_STAGE)
+                    .map_err(map_core)?
+                {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cp.cursor_json) {
+                        if let Some(label) = extract_source_label(&v, inventory) {
+                            labels.insert(job.id.clone(), label);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let unlabeled: Vec<&Job> = jobs
+        .iter()
+        .filter(|j| j.kind == "ingest" && !labels.contains_key(&j.id))
+        .collect();
+    let leftover: Vec<&Source> = sources
+        .iter()
+        .filter(|s| !claimed.contains(&s.id))
+        .collect();
+    if unlabeled.len() == 1 && leftover.len() == 1 {
+        if let (Some(job), Some(src)) = (unlabeled.first(), leftover.first()) {
+            labels.insert(job.id.clone(), path_basename(&src.path));
+        }
+    }
+    Ok(labels)
+}
+
+fn group_item_errors(recent: Vec<matter_core::ItemError>) -> Vec<ProcessErrorGroup> {
+    let mut grouped: BTreeMap<String, ProcessErrorGroup> = BTreeMap::new();
+    for err in recent {
+        grouped
+            .entry(err.code.clone())
+            .and_modify(|g| {
+                g.count += 1;
+                if g.sample_job_id.is_none() {
+                    g.sample_job_id = err.job_id.clone();
+                }
+                if g.sample_item_id.is_none() {
+                    g.sample_item_id = err.item_id.clone();
+                }
+            })
+            .or_insert(ProcessErrorGroup {
+                code: err.code,
+                count: 1,
+                sample_message: err.message,
+                sample_job_id: err.job_id,
+                sample_item_id: err.item_id,
+            });
+    }
+    grouped.into_values().collect()
+}
+
 fn snapshot_idle_or_terminal(snap: &JobProgressSnapshot) -> bool {
     snap.job_id.is_empty() || snap.state == "idle" || snap.is_terminal()
 }
@@ -216,10 +353,10 @@ pub fn process_page_blocking(
         .map_err(|e| CommandError::failed(e.to_string()))?;
     let ov = load_case_overview_on(&matter, &OverviewOptions::default())
         .map_err(|e| CommandError::failed(e.to_string()))?;
-    let sources = matter
-        .list_sources()
-        .map_err(map_core)?
-        .into_iter()
+    let source_rows = matter.list_sources().map_err(map_core)?;
+    let sources: Vec<ProcessSourceRow> = source_rows
+        .iter()
+        .cloned()
         .map(ProcessSourceRow::from)
         .collect();
     let pst_items = matter
@@ -238,9 +375,16 @@ pub fn process_page_blocking(
     let extracted_ids = extracted_pst_item_ids(&matter, &jobs_raw)?;
     let failed_unlogged = failed_jobs_without_item_errors(&matter, &jobs_raw)?;
     let inventory_ids: Vec<String> = pst_inventory.iter().map(|p| p.id.clone()).collect();
+    let unextracted_psts: Vec<ProcessPstRow> = pst_inventory
+        .iter()
+        .filter(|p| !extracted_ids.contains(&p.id))
+        .cloned()
+        .collect();
+    let labels = job_source_labels(&matter, &jobs_raw, &source_rows, &pst_inventory)?;
     let jobs: Vec<ProcessJobRow> = jobs_raw
         .into_iter()
         .map(|j| ProcessJobRow {
+            source_label: labels.get(&j.id).cloned(),
             id: j.id,
             kind: j.kind,
             state: j.state.as_str().to_string(),
@@ -251,18 +395,7 @@ pub fn process_page_blocking(
         })
         .collect();
     let recent = matter.list_item_errors_recent(100).map_err(map_core)?;
-    let mut grouped: BTreeMap<String, ProcessErrorGroup> = BTreeMap::new();
-    for err in recent {
-        grouped
-            .entry(err.code.clone())
-            .and_modify(|g| g.count += 1)
-            .or_insert(ProcessErrorGroup {
-                code: err.code,
-                count: 1,
-                sample_message: err.message,
-            });
-    }
-    let error_groups: Vec<ProcessErrorGroup> = grouped.into_values().collect();
+    let error_groups: Vec<ProcessErrorGroup> = group_item_errors(recent);
 
     let snap = runner.watch_progress().borrow().clone();
     let same_matter = !snap.matter_id.is_empty() && snap.matter_id == info.id;
@@ -307,6 +440,8 @@ pub fn process_page_blocking(
         dupes,
         families: ov.totals.families_total,
         pdf_needs_ocr: ov.ocr.pdf_needs_ocr,
+        unextracted_psts,
+        failed_unlogged,
     })
 }
 
@@ -907,6 +1042,295 @@ mod tests {
             1,
             "extracting A twice must not zero-out missing B"
         );
+    }
+
+    #[test]
+    fn source_size_bytes_file_only_never_walkdir() {
+        let tmp = tempdir().expect("tempdir");
+        let file = tmp.path().join("one.pst");
+        std::fs::write(&file, b"abcd").expect("write");
+        assert_eq!(source_size_bytes(file.to_str().expect("utf8")), Some(4));
+        assert_eq!(
+            source_size_bytes(tmp.path().to_str().expect("dir")),
+            None,
+            "directories must not report a walked size"
+        );
+        assert_eq!(source_size_bytes(r"C:\this\path\does\not\exist.pst"), None);
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(prod.contains("symlink_metadata"));
+        assert!(!prod.contains("walkdir"));
+        assert!(!prod.contains("list_items_for_source"));
+        let conf = include_str!("../tauri.conf.json");
+        assert!(
+            !conf.contains("dragDropEnabled"),
+            "dragDropEnabled must stay omitted (Tauri 2 default true)"
+        );
+        let lib = include_str!("lib.rs");
+        assert!(lib.contains("on_webview_event"));
+        assert!(lib.contains("process-file-drop"));
+        assert!(lib.contains("DragDropEvent::Drop"));
+    }
+
+    #[test]
+    fn unextracted_psts_named_gap_two_then_one_then_zero() {
+        let tmp = tempdir().expect("tempdir");
+        let parent = utf8_tmp(&tmp);
+        let root = create_matter_under(&parent, "Leaves").expect("create");
+        {
+            let matter = Matter::open(&root).expect("open");
+            matter
+                .insert_item(ItemInput {
+                    id: Some("itm_pst_a".into()),
+                    path: Some(r"C:\mail\one.pst".into()),
+                    status: item_status::EXTRACTED.into(),
+                    file_category: Some("pst".into()),
+                    ..Default::default()
+                })
+                .expect("a");
+            matter
+                .insert_item(ItemInput {
+                    id: Some("itm_pst_b".into()),
+                    path: Some(r"C:\mail\two.pst".into()),
+                    status: item_status::EXTRACTED.into(),
+                    file_category: Some("pst".into()),
+                    ..Default::default()
+                })
+                .expect("b");
+        }
+        let runner = test_runner();
+        let page = process_page_blocking(&runner, root.as_str()).expect("page");
+        assert_eq!(page.unextracted_psts.len(), 2);
+        let names: Vec<String> = page
+            .unextracted_psts
+            .iter()
+            .map(|p| p.path.clone().unwrap_or_default())
+            .map(|p| path_basename(&p))
+            .collect();
+        assert!(names.contains(&"one.pst".into()));
+        assert!(names.contains(&"two.pst".into()));
+        assert_eq!(page.unaccounted_for, 2);
+        assert_eq!(page.failed_unlogged, 0);
+
+        {
+            let matter = Matter::open(&root).expect("open2");
+            let job = matter.create_job("extract_pst").expect("job");
+            matter
+                .set_job_state(&job.id, JobState::Running, None)
+                .expect("run");
+            matter
+                .set_job_state(&job.id, JobState::Succeeded, None)
+                .expect("ok");
+            matter
+                .put_checkpoint(
+                    &job.id,
+                    "pst_extract",
+                    r#"{"pst_item_id":"itm_pst_a","pst_path":"C:\\mail\\one.pst"}"#,
+                    1,
+                )
+                .expect("cp");
+        }
+        let page1 = process_page_blocking(&runner, root.as_str()).expect("page1");
+        assert_eq!(page1.unextracted_psts.len(), 1);
+        assert_eq!(
+            page1.unextracted_psts[0]
+                .path
+                .as_deref()
+                .map(path_basename)
+                .as_deref(),
+            Some("two.pst")
+        );
+        assert_eq!(page1.unaccounted_for, 1);
+        let extract_row = page1
+            .jobs
+            .iter()
+            .find(|j| j.kind == "extract_pst")
+            .expect("extract job");
+        assert_eq!(extract_row.source_label.as_deref(), Some("one.pst"));
+
+        {
+            let matter = Matter::open(&root).expect("open3");
+            let job = matter.create_job("extract_pst").expect("job2");
+            matter
+                .set_job_state(&job.id, JobState::Running, None)
+                .expect("run");
+            matter
+                .set_job_state(&job.id, JobState::Succeeded, None)
+                .expect("ok");
+            matter
+                .put_checkpoint(
+                    &job.id,
+                    "pst_extract",
+                    r#"{"pst_item_id":"itm_pst_b","pst_path":"C:\\mail\\two.pst"}"#,
+                    1,
+                )
+                .expect("cp");
+        }
+        let page0 = process_page_blocking(&runner, root.as_str()).expect("page0");
+        assert!(page0.unextracted_psts.is_empty());
+        assert_eq!(page0.unaccounted_for, 0);
+        runner.shutdown();
+    }
+
+    #[test]
+    fn ingest_source_label_without_expand_checkpoint() {
+        let tmp = tempdir().expect("tempdir");
+        let parent = utf8_tmp(&tmp);
+        let root = create_matter_under(&parent, "Label").expect("create");
+        {
+            let matter = Matter::open(&root).expect("open");
+            matter
+                .insert_source(r"C:\custodian\INC.pst", "single_pst", "ready", None)
+                .expect("src");
+            let _job = matter.create_job("ingest").expect("ingest");
+            let _prof = matter.create_job("profile_run").expect("profile");
+        }
+        let runner = test_runner();
+        let page = process_page_blocking(&runner, root.as_str()).expect("page");
+        let ingest = page
+            .jobs
+            .iter()
+            .find(|j| j.kind == "ingest")
+            .expect("ingest row");
+        assert_eq!(ingest.source_label.as_deref(), Some("INC.pst"));
+        let profile = page
+            .jobs
+            .iter()
+            .find(|j| j.kind == "profile_run")
+            .expect("profile row");
+        assert!(profile.source_label.is_none());
+        runner.shutdown();
+    }
+
+    #[test]
+    fn two_unlabeled_ingests_stay_kind_fallback() {
+        let tmp = tempdir().expect("tempdir");
+        let parent = utf8_tmp(&tmp);
+        let root = create_matter_under(&parent, "TwoIngest").expect("create");
+        {
+            let matter = Matter::open(&root).expect("open");
+            matter
+                .insert_source(r"C:\custodian\a.pst", "single_pst", "ready", None)
+                .expect("src a");
+            matter
+                .insert_source(r"C:\custodian\b.pst", "single_pst", "ready", None)
+                .expect("src b");
+            let _ = matter.create_job("ingest").expect("ingest a");
+            let _ = matter.create_job("ingest").expect("ingest b");
+        }
+        let runner = test_runner();
+        let page = process_page_blocking(&runner, root.as_str()).expect("page");
+        let ingest: Vec<_> = page.jobs.iter().filter(|j| j.kind == "ingest").collect();
+        assert_eq!(ingest.len(), 2);
+        assert!(
+            ingest.iter().all(|j| j.source_label.is_none()),
+            "two unlabeled ingest jobs must not pair sources by clock"
+        );
+        runner.shutdown();
+    }
+
+    #[test]
+    fn ingest_expand_checkpoint_labels_source_basename() {
+        let tmp = tempdir().expect("tempdir");
+        let parent = utf8_tmp(&tmp);
+        let root = create_matter_under(&parent, "ExpandLabel").expect("create");
+        {
+            let matter = Matter::open(&root).expect("open");
+            let src = matter
+                .insert_source(r"C:\custodian\INC.pst", "single_pst", "ready", None)
+                .expect("src");
+            let job = matter.create_job("ingest").expect("ingest");
+            let cursor = serde_json::json!({ "source_id": src.id }).to_string();
+            matter
+                .put_checkpoint(&job.id, "expand", &cursor, 1)
+                .expect("cp");
+        }
+        let runner = test_runner();
+        let page = process_page_blocking(&runner, root.as_str()).expect("page");
+        let ingest = page
+            .jobs
+            .iter()
+            .find(|j| j.kind == "ingest")
+            .expect("ingest row");
+        assert_eq!(ingest.source_label.as_deref(), Some("INC.pst"));
+        runner.shutdown();
+    }
+
+    #[test]
+    fn extract_source_label_prefers_pst_path() {
+        let inventory = vec![ProcessPstRow {
+            id: "itm_x".into(),
+            source_id: None,
+            path: Some(r"C:\mail\from-inventory.pst".into()),
+            status: "extracted".into(),
+        }];
+        let cursor = serde_json::json!({
+            "pst_item_id": "itm_x",
+            "pst_path": r"C:\mail\leaf.pst",
+            "open_fs_path": serde_json::Value::Null,
+        });
+        assert_eq!(
+            extract_source_label(&cursor, &inventory).as_deref(),
+            Some("leaf.pst")
+        );
+        let no_path = serde_json::json!({ "pst_item_id": "itm_x" });
+        assert_eq!(
+            extract_source_label(&no_path, &inventory).as_deref(),
+            Some("from-inventory.pst")
+        );
+        let temp_fs = serde_json::json!({
+            "pst_item_id": "itm_x",
+            "open_fs_path": r"C:\tmp\extract\scratch.pst",
+        });
+        assert_eq!(
+            extract_source_label(&temp_fs, &inventory).as_deref(),
+            Some("from-inventory.pst"),
+            "empty pst_path must use inventory, not a temp open_fs_path"
+        );
+        let empty = serde_json::json!({});
+        assert!(extract_source_label(&empty, &inventory).is_none());
+    }
+
+    #[test]
+    fn path_basename_strips_extended_and_dirs() {
+        assert_eq!(path_basename(r"\\?\C:\mail\INC.pst"), "INC.pst");
+        assert_eq!(path_basename(r"C:\custodian\foo.zip"), "foo.zip");
+        assert_eq!(
+            path_basename(r"\\?\UNC\server\share\a.pst"),
+            r"\\server\share\a.pst".rsplit('\\').next().unwrap()
+        );
+    }
+
+    #[test]
+    fn group_item_errors_fills_job_and_item_independently() {
+        use matter_core::ItemError;
+        let a = ItemError {
+            id: 1,
+            item_id: None,
+            source_id: None,
+            job_id: Some("job_a".into()),
+            stage: "expand".into(),
+            code: "zip_corrupt".into(),
+            message: "bad zip".into(),
+            detail: None,
+            created_at: "t".into(),
+        };
+        let b = ItemError {
+            id: 2,
+            item_id: Some("itm_1".into()),
+            source_id: None,
+            job_id: None,
+            stage: "expand".into(),
+            code: "zip_corrupt".into(),
+            message: "also bad".into(),
+            detail: None,
+            created_at: "t".into(),
+        };
+        let groups = group_item_errors(vec![a, b]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].count, 2);
+        assert_eq!(groups[0].sample_job_id.as_deref(), Some("job_a"));
+        assert_eq!(groups[0].sample_item_id.as_deref(), Some("itm_1"));
     }
 
     #[test]

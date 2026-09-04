@@ -620,6 +620,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(runner)
+        .on_webview_event(|webview, event| {
+            use tauri::Emitter;
+            if let tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let paths: Vec<String> = paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
+                let _ = webview.emit("process-file-drop", &paths);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             matter_overview,
             create_matter,

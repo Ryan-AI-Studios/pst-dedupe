@@ -637,6 +637,8 @@ pub struct ProcessSourceRow {
     pub path: String,
     pub kind: String,
     pub status: String,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
@@ -656,6 +658,8 @@ pub struct ProcessJobRow {
     pub error_summary: Option<String>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    #[serde(default)]
+    pub source_label: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
@@ -663,6 +667,10 @@ pub struct ProcessErrorGroup {
     pub code: String,
     pub count: u64,
     pub sample_message: String,
+    #[serde(default)]
+    pub sample_job_id: Option<String>,
+    #[serde(default)]
+    pub sample_item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
@@ -703,6 +711,10 @@ pub struct ProcessPageResponse {
     pub families: u64,
     #[serde(default)]
     pub pdf_needs_ocr: u64,
+    #[serde(default)]
+    pub unextracted_psts: Vec<ProcessPstRow>,
+    #[serde(default)]
+    pub failed_unlogged: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
