@@ -259,6 +259,38 @@ fn ceiling_8_fails_at_7_succeeds_at_8() {
 }
 
 #[test]
+fn late_manifest_err_still_emits_depth_hint() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("src4.pst");
+    let out = dir.path().join("pack");
+    let man_block = dir.path().join("manifest_as_dir");
+    write_source(&src, 4);
+    fs::create_dir_all(&man_block).expect("manifest path as directory");
+
+    let result = run_unique_eml(&[
+        "unique-eml",
+        src.to_str().expect("utf8"),
+        "--out",
+        out.to_str().expect("utf8"),
+        "--manifest-json",
+        man_block.to_str().expect("utf8"),
+        "--json",
+        "--allow-partial-fidelity",
+    ]);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        !result.status.success(),
+        "manifest dir must fail the pack; exit={:?} stderr={stderr} stdout={stdout}",
+        result.status.code()
+    );
+    assert!(
+        stderr.contains("--max-embedded-depth=3"),
+        "0127 unique-eml hint must still print on late Err; stderr={stderr} stdout={stdout}"
+    );
+}
+
+#[test]
 fn clap_rejects_zero_nine_and_non_integer() {
     for bad in ["0", "9", "abc"] {
         let result = run_unique_eml(&[

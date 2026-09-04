@@ -41,7 +41,7 @@ CI uses unit fixtures, not INC*. Owner INC* re-smoke is optional (not a gate). N
 |---|---|
 | (this track) | none above low |
 | D-0127-* / D-0067 | see 0127 |
-| 0131 HITL | owner `--prefer-folder-class` skipped -- see 0131 |
+| 0131 HITL | 2026-09-03 PASS -- see 0131 (RI 826→821) |
 | Owner INC* re-smoke | optional, not a gate |
 
 ## Publish

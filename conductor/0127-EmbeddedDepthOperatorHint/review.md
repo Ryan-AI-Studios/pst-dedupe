@@ -33,17 +33,15 @@ Operator disclosure when unique-pst / unique-eml hit the configured `--max-embed
 
 ## HITL (owner)
 
-CI uses `unique_pst_depth` / `unique_eml_depth` fixtures, not INC*. Owner INC* re-smoke at default 3 vs `--max-embedded-depth 8` is optional (not a gate). Never commit INC* PSTs. Codesign is **D-0062-codesign**.
+2026-09-03 operator-local INC* split (packs gitignored). Depth **8**: exit 0, `ATTACH_DEPTH_LIMIT` empty. Default **3**: exit **64**, stderr `--max-embedded-depth=3` once, histogram 4. Never commit INC* PSTs. Codesign is **D-0062-codesign**.
 
 ## Residual lows (deferred)
 
 | ID | Item |
 |---|---|
-| D-0127-eml-err-stderr-assert | P3: unique-eml late report Err still emits hint but tests do not assert the stderr string on that path |
-| D-0127-also-eml-dual-hint | P3, allowed: also-eml may emit unique-pst depth hint and a `unique-eml:`-prefixed line |
 | D-0067-embedded-depth | remains (matter children) |
-| 0131 HITL | owner `--prefer-folder-class` skipped -- see 0131 |
-| Owner INC* re-smoke | optional, not a gate |
+
+`D-0127-eml-err-stderr-assert` and `D-0127-also-eml-dual-hint` closed in hygiene after PR **#147** (`unique_eml_depth::late_manifest_err_still_emits_depth_hint`; also-eml `emit_depth_limit_hint: false`).
 
 ## Publish
 

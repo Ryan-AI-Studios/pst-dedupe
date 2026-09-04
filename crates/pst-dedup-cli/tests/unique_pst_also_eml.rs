@@ -673,6 +673,7 @@ fn mode_a_soft_skip_row_lands_on_also_eml_ledger() {
         attach_src: &mut attach_src,
         manifest_json: None,
         materialized_count: 1,
+        emit_depth_limit_hint: true,
     })
     .expect("write pack");
     assert_eq!(pack.eml_written, 1);
@@ -823,6 +824,7 @@ fn helper_hard_fail_writes_summary_json() {
         attach_src: &mut attach_src,
         manifest_json: Some(&bad_manifest),
         materialized_count: 1,
+        emit_depth_limit_hint: true,
     });
     assert!(result.is_err(), "manifest dir must hard-fail the helper");
     let summary = pack_out.join("summary.json");
@@ -1022,6 +1024,7 @@ fn helper_cancel_with_blocked_summary_returns_cancelled_ok() {
         attach_src: &mut attach_src,
         manifest_json: None,
         materialized_count: 1,
+        emit_depth_limit_hint: true,
     })
     .expect("cancel must not surface as Generic Err");
     assert!(pack.cancelled);
@@ -1177,6 +1180,7 @@ fn cancel_ok_recovers_attach_and_embedded_from_summary() {
         attach_src: &mut attach_src,
         manifest_json: None,
         materialized_count: 1,
+        emit_depth_limit_hint: true,
     })
     .expect("cancel must not surface as Generic Err");
     assert!(pack.cancelled);
@@ -1330,6 +1334,7 @@ fn summary_write_failure_returns_err() {
         attach_src: &mut attach_src,
         manifest_json: None,
         materialized_count: 1,
+        emit_depth_limit_hint: true,
     });
     assert!(result.is_err(), "summary write failure must return Err");
 }
@@ -1464,6 +1469,7 @@ fn summary_write_failure_after_depth_limit_returns_err() {
         attach_src: &mut attach_src,
         manifest_json: None,
         materialized_count: 1,
+        emit_depth_limit_hint: true,
     });
     assert!(
         result.is_err(),

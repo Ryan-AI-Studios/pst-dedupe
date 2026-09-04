@@ -143,7 +143,7 @@
 | 84 | P1 U | **0128** ExportRiskAdvisoryCopy | ✅ Completed | `operator_note` keyed BODY_UNAVAILABLE; PR **#147** / `9082761` |
 | 85 | P2 U | **0129** AlsoEmlPhaseTimings | ✅ Completed | `also_eml_ms`; PR **#147** / `9082761` |
 | 86 | P3 U | **0130** QcSampleCost | ✅ Completed | stderr `qc_ms=`; default sample; PR **#147** / `9082761` |
-| 87 | P3 U | **0131** RecoverableItemsOperatorHint | ✅ Completed | RI/Purges opt-in folder-class runbook; HITL skipped; PR **#147** / `9082761` |
+| 87 | P3 U | **0131** RecoverableItemsOperatorHint | ✅ Completed | RI/Purges opt-in folder-class; HITL 826→821; PR **#147** / `9082761` |
 | 88 | P3 U | **0132** CliProgressPowershell | ✅ Completed | PowerShell stderr progress; PR **#147** / `9082761` |
 
 ## Series K spine (clean unique export)
@@ -298,5 +298,5 @@ Shipped `/implement-track 127-132` (2026-09-03). PR **#147** / `9082761`. No BCC
 | 2 | **0128** ExportRiskAdvisoryCopy | **Completed** — do not discount BODY_UNAVAILABLE; no fourth risk value; PR **#147** / `9082761` |
 | 3 | **0129** AlsoEmlPhaseTimings | **Completed** — additive `also_eml_ms`; never fudge unaccounted; PR **#147** / `9082761` |
 | 4 | **0130** QcSampleCost | **Completed** — default sample stays; stderr `qc_ms=`; PR **#147** / `9082761` |
-| 5 | **0131** RecoverableItemsOperatorHint | **Completed** — folder-class stays opt-in; owner HITL skipped; PR **#147** / `9082761` |
+| 5 | **0131** RecoverableItemsOperatorHint | **Completed** — folder-class stays opt-in; HITL 826→821; PR **#147** / `9082761` |
 | 6 | **0132** CliProgressPowershell | **Completed** — JSON stays stdout; docs + timing-script comment; PR **#147** / `9082761` |

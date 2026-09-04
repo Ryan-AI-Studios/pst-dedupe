@@ -175,6 +175,9 @@ pub struct WriteEmlPackFromKeepSetInput<'a> {
     pub manifest_json: Option<&'a Path>,
     /// Echoed into summary.json `materialized` (promote count or winner len).
     pub materialized_count: u64,
+    /// Standalone unique-eml: true. unique-pst `--also-eml`: false (parent already
+    /// `emit_log`s the unique-pst depth line).
+    pub emit_depth_limit_hint: bool,
 }
 
 /// Result of [`write_eml_pack_from_keep_set`].
@@ -695,7 +698,10 @@ fn write_eml_pack_from_keep_set_inner(
 
     // Before both Ok and late Err (manifest/summary write). Covers helper
     // hard-fail so run_unique_eml must not emit again (would print twice).
-    emit_unique_eml_depth_limit_hint(depth_limit_events, nested_depth);
+    // unique-pst --also-eml sets emit_depth_limit_hint false (parent emit_log).
+    if input.emit_depth_limit_hint {
+        emit_unique_eml_depth_limit_hint(depth_limit_events, nested_depth);
+    }
 
     if eml_pack_cancel_requested(input.cancel) {
         cancelled = true;
@@ -1118,6 +1124,7 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
         attach_src: &mut attach_src,
         manifest_json: Some(&manifest_path),
         materialized_count,
+        emit_depth_limit_hint: true,
     })?;
 
     // Depth hint is emitted inside write_eml_pack_from_keep_set_inner (Ok and Err).

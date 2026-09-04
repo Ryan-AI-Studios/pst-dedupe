@@ -454,7 +454,7 @@ Operator unique-pst 2026-09-02 on the 4GB-split INC* pair (release CLI after 012
 | **0128** | ExportRiskAdvisoryCopy | **Completed** | **P1 U** | `operator_note` when keyed BODY_UNAVAILABLE trips 0.02; no fourth enum. PR **#147** / `9082761`. Spec: `0128-ExportRiskAdvisoryCopy/`. |
 | **0129** | AlsoEmlPhaseTimings | **Completed** | **P2 U** | `phase_timings.also_eml_ms` in `accounted_ms()`. PR **#147** / `9082761`. Spec: `0129-AlsoEmlPhaseTimings/`. |
 | **0130** | QcSampleCost | **Completed** | **P3 U** | stderr `qc_ms=`; default stays `sample`. PR **#147** / `9082761`. Spec: `0130-QcSampleCost/`. |
-| **0131** | RecoverableItemsOperatorHint | **Completed** | **P3 U** | opt-in `--prefer-folder-class` runbook; HITL skipped. PR **#147** / `9082761`. Spec: `0131-RecoverableItemsOperatorHint/`. |
+| **0131** | RecoverableItemsOperatorHint | **Completed** | **P3 U** | opt-in `--prefer-folder-class` runbook; HITL 2026-09-03 RI 826→821. PR **#147** / `9082761`. Spec: `0131-RecoverableItemsOperatorHint/`. |
 | **0132** | CliProgressPowershell | **Completed** | **P3 U** | PowerShell stderr capture; JSON stays stdout. PR **#147** / `9082761`. Spec: `0132-CliProgressPowershell/`. |
 
 **Order:** **0127 Completed**. **0128 Completed**. **0129 Completed**. **0130 Completed**. **0131 Completed**. **0132 Completed**. Next free ID **0133**.
