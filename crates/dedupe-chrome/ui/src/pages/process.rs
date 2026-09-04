@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use leptos_router::components::A;
 use leptos_router::hooks::{use_navigate, use_params_map};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -10,14 +11,15 @@ use crate::invoke::{
     ProcessPageResponse, ProcessPstRow, ProcessResumeArgs, ProcessSourceRow, ProcessStartArgs,
     ProcessStartResponse, RootArgs,
 };
-use crate::path_id::encode_matter_id;
+use crate::path_id::{encode_matter_id, review_doc_href};
 use crate::shell::ProcessChromeCtx;
 
 const DEFAULT_PROFILE: &str = "builtin:standard";
 const DROP_COPY_KINDS: &str = "PST · ZIP · Purview package · folder";
 const DROP_COPY_HASH: &str = "Hashed on arrival.";
 const DENIST_NSRL_NOTE: &str = "optional local hash-list (NSRL RDS not this track).";
-const EXCEPTIONS_NOT_THIS_TRACK: &str = "Retry / exclude / password vault: not this track.";
+const EXCEPTIONS_NO_VAULT: &str = "Exclude is not available. Encrypted stores fail closed (no password vault).";
+const FILE_DROP_EVENT: &str = "process-file-drop";
 
 fn ingest_params(path: &str) -> String {
     serde_json::json!({ "path": path }).to_string()
@@ -90,6 +92,8 @@ async fn pick_path(
 extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "dialog"], js_name = open, catch)]
     fn dialog_open(options: JsValue) -> Result<js_sys::Promise, JsValue>;
+    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"], js_name = listen, catch)]
+    fn tauri_event_listen(event: &str, handler: &js_sys::Function) -> Result<js_sys::Promise, JsValue>;
 }
 
 fn dash(v: Option<u64>) -> String {
@@ -109,6 +113,168 @@ fn strip_extended_path(path: &str) -> String {
     } else {
         path.to_string()
     }
+}
+
+fn path_basename(path: &str) -> String {
+    let stripped = strip_extended_path(path);
+    stripped
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(stripped.as_str())
+        .to_string()
+}
+
+fn format_size(n: u64) -> String {
+    const GB: f64 = 1_000_000_000.0;
+    const MB: f64 = 1_000_000.0;
+    if (n as f64) >= GB {
+        format!("{:.1} GB", n as f64 / GB)
+    } else if (n as f64) >= MB {
+        format!("{:.1} MB", n as f64 / MB)
+    } else {
+        format!("{n} B")
+    }
+}
+
+fn retry_allowed(state: &str) -> bool {
+    state == "failed" || state == "paused"
+}
+
+fn exception_title(code: &str) -> &str {
+    match code {
+        "zip_corrupt" => "ZIP corrupt",
+        "zip_path_traversal" => "ZIP path rejected",
+        "unsupported_7z" => "Unsupported 7z",
+        "package_not_found" => "Package not found",
+        "io_error" => "I/O error",
+        other => other,
+    }
+}
+
+fn snapshot_idle_or_terminal(snap: &JobProgressSnapshot) -> bool {
+    snap.job_id.is_empty()
+        || snap.state == "idle"
+        || snap.state == "succeeded"
+        || snap.state == "failed"
+        || snap.state == "cancelled"
+        || snap.state == "paused"
+}
+
+fn should_reload_stale_importing(sources_importing: bool, snap: &JobProgressSnapshot) -> bool {
+    sources_importing && snapshot_idle_or_terminal(snap)
+}
+
+/// Completion for the 400 ms poller: classic busy→idle, or a job we accepted that
+/// reached terminal before the first poll observed `running`.
+fn poll_finished_ok(was_busy: bool, snap: &JobProgressSnapshot, accepted_job: &str) -> bool {
+    if snapshot_busy(snap) {
+        return false;
+    }
+    if was_busy {
+        return true;
+    }
+    !accepted_job.is_empty() && snap.job_id == accepted_job
+}
+
+fn extract_work_from_psts(rows: &[ProcessPstRow]) -> Vec<ExtractWork> {
+    rows.iter()
+        .map(|p| ExtractWork {
+            source_id: p.source_id.clone().unwrap_or_default(),
+            pst_item_id: p.id.clone(),
+            name: p.path.clone().unwrap_or_else(|| p.id.clone()),
+        })
+        .collect()
+}
+
+fn strings_from_js(value: &JsValue) -> Vec<String> {
+    if let Some(s) = value.as_string() {
+        return if s.is_empty() { Vec::new() } else { vec![s] };
+    }
+    let arr = js_sys::Array::from(value);
+    let mut out = Vec::new();
+    for i in 0..arr.length() {
+        if let Some(s) = arr.get(i).as_string() {
+            if !s.is_empty() {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+fn drop_paths_from_event(ev: &JsValue) -> Vec<String> {
+    let Ok(payload) = js_sys::Reflect::get(ev, &"payload".into()) else {
+        return Vec::new();
+    };
+    if let Ok(ty) = js_sys::Reflect::get(&payload, &"type".into()) {
+        if let Some(kind) = ty.as_string() {
+            if kind != "drop" {
+                return Vec::new();
+            }
+            if let Ok(paths) = js_sys::Reflect::get(&payload, &"paths".into()) {
+                return strings_from_js(&paths);
+            }
+        }
+    }
+    strings_from_js(&payload)
+}
+
+fn drop_error_after_start(start_err: Option<&str>, paths: &[String]) -> Option<String> {
+    match start_err {
+        None => {
+            if paths.len() <= 1 {
+                return None;
+            }
+            let names: Vec<String> = paths[1..].iter().map(|p| path_basename(p)).collect();
+            Some(format!("Not queued: {}", names.join(", ")))
+        }
+        Some(e) => {
+            let names: Vec<String> = paths.iter().map(|p| path_basename(p)).collect();
+            Some(format!("{e}; not queued: {}", names.join(", ")))
+        }
+    }
+}
+
+fn try_listen_webview_drop(handler: &js_sys::Function) -> Option<js_sys::Promise> {
+    let window = web_sys::window()?;
+    let tauri = js_sys::Reflect::get(&window, &"__TAURI__".into()).ok()?;
+    if tauri.is_undefined() || tauri.is_null() {
+        return None;
+    }
+    let webview_ns = js_sys::Reflect::get(&tauri, &"webview".into()).ok()?;
+    if webview_ns.is_undefined() || webview_ns.is_null() {
+        return None;
+    }
+    let get_current = js_sys::Reflect::get(&webview_ns, &"getCurrentWebview".into()).ok()?;
+    let get_fn = get_current.dyn_into::<js_sys::Function>().ok()?;
+    let current = get_fn.call0(&webview_ns).ok()?;
+    let on_drop = js_sys::Reflect::get(&current, &"onDragDropEvent".into()).ok()?;
+    let on_drop_fn = on_drop.dyn_into::<js_sys::Function>().ok()?;
+    let ret = on_drop_fn.call1(&current, handler.as_ref()).ok()?;
+    if ret.is_undefined() || ret.is_null() {
+        return None;
+    }
+    Some(js_sys::Promise::resolve(&ret))
+}
+
+async fn unlisten_from_promise(promise: js_sys::Promise) -> Result<js_sys::Function, String> {
+    let value = wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(|e| format!("File drop listener failed: {e:?}"))?;
+    value
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| "File drop listener failed: invalid unlisten".into())
+}
+
+async fn attach_drop_listener(handler: &js_sys::Function) -> Result<js_sys::Function, String> {
+    if let Some(promise) = try_listen_webview_drop(handler) {
+        if let Ok(unlisten) = unlisten_from_promise(promise).await {
+            return Ok(unlisten);
+        }
+    }
+    let promise = tauri_event_listen(FILE_DROP_EVENT, handler)
+        .map_err(|e| format!("File drop listener failed: {e:?}"))?;
+    unlisten_from_promise(promise).await
 }
 
 fn truncate_error(s: &str, max: usize) -> String {
@@ -198,12 +364,77 @@ fn spawn_cancel(job_id: String) {
     });
 }
 
-fn spawn_resume(root: String, job_id: String) {
+fn spawn_resume(
+    root: String,
+    job_id: String,
+    error: RwSignal<Option<String>>,
+    accepted_job: RwSignal<String>,
+) {
     if root.is_empty() || job_id.is_empty() {
         return;
     }
     leptos::task::spawn_local(async move {
-        let _ = tauri_invoke::<(), _>("process_resume", &ProcessResumeArgs { root, job_id }).await;
+        match tauri_invoke::<(), _>(
+            "process_resume",
+            &ProcessResumeArgs {
+                root,
+                job_id: job_id.clone(),
+            },
+        )
+        .await
+        {
+            Ok(()) => {
+                error.set(None);
+                accepted_job.set(job_id);
+            }
+            Err(e) => error.set(Some(e)),
+        }
+    });
+}
+
+fn spawn_drop_ingest(
+    root: String,
+    paths: Vec<String>,
+    error: RwSignal<Option<String>>,
+    page: RwSignal<Option<ProcessPageResponse>>,
+    accepted_job: RwSignal<String>,
+) {
+    if root.is_empty() || paths.is_empty() {
+        return;
+    }
+    let first = paths[0].clone();
+    leptos::task::spawn_local(async move {
+        match tauri_invoke::<ProcessStartResponse, _>(
+            "process_start",
+            &ProcessStartArgs {
+                root: root.clone(),
+                kind: "ingest".into(),
+                params_json: ingest_params(&first),
+            },
+        )
+        .await
+        {
+            Ok(resp) => {
+                accepted_job.set(resp.job_id);
+                let queued_note = drop_error_after_start(None, &paths);
+                error.set(queued_note.clone());
+                match tauri_invoke::<ProcessPageResponse, _>(
+                    "process_page",
+                    &ProcessPageArgs { root },
+                )
+                .await
+                {
+                    Ok(resp) => page.set(Some(resp)),
+                    Err(e) => {
+                        error.set(Some(match queued_note {
+                            Some(note) => format!("{e}; {note}"),
+                            None => e,
+                        }));
+                    }
+                }
+            }
+            Err(e) => error.set(drop_error_after_start(Some(&e), &paths)),
+        }
     });
 }
 
@@ -331,6 +562,7 @@ pub fn ProcessPage() -> impl IntoView {
     let extract_note = RwSignal::new(Option::<String>::None);
     let extract_current_name = RwSignal::new(String::new());
     let busy_retry_pending = RwSignal::new(false);
+    let accepted_job = RwSignal::new(String::new());
     let exporting = RwSignal::new(false);
     let export_note = RwSignal::new(Option::<String>::None);
     let selected_exception = RwSignal::new(Option::<String>::None);
@@ -388,12 +620,14 @@ pub fn ProcessPage() -> impl IntoView {
                 {
                     Ok(snap) => {
                         let was_busy = snapshot_busy(&progress.get_untracked());
-                        let finished_failed =
-                            was_busy && !snapshot_busy(&snap) && snap.state == "failed";
-                        let finished_paused = was_busy
-                            && !snapshot_busy(&snap)
+                        let finished_ok = poll_finished_ok(
+                            was_busy,
+                            &snap,
+                            &accepted_job.get_untracked(),
+                        );
+                        let finished_failed = finished_ok && snap.state == "failed";
+                        let finished_paused = finished_ok
                             && (snap.state == "paused" || snap.state == "cancelled");
-                        let finished_ok = was_busy && !snapshot_busy(&snap);
                         let missing_job = snapshot_busy(&snap)
                             && page
                                 .get_untracked()
@@ -410,7 +644,15 @@ pub fn ProcessPage() -> impl IntoView {
                         let fire_retry = take_busy_retry_fire(&mut pending, snapshot_busy(&snap));
                         busy_retry_pending.set(pending);
                         progress.set(snap.clone());
-                        if finished_ok || missing_job {
+                        let importing = page
+                            .get_untracked()
+                            .map(|p| p.sources.iter().any(|s| s.status == "importing"))
+                            .unwrap_or(false);
+                        let stale_importing = should_reload_stale_importing(importing, &snap);
+                        if finished_ok || missing_job || stale_importing {
+                            if finished_ok {
+                                accepted_job.set(String::new());
+                            }
                             let prev_exceptions =
                                 page.get_untracked().map(|p| p.exceptions).unwrap_or(0);
                             match tauri_invoke::<ProcessPageResponse, _>(
@@ -466,7 +708,8 @@ pub fn ProcessPage() -> impl IntoView {
                                     )
                                     .await
                                     {
-                                        Ok(_) => {
+                                        Ok(resp) => {
+                                            accepted_job.set(resp.job_id);
                                             if should_clear_busy_retry(true, false, false) {
                                                 busy_retry_pending.set(false);
                                             }
@@ -498,7 +741,8 @@ pub fn ProcessPage() -> impl IntoView {
                                 )
                                 .await
                                 {
-                                    Ok(_) => {
+                                    Ok(resp) => {
+                                        accepted_job.set(resp.job_id);
                                         if should_clear_busy_retry(true, false, false) {
                                             busy_retry_pending.set(false);
                                         }
@@ -552,7 +796,8 @@ pub fn ProcessPage() -> impl IntoView {
             )
             .await
             {
-                Ok(_) => {
+                Ok(resp) => {
+                    accepted_job.set(resp.job_id);
                     error.set(None);
                     reload(root);
                 }
@@ -560,6 +805,30 @@ pub fn ProcessPage() -> impl IntoView {
             }
         });
     };
+
+    Effect::new(move |_| {
+        let unlisten = StoredValue::new(Option::<js_sys::Function>::None);
+        let cb = Closure::wrap(Box::new(move |ev: JsValue| {
+            let paths = drop_paths_from_event(&ev);
+            if paths.is_empty() {
+                return;
+            }
+            spawn_drop_ingest(root_sig.get_untracked(), paths, error, page, accepted_job);
+        }) as Box<dyn FnMut(JsValue)>);
+        let handler: js_sys::Function = cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+        leptos::task::spawn_local(async move {
+            match attach_drop_listener(&handler).await {
+                Ok(f) => unlisten.set_value(Some(f)),
+                Err(e) => error.set(Some(e)),
+            }
+        });
+        cb.forget();
+        on_cleanup(move || {
+            if let Some(f) = unlisten.get_value() {
+                let _ = f.call0(&JsValue::UNDEFINED);
+            }
+        });
+    });
 
     let add_folder = move |_| {
         leptos::task::spawn_local(async move {
@@ -615,15 +884,7 @@ pub fn ProcessPage() -> impl IntoView {
             error.set(Some("No PST inventory leaves to extract.".into()));
             return;
         }
-        let q: Vec<ExtractWork> = pg
-            .pst_inventory
-            .iter()
-            .map(|p| ExtractWork {
-                source_id: p.source_id.clone().unwrap_or_default(),
-                pst_item_id: p.id.clone(),
-                name: p.path.clone().unwrap_or_else(|| p.id.clone()),
-            })
-            .collect();
+        let q = extract_work_from_psts(&pg.pst_inventory);
         let total = q.len() as u64;
         let first = q[0].clone();
         extract_total.set(total);
@@ -643,7 +904,59 @@ pub fn ProcessPage() -> impl IntoView {
             )
             .await
             {
-                Ok(_) => {
+                Ok(resp) => {
+                    accepted_job.set(resp.job_id);
+                    error.set(None);
+                    if should_clear_busy_retry(true, false, false) {
+                        busy_retry_pending.set(false);
+                    }
+                    reload(root);
+                }
+                Err(e) => apply_extract_start_err(
+                    e,
+                    extract_queue,
+                    extract_total,
+                    busy_retry_pending,
+                    error,
+                    true,
+                ),
+            }
+        });
+    };
+
+    let extract_remaining = move |_| {
+        if !extract_all_should_start(extract_queue.get().len(), snapshot_busy(&progress.get())) {
+            return;
+        }
+        let Some(pg) = page.get() else {
+            return;
+        };
+        if pg.unextracted_psts.is_empty() {
+            error.set(Some("No unextracted PST leaves.".into()));
+            return;
+        }
+        let q = extract_work_from_psts(&pg.unextracted_psts);
+        let total = q.len() as u64;
+        let first = q[0].clone();
+        extract_total.set(total);
+        extract_done.set(0);
+        extract_note.set(None);
+        extract_current_name.set(first.name.clone());
+        extract_queue.set(q);
+        let root = root_sig.get();
+        leptos::task::spawn_local(async move {
+            match tauri_invoke::<ProcessStartResponse, _>(
+                "process_start",
+                &ProcessStartArgs {
+                    root: root.clone(),
+                    kind: "extract_pst".into(),
+                    params_json: extract_params(&first.source_id, &first.pst_item_id),
+                },
+            )
+            .await
+            {
+                Ok(resp) => {
+                    accepted_job.set(resp.job_id);
                     error.set(None);
                     if should_clear_busy_retry(true, false, false) {
                         busy_retry_pending.set(false);
@@ -749,8 +1062,11 @@ pub fn ProcessPage() -> impl IntoView {
                             let source = s.clone();
                             view! {
                                 <div class="set-row">
-                                    <div class="name">{strip_extended_path(&s.path)}</div>
+                                    <div class="name">{path_basename(&s.path)}</div>
                                     <div class="empty">{format!("{} · {}", s.kind, s.status)}</div>
+                                    {s.size_bytes.map(|n| {
+                                        view! { <div class="empty">{format_size(n)}</div> }
+                                    })}
                                     <Show when=move || {
                                         let snap = progress.get();
                                         let inventory = page
@@ -895,6 +1211,20 @@ pub fn ProcessPage() -> impl IntoView {
                             "Extract all"
                         </button>
                         <button class="primary" on:click=run_profile>"Run profile"</button>
+                        <Show when=move || {
+                            page.get()
+                                .map(|p| !p.unextracted_psts.is_empty())
+                                .unwrap_or(false)
+                        }>
+                            <button
+                                on:click=extract_remaining
+                                disabled=move || {
+                                    snapshot_busy(&progress.get()) || busy_retry_pending.get()
+                                }
+                            >
+                                "Extract remaining"
+                            </button>
+                        </Show>
                     </div>
                     <Show when=move || extract_note.get().is_some()>
                         <p class="empty">{move || extract_note.get().unwrap_or_default()}</p>
@@ -931,6 +1261,7 @@ pub fn ProcessPage() -> impl IntoView {
                                     key=|j: &ProcessJobRow| j.id.clone()
                                     children=move |j| {
                                         let job_for_orphan = j.clone();
+                                        let job_for_retry = j.clone();
                                         let job_id_for_counts = j.id.clone();
                                         let job_id_for_active = j.id.clone();
                                         let job_id_for_status = j.id.clone();
@@ -944,7 +1275,8 @@ pub fn ProcessPage() -> impl IntoView {
                                         view! {
                                             <tr>
                                                 <td class=job_source_class(&j.parent_job_id)>
-                                                    <div>{j.kind.clone()}</div>
+                                                    <div class="name">{j.source_label.clone().unwrap_or_else(|| j.kind.clone())}</div>
+                                                    <div class="empty">{j.kind.clone()}</div>
                                                     {err.map(|e| view! { <div class="empty">{e}</div> })}
                                                 </td>
                                                 <td class="num">{move || {
@@ -992,11 +1324,18 @@ pub fn ProcessPage() -> impl IntoView {
                                                         is_orphan_running(&job_for_orphan, &progress.get())
                                                     }>
                                                         <button class="primary" on:click=move |_| {
-                                                            spawn_resume(root_sig.get(), job_id.get_value());
+                                                            spawn_resume(root_sig.get(), job_id.get_value(), error, accepted_job);
                                                         }>"Resume"</button>
                                                         <button on:click=move |_| {
                                                             spawn_cancel(job_id.get_value());
                                                         }>"Cancel"</button>
+                                                    </Show>
+                                                    <Show when=move || {
+                                                        retry_allowed(&job_for_retry.state)
+                                                    }>
+                                                        <button class="primary" on:click=move |_| {
+                                                            spawn_resume(root_sig.get(), job_id.get_value(), error, accepted_job);
+                                                        }>"Resume"</button>
                                                     </Show>
                                                 </td>
                                             </tr>
@@ -1035,12 +1374,13 @@ pub fn ProcessPage() -> impl IntoView {
                         children=move |g| {
                             let code = g.code.clone();
                             let code_sel = code.clone();
+                            let title = exception_title(&g.code).to_string();
                             view! {
                                 <button
                                     class="set-row exception-group"
                                     on:click=move |_| selected_exception.set(Some(code_sel.clone()))
                                 >
-                                    <div class="name">{format!("{} · {}", g.code, g.count)}</div>
+                                    <div class="name">{format!("{} · {}", title, g.count)}</div>
                                 </button>
                             }
                         }
@@ -1052,11 +1392,36 @@ pub fn ProcessPage() -> impl IntoView {
                                 page.get()
                                     .and_then(|p| p.error_groups.into_iter().find(|g| g.code == code))
                                     .map(|g| {
+                                        let title = exception_title(&g.code).to_string();
+                                        let resume_id = StoredValue::new(
+                                            g.sample_job_id.clone().unwrap_or_default(),
+                                        );
+                                        let retry_id = resume_id.get_value();
+                                        let item_id = g.sample_item_id.clone();
                                         view! {
                                             <div>
-                                                <div class="name">{format!("code {}", g.code)}</div>
+                                                <div class="name">{format!("{} ({})", title, g.code)}</div>
                                                 <div class="empty">{format!("count {}", g.count)}</div>
                                                 <div class="empty">{format!("sample_message {}", g.sample_message)}</div>
+                                                <Show when=move || {
+                                                    if retry_id.is_empty() {
+                                                        return false;
+                                                    }
+                                                    page.get()
+                                                        .and_then(|p| {
+                                                            p.jobs.into_iter().find(|j| j.id == retry_id)
+                                                        })
+                                                        .map(|j| retry_allowed(&j.state))
+                                                        .unwrap_or(false)
+                                                }>
+                                                    <button class="primary" on:click=move |_| {
+                                                        spawn_resume(root_sig.get(), resume_id.get_value(), error, accepted_job);
+                                                    }>"Retry"</button>
+                                                </Show>
+                                                {item_id.as_ref().filter(|id| !id.is_empty()).map(|id| {
+                                                    let href = review_doc_href(&root_sig.get(), id, None, None);
+                                                    view! { <A href=href>"Open in review"</A> }
+                                                })}
                                             </div>
                                         }
                                     })
@@ -1077,7 +1442,7 @@ pub fn ProcessPage() -> impl IntoView {
                             )
                         }}</p>
                     </Show>
-                    <p class="empty">{EXCEPTIONS_NOT_THIS_TRACK}</p>
+                    <p class="empty">{EXCEPTIONS_NO_VAULT}</p>
                 </div>
                 <aside class="process-pane">
                     <h2>"Running report"</h2>
@@ -1111,6 +1476,33 @@ pub fn ProcessPage() -> impl IntoView {
                             <dd>{move || page.get().map(|p| p.still_processing).unwrap_or(0)}</dd>
                         </div>
                     </dl>
+                    <Show when=move || {
+                        page.get()
+                            .map(|p| !p.unextracted_psts.is_empty())
+                            .unwrap_or(false)
+                    }>
+                        <p class="empty">"Unextracted inventory (not missing messages):"</p>
+                        <For
+                            each=move || page.get().map(|p| p.unextracted_psts).unwrap_or_default()
+                            key=|p: &ProcessPstRow| p.id.clone()
+                            children=move |p| {
+                                let name = p
+                                    .path
+                                    .as_deref()
+                                    .map(path_basename)
+                                    .unwrap_or_else(|| p.id.clone());
+                                view! { <p class="empty">{name}</p> }
+                            }
+                        />
+                    </Show>
+                    <Show when=move || {
+                        page.get().map(|p| p.failed_unlogged > 0).unwrap_or(false)
+                    }>
+                        <p class="empty">{move || {
+                            let n = page.get().map(|p| p.failed_unlogged).unwrap_or(0);
+                            format!("{n} failed job(s) without item_errors — use job Resume")
+                        }}</p>
+                    </Show>
                     <p class="empty">{move || format!(
                         "Families {}",
                         page.get().map(|p| p.families).unwrap_or(0)
@@ -1178,7 +1570,12 @@ mod extract_all_busy_tests {
             error_summary: None,
             started_at: None,
             finished_at: None,
+            source_label: None,
         }
+    }
+
+    fn job_row_shows_resume(job: &ProcessJobRow, snap: &JobProgressSnapshot) -> bool {
+        is_orphan_running(job, snap) || retry_allowed(&job.state)
     }
 
     #[test]
@@ -1322,6 +1719,43 @@ mod extract_all_busy_tests {
         assert!(is_orphan_running(&running, &other));
         let succeeded = job("job_live", "succeeded");
         assert!(!is_orphan_running(&succeeded, &idle));
+        let failed = job("job_fail", "failed");
+        let paused = job("job_pause", "paused");
+        assert!(job_row_shows_resume(&failed, &idle));
+        assert!(job_row_shows_resume(&paused, &idle));
+        assert!(!job_row_shows_resume(&succeeded, &idle));
+        assert!(!job_row_shows_resume(&running, &matching));
+        assert!(job_row_shows_resume(&running, &idle));
+    }
+
+    #[test]
+    fn poll_finished_ok_matches_accepted_terminal_without_was_busy() {
+        let terminal = snap("job_fast", "succeeded");
+        assert!(
+            poll_finished_ok(false, &terminal, "job_fast"),
+            "idle→terminal with accepted id must complete without observing running"
+        );
+        assert!(!poll_finished_ok(false, &terminal, ""));
+        assert!(!poll_finished_ok(false, &terminal, "other"));
+        assert!(!poll_finished_ok(
+            false,
+            &snap("job_fast", "running"),
+            "job_fast"
+        ));
+        assert!(poll_finished_ok(true, &terminal, ""));
+        let idle = snap("", "idle");
+        assert!(
+            !poll_finished_ok(false, &idle, "job_fast"),
+            "empty idle must not complete a different accepted id"
+        );
+        assert!(poll_finished_ok(true, &idle, "job_fast"));
+        let failed = snap("job_fast", "failed");
+        assert!(poll_finished_ok(false, &failed, "job_fast"));
+        let mut queue = 2usize;
+        if poll_finished_ok(false, &terminal, "job_fast") && terminal.kind == "extract_pst" {
+            queue -= 1;
+        }
+        assert_eq!(queue, 1);
     }
 
     #[test]
@@ -1355,6 +1789,10 @@ mod extract_all_busy_tests {
         let page_await = poller
             .find("if finished_ok || missing_job")
             .expect("poller still reloads the page after a terminal job");
+        assert!(
+            poller.contains("poll_finished_ok"),
+            "poller must complete accepted jobs that skip the running poll"
+        );
         assert!(
             clear_paused < consume,
             "Pause/Cancel must clear busy_retry_pending before a retry can be taken"
@@ -1391,6 +1829,10 @@ mod extract_all_busy_tests {
         assert!(
             prod.contains("is_orphan_running(&job_for_orphan, &progress.get())"),
             "orphan Show must read live progress"
+        );
+        assert!(
+            prod.contains("retry_allowed(&job_for_retry.state)"),
+            "failed/paused jobs must offer Resume beside the orphan lock"
         );
     }
 
@@ -1489,5 +1931,134 @@ mod extract_all_busy_tests {
         assert!(top.contains("ProcessChromeCtx"));
         let status = shell_prod.split("fn StatusBar").nth(1).unwrap_or("");
         assert!(status.contains("ProcessChromeCtx"));
+    }
+
+    #[test]
+    fn retry_allowed_failed_or_paused_only() {
+        assert!(retry_allowed("failed"));
+        assert!(retry_allowed("paused"));
+        assert!(!retry_allowed("succeeded"));
+        assert!(!retry_allowed("running"));
+        assert!(!retry_allowed("cancelled"));
+        assert!(!retry_allowed("pending"));
+        assert!(!retry_allowed("idle"));
+        assert!(!retry_allowed(""));
+        assert_eq!(exception_title("zip_corrupt"), "ZIP corrupt");
+        assert_eq!(exception_title("unknown_bucket"), "unknown_bucket");
+    }
+
+    #[test]
+    fn extract_remaining_reuses_extract_all_guard_without_extra_queue_wipe() {
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let remaining = prod
+            .split("let extract_remaining = move |_|")
+            .nth(1)
+            .unwrap_or("");
+        let guard = remaining
+            .find("extract_all_should_start")
+            .expect("extract remaining must call extract_all_should_start");
+        let queue_write = remaining
+            .find("extract_queue.set(q)")
+            .expect("extract remaining still writes the queue after the guard");
+        assert!(guard < queue_write);
+        assert!(remaining.contains("unextracted_psts"));
+        assert!(remaining.contains("apply_extract_start_err"));
+        assert!(
+            !remaining.contains("extract_queue.set(Vec::new())"),
+            "remaining must not add a second queue wipe"
+        );
+        assert!(prod.contains("\"Extract remaining\""));
+        assert!(prod.contains("\"Extract all\""));
+    }
+
+    #[test]
+    fn poller_reloads_stale_importing_when_snapshot_idle() {
+        let idle = snap("", "idle");
+        assert!(should_reload_stale_importing(true, &idle));
+        assert!(!should_reload_stale_importing(false, &idle));
+        assert!(!should_reload_stale_importing(
+            true,
+            &snap("j1", "running")
+        ));
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(prod.contains("should_reload_stale_importing"));
+        assert!(prod.contains("if finished_ok || missing_job || stale_importing"));
+        assert!(prod.contains("poll_finished_ok"));
+    }
+
+    #[test]
+    fn drop_ingest_lists_unqueued_and_never_writes_extract_queue() {
+        assert_eq!(
+            drop_error_after_start(None, &["C:\\a.pst".into()]),
+            None
+        );
+        let note = drop_error_after_start(
+            None,
+            &["C:\\a.pst".into(), "C:\\b.zip".into(), "C:\\c.pst".into()],
+        );
+        assert_eq!(note.as_deref(), Some("Not queued: b.zip, c.pst"));
+        let busy = drop_error_after_start(
+            Some("busy: matter is busy: a job is already running (job_1)"),
+            &["C:\\a.pst".into(), "C:\\b.zip".into()],
+        );
+        assert!(busy.as_deref().unwrap_or("").contains("not queued: a.pst, b.zip"));
+        let encrypted = drop_error_after_start(
+            Some("encrypted PST: password required"),
+            &["C:\\a.pst".into(), "C:\\b.zip".into()],
+        );
+        assert!(
+            encrypted
+                .as_deref()
+                .unwrap_or("")
+                .contains("not queued: a.pst, b.zip")
+        );
+        assert!(encrypted
+            .as_deref()
+            .unwrap_or("")
+            .contains("encrypted PST: password required"));
+        assert!(is_busy_invoke_err(
+            "busy: matter is busy: a job is already running (job_1)"
+        ));
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let drop_fn = prod.split("fn spawn_drop_ingest").nth(1).unwrap_or("");
+        let drop_fn = drop_fn.split("fn is_orphan_running").next().unwrap_or(drop_fn);
+        assert!(drop_fn.contains("ingest"));
+        assert!(!drop_fn.contains("extract_queue"));
+        assert!(drop_fn.contains("accepted_job.set(resp.job_id)"));
+        assert!(prod.contains("try_listen_webview_drop"));
+        assert!(prod.contains("attach_drop_listener"));
+        assert!(prod.contains("tauri_event_listen"));
+        assert!(prod.contains(FILE_DROP_EVENT));
+        assert!(prod.contains("File drop listener failed"));
+        let drop_effect = prod.split("attach_drop_listener(&handler)").nth(1).unwrap_or("");
+        let drop_effect = drop_effect.split("let add_folder").next().unwrap_or(drop_effect);
+        assert!(
+            drop_effect.contains("on_cleanup"),
+            "drop listener must unlisten when Process unmounts"
+        );
+        assert!(prod.contains("Add folder"));
+        assert!(prod.contains("Add ZIP / PST"));
+        assert_eq!(path_basename(r"\\?\C:\mail\INC.pst"), "INC.pst");
+        assert_eq!(format_size(1_500_000_000), "1.5 GB");
+        assert_eq!(format_size(2_000_000), "2.0 MB");
+        assert_eq!(format_size(12), "12 B");
+    }
+
+    #[test]
+    fn exception_retry_and_no_vault_copy() {
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(prod.contains("retry_allowed"));
+        assert!(prod.contains("\"Retry\""));
+        assert!(prod.contains("Open in review"));
+        assert!(prod.contains(EXCEPTIONS_NO_VAULT));
+        assert!(!prod.contains("EXCEPTIONS_NOT_THIS_TRACK"));
+        assert!(!prod.contains("password vault: not this track"));
+        assert!(!prod.contains("request from custodian"));
+        assert!(prod.contains("spawn_resume(root_sig.get(), job_id.get_value(), error, accepted_job)"));
+        assert!(!prod.contains("let _ = tauri_invoke::<(), _>(\"process_resume\""));
     }
 }
