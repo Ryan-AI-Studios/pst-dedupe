@@ -457,7 +457,21 @@ Operator unique-pst 2026-09-02 on the 4GB-split INC* pair (release CLI after 012
 | **0131** | RecoverableItemsOperatorHint | **Completed** | **P3 U** | opt-in `--prefer-folder-class` runbook; HITL 2026-09-03 RI 826→821. PR **#147** / `9082761`. Spec: `0131-RecoverableItemsOperatorHint/`. |
 | **0132** | CliProgressPowershell | **Completed** | **P3 U** | PowerShell stderr capture; JSON stays stdout. PR **#147** / `9082761`. Spec: `0132-CliProgressPowershell/`. |
 
-**Order:** **0127 Completed**. **0128 Completed**. **0129 Completed**. **0130 Completed**. **0131 Completed**. **0132 Completed**. Next free ID **0133**.
+**Order:** **0127 Completed**. **0128 Completed**. **0129 Completed**. **0130 Completed**. **0131 Completed**. **0132 Completed**.
+
+### Wave 13 — Chrome–mockup operational parity (Series V)
+
+Chrome INC* HITL 2026-09-03: ingest hashed both PSTs; Review 0; Unaccounted-for **2** (unextracted leaves). **Completed** 2026-09-04 (PR **#150** / `a8287b4`). Do not fudge unaccounted to 0. Do not drop Matters/Home, dual Add buttons, Purview ingest, job-grain table, 0125 canvas.
+
+| ID | Track | Status | Priority | High-level notes |
+|---|---|---|---|---|
+| **0133** | ProcessUnaccountedLeaves | **Completed** | **P1 V** | Name unextracted PST leaves; Extract remaining queues those only. PR **#150** / `a8287b4`. Spec: `0133-ProcessUnaccountedLeaves/`. |
+| **0134** | ProcessSourceProgress | **Completed** | **P1 V** | Basename/status/progress; real Tauri drop. PR **#150** / `a8287b4`. Spec: `0134-ProcessSourceProgress/`. |
+| **0135** | ProcessJobsSourceColumn | **Completed** | **P2 V** | Source column basename from checkpoints; Dupes/NIST stay `—`. PR **#150** / `a8287b4`. Spec: `0135-ProcessJobsSourceColumn/`. |
+| **0136** | ProcessExceptionActions | **Completed** | **P3 V** | Real item_errors Retry; no vault. PR **#150** / `a8287b4`. Spec: `0136-ProcessExceptionActions/`. |
+| **0137** | ProducePreflightActions | **Completed** | **P3 V** | Pre-flight extras without item_id → Set/QC/protocol. PR **#150** / `a8287b4`. Spec: `0137-ProducePreflightActions/`. |
+
+**Order:** **0133 Completed**. **0134 Completed**. **0135 Completed**. **0136 Completed**. **0137 Completed**. Next free ID **0138**.
 
 ### What each step is for
 

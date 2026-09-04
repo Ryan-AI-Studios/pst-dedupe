@@ -317,7 +317,7 @@ Bugbot residuals **0120–0122** stay their own tracks. These IDs steal **layout
 | [0125-ProduceCanvas](0125-ProduceCanvas/spec.md) | **Completed** | Un-wizard: five steps visible + protocol + 320px Stage. Finalize in Stage; **0119** latch frozen. Privilege-in-set unchanged. No fake snapshot / ACME Bates. PR **#143** / `1fbc22a`. |
 | [0126-ProcessChromeVisual](0126-ProcessChromeVisual/spec.md) | **Completed** | Jobs table (job grain; per-row Dupes/NIST stay `—`), locked builtin checklist, honest drop copy, `\\?\` strip, minus-stack, 0039 download. **0122** Busy frozen. PR **#145** / `73c0496`. |
 
-**Series T closed.** **Series U 0127–0132 Completed** (PR **#147** / `9082761`). Next free ID **0133**.
+**Series T closed.** **Series U 0127–0132 Completed** (PR **#147** / `9082761`). **Series V 0133–0137 Completed** (PR **#150** / `a8287b4`). Next free ID **0138**.
 
 **Suggested order:** **0122 Completed**. **0123 Completed** (shell). **0124 Completed** (queue chrome). **0125 Completed** (produce canvas). **0126 Completed** (Process visual).
 
@@ -334,14 +334,28 @@ Operator unique-pst smoke **2026-09-02** on Desktop `INC0102784.pst` + `INC01027
 | [0131-RecoverableItemsOperatorHint](0131-RecoverableItemsOperatorHint/spec.md) | **Completed** | Runbook `--prefer-folder-class` opt-in; HITL 2026-09-03 RI **826 → 821**. PR **#147** / `9082761`. |
 | [0132-CliProgressPowershell](0132-CliProgressPowershell/spec.md) | **Completed** | Runbook `cmd /c` + `Start-Process`; timing-script stderr comment. JSON stdout. PR **#147** / `9082761`. |
 
-**Suggested order:** **0127 Completed**. **0128 Completed**. **0129 Completed**. **0130 Completed**. **0131 Completed**. **0132 Completed**. Next free ID **0133**.
+**Suggested order:** **0127 Completed**. **0128 Completed**. **0129 Completed**. **0130 Completed**. **0131 Completed**. **0132 Completed**.
+
+## Series V — Chrome–mockup operational parity (post-U)
+
+Operator chrome HITL **2026-09-03**: ingest INC* pair hashed; Review 0; **Unaccounted-for 2** (unextracted leaves). Steal mockup **workflow** only. **Keep** Matters/Home, Add folder + Add ZIP/PST, Purview kinds, job-grain table, Dupes/NIST `—` on rows, 0125 un-wizard, 0119 latch, 0122 Busy, 0126 unaccounted **arithmetic**. Do not vendor `C:\dev\dedupe-frontend`. No OST/MBOX engines. No password vault. No BCC-default. Do not paint unaccounted 0 while PST leaves remain.
+
+| Track | Status | Summary |
+|---|---|---|
+| [0133-ProcessUnaccountedLeaves](0133-ProcessUnaccountedLeaves/spec.md) | **Completed** | Name unextracted PST leaves; Extract remaining queues those leaves only. Formula frozen. PR **#150** / `a8287b4`. |
+| [0134-ProcessSourceProgress](0134-ProcessSourceProgress/spec.md) | **Completed** | Basename/status/progress; real Tauri drop (**D-0116-drop**). Keep both Add buttons. PR **#150** / `a8287b4`. |
+| [0135-ProcessJobsSourceColumn](0135-ProcessJobsSourceColumn/spec.md) | **Completed** | Job Source column basename from checkpoints; still job grain; Dupes/NIST stay `—`. PR **#150** / `a8287b4`. |
+| [0136-ProcessExceptionActions](0136-ProcessExceptionActions/spec.md) | **Completed** | Real `item_errors` Retry via `process_resume`; vault never (D-0034-06). PR **#150** / `a8287b4`. |
+| [0137-ProducePreflightActions](0137-ProducePreflightActions/spec.md) | **Completed** | Pre-flight extras without `item_id` → Set/QC/protocol; Open in review already shipped. 0125/0119 frozen. PR **#150** / `a8287b4`. |
+
+**Suggested order:** **0133 Completed**. **0134 Completed**. **0135 Completed**. **0136 Completed**. **0137 Completed**. Next free ID **0138**.
 
 ## Notes
 
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099–0104 Completed**. **Series Q 0105–0106 Completed** (window-edge + unique-eml nested MIME). **Series R 0107 Completed** (`unique-pst --also-eml` co-export; PR #104 / `339dfa0`). **Series S 0108–0109 Completed** (poly degrade risk + also-eml classify). **Series O 0110–0122 Completed** (Tauri chrome + first-pass queue + review window + DAT produce checklist + zpdf raster/burn + TIFF G4/OPT + Process fold + queue virtualization residuals + review-window async + produce-checklist residuals + pdf-raster UI residuals + image OPT/QC residuals + Process extract-all / orphan residuals; PRs **#111** / **#113** / **#115** / **#117** / **#119** / **#121** / **#123** / **#125** / **#127** / **#129** / **#131** / **#135** / **#137**). **0123 Completed** (shared matter shell; PR **#139** / `fce416e`). **0124 Completed** (queue ellipsis + rail + Go-to/range; PR **#141** / `ff8b0ea`). **0125 Completed** (un-wizard produce canvas; PR **#143** / `1fbc22a`). **0126 Completed** (Process visual). **Series U 0127–0132 Completed** (unique-pst HITL residuals; PR **#147** / `9082761`; next free **0133**).
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099–0104 Completed**. **Series Q 0105–0106 Completed** (window-edge + unique-eml nested MIME). **Series R 0107 Completed** (`unique-pst --also-eml` co-export; PR #104 / `339dfa0`). **Series S 0108–0109 Completed** (poly degrade risk + also-eml classify). **Series O 0110–0122 Completed** (Tauri chrome + first-pass queue + review window + DAT produce checklist + zpdf raster/burn + TIFF G4/OPT + Process fold + queue virtualization residuals + review-window async + produce-checklist residuals + pdf-raster UI residuals + image OPT/QC residuals + Process extract-all / orphan residuals; PRs **#111** / **#113** / **#115** / **#117** / **#119** / **#121** / **#123** / **#125** / **#127** / **#129** / **#131** / **#135** / **#137**). **0123 Completed** (shared matter shell; PR **#139** / `fce416e`). **0124 Completed** (queue ellipsis + rail + Go-to/range; PR **#141** / `ff8b0ea`). **0125 Completed** (un-wizard produce canvas; PR **#143** / `1fbc22a`). **0126 Completed** (Process visual). **Series U 0127–0132 Completed** (unique-pst HITL residuals; PR **#147** / `9082761`). **Series V 0133–0137 Completed** (chrome–mockup operational parity; PR **#150** / `a8287b4`; next free **0138**).
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).
