@@ -145,6 +145,11 @@
 | 86 | P3 U | **0130** QcSampleCost | ✅ Completed | stderr `qc_ms=`; default sample; PR **#147** / `9082761` |
 | 87 | P3 U | **0131** RecoverableItemsOperatorHint | ✅ Completed | RI/Purges opt-in folder-class; HITL 826→821; PR **#147** / `9082761` |
 | 88 | P3 U | **0132** CliProgressPowershell | ✅ Completed | PowerShell stderr progress; PR **#147** / `9082761` |
+| 89 | P1 V | **0133** ProcessUnaccountedLeaves | ✅ Completed | Name unextracted PST leaves; Extract remaining; formula frozen; PR **#150** / `a8287b4` |
+| 90 | P1 V | **0134** ProcessSourceProgress | ✅ Completed | Basename/progress; real drop (D-0116-drop); PR **#150** / `a8287b4` |
+| 91 | P2 V | **0135** ProcessJobsSourceColumn | ✅ Completed | Job Source basename; Dupes/NIST stay —; PR **#150** / `a8287b4` |
+| 92 | P3 V | **0136** ProcessExceptionActions | ✅ Completed | Real item_errors Retry; vault never; PR **#150** / `a8287b4` |
+| 93 | P3 V | **0137** ProducePreflightActions | ✅ Completed | Pre-flight extras → review/QC; 0119 frozen; PR **#150** / `a8287b4` |
 
 ## Series K spine (clean unique export)
 
@@ -300,3 +305,15 @@ Shipped `/implement-track 127-132` (2026-09-03). PR **#147** / `9082761`. No BCC
 | 4 | **0130** QcSampleCost | **Completed** — default sample stays; stderr `qc_ms=`; PR **#147** / `9082761` |
 | 5 | **0131** RecoverableItemsOperatorHint | **Completed** — folder-class stays opt-in; HITL 826→821; PR **#147** / `9082761` |
 | 6 | **0132** CliProgressPowershell | **Completed** — JSON stays stdout; docs + timing-script comment; PR **#147** / `9082761` |
+
+## Series V — Chrome–mockup operational parity (0133–0137)
+
+Minted **2026-09-03** after chrome INC* ingest HITL (`unaccounted_for=2` with no names). **Completed** 2026-09-04 (PR **#150** / `a8287b4`). Keep chrome features; steal mockup workflow only.
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0133** ProcessUnaccountedLeaves | **Completed** — named leaves; Extract remaining; formula frozen; PR **#150** / `a8287b4` |
+| 2 | **0134** ProcessSourceProgress | **Completed** — source rows + D-0116-drop; PR **#150** / `a8287b4` |
+| 3 | **0135** ProcessJobsSourceColumn | **Completed** — job basename from checkpoints; grain stays jobs; PR **#150** / `a8287b4` |
+| 4 | **0136** ProcessExceptionActions | **Completed** — real item_errors Retry; vault never; PR **#150** / `a8287b4` |
+| 5 | **0137** ProducePreflightActions | **Completed** — extras without item_id → Set/QC/protocol; PR **#150** / `a8287b4` |

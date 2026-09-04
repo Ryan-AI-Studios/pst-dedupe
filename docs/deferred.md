@@ -935,7 +935,7 @@ Timing: unique-export Series S closed; frontend is the next Dedupe series. IDs a
 | D-0115-email-print | P3 | EML/OOXML print-to-TIFF | Native-only + Warn in 0115 | residual |
 | D-0116-process-fold | — | Swallow egui Process into the Tauri window | **Closed in 0116** (PR **#123** / `727c857`) — chrome Process workspace + `process-runner`. Residuals **D-0116-workflow** / **D-0116-drop**. **D-0116-report** closed in **0126**. | **closed / 0116** |
 | D-0116-workflow | P3 | Chrome Process has no `workflow_run` picker | Builtins only (`profile_run`); workflow UI skipped | residual / after **0116** |
-| D-0116-drop | P3 | Process ingest is dialog picker only | Drop-zone **copy** shipped in **0126**. Actual Tauri file drop remains. | residual (Tauri drop) |
+| D-0116-drop | — | Process ingest is dialog picker only | **Closed in 0134** (PR **#150** / `a8287b4`) — real Tauri drop. Copy shipped in **0126**. | **closed / 0134** |
 | D-0116-report | — | No reconciliation report download on Process | **Closed in 0126** (PR **#145** / `73c0496`) — `process_export_report` 0039 CSV pack; encrypted/`open_for_read`; no Busy gate. | **closed / 0126** |
 | D-0031-09 | — | Court e-file / load-file Bates on privilege log | Chrome 0113 volume log joins Bates when `production_items` exist; Desk/CLI still item_id | residual (Desk/CLI) |
 | D-0040-04 | — | Privilege log co-export into volume `PRIVILEGE/` | Chrome 0113 writes `privilege-log.csv` at volume root; folder layout residual | residual (`PRIVILEGE/` folder) |
@@ -957,7 +957,7 @@ From `C:\dev\deviations.md` vs `C:\dev\dedupe-frontend` (research only). **0123 
 | D-0125-pad-fallback | P3 | Stage pad display falls back to 6 if Thin `pad_width` is 0 | Host copies live body; tests assert 1..=12. | residual polish |
 | D-0126-process-chrome-visual | — | Process jobs table, locked profile, drop copy, strip `\\?\`, minus-stack; absorb D-0116-report | **Closed in 0126** (PR **#145** / `73c0496`) — jobs table; honest drop copy; minus-stack; 0039 download. **0122** Busy frozen. Owner HITL remaining (release EXE). D-0116-drop remains (copy only). | **closed / 0126** |
 
-**Not minted (v1.1 / never as next IDs):** local AI first-pass job, clawback packet, LFP default, native spreadsheet redact, legal hold, TAR-as-primary, cluster wheel, StoryBuilder, auto-privilege, BCC-default, `D-0108-keepset-crc-retaint`, `D-0067-embedded-depth` matter children. Mock Archivo/coral declined 2026-09-01 (0123 = Plex + ink-navy). Next free ID **0133**.
+**Not minted (v1.1 / never as next IDs):** local AI first-pass job, clawback packet, LFP default, native spreadsheet redact, legal hold, TAR-as-primary, cluster wheel, StoryBuilder, auto-privilege, BCC-default, `D-0108-keepset-crc-retaint`, `D-0067-embedded-depth` matter children. Mock Archivo/coral declined 2026-09-01 (0123 = Plex + ink-navy). OST/MBOX engines and password vault **not** minted in Series V. Next free ID **0138**.
 
 ## Series U — Unique-export INC* HITL residuals (0127–0132, minted 2026-09-02)
 
@@ -974,6 +974,19 @@ Operator unique-pst smoke **2026-09-02** after Series T (`f8cb240` release CLI) 
 | D-0132-cli-progress-powershell | — | PowerShell treats unique-pst stderr progress as `NativeCommandError` | **Closed in 0132** (PR **#147** / `9082761`) — runbook `cmd /c` + `Start-Process`; timing-script comment; JSON stdout. | **closed / 0132** |
 | D-0127-eml-err-stderr-assert | — | unique-eml late report Err emits depth hint; tests do not assert the stderr string on that path | **Closed** (hygiene after #147) — `unique_eml_depth::late_manifest_err_still_emits_depth_hint`. | **closed / 0127** |
 | D-0127-also-eml-dual-hint | — | `--also-eml` may print unique-pst depth hint and a `unique-eml:`-prefixed line | **Closed** (hygiene after #147) — also-eml sets `emit_depth_limit_hint: false`; parent unique-pst `emit_log` only. | **closed / 0127** |
+
+## Series V — Chrome–mockup operational parity (0133–0137, minted 2026-09-03)
+
+Chrome HITL: ingest INC* pair; `unaccounted_for=2` (unextracted PST leaves); Review 0. Shipped **2026-09-04** (`/implement-track 133-137`; PR **#150** / `a8287b4`). Do not fudge unaccounted to 0. Do not vendor mockup ACME counts. Owner chrome EXE drop / two-PST Extract remaining remains HITL.
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0133-unaccounted-leaves | — | Unaccounted-for after ingest has no names / no Extract remaining | **Closed in 0133** (PR **#150** / `a8287b4`) — named `unextracted_psts`; Extract remaining; formula frozen. | **closed / 0133** |
+| D-0134-source-progress | — | Source rows are full paths; drop-zone copy only | **Closed in 0134** (PR **#150** / `a8287b4`) — basename + file-only size; real Tauri drop. | **closed / 0134** |
+| D-0135-jobs-source-column | — | Jobs Source column is `ingest` not filename | **Closed in 0135** (PR **#150** / `a8287b4`) — checkpoint/inventory label; `{j.kind.clone()}` kept. | **closed / 0135** |
+| D-0136-exception-actions | — | Exception Retry/exclude is “not this track” | **Closed in 0136** (PR **#150** / `a8287b4`) — `retry_allowed` failed/paused; vault never. | **closed / 0136** |
+| D-0137-produce-preflight-actions | — | Produce pre-flight extras lack review/QC jumps | **Closed in 0137** (PR **#150** / `a8287b4`) — Set/protocol hashes; Open in review `<A>`. | **closed / 0137** |
+| D-0116-drop | — | Process ingest is dialog picker only | **Closed in 0134** (PR **#150** / `a8287b4`) — webview drop then host `process-file-drop`. Copy already in 0126. | **closed / 0134** |
 
 ## Hygiene
 
