@@ -370,6 +370,58 @@ fn snapshot_busy(snap: &JobProgressSnapshot) -> bool {
         && snap.state != "paused"
 }
 
+fn ingest_items_label(kind: &str, completed_count: u64, total_hint: Option<u64>) -> String {
+    if kind == "ingest" {
+        match total_hint {
+            None if completed_count == 0 => "—".into(),
+            None => completed_count.to_string(),
+            Some(total) => format!("{completed_count}/{total}"),
+        }
+    } else {
+        format!(
+            "{}/{}",
+            completed_count,
+            total_hint
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "—".into())
+        )
+    }
+}
+
+fn ingest_status_label(kind: &str, is_busy: bool, state: &str) -> String {
+    if kind == "ingest" && is_busy {
+        "importing".into()
+    } else {
+        state.into()
+    }
+}
+
+fn source_shows_ingest_progress(
+    source: &ProcessSourceRow,
+    ingest_current_path: &str,
+    snap: &JobProgressSnapshot,
+    jobs: &[ProcessJobRow],
+    importing_count: usize,
+) -> bool {
+    if snap.kind != "ingest" || !snapshot_busy(snap) {
+        return false;
+    }
+    let want = strip_extended_path(ingest_current_path);
+    if !want.is_empty() && strip_extended_path(&source.path) == want {
+        return true;
+    }
+    if let Some(label) = jobs
+        .iter()
+        .find(|j| j.id == snap.job_id)
+        .and_then(|j| j.source_label.as_deref())
+    {
+        if path_basename(&source.path) == label {
+            return true;
+        }
+    }
+    source.status == "importing" && importing_count == 1
+}
+
 fn job_in_table(jobs: &[ProcessJobRow], job_id: &str) -> bool {
     !job_id.is_empty() && jobs.iter().any(|j| j.id == job_id)
 }
@@ -425,6 +477,7 @@ fn spawn_drop_ingest(
     error: RwSignal<Option<String>>,
     page: RwSignal<Option<ProcessPageResponse>>,
     accepted_job: RwSignal<String>,
+    ingest_current_path: RwSignal<String>,
 ) {
     if root.is_empty() || paths.is_empty() {
         return;
@@ -442,6 +495,7 @@ fn spawn_drop_ingest(
         .await
         {
             Ok(resp) => {
+                ingest_current_path.set(first.clone());
                 accepted_job.set(resp.job_id);
                 let queued_note = drop_error_after_start(None, &paths);
                 error.set(queued_note.clone());
@@ -588,6 +642,7 @@ pub fn ProcessPage() -> impl IntoView {
     let extract_total = RwSignal::new(0u64);
     let extract_note = RwSignal::new(Option::<String>::None);
     let extract_current_name = RwSignal::new(String::new());
+    let ingest_current_path = RwSignal::new(String::new());
     let busy_retry_pending = RwSignal::new(false);
     let accepted_job = RwSignal::new(String::new());
     let exporting = RwSignal::new(false);
@@ -668,6 +723,9 @@ pub fn ProcessPage() -> impl IntoView {
                         let fire_retry = take_busy_retry_fire(&mut pending, snapshot_busy(&snap));
                         busy_retry_pending.set(pending);
                         progress.set(snap.clone());
+                        if snap.kind == "ingest" && !snapshot_busy(&snap) {
+                            ingest_current_path.set(String::new());
+                        }
                         let importing = page
                             .get_untracked()
                             .map(|p| p.sources.iter().any(|s| s.status == "importing"))
@@ -809,6 +867,14 @@ pub fn ProcessPage() -> impl IntoView {
         if root.is_empty() {
             return;
         }
+        let ingest_path = if kind == "ingest" {
+            serde_json::from_str::<serde_json::Value>(&params_json)
+                .ok()
+                .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         leptos::task::spawn_local(async move {
             match tauri_invoke::<ProcessStartResponse, _>(
                 "process_start",
@@ -821,6 +887,9 @@ pub fn ProcessPage() -> impl IntoView {
             .await
             {
                 Ok(resp) => {
+                    if !ingest_path.is_empty() {
+                        ingest_current_path.set(ingest_path);
+                    }
                     accepted_job.set(resp.job_id);
                     error.set(None);
                     reload(root);
@@ -837,7 +906,14 @@ pub fn ProcessPage() -> impl IntoView {
             if paths.is_empty() {
                 return;
             }
-            spawn_drop_ingest(root_sig.get_untracked(), paths, error, page, accepted_job);
+            spawn_drop_ingest(
+                root_sig.get_untracked(),
+                paths,
+                error,
+                page,
+                accepted_job,
+                ingest_current_path,
+            );
         }) as Box<dyn FnMut(JsValue)>);
         let handler: js_sys::Function = cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
         leptos::task::spawn_local(async move {
@@ -1103,6 +1179,7 @@ pub fn ProcessPage() -> impl IntoView {
                         key=|s: &ProcessSourceRow| s.id.clone()
                         children=move |s| {
                             let source = s.clone();
+                            let source_ingest = source.clone();
                             view! {
                                 <div class="set-row">
                                     <div class="name">{path_basename(&s.path)}</div>
@@ -1127,6 +1204,29 @@ pub fn ProcessPage() -> impl IntoView {
                                             max=move || progress.get().total_hint.unwrap_or(1)
                                             value=move || progress.get().completed_count
                                         />
+                                    </Show>
+                                    <Show when=move || {
+                                        let snap = progress.get();
+                                        let pg = page.get();
+                                        let jobs = pg.as_ref().map(|p| p.jobs.clone()).unwrap_or_default();
+                                        let importing_count = pg
+                                            .as_ref()
+                                            .map(|p| {
+                                                p.sources
+                                                    .iter()
+                                                    .filter(|row| row.status == "importing")
+                                                    .count()
+                                            })
+                                            .unwrap_or(0);
+                                        source_shows_ingest_progress(
+                                            &source_ingest,
+                                            &ingest_current_path.get(),
+                                            &snap,
+                                            &jobs,
+                                            importing_count,
+                                        )
+                                    }>
+                                        <progress></progress>
                                     </Show>
                                 </div>
                             }
@@ -1325,10 +1425,10 @@ pub fn ProcessPage() -> impl IntoView {
                                                 <td class="num">{move || {
                                                     let snap = progress.get();
                                                     if snap.job_id == job_id_for_counts {
-                                                        format!(
-                                                            "{}/{}",
+                                                        ingest_items_label(
+                                                            &snap.kind,
                                                             snap.completed_count,
-                                                            snap.total_hint.map(|n| n.to_string()).unwrap_or_else(|| "—".into())
+                                                            snap.total_hint,
                                                         )
                                                     } else {
                                                         "—".into()
@@ -1341,6 +1441,13 @@ pub fn ProcessPage() -> impl IntoView {
                                                 <td class="status">{move || {
                                                     let snap = progress.get();
                                                     if snap.job_id == job_id_for_status {
+                                                        if snap.kind == "ingest" {
+                                                            return ingest_status_label(
+                                                                &snap.kind,
+                                                                snapshot_busy(&snap),
+                                                                &snap.state,
+                                                            );
+                                                        }
                                                         if snapshot_busy(&snap) {
                                                             if let Some(total) = snap.total_hint {
                                                                 if total > 0 {
@@ -1669,6 +1776,101 @@ mod extract_all_busy_tests {
         assert_eq!(pause_button_count(false, "j1", &[]), 0);
         assert!(!job_in_table(&[job("j1", "running")], ""));
         assert!(!job_row_shows_pause(true, "", "j1"));
+    }
+
+    fn source_row(id: &str, path: &str, status: &str) -> ProcessSourceRow {
+        ProcessSourceRow {
+            id: id.into(),
+            path: path.into(),
+            kind: "single_pst".into(),
+            status: status.into(),
+            size_bytes: None,
+        }
+    }
+
+    fn ingest_snap(job_id: &str, state: &str) -> JobProgressSnapshot {
+        JobProgressSnapshot {
+            job_id: job_id.into(),
+            kind: "ingest".into(),
+            matter_id: "m".into(),
+            state: state.into(),
+            stage: Some("expand".into()),
+            completed_count: 0,
+            total_hint: None,
+            message: Some("ingest".into()),
+            error_summary: None,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn ingest_items_and_status_labels() {
+        assert_eq!(ingest_items_label("ingest", 0, None), "—");
+        assert_eq!(ingest_items_label("ingest", 3, None), "3");
+        assert_eq!(ingest_items_label("ingest", 2, Some(10)), "2/10");
+        assert_eq!(ingest_items_label("extract_pst", 0, None), "0/—");
+        assert_eq!(ingest_items_label("extract_pst", 3, Some(10)), "3/10");
+        assert_eq!(ingest_status_label("ingest", true, "running"), "importing");
+        assert_eq!(
+            ingest_status_label("ingest", false, "succeeded"),
+            "succeeded"
+        );
+        assert_eq!(
+            ingest_status_label("extract_pst", true, "running"),
+            "running"
+        );
+    }
+
+    #[test]
+    fn source_shows_ingest_progress_mapping() {
+        let busy = ingest_snap("j1", "running");
+        let idle = ingest_snap("j1", "succeeded");
+        let extract = snap("j1", "running");
+        let src = source_row("s1", r"C:\mail\INC.pst", "importing");
+        let other = source_row("s2", r"C:\mail\other.pst", "importing");
+        let ready = source_row("s3", r"C:\mail\ready.pst", "ready");
+
+        assert!(source_shows_ingest_progress(
+            &src,
+            r"\\?\C:\mail\INC.pst",
+            &busy,
+            &[],
+            2
+        ));
+        let mut labeled = job("j1", "running");
+        labeled.kind = "ingest".into();
+        labeled.source_label = Some("INC.pst".into());
+        assert!(source_shows_ingest_progress(
+            &src,
+            "",
+            &busy,
+            &[labeled.clone()],
+            2
+        ));
+        assert!(source_shows_ingest_progress(&src, "", &busy, &[], 1));
+        assert!(!source_shows_ingest_progress(&src, "", &busy, &[], 2));
+        assert!(!source_shows_ingest_progress(
+            &other,
+            r"C:\mail\INC.pst",
+            &busy,
+            &[],
+            2
+        ));
+        assert!(!source_shows_ingest_progress(&ready, "", &busy, &[], 1));
+        assert!(!source_shows_ingest_progress(
+            &src,
+            r"C:\mail\INC.pst",
+            &idle,
+            &[],
+            1
+        ));
+        assert!(!source_shows_ingest_progress(
+            &src,
+            r"C:\mail\INC.pst",
+            &extract,
+            &[],
+            1
+        ));
     }
 
     #[test]
@@ -2192,6 +2394,61 @@ mod extract_all_busy_tests {
         assert!(
             footer.contains("footer_shows_pause"),
             "footer Pause button must sit inside the busy readout Show"
+        );
+    }
+
+    #[test]
+    fn ingest_progress_wires_helpers() {
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            prod.contains("ingest_items_label("),
+            "job Items must call ingest_items_label"
+        );
+        assert!(
+            prod.contains("ingest_status_label("),
+            "job Status must call ingest_status_label"
+        );
+        assert!(
+            prod.contains("source_shows_ingest_progress("),
+            "source row must call source_shows_ingest_progress"
+        );
+        assert!(
+            prod.contains("source_shows_extract_progress("),
+            "extract helper stays on the extract Show"
+        );
+        assert!(
+            prod.contains("snap.kind != \"extract_pst\""),
+            "extract helper still requires extract_pst"
+        );
+        let ingest_bar = prod
+            .split("source_shows_ingest_progress(")
+            .nth(2)
+            .unwrap_or("");
+        let ingest_bar = ingest_bar.split("</Show>").next().unwrap_or("");
+        assert!(
+            ingest_bar.contains("<progress"),
+            "ingest Show must paint a progress element"
+        );
+        assert!(
+            !ingest_bar.contains("value="),
+            "ingest progress must be indeterminate (no value)"
+        );
+        assert!(
+            !ingest_bar.contains("total_hint"),
+            "ingest bar must not gate on total_hint"
+        );
+        let extract_bar = prod
+            .split("source_shows_extract_progress(")
+            .nth(2)
+            .unwrap_or("");
+        let extract_bar = extract_bar.split("</Show>").next().unwrap_or("");
+        assert!(extract_bar.contains("total_hint.filter(|t| *t > 0)"));
+        assert!(extract_bar.contains("value=move || progress.get().completed_count"));
+        assert!(prod.contains("ingest_current_path.set"));
+        assert!(
+            prod.contains("snap.kind == \"ingest\" && !snapshot_busy(&snap)"),
+            "poller must clear ingest_current_path when ingest is no longer busy"
         );
     }
 

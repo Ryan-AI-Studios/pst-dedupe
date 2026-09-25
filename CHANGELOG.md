@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0151 — Process ingest progress)
+
+- Chrome Process ingest no longer paints Items `0/—` and Status `running` while a PST hashes. Busy ingest shows Items `—` (or a bare leaf count once checkpoints exist), Status `importing`, and an indeterminate bar on the mapped source. Extract source bars stay gated on `total_hint`.
+
 ### Fixed (0150 — Process Pause once)
 
 - Chrome Process shows one Pause per live busy job: the job-row button when that job is in the table, otherwise a footer fallback. The busy kind/state/stage/message readout stays.
