@@ -98,6 +98,49 @@ pub fn recent_matters_forget_in(dir: &Path, root: &str) -> Result<Vec<RecentMatt
     persist_matters(dir, matters)
 }
 
+fn existing_dir_string(path: &Path) -> Option<String> {
+    if path.is_dir() {
+        path.to_str().map(str::to_string)
+    } else {
+        None
+    }
+}
+
+/// First existing directory for a chrome file picker. Does not create directories.
+///
+/// Order: `preferred`, parent of each recent root (MRU), Documents, home, cwd.
+pub fn picker_default_dir_in(
+    recents_dir: &Path,
+    preferred: Option<&str>,
+) -> Result<Option<String>, CommandError> {
+    if let Some(pref) = preferred {
+        if let Some(s) = existing_dir_string(Path::new(pref)) {
+            return Ok(Some(s));
+        }
+    }
+    let recents = recent_matters_list_in(recents_dir).unwrap_or_default();
+    for matter in recents {
+        if let Some(parent) = Path::new(&matter.root).parent() {
+            if let Some(s) = existing_dir_string(parent) {
+                return Ok(Some(s));
+            }
+        }
+    }
+    for candidate in [
+        dirs::document_dir(),
+        dirs::home_dir(),
+        std::env::current_dir().ok(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(s) = existing_dir_string(&candidate) {
+            return Ok(Some(s));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +245,96 @@ mod tests {
         assert!(toml.contains("deny-recent-matters-forget"));
         let caps = include_str!("../capabilities/default.json");
         assert!(caps.contains("allow-recent-matters-forget"));
+    }
+
+    #[test]
+    fn picker_default_dir_preferred_wins() {
+        let tmp = tempdir().expect("tempdir");
+        let recents_dir = tmp.path().join("recents");
+        fs::create_dir_all(&recents_dir).expect("recents dir");
+        let preferred = tmp.path().join("preferred");
+        let parent = tmp.path().join("parent");
+        let matter = parent.join("matter");
+        fs::create_dir_all(&preferred).expect("preferred");
+        fs::create_dir_all(&matter).expect("matter");
+        recent_matters_remember_in(&recents_dir, matter.to_str().expect("utf8"), "Matter")
+            .expect("remember");
+        let got = picker_default_dir_in(&recents_dir, preferred.to_str())
+            .expect("resolve")
+            .expect("some");
+        assert_eq!(got, preferred.to_str().expect("utf8"));
+    }
+
+    #[test]
+    fn picker_default_dir_skips_missing_preferred_uses_recents_parent() {
+        let tmp = tempdir().expect("tempdir");
+        let recents_dir = tmp.path().join("recents");
+        fs::create_dir_all(&recents_dir).expect("recents dir");
+        let parent = tmp.path().join("parent");
+        let matter = parent.join("matter");
+        fs::create_dir_all(&matter).expect("matter");
+        recent_matters_remember_in(&recents_dir, matter.to_str().expect("utf8"), "Matter")
+            .expect("remember");
+        let missing = tmp.path().join("no-such-preferred");
+        let got = picker_default_dir_in(&recents_dir, missing.to_str())
+            .expect("resolve")
+            .expect("some");
+        assert_eq!(got, parent.to_str().expect("utf8"));
+        assert!(!missing.exists(), "missing preferred must not be created");
+    }
+
+    #[test]
+    fn picker_default_dir_skips_recent_whose_parent_is_missing() {
+        let tmp = tempdir().expect("tempdir");
+        let recents_dir = tmp.path().join("recents");
+        fs::create_dir_all(&recents_dir).expect("recents dir");
+        let good_parent = tmp.path().join("good-parent");
+        let good_matter = good_parent.join("matter");
+        fs::create_dir_all(&good_matter).expect("good matter");
+        recent_matters_remember_in(&recents_dir, good_matter.to_str().expect("utf8"), "Good")
+            .expect("remember good");
+        let ghost = tmp.path().join("ghost-parent").join("matter");
+        recent_matters_remember_in(&recents_dir, ghost.to_str().expect("utf8"), "Ghost")
+            .expect("remember ghost");
+        let got = picker_default_dir_in(&recents_dir, None)
+            .expect("resolve")
+            .expect("some");
+        assert_eq!(got, good_parent.to_str().expect("utf8"));
+        assert!(!ghost.parent().expect("ghost parent").exists());
+    }
+
+    #[test]
+    fn picker_default_dir_does_not_create_directories() {
+        let tmp = tempdir().expect("tempdir");
+        let recents_dir = tmp.path().join("recents");
+        fs::create_dir_all(&recents_dir).expect("recents dir");
+        let mut before: Vec<_> = fs::read_dir(tmp.path())
+            .expect("read")
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+        before.sort();
+        let _ = picker_default_dir_in(&recents_dir, tmp.path().join("output").to_str())
+            .expect("resolve");
+        let mut after: Vec<_> = fs::read_dir(tmp.path())
+            .expect("read2")
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+        after.sort();
+        assert_eq!(before, after);
+        assert!(!tmp.path().join("output").exists());
+    }
+
+    #[test]
+    fn picker_default_dir_permission_and_capability() {
+        let toml = include_str!("../permissions/autogenerated/picker_default_dir.toml");
+        assert!(toml.contains("allow-picker-default-dir"));
+        assert!(toml.contains("deny-picker-default-dir"));
+        let caps = include_str!("../capabilities/default.json");
+        assert!(caps.contains("allow-picker-default-dir"));
+        let build = include_str!("../build.rs");
+        assert!(build.contains("\"picker_default_dir\""));
+        let lib = include_str!("lib.rs");
+        assert!(lib.contains("picker_default_dir,"));
     }
 
     #[test]

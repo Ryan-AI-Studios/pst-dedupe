@@ -6,10 +6,10 @@ use wasm_bindgen::JsCast;
 use web_sys::HtmlSelectElement;
 
 use crate::invoke::{
-    tauri_invoke, BuiltinProfileFlags, JobProgressSnapshot, ProcessCancelArgs, ProcessErrorGroup,
-    ProcessExportReportArgs, ProcessExportReportResponse, ProcessJobRow, ProcessPageArgs,
-    ProcessPageResponse, ProcessPstRow, ProcessResumeArgs, ProcessSourceRow, ProcessStartArgs,
-    ProcessStartResponse, RootArgs,
+    tauri_invoke, BuiltinProfileFlags, JobProgressSnapshot, PickerDefaultDirArgs,
+    ProcessCancelArgs, ProcessErrorGroup, ProcessExportReportArgs, ProcessExportReportResponse,
+    ProcessJobRow, ProcessPageArgs, ProcessPageResponse, ProcessPstRow, ProcessResumeArgs,
+    ProcessSourceRow, ProcessStartArgs, ProcessStartResponse, RootArgs,
 };
 use crate::path_id::{encode_matter_id, review_doc_href};
 use crate::shell::ProcessChromeCtx;
@@ -52,12 +52,23 @@ struct ExtractWork {
 async fn pick_path(
     directory: bool,
     filters: Option<Vec<(String, Vec<String>)>>,
+    title: &str,
+    preferred: Option<String>,
 ) -> Result<Option<String>, String> {
     let opts = js_sys::Object::new();
     js_sys::Reflect::set(&opts, &"directory".into(), &JsValue::from_bool(directory))
         .map_err(|e| format!("{e:?}"))?;
     js_sys::Reflect::set(&opts, &"multiple".into(), &JsValue::FALSE)
         .map_err(|e| format!("{e:?}"))?;
+    js_sys::Reflect::set(&opts, &"title".into(), &JsValue::from_str(title))
+        .map_err(|e| format!("{e:?}"))?;
+    if let Ok(Some(path)) =
+        tauri_invoke::<Option<String>, _>("picker_default_dir", &PickerDefaultDirArgs { preferred })
+            .await
+    {
+        js_sys::Reflect::set(&opts, &"defaultPath".into(), &JsValue::from_str(&path))
+            .map_err(|e| format!("{e:?}"))?;
+    }
     if let Some(filters) = filters {
         let arr = js_sys::Array::new();
         for (name, exts) in filters {
@@ -832,8 +843,16 @@ pub fn ProcessPage() -> impl IntoView {
     });
 
     let add_folder = move |_| {
+        let preferred = {
+            let root = root_sig.get();
+            if root.is_empty() {
+                None
+            } else {
+                Some(root)
+            }
+        };
         leptos::task::spawn_local(async move {
-            match pick_path(true, None).await {
+            match pick_path(true, None, "Add folder", preferred).await {
                 Ok(Some(path)) => start_kind("ingest".into(), ingest_params(&path)),
                 Ok(None) => {}
                 Err(e) => error.set(Some(e)),
@@ -842,6 +861,14 @@ pub fn ProcessPage() -> impl IntoView {
     };
 
     let add_zip_pst = move |_| {
+        let preferred = {
+            let root = root_sig.get();
+            if root.is_empty() {
+                None
+            } else {
+                Some(root)
+            }
+        };
         leptos::task::spawn_local(async move {
             match pick_path(
                 false,
@@ -849,6 +876,8 @@ pub fn ProcessPage() -> impl IntoView {
                     "ZIP or PST".into(),
                     vec!["zip".into(), "pst".into()],
                 )]),
+                "Add ZIP or PST",
+                preferred,
             )
             .await
             {
@@ -2055,6 +2084,20 @@ mod extract_all_busy_tests {
         assert_eq!(format_size(1_500_000_000), "1.5 GB");
         assert_eq!(format_size(2_000_000), "2.0 MB");
         assert_eq!(format_size(12), "12 B");
+    }
+
+    #[test]
+    fn pick_path_sets_default_path_and_titles() {
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let pick = prod.split("async fn pick_path").nth(1).unwrap_or("");
+        assert!(
+            pick.contains("\"defaultPath\""),
+            "pick_path must set dialog defaultPath"
+        );
+        assert!(pick.contains("picker_default_dir"));
+        assert!(prod.contains("Add folder"));
+        assert!(prod.contains("Add ZIP or PST"));
     }
 
     #[test]
