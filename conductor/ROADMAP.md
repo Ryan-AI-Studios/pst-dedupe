@@ -489,7 +489,7 @@ Read-only operator smoke 2026-09-24 (`inspect`/`scan`/`dups`/`keep-set`, no uniq
 
 | ID | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|
-| **0139** | SourceRankDiscoverability | **Ready** | **P2 X** | `first_seen` path-sort vs `--source-rank`. Spec: `0139-SourceRankDiscoverability/`. |
+| **0139** | SourceRankDiscoverability | **Completed** | **P2 X** | `first_seen` path-sort vs `--source-rank`. Spec: `0139-SourceRankDiscoverability/`. PR **#154** / `234f4fa`. |
 | **0140** | ScanStderrCadence | **Proposed** | **P2 X** | Scan stderr cadence; owns I/O tax. Spec: `0140-ScanStderrCadence/`. |
 | **0141** | KeepSetJsonEnvelope | **Proposed** | **P2 X** | `--json` stats envelope. Spec: `0141-KeepSetJsonEnvelope/`. |
 | **0142** | DupsJsonTotals | **Proposed** | **P3 X** | Totals independent of `--limit`. Spec: `0142-DupsJsonTotals/`. |

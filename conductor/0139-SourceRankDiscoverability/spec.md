@@ -8,7 +8,7 @@
 - **Execution repo:** `C:\dev\Dedupe`
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** unique-pst keep-set policy. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-09-25).
-- **Status:** Ready — not started
+- **Status:** Completed
 - **Depends on:** **0066** keep-set · **0071** / **0075** `--source-rank` ladder
 - **Spec authored:** 2026-09-24 placeholder
 - **Fold-in:** 2026-09-25 `agy-review.md` + `opencode-review.md` (+ bundle `AI-review.md`)

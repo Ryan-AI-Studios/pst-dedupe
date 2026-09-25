@@ -366,7 +366,7 @@ Minted **2026-09-24** from a read-only operator smoke of Desktop `INC0102784.pst
 
 | Track | Status | Summary |
 |---|---|---|
-| [0139-SourceRankDiscoverability](0139-SourceRankDiscoverability/spec.md) | **In progress** | `first_seen` path-sort vs `--source-rank`; JSON `input_path_sort_order`; one multi-input stderr note. Fold-in 2026-09-25. Closes **D-0139-source-rank-discoverability**. |
+| [0139-SourceRankDiscoverability](0139-SourceRankDiscoverability/spec.md) | **Completed** | `first_seen` path-sort vs `--source-rank`; JSON `input_path_sort_order`; one multi-input stderr note. Closes **D-0139-source-rank-discoverability**. PR **#154** / `234f4fa`. |
 | [0140-ScanStderrCadence](0140-ScanStderrCadence/spec.md) | **Ready — not started** | Scan/dups/keep-set stderr: periodic aggregates, not per-folder / per-probe. Owns stderr I/O tax. Closes **D-0140-scan-stderr-cadence**. |
 | [0141-KeepSetJsonEnvelope](0141-KeepSetJsonEnvelope/spec.md) | **Ready — not started** | `keep-set --json` stats envelope; winners in `--keep-set-json`. Closes **D-0141-keepset-json-envelope**. |
 | [0142-DupsJsonTotals](0142-DupsJsonTotals/spec.md) | **Ready — not started** | `dups --json` totals independent of `--limit`. Closes **D-0142-dups-json-totals**. |

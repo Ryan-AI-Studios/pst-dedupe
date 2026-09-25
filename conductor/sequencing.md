@@ -151,7 +151,7 @@
 | 92 | P3 V | **0136** ProcessExceptionActions | ✅ Completed | Real item_errors Retry; vault never; PR **#150** / `a8287b4` |
 | 93 | P3 V | **0137** ProducePreflightActions | ✅ Completed | Pre-flight extras → review/QC; 0119 frozen; PR **#150** / `a8287b4` |
 | 94 | P1 W | **0138** ChromeInvokeCamelCase | ✅ Completed | Top-level `tauri_invoke` camelCase; host stays default; shallow only |
-| 95 | P2 X | **0139** SourceRankDiscoverability | ⬜ Ready | `first_seen` path-sort vs `--source-rank` |
+| 95 | P2 X | **0139** SourceRankDiscoverability | ✅ Completed | `first_seen` path-sort vs `--source-rank`; PR **#154** / `234f4fa` |
 | 96 | P2 X | **0140** ScanStderrCadence | 📦 Proposed | Scan stderr aggregates; owns I/O tax |
 | 97 | P2 X | **0141** KeepSetJsonEnvelope | 📦 Proposed | `--json` stats vs winners sidecar |
 | 98 | P3 X | **0142** DupsJsonTotals | 📦 Proposed | `dups --limit` still reports totals |
@@ -342,7 +342,7 @@ Minted **2026-09-24** from read-only inspect/scan/dups/keep-set on the split INC
 
 | Order | Track | Notes |
 |---|---|---|
-| 1 | **0139** SourceRankDiscoverability | **Ready** — path-sort `first_seen`; JSON `input_path_sort_order`; one multi-input note |
+| 1 | **0139** SourceRankDiscoverability | **Completed** — PR **#154** / `234f4fa` |
 | 2 | **0140** ScanStderrCadence | Per-folder / per-probe stderr |
 | 3 | **0141** KeepSetJsonEnvelope | 3.4 MB `--json` winners |
 | 4 | **0142** DupsJsonTotals | `--limit` sample vs totals |
