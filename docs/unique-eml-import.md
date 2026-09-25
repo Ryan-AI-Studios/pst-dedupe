@@ -16,6 +16,8 @@ mail clients. This is the Series K **interim** path while production PST write
   --json
 ```
 
+`--keep-set-json` is the `keep_set_v1` winners document. `keep-set --json` stdout is a stats envelope (`keep_set_summary_v1`); it does not list winners unless `--include-winners` is passed.
+
 `unique-pst --also-eml <dir>` writes the same unique-EML pack layout from the unique-pst keep-set (no second scan).
 
 | Flag | Notes |

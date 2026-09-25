@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Changed (0141 — Keep-set JSON envelope)
+
+- `keep-set --json` prints a `keep_set_summary_v1` stats envelope (no nested `winners`). Winners stay in `--keep-set-json` (`keep_set_v1`). `--include-winners` restores the list on stdout only. `keep_set_summary.json` is always the envelope.
+
 ### Changed (0140 — Scan stderr cadence)
 
 - `scan` / `dups` / `keep-set` `-v` prints periodic folder progress (first/last of each file, every 250 folders, or every 2 s), not one INFO line per folder. `-vv` is one line per folder. `--crc-log-limit 0` also silences per-attempt deep-attach `attempted=` progress lines (CRC totals-only unchanged; unique-pst still prints one end-of-probe summary).

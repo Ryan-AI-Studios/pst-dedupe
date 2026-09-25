@@ -302,6 +302,12 @@ fn keep_set_summary_path_self_locating() {
         summary_file.file_name().and_then(|n| n.to_str()) == Some("keep_set_summary.json"),
         "expected keep_set_summary.json, got {sp}"
     );
+    assert_eq!(on_disk["schema"].as_str(), Some("keep_set_summary_v1"));
+    assert_eq!(on_disk["winners_inline"], false);
+    assert!(
+        on_disk["keep_set"].get("winners").is_none(),
+        "keep_set_summary.json must omit winners"
+    );
 }
 
 /// Pure stdout keep-set (`--json` only) still writes absolute summary_path (DoD-22).
@@ -340,6 +346,12 @@ fn keep_set_stdout_only_still_self_locating() {
         serde_json::from_str(&fs::read_to_string(&summary_file).expect("body")).expect("json");
     assert_eq!(on_disk["exit_code"], v["exit_code"]);
     assert_eq!(on_disk["summary_path"].as_str(), Some(sp));
+    assert_eq!(on_disk["schema"].as_str(), Some("keep_set_summary_v1"));
+    assert_eq!(on_disk["winners_inline"], false);
+    assert!(
+        on_disk["keep_set"].get("winners").is_none(),
+        "stdout-only keep_set_summary.json must omit winners"
+    );
 }
 
 /// Production-path unique-eml attach soft-fail: writer counters → classify → exit 64.

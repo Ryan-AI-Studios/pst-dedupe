@@ -1004,7 +1004,7 @@ Read-only smoke of Desktop `INC0102784.pst` (4.00 GiB) + `INC0102784-2.pst` (537
 |---|---|---|---|---|
 | D-0139-source-rank-discoverability | P3 | `first_seen` path-sort crowns `-2.pst` unless `--source-rank` | **Closed in 0139** — clap help + JSON `input_path_sort_order` + one multi-input stderr note. `first_seen` semantics unchanged. Oracle root-removes the new key. | **closed / 0139** |
 | D-0140-scan-stderr-cadence | P3 | `scan -v` ~2506 folder lines; deep-attach ~2800 probe lines | **Closed in 0140** — periodic `-v` folder progress; `--crc-log-limit 0` silences per-attempt probe writeln; unique-pst end-of-probe summary retained. Distinct from 0132. | **closed / 0140** |
-| D-0141-keepset-json-envelope | P3 | `keep-set --json` stdout 3.4 MB (all winners) | **Owned by 0141 Proposed** — stats envelope; winners in `--keep-set-json`. | **0141** |
+| D-0141-keepset-json-envelope | P3 | `keep-set --json` stdout 3.4 MB (all winners) | **Owned by 0141 Ready** — stats envelope `keep_set_summary_v1`; winners in `--keep-set-json` or `--include-winners`. | **0141** |
 | D-0142-dups-json-totals | P3 | `dups --limit N` JSON looks like N dups | **Owned by 0142 Proposed** — totals independent of `--limit`. | **0142** |
 | D-0143-poly-crc-scan-copy | P3 | `block_crc_rate≈30` + preflight `ok` looks like a corrupt PST | **Owned by 0143 Proposed** — JSON/stderr copy. No skip-math or keep-set restrip. | **0143** |
 | D-0144-integrity-csv-honesty | P3 | Header-only `--integrity-csv` when CRC_SUSPECT-only | **Owned by 0144 Proposed** — omitted-reason; no fake skip rows. | **0144** |

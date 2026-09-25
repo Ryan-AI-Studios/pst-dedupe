@@ -274,7 +274,7 @@ enum Commands {
         /// Streaming decision CSV (emitted only after resolve; every recoverable row).
         #[arg(long)]
         decision_csv: Option<PathBuf>,
-        /// Keep-set JSON (winners + stats; no bodies).
+        /// Keep-set JSON sidecar (`keep_set_v1` winners + stats; no bodies).
         #[arg(long)]
         keep_set_json: Option<PathBuf>,
         /// Materialize winners (full extract); hard fail promotes next peer.
@@ -284,8 +284,12 @@ enum Commands {
         no_tier2: bool,
         #[arg(long)]
         no_attachments: bool,
+        /// JSON envelope to stdout (`keep_set_summary_v1`; winners omitted unless `--include-winners`).
         #[arg(long)]
         json: bool,
+        /// Restore inline `keep_set.winners` under `--json` (no-op without `--json`). Sidecar `--keep-set-json` is the winners source.
+        #[arg(long = "include-winners")]
+        include_winners: bool,
         #[arg(long, default_value = "best-effort", value_parser = parse_scan_mode)]
         mode: ScanMode,
         #[arg(long, default_value_t = 0.05, value_parser = parse_rate_threshold)]
@@ -1187,6 +1191,7 @@ fn run(cli: Cli) -> Result<CliExit> {
             no_tier2,
             no_attachments,
             json,
+            include_winners,
             mode,
             max_skip_rate,
             max_crc_skip_rate,
@@ -1232,6 +1237,7 @@ fn run(cli: Cli) -> Result<CliExit> {
                 no_tier2,
                 no_attachments,
                 json,
+                include_winners,
                 mode,
                 max_skip_rate,
                 max_crc_skip_rate,
