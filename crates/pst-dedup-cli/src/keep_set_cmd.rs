@@ -19,8 +19,8 @@ use crate::error::{CliError, CliExit, Result};
 use crate::grouping_cli::{format_grouping_stats_human, grouping_context_from_cli};
 use crate::pst_materializer::PstMaterializer;
 use crate::scan::{
-    eprint_poly_crc_note, evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions,
-    ScanSummary,
+    eprint_poly_crc_note, evaluate_exit_policy, format_integrity_csv_line, resolve_pst_paths,
+    run_scan, ScanOptions, ScanSummary,
 };
 
 /// CLI options for `keep-set`.
@@ -517,8 +517,8 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
     if args.materialize {
         println!("  materialized:  {materialized_count}");
     }
-    if let Some(ic) = &outcome.summary.integrity_csv {
-        println!("  integrity_csv: {ic}");
+    if let Some(line) = format_integrity_csv_line(&outcome.summary) {
+        println!("{line}");
     }
 
     if classified.exit != CliExit::Success {

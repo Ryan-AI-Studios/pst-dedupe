@@ -46,8 +46,8 @@ use crate::pst_materializer::{
     DEFAULT_MAX_OPEN_PSTS,
 };
 use crate::scan::{
-    apply_strict_probe_skips_to_file_stats, eprint_poly_crc_note, evaluate_exit_policy,
-    rebuild_dedup_results_with_ctx, recompute_file_status_counts,
+    add_integrity_csv_appended_rows, apply_strict_probe_skips_to_file_stats, eprint_poly_crc_note,
+    evaluate_exit_policy, rebuild_dedup_results_with_ctx, recompute_file_status_counts,
     recompute_per_file_degraded_from_candidates, recompute_per_file_dup_from_results,
     resolve_pst_paths, run_scan, ScanOptions,
 };
@@ -1212,6 +1212,8 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
         block_crc_read_rate: 0.0,
         poly_class_crc_sources: 0,
         poly_crc_note: None,
+        integrity_csv_rows: None,
+        integrity_csv_omitted_reason: None,
     };
     let keep_set = KeepSet {
         schema: KEEP_SET_SCHEMA.to_string(),
@@ -1881,6 +1883,7 @@ pub fn run_unique_pst_with_options(
                 if !probe_skips.is_empty() {
                     match IntegrityCsvWriter::open_append(path) {
                         Ok(mut wtr) => {
+                            let mut appended = 0u64;
                             for skip in &probe_skips {
                                 if let Err(e) = wtr.write_skip(skip) {
                                     tracing::warn!(
@@ -1890,8 +1893,10 @@ pub fn run_unique_pst_with_options(
                                     );
                                     break;
                                 }
+                                appended = appended.saturating_add(1);
                             }
                             let _ = wtr.flush();
+                            add_integrity_csv_appended_rows(&mut outcome.summary, appended);
                         }
                         Err(e) => {
                             tracing::warn!(

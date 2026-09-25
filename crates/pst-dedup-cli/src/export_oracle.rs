@@ -73,6 +73,9 @@ const SUMMARY_ALLOWLIST_KEYS: &[&str] = &[
     "bytes_written_total",
     // 0143 operator copy; parent packs omit the key.
     "poly_crc_note",
+    // 0144 integrity CSV honesty; parent packs omit the keys.
+    "integrity_csv_rows",
+    "integrity_csv_omitted_reason",
 ];
 
 /// One volume's structural fingerprint (order-stable).
@@ -1128,5 +1131,42 @@ mod tests {
             "parent without poly_crc_note must equal HEAD after allowlist strip"
         );
         assert!(head.pointer("/scan/poly_crc_note").is_none());
+    }
+
+    #[test]
+    fn integrity_csv_honesty_keys_on_allowlist_parent_equals_head() {
+        assert!(
+            SUMMARY_ALLOWLIST_KEYS.contains(&"integrity_csv_rows"),
+            "0144 rows must be allowlisted so parent packs without it compare"
+        );
+        assert!(
+            SUMMARY_ALLOWLIST_KEYS.contains(&"integrity_csv_omitted_reason"),
+            "0144 omitted-reason must be allowlisted so parent packs without it compare"
+        );
+        let mut parent = json!({
+            "ok": true,
+            "scan": { "schema": "scan_integrity_v1", "crc_suspect_messages": 17 },
+            "export": { "messages_written_total": 1, "attachments_failed": 0 },
+            "keep_set": { "stats": { "unique": 1 } }
+        });
+        let mut head = json!({
+            "ok": true,
+            "scan": {
+                "schema": "scan_integrity_v1",
+                "crc_suspect_messages": 17,
+                "integrity_csv_rows": 0,
+                "integrity_csv_omitted_reason": "crc_suspect_is_taint_not_skip"
+            },
+            "export": { "messages_written_total": 1, "attachments_failed": 0 },
+            "keep_set": { "stats": { "unique": 1 } }
+        });
+        normalize_summary_for_oracle(&mut parent);
+        normalize_summary_for_oracle(&mut head);
+        assert_eq!(
+            parent, head,
+            "parent without integrity CSV honesty keys must equal HEAD after allowlist strip"
+        );
+        assert!(head.pointer("/scan/integrity_csv_rows").is_none());
+        assert!(head.pointer("/scan/integrity_csv_omitted_reason").is_none());
     }
 }

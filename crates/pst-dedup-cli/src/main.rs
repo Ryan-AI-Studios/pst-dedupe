@@ -17,8 +17,9 @@ use dedup_engine::keepset::{FamilyPolicy, KeepPolicy};
 use pst_dedup_cli::error::{CliError, CliExit, Result};
 use pst_dedup_cli::json_io::emit_error;
 use pst_dedup_cli::scan::{
-    collect_dups, dups_sample_limit, eprint_poly_crc_note, evaluate_exit_policy, resolve_pst_paths,
-    run_scan, write_report, DupRow, DupsJsonPayload, ScanOptions, ScanSummary,
+    collect_dups, dups_sample_limit, eprint_poly_crc_note, evaluate_exit_policy,
+    format_integrity_csv_line, resolve_pst_paths, run_scan, write_report, DupRow, DupsJsonPayload,
+    ScanOptions, ScanSummary,
 };
 use pst_dedup_cli::{
     convenience, inspect, job_cmd, keep_set_cmd, matter_cmd, platform_cmd, production_profile_cmd,
@@ -1837,8 +1838,8 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
     if let Some(csv_path) = &args.csv {
         println!("  csv:           {}", csv_path.display());
     }
-    if let Some(ic) = &outcome.summary.integrity_csv {
-        println!("  integrity_csv: {ic}");
+    if let Some(line) = format_integrity_csv_line(&outcome.summary) {
+        println!("{line}");
     }
     if args.list_dups {
         println!();
@@ -1967,6 +1968,9 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
     }
 
     print_summary_text(&outcome.summary);
+    if let Some(line) = format_integrity_csv_line(&outcome.summary) {
+        println!("{line}");
+    }
     println!();
     print_dups_text(&dups, outcome.summary.duplicates);
     if let Some(msg) = exit_err {
