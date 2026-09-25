@@ -7,6 +7,11 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0145 — Scan-once reuse)
+
+- `scan --emit-candidates PATH` writes a `scan_candidates_v1` sidecar (candidates after poly-clear; that invocation sorts inputs like keep-set). Default `scan --json` stays a summary envelope with no candidate array.
+- `keep-set --from-scan-json PATH` skips the Phase-1 folder walk when schema, grouping fingerprint, size/mtime, and `input_path_sort_order` match. Fail-closed (exit 2) on mismatch. `--materialize` still opens source PSTs. `dups` does not reuse (listing needs `ReportRow` subject/sender). unique-pst / unique-eml still scan. The sidecar is client-sensitive and stays out of git.
+
 ### Changed (0144 — Integrity CSV honesty)
 
 - When an integrity CSV sink is active (`--integrity-csv` or the `--csv` sidecar) and poly-class CRC leaves the file header-only, `scan` / `dups` / `keep-set` / `unique-pst` / `unique-eml` JSON include `integrity_csv_rows` and `integrity_csv_omitted_reason=crc_suspect_is_taint_not_skip`. Clean runs omit the reason. No sink omits both keys. Human `integrity_csv:` lines show the row count or the taint sentence. The CSV stays skip/degraded items only (no CLASS/comment rows). unique-pst counts probe-appended rows on the same fields.

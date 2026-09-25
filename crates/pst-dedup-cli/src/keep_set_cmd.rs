@@ -26,6 +26,8 @@ use crate::scan::{
 /// CLI options for `keep-set`.
 pub struct KeepSetCliArgs {
     pub paths: Vec<PathBuf>,
+    /// `scan_candidates_v1` sidecar (0145). Skips Phase-1 `run_scan`.
+    pub from_scan_json: Option<PathBuf>,
     pub policy: KeepPolicy,
     pub family_policy: FamilyPolicy,
     pub prefer_path_contains: Vec<String>,
@@ -212,13 +214,6 @@ struct KeepSetSummaryOut {
 
 /// Run keep-set orchestration end-to-end.
 pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
-    // Phase 0: resolve + deterministic sort.
-    let mut paths = resolve_pst_paths(&args.paths)?;
-    sort_input_paths(&mut paths);
-    if let Some(hint) = multi_input_source_rank_hint(paths.len(), &args.source_rank) {
-        eprintln!("note: {hint}");
-    }
-
     pst_reader::integrity_telemetry::set_log_limit(
         args.crc_log_limit,
         std::time::Duration::from_secs(args.crc_log_interval_secs),
@@ -262,10 +257,71 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
         ..Default::default()
     };
 
-    // Phase 1: integrity-aware scan collecting candidates.
-    // Dual-rate poly sources reclassify (clear) false-positive CRC_SUSPECT in
-    // run_scan so keep-set sees clean identity without Tier-2 auto-allow.
-    let outcome = run_scan(&paths, &opts)?;
+    let (paths, outcome, from_candidates_n) = if let Some(from) = args.from_scan_json.clone() {
+        if args.integrity_csv.is_some() {
+            return Err(CliError::Usage(
+                "--from-scan-json cannot be combined with --integrity-csv (live walk required)"
+                    .into(),
+            ));
+        }
+        let mut early_protected: Vec<PathBuf> = Vec::new();
+        if !args.paths.is_empty() {
+            let mut resolved_early = resolve_pst_paths(&args.paths)?;
+            sort_input_paths(&mut resolved_early);
+            early_protected.extend(resolved_early);
+        }
+        if let Some(p) = &args.decision_csv {
+            early_protected.push(p.clone());
+        }
+        if let Some(p) = &args.keep_set_json {
+            early_protected.push(p.clone());
+        }
+        if !early_protected.is_empty() {
+            crate::scan_candidates::guard_candidates_path(&from, &early_protected)?;
+        }
+        let artifact = crate::scan_candidates::load_scan_candidates(&from)?;
+        let want_fp = crate::scan_candidates::fingerprint_from_options(&opts);
+        if artifact.fingerprint != want_fp {
+            return Err(CliError::Usage(
+                "--from-scan-json fingerprint does not match this keep-set's grouping/scan options"
+                    .into(),
+            ));
+        }
+        let mut resolved = if args.paths.is_empty() {
+            let as_paths: Vec<PathBuf> = artifact.input_files.iter().map(PathBuf::from).collect();
+            resolve_pst_paths(&as_paths)?
+        } else {
+            resolve_pst_paths(&args.paths)?
+        };
+        sort_input_paths(&mut resolved);
+        if !crate::scan_candidates::order_matches(&resolved, &artifact.input_path_sort_order) {
+            return Err(CliError::Usage(
+                "--from-scan-json input_path_sort_order does not match resolved inputs".into(),
+            ));
+        }
+        crate::scan_candidates::guard_candidates_path(&from, &resolved)?;
+        crate::scan_candidates::verify_freshness(&resolved, &artifact.inputs_stat)?;
+        let n = artifact.candidates.len();
+        let outcome = crate::scan::ScanOutcome {
+            summary: artifact.summary,
+            rows: Vec::new(),
+            candidates: artifact.candidates,
+            csv_streamed: false,
+            digest_probe_cache: crate::attach_probe::ProbeResultCache::new(),
+        };
+        (resolved, outcome, Some((from, n)))
+    } else {
+        let mut paths = resolve_pst_paths(&args.paths)?;
+        sort_input_paths(&mut paths);
+        // Phase 1: integrity-aware scan collecting candidates.
+        // Dual-rate poly sources reclassify (clear) false-positive CRC_SUSPECT in
+        // run_scan so keep-set sees clean identity without Tier-2 auto-allow.
+        let outcome = run_scan(&paths, &opts)?;
+        (paths, outcome, None)
+    };
+    if let Some(hint) = multi_input_source_rank_hint(paths.len(), &args.source_rank) {
+        eprintln!("note: {hint}");
+    }
     eprint_poly_crc_note(outcome.summary.poly_class_crc_sources);
 
     let provenance = KeepSetProvenance {
@@ -438,6 +494,12 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
     }
 
     if args.json {
+        if let Some((ref from, n)) = from_candidates_n {
+            eprintln!(
+                "{}",
+                crate::scan_candidates::format_from_candidates_line(from, n)
+            );
+        }
         let stdout_value = if args.include_winners {
             build_summary(&classified, &error_obj, true)?
         } else {
@@ -516,6 +578,12 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
     }
     if args.materialize {
         println!("  materialized:  {materialized_count}");
+    }
+    if let Some((ref from, n)) = from_candidates_n {
+        println!(
+            "{}",
+            crate::scan_candidates::format_from_candidates_line(from, n)
+        );
     }
     if let Some(line) = format_integrity_csv_line(&outcome.summary) {
         println!("{line}");

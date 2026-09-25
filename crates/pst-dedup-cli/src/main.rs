@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use dedup_engine::format_bytes;
 
 use dedup_engine::integrity::{IntegrityThresholds, ScanMode};
-use dedup_engine::keepset::{FamilyPolicy, KeepPolicy};
+use dedup_engine::keepset::{sort_input_paths, FamilyPolicy, KeepPolicy};
 
 use pst_dedup_cli::error::{CliError, CliExit, Result};
 use pst_dedup_cli::json_io::emit_error;
@@ -67,6 +67,10 @@ enum Commands {
         csv: Option<PathBuf>,
         #[arg(long)]
         json: bool,
+        /// Write a `scan_candidates_v1` sidecar for `keep-set --from-scan-json` (0145).
+        /// Sorts inputs like keep-set on this invocation only. Default `scan --json` is unchanged.
+        #[arg(long = "emit-candidates")]
+        emit_candidates: Option<PathBuf>,
         #[arg(long)]
         dups: bool,
         /// Cap listed duplicate rows (default 50). `0` = unlimited. JSON `duplicates_total` is the corpus count, independent of this cap.
@@ -290,6 +294,10 @@ enum Commands {
         /// JSON envelope to stdout (`keep_set_summary_v1`; winners omitted unless `--include-winners`).
         #[arg(long)]
         json: bool,
+        /// Reuse a `scan_candidates_v1` sidecar (0145). Skips Phase-1 `run_scan`.
+        /// This is not `scan --json` or `keep-set --json`.
+        #[arg(long = "from-scan-json")]
+        from_scan_json: Option<PathBuf>,
         /// Restore inline `keep_set.winners` under `--json` (no-op without `--json`). Sidecar `--keep-set-json` is the winners source.
         #[arg(long = "include-winners")]
         include_winners: bool,
@@ -1042,6 +1050,7 @@ fn run(cli: Cli) -> Result<CliExit> {
             no_attachments,
             csv,
             json,
+            emit_candidates,
             dups,
             limit,
             mode,
@@ -1079,6 +1088,7 @@ fn run(cli: Cli) -> Result<CliExit> {
             no_attachments,
             csv,
             json,
+            emit_candidates,
             list_dups: dups,
             limit,
             mode,
@@ -1143,6 +1153,7 @@ fn run(cli: Cli) -> Result<CliExit> {
             no_attachments: false,
             csv: None,
             json,
+            emit_candidates: None,
             list_dups: true,
             limit,
             mode,
@@ -1194,6 +1205,7 @@ fn run(cli: Cli) -> Result<CliExit> {
             no_tier2,
             no_attachments,
             json,
+            from_scan_json,
             include_winners,
             mode,
             max_skip_rate,
@@ -1218,13 +1230,15 @@ fn run(cli: Cli) -> Result<CliExit> {
         } => {
             let mut all = paths;
             all.extend(input);
-            if all.is_empty() {
+            if all.is_empty() && from_scan_json.is_none() {
                 return Err(CliError::Usage(
-                    "keep-set requires at least one PST path (positional or --input)".into(),
+                    "keep-set requires at least one PST path (positional or --input), or --from-scan-json"
+                        .into(),
                 ));
             }
             keep_set_cmd::run_keep_set(keep_set_cmd::KeepSetCliArgs {
                 paths: all,
+                from_scan_json,
                 policy,
                 family_policy,
                 prefer_path_contains,
@@ -1683,6 +1697,7 @@ struct ScanCliArgs {
     no_attachments: bool,
     csv: Option<PathBuf>,
     json: bool,
+    emit_candidates: Option<PathBuf>,
     list_dups: bool,
     limit: usize,
     mode: ScanMode,
@@ -1724,7 +1739,7 @@ fn apply_crc_log_limits(first_n: u64, interval_secs: u64) {
 }
 
 fn cmd_scan(args: ScanCliArgs) -> Result<()> {
-    let paths = resolve_pst_paths(&args.paths)?;
+    let mut paths = resolve_pst_paths(&args.paths)?;
     if args.tier1_backfill {
         return Err(CliError::Usage(
             "--tier1-backfill merge is keep-set/unique-pst/unique-eml only \
@@ -1732,6 +1747,9 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
              Run keep-set or unique-* with --tier1-backfill for the merge post-pass."
                 .into(),
         ));
+    }
+    if args.emit_candidates.is_some() {
+        sort_input_paths(&mut paths);
     }
     apply_crc_log_limits(args.crc_log_limit, args.crc_log_interval_secs);
     let grouping = pst_dedup_cli::grouping_cli::grouping_context_from_cli(
@@ -1747,6 +1765,7 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
         args.no_attachments,
     )
     .map_err(CliError::Usage)?;
+    let retain_candidates = args.emit_candidates.is_some();
     let opts = ScanOptions {
         enable_tier2: !args.no_tier2,
         include_attachments: !args.no_attachments,
@@ -1758,11 +1777,11 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
             max_attach_fail_rate: args.max_attach_fail_rate,
         },
         allow_failed_files: args.allow_failed_files,
-        integrity_csv: args.integrity_csv,
+        integrity_csv: args.integrity_csv.clone(),
         csv: args.csv.clone(),
         skip_limit: args.skip_limit,
         retain_rows: args.list_dups,
-        retain_candidates: false,
+        retain_candidates,
         cancel: None,
         deep_attach_preflight: args.deep_attach_preflight,
         deep_attach_level: args.deep_attach_level,
@@ -1777,9 +1796,38 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
         strong_hash_attach_max_bytes: args.strong_hash_attach_max_bytes,
         strong_hash_attach_per_attach_max_bytes: args.strong_hash_attach_per_attach_max_bytes,
     };
+    if let Some(emit) = &args.emit_candidates {
+        let mut protected = paths.clone();
+        if let Some(csv) = &args.csv {
+            protected.push(csv.clone());
+        }
+        if let Some(ic) = &args.integrity_csv {
+            protected.push(ic.clone());
+        }
+        pst_dedup_cli::scan_candidates::guard_candidates_path(emit, &protected)?;
+    }
     // Artifacts (CSV/integrity) are streamed and flushed inside run_scan before return.
     let outcome = run_scan(&paths, &opts)?;
     eprint_poly_crc_note(outcome.summary.poly_class_crc_sources);
+
+    if let Some(emit) = &args.emit_candidates {
+        let input_files = pst_dedup_cli::scan_candidates::path_list(&paths);
+        let artifact = pst_dedup_cli::scan_candidates::ScanCandidatesV1 {
+            schema: pst_dedup_cli::scan_candidates::SCAN_CANDIDATES_SCHEMA.to_string(),
+            input_path_sort_order: input_files.clone(),
+            input_files,
+            inputs_stat: pst_dedup_cli::scan_candidates::collect_input_stats(&paths)?,
+            fingerprint: pst_dedup_cli::scan_candidates::fingerprint_from_options(&opts),
+            summary: outcome.summary.clone(),
+            candidates: outcome.candidates.clone(),
+        };
+        pst_dedup_cli::scan_candidates::write_scan_candidates(emit, &artifact)?;
+        let line =
+            pst_dedup_cli::scan_candidates::format_candidates_line(emit, artifact.candidates.len());
+        if args.json {
+            eprintln!("{line}");
+        }
+    }
 
     if let Some(csv_path) = &args.csv {
         // Append summary footer (rows already streamed when csv was set).
@@ -1837,6 +1885,12 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
     print_summary_text(&outcome.summary);
     if let Some(csv_path) = &args.csv {
         println!("  csv:           {}", csv_path.display());
+    }
+    if let Some(emit) = &args.emit_candidates {
+        println!(
+            "{}",
+            pst_dedup_cli::scan_candidates::format_candidates_line(emit, outcome.candidates.len())
+        );
     }
     if let Some(line) = format_integrity_csv_line(&outcome.summary) {
         println!("{line}");
