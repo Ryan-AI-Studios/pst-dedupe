@@ -61,7 +61,7 @@ cargo build --release -p pst-dedup-gui
 # Full dedup summary (machine-readable; includes scan_integrity_v1)
 .\target\release\pst-dedup.exe scan archive.pst --json
 
-# Duplicates only
+# Duplicates only (`duplicates` is a capped sample; `duplicates_total` is corpus-wide)
 .\target\release\pst-dedup.exe dups archive.pst --limit 25 --json
 
 # CSV report (+ summary footer) and auto sidecar integrity ledger
@@ -70,6 +70,7 @@ cargo build --release -p pst-dedup-gui
 
 # Multiple PSTs, best-effort (default) or strict
 .\target\release\pst-dedup.exe scan a.pst b.pst --json --dups --limit 50
+# → with --dups, JSON also reports duplicates_total / duplicates_shown / duplicates_truncated
 .\target\release\pst-dedup.exe scan a.pst b.pst --mode strict --json
 .\target\release\pst-dedup.exe scan good.pst bad.pst --allow-failed-files --json
 

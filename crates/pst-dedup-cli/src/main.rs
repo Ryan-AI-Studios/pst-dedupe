@@ -17,8 +17,8 @@ use dedup_engine::keepset::{FamilyPolicy, KeepPolicy};
 use pst_dedup_cli::error::{CliError, CliExit, Result};
 use pst_dedup_cli::json_io::emit_error;
 use pst_dedup_cli::scan::{
-    collect_dups, evaluate_exit_policy, resolve_pst_paths, run_scan, write_report, DupRow,
-    ScanOptions, ScanSummary,
+    collect_dups, dups_sample_limit, evaluate_exit_policy, resolve_pst_paths, run_scan,
+    write_report, DupRow, DupsJsonPayload, ScanOptions, ScanSummary,
 };
 use pst_dedup_cli::{
     convenience, inspect, job_cmd, keep_set_cmd, matter_cmd, platform_cmd, production_profile_cmd,
@@ -68,6 +68,7 @@ enum Commands {
         json: bool,
         #[arg(long)]
         dups: bool,
+        /// Cap listed duplicate rows (default 50). `0` = unlimited. JSON `duplicates_total` is the corpus count, independent of this cap.
         #[arg(long, default_value_t = 50)]
         limit: usize,
         /// Recoverability mode: `best-effort` (default) or `strict`.
@@ -173,6 +174,7 @@ enum Commands {
         paths: Vec<PathBuf>,
         #[arg(long)]
         no_tier2: bool,
+        /// Cap listed duplicate rows (default 50). `0` = unlimited. JSON `duplicates_total` is the corpus count, independent of this cap.
         #[arg(long, default_value_t = 50)]
         limit: usize,
         #[arg(long)]
@@ -1782,11 +1784,7 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
         write_report(csv_path, &outcome)?;
     }
 
-    let dup_limit = if args.limit == 0 {
-        None
-    } else {
-        Some(args.limit)
-    };
+    let dup_limit = dups_sample_limit(args.limit);
     let dups = if args.list_dups || args.json {
         collect_dups(&outcome, dup_limit)
     } else {
@@ -1797,19 +1795,34 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
 
     if args.json {
         let ok = exit_err.is_none();
-        let mut payload = serde_json::json!({
-            "ok": ok,
-            "summary": outcome.summary,
-            "csv": args.csv.as_ref().map(|p| p.display().to_string()),
-            "duplicates": if args.list_dups { serde_json::to_value(&dups)? } else { serde_json::Value::Null },
-        });
-        if let Some(msg) = &exit_err {
-            payload["error"] = serde_json::json!({
+        let error = exit_err.as_ref().map(|msg| {
+            serde_json::json!({
                 "code": "scan_integrity",
                 "message": msg,
+            })
+        });
+        if args.list_dups {
+            let payload = DupsJsonPayload::listing(
+                ok,
+                outcome.summary.clone(),
+                args.csv.as_ref().map(|p| p.display().to_string()),
+                dups,
+                dup_limit,
+                error,
+            );
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            let mut payload = serde_json::json!({
+                "ok": ok,
+                "summary": outcome.summary,
+                "csv": args.csv.as_ref().map(|p| p.display().to_string()),
+                "duplicates": serde_json::Value::Null,
             });
+            if let Some(err) = error {
+                payload["error"] = err;
+            }
+            println!("{}", serde_json::to_string_pretty(&payload)?);
         }
-        println!("{}", serde_json::to_string_pretty(&payload)?);
         if let Some(msg) = exit_err {
             return Err(CliError::AlreadyEmitted {
                 message: msg,
@@ -1828,7 +1841,7 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
     }
     if args.list_dups {
         println!();
-        print_dups_text(&dups);
+        print_dups_text(&dups, outcome.summary.duplicates);
     }
     if let Some(msg) = exit_err {
         return Err(CliError::Msg(msg));
@@ -1927,27 +1940,20 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
         strong_hash_attach_per_attach_max_bytes: args.strong_hash_attach_per_attach_max_bytes,
     };
     let outcome = run_scan(&paths, &opts)?;
-    let dup_limit = if args.limit == 0 {
-        None
-    } else {
-        Some(args.limit)
-    };
+    let dup_limit = dups_sample_limit(args.limit);
     let dups = collect_dups(&outcome, dup_limit);
     let exit_err = evaluate_exit_policy(&outcome.summary, &opts).err();
 
     if args.json {
         let ok = exit_err.is_none();
-        let mut payload = serde_json::json!({
-            "ok": ok,
-            "summary": outcome.summary,
-            "duplicates": dups,
-        });
-        if let Some(msg) = &exit_err {
-            payload["error"] = serde_json::json!({
+        let error = exit_err.as_ref().map(|msg| {
+            serde_json::json!({
                 "code": "scan_integrity",
                 "message": msg,
-            });
-        }
+            })
+        });
+        let payload =
+            DupsJsonPayload::listing(ok, outcome.summary.clone(), None, dups, dup_limit, error);
         println!("{}", serde_json::to_string_pretty(&payload)?);
         if let Some(msg) = exit_err {
             return Err(CliError::AlreadyEmitted {
@@ -1960,7 +1966,7 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
 
     print_summary_text(&outcome.summary);
     println!();
-    print_dups_text(&dups);
+    print_dups_text(&dups, outcome.summary.duplicates);
     if let Some(msg) = exit_err {
         return Err(CliError::Msg(msg));
     }
@@ -2034,12 +2040,12 @@ fn print_summary_text(s: &ScanSummary) {
     );
 }
 
-fn print_dups_text(dups: &[DupRow]) {
+fn print_dups_text(dups: &[DupRow], total: u64) {
     if dups.is_empty() {
         println!("No duplicates listed.");
         return;
     }
-    println!("Duplicates ({} shown):", dups.len());
+    println!("Duplicates ({} of {} shown):", dups.len(), total);
     for (i, d) in dups.iter().enumerate() {
         println!(
             "  [{:02}] [{}] {} | {} | {} bytes",
