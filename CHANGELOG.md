@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Changed (0146 — Unique-PST wall measurement)
+
+- unique-pst remainder writer work is **parked**. Operator wall on INC*-class `--also-eml` + default `--qc-level sample` is dominated by `also_eml_ms` and `qc_ms` (historical 1043 s: ~393 s + ~407 s). 0079 writer cuts (`PhaseTimings`, single materialize, O(1) AMap, positioned writes, concurrent hash) stay. `--jobs` stays unshipped. See `docs/unique-pst-export.md`.
+
 ### Added (0145 — Scan-once reuse)
 
 - `scan --emit-candidates PATH` writes a `scan_candidates_v1` sidecar (candidates after poly-clear; that invocation sorts inputs like keep-set). Default `scan --json` stays a summary envelope with no candidate array.
