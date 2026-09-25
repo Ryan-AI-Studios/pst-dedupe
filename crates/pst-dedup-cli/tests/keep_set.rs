@@ -643,6 +643,10 @@ fn keep_set_help_lists_0075_flags() {
         text.contains("first_seen = sorted input-path order, not chronological send time"),
         "existing --policy first_seen sentence must remain; {text}"
     );
+    assert!(
+        text.contains("per-attempt"),
+        "0140 keep-set --crc-log-limit help; {text}"
+    );
 }
 
 fn source_rank_note_count(stderr: &str) -> usize {

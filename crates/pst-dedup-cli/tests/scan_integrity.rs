@@ -357,3 +357,185 @@ fn resolved_paths_are_absolute_in_json() {
         "source path must be absolute, got {path}"
     );
 }
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for x in chars.by_ref() {
+                if x.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn folder_progress_line_count(stderr: &str) -> usize {
+    // Spec: folder-only events have `folder=` and omit `msg_i=`. Strip ANSI so
+    // styled field names still match (0140 Codex P2).
+    strip_ansi(stderr)
+        .split(['\n', '\r'])
+        .filter(|l| l.contains("folder=") && !l.contains("msg_i="))
+        .count()
+}
+
+fn probe_progress_line_count(stderr: &str) -> usize {
+    stderr
+        .lines()
+        .filter(|l| l.contains("attempted=") && l.contains("bytes=") && l.contains("source="))
+        .count()
+}
+
+fn scan_cmd(args: &[&str]) -> std::process::Output {
+    Command::new(bin())
+        .env_remove("RUST_LOG")
+        .env("NO_COLOR", "1")
+        .args(args)
+        .output()
+        .expect("run scan")
+}
+
+#[test]
+fn scan_folder_progress_cadence_aspose() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let path = sample.to_str().expect("utf8");
+
+    let default = scan_cmd(&["scan", path, "--json"]);
+    assert!(
+        default.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&default.stderr)
+    );
+    let default_json: serde_json::Value =
+        serde_json::from_slice(&default.stdout).expect("default json");
+    assert!(default_json.is_object());
+    let folders = default_json["summary"]["files"][0]["folders"]
+        .as_u64()
+        .expect("folders") as usize;
+    assert!(
+        folders >= 2,
+        "fixture must have multiple folders, got {folders}"
+    );
+    let default_err = String::from_utf8_lossy(&default.stderr);
+    assert_eq!(
+        folder_progress_line_count(&default_err),
+        0,
+        "default verbosity must hide folder progress; stderr={default_err}"
+    );
+
+    let v = scan_cmd(&["-v", "scan", path, "--json"]);
+    assert!(
+        v.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&v.stderr)
+    );
+    let v_json: serde_json::Value = serde_json::from_slice(&v.stdout).expect("-v json");
+    assert!(v_json.is_object());
+    let v_err = String::from_utf8_lossy(&v.stderr);
+    let v_n = folder_progress_line_count(&v_err);
+    assert!(
+        v_n < folders,
+        "-v folder progress must be cadence, got {v_n} for {folders} folders; stderr={v_err}"
+    );
+    assert!(v_n >= 1, "-v must emit at least first/last; stderr={v_err}");
+
+    let vv = scan_cmd(&["-vv", "scan", path, "--json"]);
+    assert!(
+        vv.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&vv.stderr)
+    );
+    let vv_err = String::from_utf8_lossy(&vv.stderr);
+    let vv_n = folder_progress_line_count(&vv_err);
+    assert_eq!(
+        vv_n, folders,
+        "-vv must be one folder line each, got {vv_n} for {folders}; stderr={vv_err}"
+    );
+}
+
+#[test]
+fn scan_deep_attach_crc_log_limit_zero_silences_probe_lines() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let path = sample.to_str().expect("utf8");
+    let out = scan_cmd(&[
+        "scan",
+        path,
+        "--json",
+        "--deep-attach-preflight",
+        "--crc-log-limit",
+        "0",
+    ]);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let probe = &v["summary"]["preflight"]["attach_probe"];
+    assert_eq!(probe["enabled"], true, "probe must run; {probe}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        probe_progress_line_count(&err),
+        0,
+        "crc-log-limit 0 must silence per-attempt probe lines; stderr={err}"
+    );
+}
+
+#[test]
+fn scan_and_global_help_name_cadence() {
+    let global = Command::new(bin())
+        .env_remove("RUST_LOG")
+        .args(["--help"])
+        .output()
+        .expect("help");
+    let g = format!(
+        "{}{}",
+        String::from_utf8_lossy(&global.stdout),
+        String::from_utf8_lossy(&global.stderr)
+    );
+    assert!(
+        g.contains("periodic") && g.contains("scan/dups/keep-set"),
+        "global -v help; {g}"
+    );
+
+    let scan = Command::new(bin())
+        .env_remove("RUST_LOG")
+        .args(["scan", "--help"])
+        .output()
+        .expect("scan help");
+    let s = format!(
+        "{}{}",
+        String::from_utf8_lossy(&scan.stdout),
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    assert!(
+        s.contains("per-attempt") && s.contains("crc-log-limit"),
+        "scan --crc-log-limit help; {s}"
+    );
+
+    let dups = Command::new(bin())
+        .env_remove("RUST_LOG")
+        .args(["dups", "--help"])
+        .output()
+        .expect("dups help");
+    let d = format!(
+        "{}{}",
+        String::from_utf8_lossy(&dups.stdout),
+        String::from_utf8_lossy(&dups.stderr)
+    );
+    assert!(d.contains("per-attempt"), "dups --crc-log-limit help; {d}");
+}

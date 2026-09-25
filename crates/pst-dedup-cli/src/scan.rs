@@ -24,6 +24,7 @@ use pst_reader::PstFile;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CliError, Result};
+use crate::scan_progress::{should_emit_folder_progress, should_emit_probe_progress_line};
 
 /// Options controlling a scan (including integrity modes / ledgers).
 #[derive(Debug, Clone)]
@@ -663,9 +664,11 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         // strip can reconcile integrity.csv with candidates (0077 r2 P2-2).
         let mut file_integrity_degraded: Vec<SkipRecord> = Vec::new();
         let folder_count = folders.len() as u64;
-        // Progress: emit at most every N messages or once per folder (§3.11).
+        // Progress: folder cadence at -v (0140); per-folder at -vv debug; every N messages.
         const PROGRESS_EVERY_MSGS: u64 = 500;
         let mut msgs_seen_file = 0u64;
+        let mut folder_i = 0u64;
+        let mut last_folder_emit = Instant::now();
 
         let mut cancelled_this_file = false;
         'folders: for folder in &folders {
@@ -677,13 +680,25 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             // Walker always gives folder paths today; is_orphaned residual D-0065-orphan-walk.
             let is_orphaned = false;
             let folder_path = folder.path.clone();
-            tracing::info!(
-                file = %name,
-                folder = %folder_path,
-                recoverable = file_messages,
-                skipped = file_skipped,
-                "scan progress"
-            );
+            folder_i = folder_i.saturating_add(1);
+            if should_emit_folder_progress(folder_i, folder_count, last_folder_emit.elapsed()) {
+                tracing::info!(
+                    file = %name,
+                    folder = %folder_path,
+                    recoverable = file_messages,
+                    skipped = file_skipped,
+                    "scan progress"
+                );
+                last_folder_emit = Instant::now();
+            } else {
+                tracing::debug!(
+                    file = %name,
+                    folder = %folder_path,
+                    recoverable = file_messages,
+                    skipped = file_skipped,
+                    "scan progress"
+                );
+            }
 
             for &msg_nid in &folder.message_nids {
                 // Safe boundary: between messages in the main per-message loop.
@@ -1459,9 +1474,10 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
             })
             .collect();
 
-        // CLI/library stderr progress sink (0074 P2-A).
+        // CLI/library stderr progress sink (0074 P2-A). Capture first_n once (0140).
+        let first_n = pst_reader::integrity_telemetry::log_first_n();
         let progress_cb: Option<ProbeProgressCb> = Some(Box::new(move |attempted, bytes, base| {
-            if attempted == 1 || attempted.is_multiple_of(500) {
+            if should_emit_probe_progress_line(attempted, first_n) {
                 let _ = writeln!(
                     std::io::stderr(),
                     "scan: deep-attach-preflight: attempted={attempted} bytes={bytes} source={base}"

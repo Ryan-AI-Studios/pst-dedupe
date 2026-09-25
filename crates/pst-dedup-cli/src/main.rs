@@ -43,6 +43,7 @@ With --json, only the final envelope is written to stdout; logs/progress go to s
 )]
 struct Cli {
     /// Increase log verbosity (-v, -vv). Logs always go to stderr.
+    /// `-v` = periodic scan/dups/keep-set folder progress; `-vv` = one line per folder.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
 
@@ -149,7 +150,7 @@ enum Commands {
         /// Allow Tier-2 bind for CRC_SUSPECT items (restores pre-0077; default off) (0077).
         #[arg(long = "allow-crc-suspect-tier2")]
         allow_crc_suspect_tier2: bool,
-        /// First-N detail CRC warn lines per category before aggregation (0=totals only; huge=firehose) (0077).
+        /// First-N CRC detail WARNs (0077). `0` = CRC totals-only and no per-attempt deep-attach `attempted=` progress lines (huge=firehose).
         #[arg(long = "crc-log-limit", default_value_t = 10)]
         crc_log_limit: u64,
         /// Seconds between aggregate CRC summary lines after first-N (0077).
@@ -221,7 +222,7 @@ enum Commands {
         /// Allow Tier-2 bind for CRC_SUSPECT items (restores pre-0077; default off) (0077).
         #[arg(long = "allow-crc-suspect-tier2")]
         allow_crc_suspect_tier2: bool,
-        /// First-N detail CRC warn lines per category before aggregation (0077).
+        /// First-N CRC detail WARNs (0077). `0` = CRC totals-only and no per-attempt deep-attach `attempted=` progress lines.
         #[arg(long = "crc-log-limit", default_value_t = 10)]
         crc_log_limit: u64,
         /// Seconds between aggregate CRC summary lines after first-N (0077).
@@ -328,7 +329,7 @@ enum Commands {
         /// Allow Tier-2 bind for CRC_SUSPECT items (restores pre-0077; default off) (0077).
         #[arg(long = "allow-crc-suspect-tier2")]
         allow_crc_suspect_tier2: bool,
-        /// First-N detail CRC warn lines per category before aggregation (0077).
+        /// First-N CRC detail WARNs (0077). `0` = CRC totals-only and no per-attempt deep-attach `attempted=` progress lines.
         #[arg(long = "crc-log-limit", default_value_t = 10)]
         crc_log_limit: u64,
         /// Seconds between aggregate CRC summary lines after first-N (0077).
@@ -447,7 +448,7 @@ enum Commands {
         /// Allow Tier-2 bind for CRC_SUSPECT items (restores pre-0077; default off) (0077).
         #[arg(long = "allow-crc-suspect-tier2")]
         allow_crc_suspect_tier2: bool,
-        /// First-N detail CRC warn lines per category before aggregation (0077).
+        /// First-N CRC detail WARNs (0077). `0` = CRC totals-only and no per-attempt deep-attach `attempted=` progress lines.
         #[arg(long = "crc-log-limit", default_value_t = 10)]
         crc_log_limit: u64,
         /// Seconds between aggregate CRC summary lines after first-N (0077).
