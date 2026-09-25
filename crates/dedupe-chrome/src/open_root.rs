@@ -6,7 +6,7 @@ use std::path::Path;
 use camino::{Utf8Path, Utf8PathBuf};
 use matter_core::{is_encrypted_matter, Matter};
 
-use crate::error::CommandError;
+use crate::error::{map_core, CommandError};
 use crate::matter_cmd::map_root_metadata_err;
 
 pub(crate) fn ensure_root_accessible(root: &str) -> Result<(), CommandError> {
@@ -35,12 +35,12 @@ pub(crate) fn open_matter_read(root: &str) -> Result<Matter, CommandError> {
     ensure_root_accessible(root)?;
     let utf8 = utf8_root(root)?;
     reject_encrypted(&utf8)?;
-    Matter::open_for_read(&utf8).map_err(|e| CommandError::failed(e.to_string()))
+    Matter::open_for_read(&utf8).map_err(map_core)
 }
 
 pub(crate) fn open_matter_write(root: &str) -> Result<Matter, CommandError> {
     ensure_root_accessible(root)?;
     let utf8 = utf8_root(root)?;
     reject_encrypted(&utf8)?;
-    Matter::open(&utf8).map_err(|e| CommandError::failed(e.to_string()))
+    Matter::open(&utf8).map_err(map_core)
 }

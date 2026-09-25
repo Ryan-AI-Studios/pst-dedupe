@@ -1042,6 +1042,7 @@ pub fn ProcessPage() -> impl IntoView {
             <Show when=move || error.get().is_some()>
                 <p class="error">{move || error.get().unwrap_or_default()}</p>
             </Show>
+            <Show when=move || page.get().is_some()>
             <div class="process-layout">
                 <aside class="process-pane">
                     <h2>"Sources"</h2>
@@ -1539,6 +1540,7 @@ pub fn ProcessPage() -> impl IntoView {
                     <p class="empty">"Identity is SHA-256."</p>
                 </aside>
             </div>
+            </Show>
         </section>
     }
 }
@@ -2053,6 +2055,25 @@ mod extract_all_busy_tests {
         assert_eq!(format_size(1_500_000_000), "1.5 GB");
         assert_eq!(format_size(2_000_000), "2.0 MB");
         assert_eq!(format_size(12), "12 B");
+    }
+
+    #[test]
+    fn process_layout_gated_on_page() {
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let after_h1 = prod.split("<h1>\"Process\"</h1>").nth(1).unwrap_or("");
+        let gated = after_h1
+            .split("<Show when=move || page.get().is_some()>")
+            .nth(1)
+            .expect("Process must Show-guard on page.is_some()");
+        let layout = gated
+            .find(r#"<div class="process-layout">"#)
+            .expect("process-layout remains");
+        let first_show_end = gated.find("</Show>").expect("Show closes");
+        assert!(
+            layout < first_show_end,
+            "process-layout must sit inside the page.is_some() Show"
+        );
     }
 
     #[test]

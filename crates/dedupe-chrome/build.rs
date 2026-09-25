@@ -5,6 +5,7 @@ fn main() {
             "create_matter",
             "recent_matters_list",
             "recent_matters_remember",
+            "recent_matters_forget",
             "review_queue_page",
             "review_code_catalog",
             "saved_searches_list",

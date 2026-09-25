@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0148 — Recents / Open honesty)
+
+- Matters Open… / recents click validates with `matter_overview` before `recent_matters_remember` and only navigates on success. Missing roots and folders without `matter.db` return `not_found`, show a list error that names the path, and `recent_matters_forget` drops the dead card. Encrypted and permission/busy failures stay listed. Process no longer paints `.process-layout` when the store did not load.
+
 ### Added (0147 — Deep-attach coverage)
 
 - `scan` / `unique-pst` `--deep-attach-preflight` JSON `preflight.attach_probe` adds `budget_exhausted_reason` (`probe_bytes` / `max_attaches` / `per_attach_timeout` / `cancel`) when truncated, plus nullable `candidate_attaches_total` / `unprobed_candidate_attaches` from the Phase-1 attach census. `fail_rate` stays failed/attempted. Default probe stays opt-in. `--deep-attach-max-probe-bytes` help names the 256 MiB mid-store cap. See `docs/unique-pst-export.md`.

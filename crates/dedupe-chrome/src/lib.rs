@@ -49,7 +49,8 @@ use raster::{
     ReviewGeomFromHitsArgs, ReviewGeomListArgs, ReviewGeomUpsertArgs, ReviewRasterPageArgs,
 };
 use recents::{
-    production_recents_dir, recent_matters_list_in, recent_matters_remember_in, RecentMatter,
+    production_recents_dir, recent_matters_forget_in, recent_matters_list_in,
+    recent_matters_remember_in, RecentMatter,
 };
 use saved::{
     saved_search_upsert_blocking, saved_searches_list_blocking, SavedSearchUpsertArgs,
@@ -97,6 +98,12 @@ fn recent_matters_list() -> Result<Vec<RecentMatter>, CommandError> {
 fn recent_matters_remember(root: String, name: String) -> Result<Vec<RecentMatter>, CommandError> {
     let dir = production_recents_dir()?;
     recent_matters_remember_in(&dir, &root, &name)
+}
+
+#[tauri::command]
+fn recent_matters_forget(root: String) -> Result<Vec<RecentMatter>, CommandError> {
+    let dir = production_recents_dir()?;
+    recent_matters_forget_in(&dir, &root)
 }
 
 #[tauri::command]
@@ -635,6 +642,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             create_matter,
             recent_matters_list,
             recent_matters_remember,
+            recent_matters_forget,
             review_queue_page,
             review_code_catalog,
             saved_searches_list,
