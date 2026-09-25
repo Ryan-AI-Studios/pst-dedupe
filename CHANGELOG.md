@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0152 — Produce shell honesty)
+
+- Chrome Produce keeps the 3-pane shell when `produce_page` errors (counts paint `—`), contains overflow inside the 0123 matter body so steps scroll beside Stage, and Finalize uses `secondary` rather than `.primary` whenever it is disabled.
+
 ### Fixed (0151 — Process ingest progress)
 
 - Chrome Process ingest no longer paints Items `0/—` and Status `running` while a PST hashes. Busy ingest shows Items `—` (or a bare leaf count once checkpoints exist), Status `importing`, and an indeterminate bar on the mapped source. Extract source bars stay gated on `total_hint`.

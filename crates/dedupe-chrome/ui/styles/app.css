@@ -234,6 +234,13 @@ textarea:focus-visible,
   flex-direction: column;
 }
 
+.matter-shell-body:has(.produce-page) {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
 #queue-goto {
   width: 220px;
   min-width: 0;
@@ -445,7 +452,9 @@ input[type="search"] {
 .produce-page {
   display: flex;
   flex-direction: column;
+  height: 100%;
   min-height: 0;
+  padding: 20px 24px 16px;
 }
 
 .produce-layout {
@@ -453,6 +462,8 @@ input[type="search"] {
   grid-template-columns: 236px minmax(0, 1fr) 320px;
   gap: 16px;
   align-items: start;
+  flex: 1;
+  min-height: 0;
 }
 
 .produce-sets,
@@ -465,6 +476,13 @@ input[type="search"] {
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
   padding: 10px 12px;
+}
+
+.produce-sets,
+.produce-center,
+.produce-stage {
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .produce-sets {
@@ -524,12 +542,6 @@ input[type="search"] {
   font-weight: 600;
 }
 
-.produce-steps li.active button {
-  background: var(--chrome-bg);
-  color: var(--surface);
-  border-color: var(--chrome-bg);
-}
-
 .produce-step {
   display: flex;
   flex-direction: column;
@@ -553,14 +565,6 @@ input[type="search"] {
 
 .card.warn {
   border-color: #c9a227;
-}
-
-.produce-foot {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  margin-top: 16px;
 }
 
 .seg {

@@ -76,6 +76,51 @@ fn finalize_blocked_by_volume_latch(volume_succeeded: bool, start_busy: bool) ->
     volume_succeeded || start_busy
 }
 
+fn finalize_disabled(
+    page_loaded: bool,
+    volume_succeeded: bool,
+    start_busy: bool,
+    bates_start: &str,
+    qc: Option<&ProduceQcRun>,
+    overrides: &HashMap<String, (String, String)>,
+) -> bool {
+    if !page_loaded {
+        return true;
+    }
+    if finalize_blocked_by_volume_latch(volume_succeeded, start_busy) {
+        return true;
+    }
+    let start_ok = bates_start
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .is_some_and(|n| n >= 1);
+    if !start_ok {
+        return true;
+    }
+    match qc {
+        None => true,
+        Some(r) => {
+            let blockers = r.extras.iter().any(|e| e.severity == "blocker")
+                || r.findings.iter().any(|f| f.severity == "error")
+                || r.ordered_ids.is_empty();
+            if blockers {
+                return true;
+            }
+            r.findings
+                .iter()
+                .filter(|f| f.severity == "warn")
+                .any(|f| {
+                    let key = override_key(&f.rule_id, f.item_id.as_deref());
+                    match overrides.get(&key) {
+                        Some((by, reason)) => by.trim().is_empty() || reason.trim().is_empty(),
+                        None => true,
+                    }
+                })
+        }
+    }
+}
+
 /// Apply `next_seq_hint` only after a succeeded volume (never first-paint silent 1).
 fn bates_start_from_next_seq_hint(hint: Option<u64>) -> Option<String> {
     hint.filter(|n| *n >= 1).map(|n| n.to_string())
@@ -110,10 +155,11 @@ fn patch_qc_burn_counts(
 mod process_job_succeeded_tests {
     use super::{
         bates_start_from_next_seq_hint, export_path_list, extra_in_page_href,
-        finalize_blocked_by_volume_latch, layout_seg, patch_qc_burn_counts,
+        finalize_blocked_by_volume_latch, finalize_disabled, layout_seg, patch_qc_burn_counts,
         privilege_log_post_step_banner, process_job_succeeded, projected_last_doc_bates,
         protocol_log_format_radio, protocol_note_display, volume_latch_after_produce_terminal,
-        wait_root_is_current, ChromeQcFinding, JobProgressSnapshot, ProduceQcRun, DAT_ONLY_PROFILE,
+        wait_root_is_current, ChromeExtra, ChromeQcFinding, JobProgressSnapshot, ProduceQcRun,
+        DAT_ONLY_PROFILE,
     };
 
     #[test]
@@ -149,6 +195,144 @@ mod process_job_succeeded_tests {
         assert!(finalize_blocked_by_volume_latch(true, false));
         assert!(finalize_blocked_by_volume_latch(false, true));
         assert!(!finalize_blocked_by_volume_latch(false, false));
+    }
+
+    fn ok_qc() -> ProduceQcRun {
+        ProduceQcRun {
+            ordered_ids: vec!["itm_a".into()],
+            pack_id: "pack".into(),
+            scope: "selected".into(),
+            findings: vec![],
+            extras: vec![],
+            error_count: 0,
+            warn_count: 0,
+            passed: true,
+            qc_run_id: "qc1".into(),
+            need_burn: 0,
+            burned_fresh: 0,
+            unmapped_text: 0,
+            job_id: None,
+        }
+    }
+
+    #[test]
+    fn finalize_disabled_truth_table() {
+        let empty = std::collections::HashMap::new();
+        let qc = ok_qc();
+        assert!(finalize_disabled(false, false, false, "1", Some(&qc), &empty));
+        assert!(finalize_disabled(true, true, false, "1", Some(&qc), &empty));
+        assert!(finalize_disabled(true, false, true, "1", Some(&qc), &empty));
+        assert!(finalize_disabled(true, false, false, "", Some(&qc), &empty));
+        assert!(finalize_disabled(true, false, false, "0", Some(&qc), &empty));
+        assert!(finalize_disabled(true, false, false, "1", None, &empty));
+        let mut empty_set = ok_qc();
+        empty_set.ordered_ids.clear();
+        assert!(finalize_disabled(
+            true,
+            false,
+            false,
+            "1",
+            Some(&empty_set),
+            &empty
+        ));
+        let mut blocked = ok_qc();
+        blocked.findings.push(ChromeQcFinding {
+            item_id: Some("itm_a".into()),
+            rule_id: "priv".into(),
+            severity: "error".into(),
+            message: "withheld".into(),
+        });
+        assert!(finalize_disabled(
+            true,
+            false,
+            false,
+            "1",
+            Some(&blocked),
+            &empty
+        ));
+        let mut extra_block = ok_qc();
+        extra_block.extras.push(ChromeExtra {
+            kind: "empty_selection".into(),
+            severity: "blocker".into(),
+            item_id: None,
+            message: "empty".into(),
+        });
+        assert!(finalize_disabled(
+            true,
+            false,
+            false,
+            "1",
+            Some(&extra_block),
+            &empty
+        ));
+        let mut warned = ok_qc();
+        warned.findings.push(ChromeQcFinding {
+            item_id: Some("itm_a".into()),
+            rule_id: "need_burn".into(),
+            severity: "warn".into(),
+            message: "needs burn".into(),
+        });
+        assert!(finalize_disabled(
+            true,
+            false,
+            false,
+            "1",
+            Some(&warned),
+            &empty
+        ));
+        let key = super::override_key("need_burn", Some("itm_a"));
+        let mut complete = std::collections::HashMap::new();
+        complete.insert(key, ("counsel".into(), "accepted".into()));
+        assert!(!finalize_disabled(
+            true,
+            false,
+            false,
+            "1",
+            Some(&warned),
+            &complete
+        ));
+        assert!(!finalize_disabled(
+            true,
+            false,
+            false,
+            "42",
+            Some(&qc),
+            &empty
+        ));
+    }
+
+    #[test]
+    fn produce_shell_honesty_source_locks() {
+        let src = include_str!("produce.rs");
+        let view_at = src
+            .rfind("pub fn ProducePage() -> impl IntoView {")
+            .expect("ProducePage view");
+        let view = &src[view_at..];
+        let css = include_str!("../../styles/app.css");
+        assert!(
+            src.contains("fn finalize_disabled"),
+            "Finalize must share one helper"
+        );
+        assert!(view.contains("class:primary"));
+        assert!(view.contains("class:secondary"));
+        assert!(
+            !view.contains("class=\"primary\""),
+            "Finalize must not hardcode class=primary"
+        );
+        assert!(
+            !view.contains("<Show when=move || page.get().is_some()>"),
+            "produce-layout must stay mounted when produce_page errors"
+        );
+        assert!(view.contains("class=\"produce-layout\""));
+        assert!(view.contains("Pad width: —"));
+        assert!(css.contains(".matter-shell-body:has(.produce-page)"));
+        assert!(css.contains("236px minmax(0, 1fr) 320px"));
+        assert!(
+            css.contains("overflow-y: auto"),
+            "produce panes must scroll internally"
+        );
+        assert!(!css.contains(".produce-foot"));
+        assert!(!css.contains(".produce-steps li.active button"));
     }
 
     #[test]
@@ -886,22 +1070,38 @@ pub fn ProducePage() -> impl IntoView {
             <Show when=move || error.get().is_some()>
                 <p class="error">{move || error.get().unwrap_or_default()}</p>
             </Show>
-            <Show when=move || page.get().is_some()>
-                {move || page.get().map(|pg| {
-                    let count = pg.default_count;
-                    let produced = pg.produced_count;
-                    let gate = pg.qc_gate.clone();
-                    let protocol_log = pg.protocol_log_format.clone();
-                    let protocol_d = protocol_note_display(pg.protocol_fre_502d_note.as_deref());
-                    let protocol_e = protocol_note_display(pg.protocol_fre_502e_note.as_deref());
+                {move || {
+                    let pg = page.get();
+                    let count_label = match pg.as_ref() {
+                        Some(p) => format!("{} item(s) in the default produce set.", p.default_count),
+                        None => "—".into(),
+                    };
+                    let produced_label = match pg.as_ref() {
+                        Some(p) => format!("{} produced item(s)", p.produced_count),
+                        None => "—".into(),
+                    };
+                    let gate_label = match pg.as_ref() {
+                        Some(p) => format!("QC gate: {} — {}", p.qc_gate.status, p.qc_gate.message),
+                        None => "QC gate: —".into(),
+                    };
+                    let protocol_log = pg
+                        .as_ref()
+                        .map(|p| p.protocol_log_format.clone())
+                        .unwrap_or_else(|| "—".into());
+                    let protocol_d = protocol_note_display(
+                        pg.as_ref().and_then(|p| p.protocol_fre_502d_note.as_deref()),
+                    );
+                    let protocol_e = protocol_note_display(
+                        pg.as_ref().and_then(|p| p.protocol_fre_502e_note.as_deref()),
+                    );
                     view! {
                         <div class="produce-layout">
                             <aside class="produce-sets">
                                 <h2>"Production sets"</h2>
-                                <p class="empty">{format!("{produced} produced item(s)")}</p>
+                                <p class="empty">{produced_label}</p>
                                 <button
                                     on:click=new_draft
-                                    disabled=move || start_busy.get() || qc_busy.get()
+                                    disabled=move || page.get().is_none() || start_busy.get() || qc_busy.get()
                                 >"New"</button>
                                 <Show when=move || page.get().map(|p| p.sets.is_empty()).unwrap_or(true)>
                                     <p class="empty">"No volumes yet."</p>
@@ -945,7 +1145,7 @@ pub fn ProducePage() -> impl IntoView {
                                             "Source: responsive AND NOT withheld (family together)."
                                         }}</p>
                                         <Show when=move || !entire_corpus.get()>
-                                            <p>{format!("{count} item(s) in the default produce set.")}</p>
+                                            <p>{count_label.clone()}</p>
                                         </Show>
                                         <label>
                                             <input
@@ -961,7 +1161,7 @@ pub fn ProducePage() -> impl IntoView {
                                             />
                                             " Entire review corpus (still withhold = false, include family)"
                                         </label>
-                                        <p class="empty">"QC gate: " {gate.status.clone()} " — " {gate.message.clone()}</p>
+                                        <p class="empty">{gate_label}</p>
                                     </div>
 
                                 <div class="produce-step" id="step-2-number">
@@ -999,12 +1199,18 @@ pub fn ProducePage() -> impl IntoView {
                                             }
                                         }}</p>
                                         <p class="empty">{move || {
-                                            format!(
-                                                "Pad width: {}",
-                                                selected_pad_width(&page.get(), &profile.get())
-                                            )
+                                            match page.get() {
+                                                Some(_) => format!(
+                                                    "Pad width: {}",
+                                                    selected_pad_width(&page.get(), &profile.get())
+                                                ),
+                                                None => "Pad width: —".into(),
+                                            }
                                         }}</p>
                                         <p class="empty">{move || {
+                                            if page.get().is_none() {
+                                                return "—".into();
+                                            }
                                             let start = bates_start
                                                 .get()
                                                 .trim()
@@ -1148,23 +1354,31 @@ pub fn ProducePage() -> impl IntoView {
                                         {move || {
                                             let p = page.get();
                                             let q = qc.get();
-                                            let need = q
-                                                .as_ref()
-                                                .map(|r| r.need_burn)
-                                                .or_else(|| p.as_ref().map(|x| x.need_burn))
-                                                .unwrap_or(0);
-                                            let fresh = q
-                                                .as_ref()
-                                                .map(|r| r.burned_fresh)
-                                                .or_else(|| p.as_ref().map(|x| x.burned_fresh))
-                                                .unwrap_or(0);
-                                            let unmapped = q
-                                                .as_ref()
-                                                .map(|r| r.unmapped_text)
-                                                .or_else(|| p.as_ref().map(|x| x.unmapped_text))
-                                                .unwrap_or(0);
+                                            let copy = if p.is_none() && q.is_none() {
+                                                "Need burn: — · Burned fresh: — · Unmapped text: —"
+                                                    .to_string()
+                                            } else {
+                                                let need = q
+                                                    .as_ref()
+                                                    .map(|r| r.need_burn)
+                                                    .or_else(|| p.as_ref().map(|x| x.need_burn))
+                                                    .unwrap_or(0);
+                                                let fresh = q
+                                                    .as_ref()
+                                                    .map(|r| r.burned_fresh)
+                                                    .or_else(|| p.as_ref().map(|x| x.burned_fresh))
+                                                    .unwrap_or(0);
+                                                let unmapped = q
+                                                    .as_ref()
+                                                    .map(|r| r.unmapped_text)
+                                                    .or_else(|| p.as_ref().map(|x| x.unmapped_text))
+                                                    .unwrap_or(0);
+                                                format!(
+                                                    "Need burn: {need} · Burned fresh: {fresh} · Unmapped text: {unmapped}"
+                                                )
+                                            };
                                             view! {
-                                                <p>{format!("Need burn: {need} · Burned fresh: {fresh} · Unmapped text: {unmapped}")}</p>
+                                                <p>{copy}</p>
                                             }
                                         }}
                                         <p>"Highlights never burn. Draft overlays are not the produced native."</p>
@@ -1223,7 +1437,7 @@ pub fn ProducePage() -> impl IntoView {
                                         <h2>"Pre-flight"</h2>
                                         <button
                                             on:click=move |_| run_qc()
-                                            disabled=move || qc_busy.get()
+                                            disabled=move || page.get().is_none() || qc_busy.get()
                                         >{move || if qc_busy.get() { "Running…" } else { "Re-run QC" }}</button>
                                         <Show when=move || qc.get().is_none()>
                                             <p class="empty">{QC_NOT_YET_RUN}</p>
@@ -1318,6 +1532,7 @@ pub fn ProducePage() -> impl IntoView {
                                 {move || {
                                     let p = page.get();
                                     let q = qc.get();
+                                    let unloaded = p.is_none() && q.is_none();
                                     let (docs, docs_label) = match q.as_ref() {
                                         Some(r) => (r.ordered_ids.len() as u64, "from QC"),
                                         None if entire_corpus.get() => {
@@ -1335,18 +1550,37 @@ pub fn ProducePage() -> impl IntoView {
                                             }
                                         }
                                     };
-                                    let docs_cell = if q.is_none() && entire_corpus.get() {
+                                    let docs_cell = if unloaded {
+                                        "—".to_string()
+                                    } else if q.is_none() && entire_corpus.get() {
                                         "— (count refreshes at QC)".to_string()
                                     } else {
                                         format!("{docs} ({docs_label})")
                                     };
-                                    let need = q
-                                        .as_ref()
-                                        .map(|r| r.need_burn)
-                                        .or_else(|| p.as_ref().map(|x| x.need_burn))
-                                        .unwrap_or(0);
-                                    let export = export_path_list(&p, &profile.get());
-                                    let withheld = withheld_stage_display(&q);
+                                    let natives_cell = if unloaded || (q.is_none() && entire_corpus.get()) {
+                                        "—".to_string()
+                                    } else {
+                                        format!("{docs}")
+                                    };
+                                    let need = if unloaded {
+                                        "—".to_string()
+                                    } else {
+                                        q.as_ref()
+                                            .map(|r| r.need_burn)
+                                            .or_else(|| p.as_ref().map(|x| x.need_burn))
+                                            .unwrap_or(0)
+                                            .to_string()
+                                    };
+                                    let export = if unloaded {
+                                        "—".to_string()
+                                    } else {
+                                        export_path_list(&p, &profile.get())
+                                    };
+                                    let withheld = if unloaded {
+                                        "—".to_string()
+                                    } else {
+                                        withheld_stage_display(&q)
+                                    };
                                     view! {
                                         <dl class="produce-stage-rows">
                                             <dt>"Documents"</dt>
@@ -1354,15 +1588,11 @@ pub fn ProducePage() -> impl IntoView {
                                             <dt>"Pages"</dt>
                                             <dd>"—"</dd>
                                             <dt>"Natives"</dt>
-                                            <dd>{if q.is_none() && entire_corpus.get() {
-                                                "—".to_string()
-                                            } else {
-                                                format!("{docs}")
-                                            }}</dd>
+                                            <dd>{natives_cell}</dd>
                                             <dt>"Slipsheets"</dt>
                                             <dd>"— · not this track"</dd>
                                             <dt>"Marks to burn"</dt>
-                                            <dd>{format!("{need}")}</dd>
+                                            <dd>{need}</dd>
                                             <dt>"Withheld"</dt>
                                             <dd>{withheld}</dd>
                                         </dl>
@@ -1388,37 +1618,35 @@ pub fn ProducePage() -> impl IntoView {
                                 }}</p>
                                 <button disabled=true>"Stage & snapshot — not this track"</button>
                                 <button
-                                class="primary"
-                                disabled=move || {
-                                    if finalize_blocked_by_volume_latch(
+                                class:primary=move || {
+                                    !finalize_disabled(
+                                        page.get().is_some(),
                                         volume_succeeded.get(),
                                         start_busy.get(),
-                                    ) {
-                                        return true;
-                                    }
-                                    let start_ok = bates_start.get().trim().parse::<u64>().ok().is_some_and(|n| n >= 1);
-                                    if !start_ok {
-                                        return true;
-                                    }
-                                    match qc.get() {
-                                        None => true,
-                                        Some(r) => {
-                                            let blockers = r.extras.iter().any(|e| e.severity == "blocker")
-                                                || r.findings.iter().any(|f| f.severity == "error")
-                                                || r.ordered_ids.is_empty();
-                                            if blockers {
-                                                return true;
-                                            }
-                                            let map = overrides.get();
-                                            r.findings.iter().filter(|f| f.severity == "warn").any(|f| {
-                                                let key = override_key(&f.rule_id, f.item_id.as_deref());
-                                                match map.get(&key) {
-                                                    Some((by, reason)) => by.trim().is_empty() || reason.trim().is_empty(),
-                                                    None => true,
-                                                }
-                                            })
-                                        }
-                                    }
+                                        &bates_start.get(),
+                                        qc.get().as_ref(),
+                                        &overrides.get(),
+                                    )
+                                }
+                                class:secondary=move || {
+                                    finalize_disabled(
+                                        page.get().is_some(),
+                                        volume_succeeded.get(),
+                                        start_busy.get(),
+                                        &bates_start.get(),
+                                        qc.get().as_ref(),
+                                        &overrides.get(),
+                                    )
+                                }
+                                disabled=move || {
+                                    finalize_disabled(
+                                        page.get().is_some(),
+                                        volume_succeeded.get(),
+                                        start_busy.get(),
+                                        &bates_start.get(),
+                                        qc.get().as_ref(),
+                                        &overrides.get(),
+                                    )
                                 }
                                 on:click=finalize
                             >{move || if start_busy.get() { "Finalizing…" } else { "Finalize production" }}</button>
@@ -1432,8 +1660,7 @@ pub fn ProducePage() -> impl IntoView {
                             </aside>
                         </div>
                     }
-                })}
-            </Show>
+                }}
         </section>
     }
 }
