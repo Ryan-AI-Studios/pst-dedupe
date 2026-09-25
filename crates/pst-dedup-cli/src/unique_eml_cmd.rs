@@ -33,8 +33,8 @@ use crate::pst_materializer::{
     materialize_nested_for_winner, PstAttachStreamSource, PstMaterializer,
 };
 use crate::scan::{
-    eprint_poly_crc_note, evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions,
-    ScanSummary,
+    eprint_poly_crc_note, evaluate_exit_policy, format_integrity_csv_line, resolve_pst_paths,
+    run_scan, ScanOptions, ScanSummary,
 };
 use crate::unique_export_report::{
     format_ledger_source_path, resolve_input_source_id, AttachLedgerFinish, AttachLedgerMode,
@@ -1279,8 +1279,8 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
     if let Some(p) = &keep_set_json_out {
         println!("  keep_set_json: {p}");
     }
-    if let Some(ic) = &outcome.summary.integrity_csv {
-        println!("  integrity_csv: {ic}");
+    if let Some(line) = format_integrity_csv_line(&outcome.summary) {
+        println!("{line}");
     }
 
     if classified_exit != crate::error::CliExit::Success {
@@ -1531,6 +1531,8 @@ mod tests {
             block_crc_read_rate: 0.0,
             poly_class_crc_sources: 0,
             poly_crc_note: None,
+            integrity_csv_rows: None,
+            integrity_csv_omitted_reason: None,
         };
         let keep_set = KeepSet {
             schema: "keep_set_v1".into(),
@@ -1652,6 +1654,8 @@ mod tests {
             block_crc_read_rate: 0.0,
             poly_class_crc_sources: 0,
             poly_crc_note: None,
+            integrity_csv_rows: None,
+            integrity_csv_omitted_reason: None,
         };
         write_eml_hard_fail_summary(
             &out,

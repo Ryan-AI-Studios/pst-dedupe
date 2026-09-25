@@ -644,6 +644,8 @@ fn mode_a_soft_skip_row_lands_on_also_eml_ledger() {
         block_crc_read_rate: 0.0,
         poly_class_crc_sources: 0,
         poly_crc_note: None,
+        integrity_csv_rows: None,
+        integrity_csv_omitted_reason: None,
     };
 
     let cancel = AtomicBool::new(false);
@@ -798,6 +800,8 @@ fn helper_hard_fail_writes_summary_json() {
         block_crc_read_rate: 0.0,
         poly_class_crc_sources: 0,
         poly_crc_note: None,
+        integrity_csv_rows: None,
+        integrity_csv_omitted_reason: None,
     };
     let result = write_eml_pack_from_keep_set(WriteEmlPackFromKeepSetInput {
         keep_set: &keep_set,
@@ -999,6 +1003,8 @@ fn helper_cancel_with_blocked_summary_returns_cancelled_ok() {
         block_crc_read_rate: 0.0,
         poly_class_crc_sources: 0,
         poly_crc_note: None,
+        integrity_csv_rows: None,
+        integrity_csv_omitted_reason: None,
     };
     let pack = write_eml_pack_from_keep_set(WriteEmlPackFromKeepSetInput {
         keep_set: &keep_set,
@@ -1156,6 +1162,8 @@ fn cancel_ok_recovers_attach_and_embedded_from_summary() {
         block_crc_read_rate: 0.0,
         poly_class_crc_sources: 0,
         poly_crc_note: None,
+        integrity_csv_rows: None,
+        integrity_csv_omitted_reason: None,
     };
     let pack = write_eml_pack_from_keep_set(WriteEmlPackFromKeepSetInput {
         keep_set: &keep_set,
@@ -1311,6 +1319,8 @@ fn summary_write_failure_returns_err() {
         block_crc_read_rate: 0.0,
         poly_class_crc_sources: 0,
         poly_crc_note: None,
+        integrity_csv_rows: None,
+        integrity_csv_omitted_reason: None,
     };
     let result = write_eml_pack_from_keep_set(WriteEmlPackFromKeepSetInput {
         keep_set: &keep_set,
@@ -1447,6 +1457,8 @@ fn summary_write_failure_after_depth_limit_returns_err() {
         block_crc_read_rate: 0.0,
         poly_class_crc_sources: 0,
         poly_crc_note: None,
+        integrity_csv_rows: None,
+        integrity_csv_omitted_reason: None,
     };
     let result = write_eml_pack_from_keep_set(WriteEmlPackFromKeepSetInput {
         keep_set: &keep_set,

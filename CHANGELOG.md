@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Changed (0144 — Integrity CSV honesty)
+
+- When an integrity CSV sink is active (`--integrity-csv` or the `--csv` sidecar) and poly-class CRC leaves the file header-only, `scan` / `dups` / `keep-set` / `unique-pst` / `unique-eml` JSON include `integrity_csv_rows` and `integrity_csv_omitted_reason=crc_suspect_is_taint_not_skip`. Clean runs omit the reason. No sink omits both keys. Human `integrity_csv:` lines show the row count or the taint sentence. The CSV stays skip/degraded items only (no CLASS/comment rows). unique-pst counts probe-appended rows on the same fields.
+
 ### Changed (0143 — Poly-CRC scan copy)
 
 - `scan` / `dups` / `keep-set` / `unique-pst` / `unique-eml` add `summary.poly_crc_note` when `poly_class_crc_sources >= 1`, plus one stderr `note:` (independent of `--crc-log-limit`). Preflight math is unchanged: poly-class CRC can coexist with recommendation `ok`. Human `crc:` lines include `poly_sources=`. `block_crc_read_rate` is the ∈[0,1] fraction; `block_crc_rate` is CRC hits per message.

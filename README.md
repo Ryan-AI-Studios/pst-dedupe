@@ -66,7 +66,7 @@ cargo build --release -p pst-dedup-gui
 
 # CSV report (+ summary footer) and auto sidecar integrity ledger
 .\target\release\pst-dedup.exe scan archive.pst --csv output\report.csv
-# → also writes output\report.integrity.csv (skips + degraded rows)
+# → also writes output\report.integrity.csv (skips + degraded item rows)
 
 # Multiple PSTs, best-effort (default) or strict
 .\target\release\pst-dedup.exe scan a.pst b.pst --json --dups --limit 50
@@ -105,6 +105,11 @@ Poly-class CRC (`files[].poly_class_crc`, `poly_class_crc_sources`) can keep pre
 next to a high `block_crc_read_rate` (the ∈[0,1] read fraction). JSON then includes
 `poly_crc_note` and stderr prints one `note:` (not silenced by `--crc-log-limit 0`).
 `block_crc_rate` is CRC hits per recoverable message, not a percent.
+On those stores an integrity CSV (`--integrity-csv` or the `--csv` sidecar) can be
+header-only: `CRC_SUSPECT` is taint, not a skip. JSON then includes
+`integrity_csv_rows` (0) and `integrity_csv_omitted_reason=crc_suspect_is_taint_not_skip`.
+A clean run with a sink still reports `integrity_csv_rows` and omits the reason.
+The sidecar stays an item ledger (no CLASS/comment rows).
 **Non-zero exit still flushes** CSV/integrity/JSON artifacts first (safe for automation
 and 0066 force-consume of partial recoverable sets). Empty `folder_path` alone is not
 orphan; use `is_orphaned`. Intentional Tier-2 4KB body preview is **not** `BODY_TRUNCATED`.

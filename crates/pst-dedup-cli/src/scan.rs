@@ -214,6 +214,12 @@ pub struct ScanSummary {
     /// Interpretive copy when `poly_class_crc_sources >= 1` (0143). Omitted when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poly_crc_note: Option<String>,
+    /// Data rows written to the integrity CSV (header not counted). Omitted when no sink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity_csv_rows: Option<u64>,
+    /// Why a configured integrity CSV has 0 data rows. Frozen token only; omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity_csv_omitted_reason: Option<String>,
 }
 
 fn grouping_stats_empty(s: &GroupingStats) -> bool {
@@ -236,6 +242,58 @@ pub fn eprint_poly_crc_note(poly_class_crc_sources: u64) {
     if let Some(note) = poly_crc_note(poly_class_crc_sources) {
         eprintln!("note: {note}");
     }
+}
+
+/// Frozen 0144 omitted-reason when poly-cleared CRC_SUSPECT leaves a header-only integrity CSV.
+pub const INTEGRITY_CSV_OMITTED_CRC_TAINT: &str = "crc_suspect_is_taint_not_skip";
+
+/// Present iff the integrity CSV sink is active, data rows are 0, CRC_SUSPECT was counted,
+/// and at least one source was poly-class (cleared). Otherwise `None` (omit the JSON key).
+pub fn integrity_csv_omitted_reason(
+    rows: Option<u64>,
+    crc_suspect_messages: u64,
+    poly_class_crc_sources: u64,
+) -> Option<String> {
+    match rows {
+        Some(0) if crc_suspect_messages > 0 && poly_class_crc_sources >= 1 => {
+            Some(INTEGRITY_CSV_OMITTED_CRC_TAINT.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Human `integrity_csv:` line (scan / dups / keep-set / unique-eml). unique-pst is JSON-only.
+pub fn format_integrity_csv_line(summary: &ScanSummary) -> Option<String> {
+    let path = summary.integrity_csv.as_deref()?;
+    Some(format_integrity_csv_human(
+        path,
+        summary.integrity_csv_rows,
+        summary.integrity_csv_omitted_reason.as_deref(),
+    ))
+}
+
+fn format_integrity_csv_human(path: &str, rows: Option<u64>, omitted: Option<&str>) -> String {
+    if omitted == Some(INTEGRITY_CSV_OMITTED_CRC_TAINT) {
+        format!("  integrity_csv: {path} (0 rows: CRC_SUSPECT is taint, not a skip)")
+    } else if let Some(n) = rows {
+        format!("  integrity_csv: {path} (rows={n})")
+    } else {
+        format!("  integrity_csv: {path}")
+    }
+}
+
+/// After unique-pst strict probe skips are appended to the integrity CSV, add those rows
+/// to `integrity_csv_rows` and clear the omitted-reason when the total is no longer 0.
+pub fn add_integrity_csv_appended_rows(summary: &mut ScanSummary, appended: u64) {
+    if appended == 0 {
+        return;
+    }
+    let rows = summary
+        .integrity_csv_rows
+        .unwrap_or(0)
+        .saturating_add(appended);
+    summary.integrity_csv_rows = Some(rows);
+    summary.integrity_csv_omitted_reason = None;
 }
 
 /// One duplicate pair for listing.
@@ -1799,6 +1857,12 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     let block_crc_rate = crc_sum as f64 / (recoverable_messages.max(1) as f64);
     let read_denom = page_reads_total.saturating_add(block_reads_total).max(1) as f64;
     let block_crc_read_rate = (crc_sum as f64 / read_denom).clamp(0.0, 1.0);
+    let integrity_csv_rows = integrity_wtr.as_ref().map(IntegrityCsvWriter::rows_written);
+    let integrity_csv_omitted_reason = integrity_csv_omitted_reason(
+        integrity_csv_rows,
+        crc_suspect_total,
+        poly_class_crc_sources,
+    );
 
     let summary = ScanSummary {
         schema: SCAN_INTEGRITY_SCHEMA.to_string(),
@@ -1836,6 +1900,8 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         block_crc_read_rate,
         poly_class_crc_sources,
         poly_crc_note: poly_crc_note(poly_class_crc_sources),
+        integrity_csv_rows,
+        integrity_csv_omitted_reason,
     };
 
     Ok(ScanOutcome {
@@ -2185,6 +2251,149 @@ mod tests {
     }
 
     #[test]
+    fn integrity_csv_omitted_reason_matrix() {
+        assert_eq!(integrity_csv_omitted_reason(None, 10, 1), None);
+        assert_eq!(integrity_csv_omitted_reason(Some(0), 0, 1), None);
+        assert_eq!(integrity_csv_omitted_reason(Some(0), 10, 0), None);
+        assert_eq!(integrity_csv_omitted_reason(Some(3), 10, 1), None);
+        assert_eq!(
+            integrity_csv_omitted_reason(Some(0), 10, 1).as_deref(),
+            Some(INTEGRITY_CSV_OMITTED_CRC_TAINT)
+        );
+    }
+
+    #[test]
+    fn add_integrity_csv_appended_rows_clears_omitted_reason() {
+        use dedup_engine::integrity::{
+            compute_preflight, IntegrityThresholds, PreflightInputs, SCAN_INTEGRITY_SCHEMA,
+        };
+        let preflight = compute_preflight(&PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            1,
+            0,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        ));
+        let mut summary = ScanSummary {
+            schema: SCAN_INTEGRITY_SCHEMA.to_string(),
+            mode: ScanMode::BestEffort,
+            files: vec![],
+            total_messages: 1,
+            unique: 1,
+            duplicates: 0,
+            tier1_hits: 0,
+            tier2_hits: 0,
+            savings_bytes: 0,
+            skipped: 0,
+            skipped_by_reason: BTreeMap::new(),
+            recoverable_messages: 1,
+            degraded_messages: 0,
+            degraded_by_reason: BTreeMap::new(),
+            orphaned_messages: 0,
+            failed_files: 0,
+            partial_files: 0,
+            opened_files: 1,
+            duration_secs: 0.0,
+            preflight,
+            skips: vec![],
+            integrity_csv: Some("skips.csv".into()),
+            grouping: Default::default(),
+            page_crc_mismatches: 0,
+            block_crc_mismatches: 0,
+            block_bid_mismatches: 0,
+            distinct_bad_bids: 0,
+            distinct_bad_bids_exact: true,
+            crc_suspect_messages: 10,
+            page_reads: 0,
+            block_reads: 0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            poly_class_crc_sources: 1,
+            poly_crc_note: None,
+            integrity_csv_rows: Some(0),
+            integrity_csv_omitted_reason: Some(INTEGRITY_CSV_OMITTED_CRC_TAINT.into()),
+        };
+        add_integrity_csv_appended_rows(&mut summary, 0);
+        assert_eq!(summary.integrity_csv_rows, Some(0));
+        assert_eq!(
+            summary.integrity_csv_omitted_reason.as_deref(),
+            Some(INTEGRITY_CSV_OMITTED_CRC_TAINT)
+        );
+        add_integrity_csv_appended_rows(&mut summary, 2);
+        assert_eq!(summary.integrity_csv_rows, Some(2));
+        assert_eq!(summary.integrity_csv_omitted_reason, None);
+    }
+
+    #[test]
+    fn format_integrity_csv_line_taint_and_rows() {
+        use dedup_engine::integrity::{
+            compute_preflight, IntegrityThresholds, PreflightInputs, SCAN_INTEGRITY_SCHEMA,
+        };
+        let preflight = compute_preflight(&PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            1,
+            0,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        ));
+        let mut summary = ScanSummary {
+            schema: SCAN_INTEGRITY_SCHEMA.to_string(),
+            mode: ScanMode::BestEffort,
+            files: vec![],
+            total_messages: 1,
+            unique: 1,
+            duplicates: 0,
+            tier1_hits: 0,
+            tier2_hits: 0,
+            savings_bytes: 0,
+            skipped: 0,
+            skipped_by_reason: BTreeMap::new(),
+            recoverable_messages: 1,
+            degraded_messages: 0,
+            degraded_by_reason: BTreeMap::new(),
+            orphaned_messages: 0,
+            failed_files: 0,
+            partial_files: 0,
+            opened_files: 1,
+            duration_secs: 0.0,
+            preflight,
+            skips: vec![],
+            integrity_csv: Some("skips.csv".into()),
+            grouping: Default::default(),
+            page_crc_mismatches: 0,
+            block_crc_mismatches: 0,
+            block_bid_mismatches: 0,
+            distinct_bad_bids: 0,
+            distinct_bad_bids_exact: true,
+            crc_suspect_messages: 10,
+            page_reads: 0,
+            block_reads: 0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            poly_class_crc_sources: 1,
+            poly_crc_note: None,
+            integrity_csv_rows: Some(0),
+            integrity_csv_omitted_reason: Some(INTEGRITY_CSV_OMITTED_CRC_TAINT.into()),
+        };
+        assert_eq!(
+            format_integrity_csv_line(&summary).as_deref(),
+            Some("  integrity_csv: skips.csv (0 rows: CRC_SUSPECT is taint, not a skip)")
+        );
+        summary.integrity_csv_omitted_reason = None;
+        summary.integrity_csv_rows = Some(4);
+        assert_eq!(
+            format_integrity_csv_line(&summary).as_deref(),
+            Some("  integrity_csv: skips.csv (rows=4)")
+        );
+        summary.integrity_csv = None;
+        assert_eq!(format_integrity_csv_line(&summary), None);
+    }
+
+    #[test]
     fn poly_crc_note_count_and_frozen_copy() {
         let one = poly_crc_note(1).expect("one");
         assert!(one.starts_with("1 source(s) classified as poly-class CRC"));
@@ -2242,6 +2451,8 @@ mod tests {
             block_crc_read_rate: 0.0,
             poly_class_crc_sources: 0,
             poly_crc_note: None,
+            integrity_csv_rows: None,
+            integrity_csv_omitted_reason: None,
         };
         let v = serde_json::to_value(&summary).expect("ser");
         assert!(v.get("poly_crc_note").is_none(), "key must be omitted; {v}");
@@ -2272,6 +2483,30 @@ mod tests {
         let old: ScanSummary = serde_json::from_value(pre).expect("pre-0143 json");
         assert_eq!(old.poly_crc_note, None);
         assert_eq!(old.poly_class_crc_sources, 0);
+        assert_eq!(old.integrity_csv_rows, None);
+        assert_eq!(old.integrity_csv_omitted_reason, None);
+        let v = serde_json::to_value(&summary).expect("ser");
+        assert!(v.get("integrity_csv_rows").is_none());
+        assert!(v.get("integrity_csv_omitted_reason").is_none());
+        let mut clean = summary.clone();
+        clean.integrity_csv = Some("skips.csv".into());
+        clean.integrity_csv_rows = Some(0);
+        clean.crc_suspect_messages = 0;
+        clean.poly_class_crc_sources = 0;
+        clean.integrity_csv_omitted_reason = integrity_csv_omitted_reason(
+            clean.integrity_csv_rows,
+            clean.crc_suspect_messages,
+            clean.poly_class_crc_sources,
+        );
+        let clean_v = serde_json::to_value(&clean).expect("ser clean");
+        assert_eq!(
+            clean_v.get("integrity_csv_rows").and_then(|x| x.as_u64()),
+            Some(0)
+        );
+        assert!(
+            clean_v.get("integrity_csv_omitted_reason").is_none(),
+            "clean sink omits reason: {clean_v}"
+        );
     }
 
     /// Dual-rate poly gate: high block alone keeps taint; both high → poly reclassify.
@@ -2804,6 +3039,8 @@ mod tests {
             block_crc_read_rate: 0.0,
             poly_class_crc_sources: 0,
             poly_crc_note: None,
+            integrity_csv_rows: None,
+            integrity_csv_omitted_reason: None,
         };
         let mut opts = ScanOptions::default();
         assert!(evaluate_exit_policy(&summary, &opts).is_err());
@@ -2859,6 +3096,8 @@ mod tests {
             block_crc_read_rate: 0.0,
             poly_class_crc_sources: 0,
             poly_crc_note: None,
+            integrity_csv_rows: None,
+            integrity_csv_omitted_reason: None,
         };
         let opts = ScanOptions {
             mode: ScanMode::Strict,
