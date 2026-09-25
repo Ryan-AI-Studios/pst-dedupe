@@ -308,7 +308,7 @@ mod process_job_succeeded_tests {
             .rfind("pub fn ProducePage() -> impl IntoView {")
             .expect("ProducePage view");
         let view = &src[view_at..];
-        let css = include_str!("../../styles/app.css");
+        let css = include_str!("../../styles/app.css").replace('\r', "");
         assert!(
             src.contains("fn finalize_disabled"),
             "Finalize must share one helper"
@@ -326,10 +326,29 @@ mod process_job_succeeded_tests {
         assert!(view.contains("class=\"produce-layout\""));
         assert!(view.contains("Pad width: —"));
         assert!(css.contains(".matter-shell-body:has(.produce-page)"));
-        assert!(css.contains("236px minmax(0, 1fr) 320px"));
+        let layout_at = css
+            .find(".produce-layout {")
+            .expect(".produce-layout rule");
+        let layout_end = css[layout_at..]
+            .find('}')
+            .expect(".produce-layout block");
+        let layout = &css[layout_at..layout_at + layout_end];
         assert!(
-            css.contains("overflow-y: auto"),
-            "produce panes must scroll internally"
+            layout.contains("236px minmax(0, 1fr) 320px"),
+            "produce layout must be three panes"
+        );
+        assert!(
+            layout.contains("align-items: stretch"),
+            "panes must fill the grid row so overflow-y can scroll"
+        );
+        assert!(
+            !layout.contains("align-items: start"),
+            "align-items: start sizes panes to content and clips Pre-flight"
+        );
+        let panes_marker = ".produce-sets,\n.produce-center,\n.produce-stage {\n  overflow-y: auto;\n  min-height: 0;\n}";
+        assert!(
+            css.contains(panes_marker),
+            "produce pane selectors must own overflow-y: auto and min-height: 0"
         );
         assert!(!css.contains(".produce-foot"));
         assert!(!css.contains(".produce-steps li.active button"));

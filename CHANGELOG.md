@@ -9,7 +9,7 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ### Fixed (0152 — Produce shell honesty)
 
-- Chrome Produce keeps the 3-pane shell when `produce_page` errors (counts paint `—`), contains overflow inside the 0123 matter body so steps scroll beside Stage, and Finalize uses `secondary` rather than `.primary` whenever it is disabled.
+- Chrome Produce keeps the 3-pane shell when `produce_page` errors (counts paint `—`), contains overflow inside the 0123 matter body so steps scroll beside Stage, and Finalize uses `secondary` rather than `.primary` whenever it is disabled. Produce panes stretch to the grid row (`align-items: stretch`) so `overflow-y: auto` actually scrolls Pre-flight instead of clipping it.
 
 ### Fixed (0151 — Process ingest progress)
 
