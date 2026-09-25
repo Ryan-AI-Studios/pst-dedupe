@@ -198,6 +198,13 @@ pub fn set_log_limit(first_n: u64, summary_interval: Duration) {
     }
 }
 
+/// Current first-N CRC detail limit (same `LOG_CONFIG` as [`set_log_limit`]).
+///
+/// CLI attach-probe progress reads this **once** per probe pass (0140).
+pub fn log_first_n() -> u64 {
+    read_log_config().0
+}
+
 /// Flush thread-local counters into process globals and return a snapshot.
 pub fn snapshot() -> IntegritySnapshot {
     flush_tls_to_global();
@@ -699,6 +706,16 @@ mod tests {
             let scope = message_scope_enter();
             note_page_crc(1, 1, 2);
             assert!(!scope.exit());
+        });
+    }
+
+    #[test]
+    fn log_first_n_reads_set_limit() {
+        with_lock(|| {
+            set_log_limit(0, Duration::from_secs(30));
+            assert_eq!(log_first_n(), 0);
+            set_log_limit(10, Duration::from_secs(30));
+            assert_eq!(log_first_n(), 10);
         });
     }
 

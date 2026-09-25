@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Changed (0140 — Scan stderr cadence)
+
+- `scan` / `dups` / `keep-set` `-v` prints periodic folder progress (first/last of each file, every 250 folders, or every 2 s), not one INFO line per folder. `-vv` is one line per folder. `--crc-log-limit 0` also silences per-attempt deep-attach `attempted=` progress lines (CRC totals-only unchanged; unique-pst still prints one end-of-probe summary).
+
 ### Added (0139 — Source-rank discoverability)
 
 - `keep-set`, `unique-pst`, and `unique-eml` `--help` name lexicographic path sort on `--source-rank` (`-2.pst` can crown before `.pst`). `--json` envelopes include `input_path_sort_order` (resolved absolute paths after sort). Two or more inputs without `--source-rank` emit one stderr `note:` (including under `--json`). Ranking is unchanged.

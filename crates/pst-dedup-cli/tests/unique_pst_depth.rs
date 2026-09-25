@@ -379,6 +379,10 @@ fn clap_rejects_zero_nine_and_non_integer() {
         help_txt.contains("-2.pst") && help_txt.contains("lexicographic"),
         "0139 unique-pst --source-rank help; {help_txt}"
     );
+    assert!(
+        help_txt.contains("per-attempt") && help_txt.contains("end-of-probe"),
+        "0140 unique-pst --crc-log-limit help; {help_txt}"
+    );
 }
 
 #[test]

@@ -26,6 +26,7 @@ pub mod qc_attestation;
 pub mod qc_external;
 pub mod runner_util;
 pub mod scan;
+pub mod scan_progress;
 pub mod service_cmd;
 pub mod unique_eml_cmd;
 pub mod unique_export_report;

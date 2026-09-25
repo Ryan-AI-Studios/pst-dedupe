@@ -485,12 +485,12 @@ Tauri 2 default camelCase command args vs snake_case UI serde (discovered on the
 
 ### Wave 15 — INC0102784 CLI friction & scan speed (Series X)
 
-Read-only operator smoke 2026-09-24 (`inspect`/`scan`/`dups`/`keep-set`, no unique-pst write). Metadata ~3 s; unique-pst remains the wall. **0139 Ready** after fold-in 2026-09-25; **0140–0147 Proposed** until `/plan-track`. Nested `Desktop\Desktop` path declined.
+Read-only operator smoke 2026-09-24 (`inspect`/`scan`/`dups`/`keep-set`, no unique-pst write). Metadata ~3 s; unique-pst remains the wall. **0139 Completed** (PR **#154** / `234f4fa`). **0140 Ready** 2026-09-25; **0141–0147 Proposed** until `/plan-track`. Nested `Desktop\Desktop` path declined.
 
 | ID | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|
 | **0139** | SourceRankDiscoverability | **Completed** | **P2 X** | `first_seen` path-sort vs `--source-rank`. Spec: `0139-SourceRankDiscoverability/`. PR **#154** / `234f4fa`. |
-| **0140** | ScanStderrCadence | **Proposed** | **P2 X** | Scan stderr cadence; owns I/O tax. Spec: `0140-ScanStderrCadence/`. |
+| **0140** | ScanStderrCadence | **Ready** | **P2 X** | Scan stderr cadence; owns I/O tax. Spec: `0140-ScanStderrCadence/`. |
 | **0141** | KeepSetJsonEnvelope | **Proposed** | **P2 X** | `--json` stats envelope. Spec: `0141-KeepSetJsonEnvelope/`. |
 | **0142** | DupsJsonTotals | **Proposed** | **P3 X** | Totals independent of `--limit`. Spec: `0142-DupsJsonTotals/`. |
 | **0143** | PolyCrcScanCopy | **Proposed** | **P2 X** | Poly CRC vs preflight `ok` copy. Spec: `0143-PolyCrcScanCopy/`. |
@@ -499,7 +499,7 @@ Read-only operator smoke 2026-09-24 (`inspect`/`scan`/`dups`/`keep-set`, no uniq
 | **0146** | UniquePstWriteHotspots | **Proposed** | **P1 X** | unique-pst write measurement. Spec: `0146-UniquePstWriteHotspots/`. |
 | **0147** | DeepAttachCoverage | **Proposed** | **P2 X** | Truncated attach-probe leftover. Spec: `0147-DeepAttachCoverage/`. |
 
-**Order:** **0139 Ready**, **0140–0147 Proposed**. Next free ID **0148** (Series Y).
+**Order:** **0139 Completed**, **0140 Ready**, **0141–0147 Proposed**. Next free ID **0148** (Series Y).
 
 ### Wave 16 — Chrome HITL mockup walk residuals (Series Y)
 

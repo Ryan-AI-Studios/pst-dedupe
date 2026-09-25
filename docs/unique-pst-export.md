@@ -311,7 +311,7 @@ Scan and unique-pst report page/block CRC and BID mismatch counters **per source
 
 `poly_class_crc_discounted` **may co-occur** with a non-CRC `not_export_ready` reason (`scan_recommendation=not_export_ready`, failed volume, attach fail). Both are true; `level` is still `max(scan, post)`. The Desk wizard banners on `level`.
 
-**CLI:** `--crc-log-limit` (default 10), `--crc-log-interval-secs` (default 30), `--allow-crc-suspect-tier2` (default off).
+**CLI:** `--crc-log-limit` (default 10), `--crc-log-interval-secs` (default 30), `--allow-crc-suspect-tier2` (default off). `0` is CRC totals-only **and** silences per-attempt deep-attach `attempted=` ticks (stderr and GUI `on_log`); unique-pst still prints one end-of-probe attach-preflight summary. `scan`/`dups`/`keep-set` `-v` is periodic folder progress (0065 §3.11 per-folder INFO superseded); unique-pst `stage=` lines are unchanged.
 
 **`export_risk`** reuses `PreflightRecommendation` (`ok` | `re_export_recommended` | `not_export_ready`) and is the **max** of scan preflight and post-export evaluation (export never lowers risk). Exit-code mapping is **0078**.
 

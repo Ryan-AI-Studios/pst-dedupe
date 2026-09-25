@@ -50,6 +50,7 @@ use crate::scan::{
     recompute_file_status_counts, recompute_per_file_degraded_from_candidates,
     recompute_per_file_dup_from_results, resolve_pst_paths, run_scan, ScanOptions,
 };
+use crate::scan_progress::should_emit_probe_progress_line;
 use crate::unique_export_report::{
     body_cloud_honesty_reason, default_report_dir, volume_path_for, write_body_cloud_links_csv,
     write_export_messages_csv, write_summary_json, write_volumes_csv, AttachLedgerMode,
@@ -235,7 +236,7 @@ pub struct UniquePstClapArgs {
     /// Allow Tier-2 bind for CRC_SUSPECT items (restores pre-0077; default off) (0077).
     #[arg(long = "allow-crc-suspect-tier2")]
     pub allow_crc_suspect_tier2: bool,
-    /// First-N detail CRC warn lines per category before aggregation (0077).
+    /// First-N CRC detail WARNs (0077). `0` = CRC totals-only and no per-attempt deep-attach `attempted=` progress lines (end-of-probe summary still prints).
     #[arg(long = "crc-log-limit", default_value_t = 10)]
     pub crc_log_limit: u64,
     /// Seconds between aggregate CRC summary lines after first-N (0077).
@@ -1764,8 +1765,9 @@ pub fn run_unique_pst_with_options(
         };
         let log_for_progress = on_log.clone();
         let stderr_p = stderr;
+        let first_n = args.crc_log_limit;
         let progress_cb: Option<ProbeProgressCb> = Some(Box::new(move |attempted, bytes, base| {
-            if attempted.is_multiple_of(500) || attempted == 1 {
+            if should_emit_probe_progress_line(attempted, first_n) {
                 let line = format!(
                     "deep-attach-preflight: attempted={attempted} bytes={bytes} source={base}"
                 );
