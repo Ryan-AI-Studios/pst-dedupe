@@ -34,5 +34,5 @@ Owner release `dedupe-chrome` EXE (ingest start, pause/cancel, filtered queue, p
 
 ## Publish
 
-- PR **#152** (SHA after squash-merge)
+- PR **#152** / `8bb86bd`
 - Closes **D-0138-chrome-invoke-camel**
