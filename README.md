@@ -75,6 +75,8 @@ cargo build --release -p pst-dedup-gui
 
 # Export keep-set (policy resolve + decision CSV + winners JSON; source PSTs read-only)
 # Paths may be positional and/or repeated --input (merged; sorted for determinism).
+# `--json` is a stats envelope (`keep_set_summary_v1`); winners live in `--keep-set-json`.
+# Pass `--include-winners` to restore the winner list on stdout.
 .\target\release\pst-dedup.exe keep-set a.pst b.pst `
   --policy first_seen `
   --decision-csv output\decisions.csv `

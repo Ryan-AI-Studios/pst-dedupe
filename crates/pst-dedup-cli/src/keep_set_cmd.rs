@@ -10,7 +10,8 @@ use dedup_engine::integrity::{IntegrityThresholds, ScanMode, SCAN_INTEGRITY_SCHE
 use dedup_engine::keepset::{
     finalize_with_materialize, multi_input_source_rank_hint, recoverable_items_hint,
     resolve_groups_with_grouping, sort_input_paths, write_keep_set_json, DecisionCsvWriter,
-    FamilyPolicy, FidelityMode, FolderRankMode, KeepPolicy, KeepSetProvenance, RankContext,
+    FamilyPolicy, FidelityMode, FolderRankMode, KeepEntry, KeepPolicy, KeepSetProvenance,
+    KeepSetStats, RankContext,
 };
 use serde::Serialize;
 
@@ -37,6 +38,8 @@ pub struct KeepSetCliArgs {
     pub no_tier2: bool,
     pub no_attachments: bool,
     pub json: bool,
+    /// Restore nested `keep_set.winners` on `--json` stdout (0141). No-op without `--json`.
+    pub include_winners: bool,
     pub mode: ScanMode,
     pub max_skip_rate: f64,
     pub max_crc_skip_rate: f64,
@@ -136,6 +139,45 @@ pub fn rank_context_from_cli(
     }
 }
 
+/// CLI stdout / `keep_set_summary.json` envelope (0141). Distinct from sidecar `keep_set_v1`.
+const KEEP_SET_SUMMARY_SCHEMA: &str = "keep_set_summary_v1";
+
+/// Nested keep-set view for the envelope. `winners` is omitted unless `--include-winners`.
+#[derive(Debug, Serialize)]
+struct KeepSetEnvelope {
+    schema: String,
+    policy: KeepPolicy,
+    family_policy: FamilyPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_from: Option<KeepSetProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dedupe_scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    winners: Option<Vec<KeepEntry>>,
+    stats: KeepSetStats,
+}
+
+impl KeepSetEnvelope {
+    fn from_keep_set(ks: &dedup_engine::KeepSet, inline_winners: bool) -> Self {
+        Self {
+            schema: ks.schema.clone(),
+            policy: ks.policy,
+            family_policy: ks.family_policy,
+            created_from: ks.created_from.clone(),
+            identity_level: ks.identity_level.clone(),
+            dedupe_scope: ks.dedupe_scope.clone(),
+            winners: if inline_winners {
+                Some(ks.winners.clone())
+            } else {
+                None
+            },
+            stats: ks.stats.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct KeepSetSummaryOut {
     schema: String,
@@ -143,7 +185,8 @@ struct KeepSetSummaryOut {
     input_path_sort_order: Vec<String>,
     policy: String,
     family_policy: String,
-    keep_set: dedup_engine::KeepSet,
+    winners_inline: bool,
+    keep_set: KeepSetEnvelope,
     scan: ScanSummary,
     decision_csv: Option<String>,
     keep_set_json: Option<String>,
@@ -327,15 +370,17 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
     });
 
     let build_summary = |classified: &crate::export_outcome::ExportOutcome,
-                         error: &Option<serde_json::Value>|
+                         error: &Option<serde_json::Value>,
+                         inline_winners: bool|
      -> Result<serde_json::Value> {
         let ok = classified.fidelity == crate::export_outcome::ExportFidelity::Complete;
         let payload = KeepSetSummaryOut {
-            schema: keep_set.schema.clone(),
+            schema: KEEP_SET_SUMMARY_SCHEMA.to_string(),
             input_path_sort_order: paths.iter().map(|p| p.display().to_string()).collect(),
             policy: args.policy.as_str().to_string(),
             family_policy: args.family_policy.as_str().to_string(),
-            keep_set: keep_set.clone(),
+            winners_inline: inline_winners,
+            keep_set: KeepSetEnvelope::from_keep_set(&keep_set, inline_winners),
             scan: outcome.summary.clone(),
             decision_csv: decision_csv_out.clone(),
             keep_set_json: keep_set_json_out.clone(),
@@ -355,7 +400,7 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
         Ok(serde_json::to_value(&payload)?)
     };
 
-    let mut summary_value = build_summary(&classified, &error_obj)?;
+    let mut summary_value = build_summary(&classified, &error_obj, false)?;
 
     // Fail-closed: summary write failure is a report failure (DoD-22).
     if let Err(e) = write_keep_set_summary_json(&summary_disk, &summary_value) {
@@ -383,13 +428,18 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
             true,
             false,
         );
-        summary_value = build_summary(&classified, &error_obj)?;
+        summary_value = build_summary(&classified, &error_obj, false)?;
         // Best-effort rewrite of corrected summary (may still fail).
         let _ = write_keep_set_summary_json(&summary_disk, &summary_value);
     }
 
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&summary_value)?);
+        let stdout_value = if args.include_winners {
+            build_summary(&classified, &error_obj, true)?
+        } else {
+            summary_value.clone()
+        };
+        println!("{}", serde_json::to_string_pretty(&stdout_value)?);
         if classified.exit != CliExit::Success {
             let msg = exit_err
                 .or_else(|| {

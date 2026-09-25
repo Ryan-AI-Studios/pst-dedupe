@@ -69,9 +69,13 @@ fn keep_set_json_schema_and_decision_csv_header() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
-    assert_eq!(v["schema"].as_str(), Some("keep_set_v1"));
+    assert_eq!(v["schema"].as_str(), Some("keep_set_summary_v1"));
     assert_eq!(v["ok"], true);
-    assert!(v["keep_set"]["winners"].is_array());
+    assert_eq!(v["winners_inline"], false);
+    assert!(
+        v["keep_set"].get("winners").is_none(),
+        "default --json must omit keep_set.winners"
+    );
     assert!(v["keep_set"]["stats"].is_object());
     assert!(v["keep_set"]["stats"]["recoverable"].as_u64().unwrap_or(0) > 0);
 
@@ -99,6 +103,10 @@ fn keep_set_json_schema_and_decision_csv_header() {
     let ks_v: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&ks).expect("read ks")).expect("ks json");
     assert_eq!(ks_v["schema"].as_str(), Some("keep_set_v1"));
+    assert!(
+        ks_v["winners"].is_array(),
+        "sidecar keep_set_v1 keeps winners"
+    );
 }
 
 #[test]
@@ -125,8 +133,9 @@ fn keep_set_input_flag_works() {
     );
     let v: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("json");
-    assert_eq!(v["schema"].as_str(), Some("keep_set_v1"));
+    assert_eq!(v["schema"].as_str(), Some("keep_set_summary_v1"));
     assert_eq!(v["ok"], true);
+    assert_eq!(v["winners_inline"], false);
 }
 
 #[test]
@@ -151,6 +160,7 @@ fn path_order_determinism_two_copies() {
                 first.to_str().expect("utf8"),
                 second.to_str().expect("utf8"),
                 "--json",
+                "--include-winners",
                 "--policy",
                 "first_seen",
             ])
@@ -533,6 +543,7 @@ fn source_rank_flips_winner_file_a_vs_a2() {
             a.to_str().unwrap().to_string(),
             a2.to_str().unwrap().to_string(),
             "--json".to_string(),
+            "--include-winners".to_string(),
         ];
         for e in extra {
             args.push((*e).to_string());
@@ -646,6 +657,10 @@ fn keep_set_help_lists_0075_flags() {
     assert!(
         text.contains("per-attempt"),
         "0140 keep-set --crc-log-limit help; {text}"
+    );
+    assert!(
+        text.contains("--include-winners"),
+        "0141 --include-winners help; {text}"
     );
 }
 
@@ -1156,12 +1171,17 @@ fn aspose_default_winners_deterministic_golden() {
     let (v1, ks1, header1, dec1) = run_once("a");
     let (v2, ks2, header2, _dec2) = run_once("b");
 
-    assert_eq!(v1["schema"].as_str(), Some("keep_set_v1"));
+    assert_eq!(v1["schema"].as_str(), Some("keep_set_summary_v1"));
     assert_eq!(v1["ok"], true);
-    assert_eq!(v2["schema"].as_str(), Some("keep_set_v1"));
+    assert_eq!(v1["winners_inline"], false);
+    assert!(v1["keep_set"].get("winners").is_none());
+    assert_eq!(v2["schema"].as_str(), Some("keep_set_summary_v1"));
+    assert!(v2["keep_set"].get("winners").is_none());
 
-    let winners1 = v1["keep_set"]["winners"].as_array().expect("w1");
-    let winners2 = v2["keep_set"]["winners"].as_array().expect("w2");
+    let ks1_v: serde_json::Value = serde_json::from_str(&ks1).expect("ks1");
+    let ks2_v: serde_json::Value = serde_json::from_str(&ks2).expect("ks2");
+    let winners1 = ks1_v["winners"].as_array().expect("w1");
+    let winners2 = ks2_v["winners"].as_array().expect("w2");
     assert_eq!(
         winners1.len(),
         ASPOSE_DEFAULT_WINNER_GOLDEN.len(),
@@ -1194,8 +1214,6 @@ fn aspose_default_winners_deterministic_golden() {
     );
 
     // On-disk keep-set JSON winners must also match.
-    let ks1_v: serde_json::Value = serde_json::from_str(&ks1).expect("ks1");
-    let ks2_v: serde_json::Value = serde_json::from_str(&ks2).expect("ks2");
     assert_eq!(
         ks1_v["winners"], ks2_v["winners"],
         "keep-set JSON winners list must match across runs"
@@ -1254,5 +1272,127 @@ fn aspose_default_winners_deterministic_golden() {
         hash_before,
         sha256_file(&sample),
         "source fixture SHA-256 must be unchanged after keep-set"
+    );
+}
+
+const ENVELOPE_MAX_BYTES: usize = 16 * 1024;
+
+#[test]
+fn keep_set_json_envelope_omits_winners_and_stays_small() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let local = dir.path().join("sample.pst");
+    fs::copy(&sample, &local).expect("copy fixture");
+    let out = Command::new(bin())
+        .args(["keep-set", local.to_str().expect("utf8"), "--json"])
+        .output()
+        .expect("run keep-set --json");
+    assert!(
+        out.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        out.stdout.len() < ENVELOPE_MAX_BYTES,
+        "default --json stdout {} bytes, want < {ENVELOPE_MAX_BYTES}",
+        out.stdout.len()
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("json");
+    assert_eq!(v["schema"].as_str(), Some("keep_set_summary_v1"));
+    assert_eq!(v["winners_inline"], false);
+    assert!(v["keep_set"].get("winners").is_none());
+    assert!(v["keep_set"]["stats"]["unique"].as_u64().unwrap_or(0) > 0);
+    assert!(v["input_path_sort_order"].is_array());
+}
+
+#[test]
+fn keep_set_include_winners_matches_sidecar_disk_stays_envelope() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let local = dir.path().join("sample.pst");
+    fs::copy(&sample, &local).expect("copy fixture");
+    let ks = dir.path().join("keepset.json");
+    let out = Command::new(bin())
+        .args([
+            "keep-set",
+            local.to_str().expect("utf8"),
+            "--json",
+            "--include-winners",
+            "--keep-set-json",
+            ks.to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("run keep-set --include-winners");
+    assert!(
+        out.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("json");
+    assert_eq!(v["winners_inline"], true);
+    let stdout_winners = v["keep_set"]["winners"].as_array().expect("stdout winners");
+    let ks_v: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&ks).expect("sidecar")).expect("ks json");
+    assert_eq!(ks_v["schema"].as_str(), Some("keep_set_v1"));
+    assert_eq!(
+        &ks_v["winners"],
+        &serde_json::Value::Array(stdout_winners.clone())
+    );
+
+    let summary_path = v["summary_path"].as_str().expect("summary_path");
+    let disk: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(summary_path).expect("disk summary"))
+            .expect("disk");
+    assert_eq!(disk["winners_inline"], false);
+    assert!(
+        disk["keep_set"].get("winners").is_none(),
+        "keep_set_summary.json must omit winners even with --include-winners"
+    );
+}
+
+#[test]
+fn include_winners_without_json_stays_human_summary() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let local = dir.path().join("sample.pst");
+    fs::copy(&sample, &local).expect("copy fixture");
+    let out = Command::new(bin())
+        .args([
+            "keep-set",
+            local.to_str().expect("utf8"),
+            "--include-winners",
+        ])
+        .output()
+        .expect("run keep-set --include-winners without --json");
+    assert!(
+        out.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("=== Keep-set"),
+        "human summary expected; stdout={stdout}"
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&stdout).is_err(),
+        "without --json, stdout must not be the JSON envelope"
     );
 }
