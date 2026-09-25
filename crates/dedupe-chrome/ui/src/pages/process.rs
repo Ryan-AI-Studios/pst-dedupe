@@ -18,7 +18,8 @@ const DEFAULT_PROFILE: &str = "builtin:standard";
 const DROP_COPY_KINDS: &str = "PST · ZIP · Purview package · folder";
 const DROP_COPY_HASH: &str = "Hashed on arrival.";
 const DENIST_NSRL_NOTE: &str = "optional local hash-list (NSRL RDS not this track).";
-const EXCEPTIONS_NO_VAULT: &str = "Exclude is not available. Encrypted stores fail closed (no password vault).";
+const EXCEPTIONS_NO_VAULT: &str =
+    "Exclude is not available. Encrypted stores fail closed (no password vault).";
 const FILE_DROP_EVENT: &str = "process-file-drop";
 
 fn ingest_params(path: &str) -> String {
@@ -93,7 +94,10 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "dialog"], js_name = open, catch)]
     fn dialog_open(options: JsValue) -> Result<js_sys::Promise, JsValue>;
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"], js_name = listen, catch)]
-    fn tauri_event_listen(event: &str, handler: &js_sys::Function) -> Result<js_sys::Promise, JsValue>;
+    fn tauri_event_listen(
+        event: &str,
+        handler: &js_sys::Function,
+    ) -> Result<js_sys::Promise, JsValue>;
 }
 
 fn dash(v: Option<u64>) -> String {
@@ -620,14 +624,11 @@ pub fn ProcessPage() -> impl IntoView {
                 {
                     Ok(snap) => {
                         let was_busy = snapshot_busy(&progress.get_untracked());
-                        let finished_ok = poll_finished_ok(
-                            was_busy,
-                            &snap,
-                            &accepted_job.get_untracked(),
-                        );
+                        let finished_ok =
+                            poll_finished_ok(was_busy, &snap, &accepted_job.get_untracked());
                         let finished_failed = finished_ok && snap.state == "failed";
-                        let finished_paused = finished_ok
-                            && (snap.state == "paused" || snap.state == "cancelled");
+                        let finished_paused =
+                            finished_ok && (snap.state == "paused" || snap.state == "cancelled");
                         let missing_job = snapshot_busy(&snap)
                             && page
                                 .get_untracked()
@@ -1911,7 +1912,10 @@ mod extract_all_busy_tests {
         assert!(prod.contains("Review-ready"));
         assert!(prod.contains("Unaccounted-for"));
         assert!(prod.contains("Still processing"));
-        let export = prod.split("let export_report = move |_|").nth(1).unwrap_or("");
+        let export = prod
+            .split("let export_report = move |_|")
+            .nth(1)
+            .unwrap_or("");
         assert!(
             export.contains("export_note.set(None)"),
             "export failure must clear a previous success note"
@@ -1977,10 +1981,7 @@ mod extract_all_busy_tests {
         let idle = snap("", "idle");
         assert!(should_reload_stale_importing(true, &idle));
         assert!(!should_reload_stale_importing(false, &idle));
-        assert!(!should_reload_stale_importing(
-            true,
-            &snap("j1", "running")
-        ));
+        assert!(!should_reload_stale_importing(true, &snap("j1", "running")));
         let src = include_str!("process.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
         assert!(prod.contains("should_reload_stale_importing"));
@@ -1990,10 +1991,7 @@ mod extract_all_busy_tests {
 
     #[test]
     fn drop_ingest_lists_unqueued_and_never_writes_extract_queue() {
-        assert_eq!(
-            drop_error_after_start(None, &["C:\\a.pst".into()]),
-            None
-        );
+        assert_eq!(drop_error_after_start(None, &["C:\\a.pst".into()]), None);
         let note = drop_error_after_start(
             None,
             &["C:\\a.pst".into(), "C:\\b.zip".into(), "C:\\c.pst".into()],
@@ -2003,17 +2001,18 @@ mod extract_all_busy_tests {
             Some("busy: matter is busy: a job is already running (job_1)"),
             &["C:\\a.pst".into(), "C:\\b.zip".into()],
         );
-        assert!(busy.as_deref().unwrap_or("").contains("not queued: a.pst, b.zip"));
+        assert!(busy
+            .as_deref()
+            .unwrap_or("")
+            .contains("not queued: a.pst, b.zip"));
         let encrypted = drop_error_after_start(
             Some("encrypted PST: password required"),
             &["C:\\a.pst".into(), "C:\\b.zip".into()],
         );
-        assert!(
-            encrypted
-                .as_deref()
-                .unwrap_or("")
-                .contains("not queued: a.pst, b.zip")
-        );
+        assert!(encrypted
+            .as_deref()
+            .unwrap_or("")
+            .contains("not queued: a.pst, b.zip"));
         assert!(encrypted
             .as_deref()
             .unwrap_or("")
@@ -2024,7 +2023,10 @@ mod extract_all_busy_tests {
         let src = include_str!("process.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
         let drop_fn = prod.split("fn spawn_drop_ingest").nth(1).unwrap_or("");
-        let drop_fn = drop_fn.split("fn is_orphan_running").next().unwrap_or(drop_fn);
+        let drop_fn = drop_fn
+            .split("fn is_orphan_running")
+            .next()
+            .unwrap_or(drop_fn);
         assert!(drop_fn.contains("ingest"));
         assert!(!drop_fn.contains("extract_queue"));
         assert!(drop_fn.contains("accepted_job.set(resp.job_id)"));
@@ -2033,8 +2035,14 @@ mod extract_all_busy_tests {
         assert!(prod.contains("tauri_event_listen"));
         assert!(prod.contains(FILE_DROP_EVENT));
         assert!(prod.contains("File drop listener failed"));
-        let drop_effect = prod.split("attach_drop_listener(&handler)").nth(1).unwrap_or("");
-        let drop_effect = drop_effect.split("let add_folder").next().unwrap_or(drop_effect);
+        let drop_effect = prod
+            .split("attach_drop_listener(&handler)")
+            .nth(1)
+            .unwrap_or("");
+        let drop_effect = drop_effect
+            .split("let add_folder")
+            .next()
+            .unwrap_or(drop_effect);
         assert!(
             drop_effect.contains("on_cleanup"),
             "drop listener must unlisten when Process unmounts"
@@ -2058,7 +2066,9 @@ mod extract_all_busy_tests {
         assert!(!prod.contains("EXCEPTIONS_NOT_THIS_TRACK"));
         assert!(!prod.contains("password vault: not this track"));
         assert!(!prod.contains("request from custodian"));
-        assert!(prod.contains("spawn_resume(root_sig.get(), job_id.get_value(), error, accepted_job)"));
+        assert!(
+            prod.contains("spawn_resume(root_sig.get(), job_id.get_value(), error, accepted_job)")
+        );
         assert!(!prod.contains("let _ = tauri_invoke::<(), _>(\"process_resume\""));
     }
 }

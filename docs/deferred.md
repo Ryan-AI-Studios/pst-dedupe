@@ -988,6 +988,14 @@ Chrome HITL: ingest INC* pair; `unaccounted_for=2` (unextracted PST leaves); Rev
 | D-0137-produce-preflight-actions | — | Produce pre-flight extras lack review/QC jumps | **Closed in 0137** (PR **#150** / `a8287b4`) — Set/protocol hashes; Open in review `<A>`. | **closed / 0137** |
 | D-0116-drop | — | Process ingest is dialog picker only | **Closed in 0134** (PR **#150** / `a8287b4`) — webview drop then host `process-file-drop`. Copy already in 0126. | **closed / 0134** |
 
+## Series W — Chrome IPC argument case (0138, minted 2026-09-24)
+
+Tauri **2.11.5** default command args are camelCase. UI `tauri_invoke` sends snake_case. Host has no `rename_all`. One-word args work; `params_json` / `job_id` / `filter_json` / `item_ids` / `source_entire_corpus` / `warning_overrides` do not. Shallow rewrite only — nested `WarningOverride.item_id` must stay snake_case.
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0138-chrome-invoke-camel | — | Chrome invoke drops underscored command args | **Closed in 0138** — shallow `tauri_invoke` camelCase (plain object + JS Map). Host stays default camelCase. Nested findings stay snake_case. | **closed / 0138** |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

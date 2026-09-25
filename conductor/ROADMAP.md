@@ -471,7 +471,17 @@ Chrome INC* HITL 2026-09-03: ingest hashed both PSTs; Review 0; Unaccounted-for 
 | **0136** | ProcessExceptionActions | **Completed** | **P3 V** | Real item_errors Retry; no vault. PR **#150** / `a8287b4`. Spec: `0136-ProcessExceptionActions/`. |
 | **0137** | ProducePreflightActions | **Completed** | **P3 V** | Pre-flight extras without item_id → Set/QC/protocol. PR **#150** / `a8287b4`. Spec: `0137-ProducePreflightActions/`. |
 
-**Order:** **0133 Completed**. **0134 Completed**. **0135 Completed**. **0136 Completed**. **0137 Completed**. Next free ID **0138**.
+**Order:** **0133 Completed**. **0134 Completed**. **0135 Completed**. **0136 Completed**. **0137 Completed**.
+
+### Wave 14 — Chrome IPC argument case (Series W)
+
+Tauri 2 default camelCase command args vs snake_case UI serde (discovered on the dirty `invoke.rs` tree, 2026-09-24). Not unique-export. Not a BCC-default track.
+
+| ID | Track | Status | Priority | High-level notes |
+|---|---|---|---|---|
+| **0138** | ChromeInvokeCamelCase | **Completed** | **P1 W** | Shallow `tauri_invoke` key rewrite. Host stays default camelCase. Nested produce findings stay snake_case. Spec: `0138-ChromeInvokeCamelCase/`. |
+
+**Order:** **0138 Completed**. Next free ID **0139**.
 
 ### What each step is for
 

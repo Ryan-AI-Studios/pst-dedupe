@@ -17,9 +17,92 @@ where
     A: Serialize,
 {
     let args_js = serde_wasm_bindgen::to_value(args).map_err(|e| e.to_string())?;
+    // Tauri 2 IPC expects camelCase keys (`paramsJson`, `jobId`, `filterJson`).
+    let args_js = js_args_to_camel(args_js)?;
     let promise = invoke(cmd, args_js).map_err(js_err_to_string)?;
     let value = JsFuture::from(promise).await.map_err(js_err_to_string)?;
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
+fn to_camel_case_key(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    let mut upper = false;
+    for ch in key.chars() {
+        if ch == '_' {
+            upper = true;
+            continue;
+        }
+        if upper {
+            for u in ch.to_uppercase() {
+                out.push(u);
+            }
+            upper = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Shallow own-key rename. Nested objects/arrays are copied as values (no recursion).
+/// Host-tested twin of `js_args_to_camel`; wasm production path uses the JS adapter.
+#[allow(dead_code)]
+fn shallow_camel_object_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(to_camel_case_key(&k), v);
+            }
+            serde_json::Value::Object(out)
+        }
+        other => other,
+    }
+}
+
+fn js_args_to_camel(value: JsValue) -> Result<JsValue, String> {
+    if value.is_null() || value.is_undefined() || !value.is_object() {
+        return Ok(value);
+    }
+    if js_sys::Array::is_array(&value) {
+        return Ok(value);
+    }
+    if let Some(map) = value.dyn_ref::<js_sys::Map>() {
+        return js_map_to_camel_object(map);
+    }
+    let obj = js_sys::Object::from(value);
+    let out = js_sys::Object::new();
+    let keys = js_sys::Object::keys(&obj);
+    for i in 0..keys.length() {
+        let key = keys
+            .get(i)
+            .as_string()
+            .ok_or_else(|| "non-string invoke arg key".to_string())?;
+        let camel = to_camel_case_key(&key);
+        let val = js_sys::Reflect::get(&obj, &JsValue::from_str(&key)).map_err(js_err_to_string)?;
+        js_sys::Reflect::set(&out, &JsValue::from_str(&camel), &val).map_err(js_err_to_string)?;
+    }
+    Ok(JsValue::from(out))
+}
+
+fn js_map_to_camel_object(map: &js_sys::Map) -> Result<JsValue, String> {
+    let out = js_sys::Object::new();
+    let entries = map.entries();
+    loop {
+        let next = entries.next().map_err(js_err_to_string)?;
+        if next.done() {
+            break;
+        }
+        let pair = js_sys::Array::from(&next.value());
+        let key = pair
+            .get(0)
+            .as_string()
+            .ok_or_else(|| "non-string invoke arg key".to_string())?;
+        let val = pair.get(1);
+        js_sys::Reflect::set(&out, &JsValue::from_str(&to_camel_case_key(&key)), &val)
+            .map_err(js_err_to_string)?;
+    }
+    Ok(JsValue::from(out))
 }
 
 fn js_err_to_string(err: JsValue) -> String {
@@ -734,4 +817,112 @@ pub struct ProcessExportReportResponse {
 pub struct ProduceQcFindingsArgs {
     pub root: String,
     pub job_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{shallow_camel_object_keys, to_camel_case_key};
+    use serde_json::json;
+
+    #[test]
+    fn tauri_ipc_keys_are_camel_case() {
+        assert_eq!(to_camel_case_key("params_json"), "paramsJson");
+        assert_eq!(to_camel_case_key("job_id"), "jobId");
+        assert_eq!(to_camel_case_key("filter_json"), "filterJson");
+        assert_eq!(to_camel_case_key("item_ids"), "itemIds");
+        assert_eq!(
+            to_camel_case_key("source_entire_corpus"),
+            "sourceEntireCorpus"
+        );
+        assert_eq!(to_camel_case_key("warning_overrides"), "warningOverrides");
+        assert_eq!(to_camel_case_key("page_index"), "pageIndex");
+        assert_eq!(to_camel_case_key("root"), "root");
+        assert_eq!(to_camel_case_key("paramsJson"), "paramsJson");
+        assert_eq!(to_camel_case_key(""), "");
+        assert_eq!(to_camel_case_key("a"), "a");
+        assert_eq!(to_camel_case_key("item_id_2"), "itemId2");
+        assert_eq!(to_camel_case_key("foo__bar"), "fooBar");
+        assert_eq!(to_camel_case_key("job_"), "job");
+    }
+
+    #[test]
+    fn shallow_walker_renames_own_keys_only() {
+        let input = json!({
+            "params_json": "{\"k\":1}",
+            "nested": { "item_id": "keep-me" },
+            "overrides": [ { "item_id": "also-keep", "rule_id": "r1" } ],
+        });
+        let out = shallow_camel_object_keys(input);
+        assert_eq!(out["paramsJson"], "{\"k\":1}");
+        assert!(out.get("params_json").is_none());
+        assert_eq!(out["nested"]["item_id"], "keep-me");
+        assert!(out["nested"].get("itemId").is_none());
+        assert_eq!(out["overrides"][0]["item_id"], "also-keep");
+        assert!(out["overrides"][0].get("itemId").is_none());
+    }
+
+    #[test]
+    fn shallow_walker_leaves_array_null_and_scalars() {
+        let arr = json!([{ "item_id": "x" }, "params_json"]);
+        let out_arr = shallow_camel_object_keys(arr.clone());
+        assert_eq!(out_arr, arr);
+        assert!(out_arr.is_array());
+        assert!(out_arr.as_object().is_none());
+
+        assert_eq!(shallow_camel_object_keys(json!(null)), json!(null));
+        assert_eq!(
+            shallow_camel_object_keys(json!("params_json")),
+            json!("params_json")
+        );
+        assert_eq!(shallow_camel_object_keys(json!(7)), json!(7));
+        assert_eq!(shallow_camel_object_keys(json!(true)), json!(true));
+    }
+
+    #[test]
+    fn invoke_adapter_is_one_shallow_pass_before_invoke() {
+        let src = include_str!("invoke.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let invoke_fn = prod
+            .split("pub async fn tauri_invoke")
+            .nth(1)
+            .expect("tauri_invoke");
+        let invoke_fn = invoke_fn.split("\nfn ").next().unwrap_or(invoke_fn);
+        let camel_at = invoke_fn
+            .find("js_args_to_camel(args_js)")
+            .expect("one camel pass on args");
+        let invoke_at = invoke_fn.find("invoke(cmd, args_js)").expect("invoke call");
+        assert!(camel_at < invoke_at, "camel rewrite must run before invoke");
+        let after_invoke = &invoke_fn[invoke_at..];
+        assert!(
+            !after_invoke.contains("js_args_to_camel"),
+            "JsFuture result must not be camel-cased"
+        );
+        assert!(
+            !after_invoke.contains("shallow_camel_object_keys"),
+            "result path must not run the walker"
+        );
+        assert_eq!(
+            invoke_fn.matches("js_args_to_camel").count(),
+            1,
+            "exactly one camel pass in tauri_invoke"
+        );
+        assert!(prod.contains("Array::is_array"), "array early-return");
+        assert!(prod.contains("js_sys::Map"), "Map branch");
+        assert!(
+            prod.contains("map.entries()"),
+            "Map copied via entries, not Object.keys"
+        );
+        assert!(
+            prod.contains("out.insert(to_camel_case_key(&k), v)"),
+            "walker must copy values without renaming nested keys"
+        );
+        assert!(
+            !prod.contains("shallow_camel_object_keys(v)"),
+            "walker must not recurse into values"
+        );
+        assert!(
+            !prod.contains("js_args_to_camel(val)"),
+            "JS adapter must not re-walk copied values"
+        );
+    }
 }
