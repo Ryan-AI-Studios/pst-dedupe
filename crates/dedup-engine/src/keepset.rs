@@ -40,6 +40,8 @@ pub enum KeepPolicy {
     ///
     /// **Note:** `first_seen` means sorted input-path order (then scan index),
     /// not chronological send time. Use [`Self::EarliestDate`] for dates.
+    /// ASCII `'-'` (0x2D) sorts before `'.'` (0x2E), so `foo-2.pst` can crown
+    /// before `foo.pst`. Override with `--source-rank`.
     #[default]
     FirstSeen,
     /// Prefer largest `message_size` (0/missing last).
@@ -1030,6 +1032,7 @@ pub fn path_compare_key(path: &Path) -> String {
 ///
 /// Windows: lexicographic on lowercased absolute path (original path preserved for open).
 /// Non-Windows: lexicographic on absolute path as-is.
+/// ASCII `'-'` (0x2D) sorts before `'.'` (0x2E), so `foo-2.pst` precedes `foo.pst`.
 pub fn sort_input_paths(paths: &mut [PathBuf]) {
     paths.sort_by_key(|a| path_compare_key(a));
 }
@@ -1986,6 +1989,24 @@ pub fn decided_by_rung(
     }
     // Keys equal (should be rare for distinct items) — fall through to path_order.
     "path_order"
+}
+
+/// Run-level hint when ≥2 inputs have no `--source-rank` (0139).
+///
+/// Callers prefix `note:`. Does not change ranking. Empty patterns count as no rank.
+pub fn multi_input_source_rank_hint(
+    input_count: usize,
+    source_rank_patterns: &[String],
+) -> Option<String> {
+    if input_count < 2 {
+        return None;
+    }
+    if source_rank_patterns.iter().any(|p| !p.is_empty()) {
+        return None;
+    }
+    Some(format!(
+        "{input_count} input PST(s) without --source-rank; first_seen and remaining ties use sorted path order (ASCII '-' sorts before '.', so -2.pst can crown before .pst)"
+    ))
 }
 
 /// Human-summary hint when any winner came from Recoverable Items (signal only).
@@ -6292,6 +6313,22 @@ mod tests {
             .expect("build");
         assert_eq!(ks2.winners[0].locus.nid, 1);
         assert_eq!(ks2.stats.winners_from_recoverable_items, 1);
+    }
+
+    #[test]
+    fn multi_input_source_rank_hint_predicate() {
+        assert!(multi_input_source_rank_hint(1, &[]).is_none());
+        assert!(multi_input_source_rank_hint(0, &[]).is_none());
+        let some = multi_input_source_rank_hint(2, &[]).expect("two inputs");
+        assert!(some.contains("--source-rank"), "{some}");
+        assert!(some.contains("sorted path order"), "{some}");
+        assert!(some.contains("'-'"), "{some}");
+        assert!(!some.contains('\n'), "{some}");
+        assert!(multi_input_source_rank_hint(2, &["a.pst".into()]).is_none());
+        assert!(
+            multi_input_source_rank_hint(2, &[String::new(), String::new()]).is_some(),
+            "empty-string-only patterns are not a rank"
+        );
     }
 
     #[test]

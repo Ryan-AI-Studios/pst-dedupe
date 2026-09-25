@@ -15,10 +15,10 @@ use crate::grouping_cli::{format_grouping_stats_human, grouping_context_from_cli
 use crate::keep_set_cmd::rank_context_from_cli;
 use dedup_engine::integrity::{IntegrityThresholds, ScanMode, SCAN_INTEGRITY_SCHEMA};
 use dedup_engine::keepset::{
-    finalize_with_materialize_opts, recoverable_items_hint, resolve_groups_with_grouping,
-    sort_input_paths, write_keep_set_json, CanonicalMessage, DecisionCsvWriter, FamilyPolicy,
-    KeepPolicy, KeepSet, KeepSetProvenance, MaterializeFinalizeOpts, MessageMaterializer,
-    SoftSkipAttachRecord,
+    finalize_with_materialize_opts, multi_input_source_rank_hint, recoverable_items_hint,
+    resolve_groups_with_grouping, sort_input_paths, write_keep_set_json, CanonicalMessage,
+    DecisionCsvWriter, FamilyPolicy, KeepPolicy, KeepSet, KeepSetProvenance,
+    MaterializeFinalizeOpts, MessageMaterializer, SoftSkipAttachRecord,
 };
 use dedup_engine::{
     clamp_files_per_volume, merge_pack_degraded, validate_volume_prefix, write_canonical_eml,
@@ -106,6 +106,8 @@ pub struct UniqueEmlCliArgs {
 #[derive(Debug, Serialize)]
 struct UniqueEmlSummaryOut {
     schema: String,
+    /// Resolved absolute paths after `sort_input_paths` (0139).
+    input_path_sort_order: Vec<String>,
     eml_pack_schema: String,
     policy: String,
     family_policy: String,
@@ -312,6 +314,11 @@ pub(crate) fn write_eml_hard_fail_summary(
     );
     let payload = UniqueEmlSummaryOut {
         schema: keep_set.schema.clone(),
+        input_path_sort_order: keep_set
+            .created_from
+            .as_ref()
+            .map(|p| p.input_files.clone())
+            .unwrap_or_default(),
         eml_pack_schema: EML_PACK_SCHEMA.to_string(),
         policy: policy.as_str().to_string(),
         family_policy: family_policy.as_str().to_string(),
@@ -794,6 +801,11 @@ fn write_eml_pack_from_keep_set_inner(
 
     let payload = UniqueEmlSummaryOut {
         schema: keep_set.schema.clone(),
+        input_path_sort_order: input
+            .paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
         eml_pack_schema: EML_PACK_SCHEMA.to_string(),
         policy: input.policy.as_str().to_string(),
         family_policy: input.family_policy.as_str().to_string(),
@@ -928,6 +940,9 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
     // Phase 0: resolve + deterministic sort.
     let mut paths = resolve_pst_paths(&args.paths)?;
     sort_input_paths(&mut paths);
+    if let Some(hint) = multi_input_source_rank_hint(paths.len(), &args.source_rank) {
+        eprintln!("note: {hint}");
+    }
 
     // CLI clamp only; VolumePackWriter accepts any ≥1 for tests.
     let files_per_volume = clamp_files_per_volume(args.files_per_volume);

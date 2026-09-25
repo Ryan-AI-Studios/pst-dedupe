@@ -22,9 +22,10 @@ use dedup_engine::integrity::{
     SCAN_INTEGRITY_SCHEMA,
 };
 use dedup_engine::keepset::{
-    finalize_with_materialize_opts, recoverable_items_hint, resolve_groups_with_grouping,
-    sort_input_paths, write_keep_set_json, DecisionCsvWriter, FamilyPolicy, KeepPolicy, KeepSet,
-    KeepSetProvenance, KeepSetStats, MaterializeFinalizeOpts, KEEP_SET_SCHEMA,
+    finalize_with_materialize_opts, multi_input_source_rank_hint, recoverable_items_hint,
+    resolve_groups_with_grouping, sort_input_paths, write_keep_set_json, DecisionCsvWriter,
+    FamilyPolicy, KeepPolicy, KeepSet, KeepSetProvenance, KeepSetStats, MaterializeFinalizeOpts,
+    KEEP_SET_SCHEMA,
 };
 use pst_reader::PstFile;
 use pst_writer::{
@@ -118,6 +119,7 @@ pub struct UniquePstClapArgs {
     #[arg(long = "folder-rank", action = clap::ArgAction::Append)]
     pub folder_rank: Vec<String>,
     /// Ordered source preference (repeatable, best-first).
+    /// Default first_seen uses lexicographic resolved-path order (ASCII '-' before '.', so -2.pst can crown before .pst); pass --source-rank to override.
     #[arg(long = "source-rank", action = clap::ArgAction::Append)]
     pub source_rank: Vec<String>,
     /// Swap source_rank and folder_class rungs.
@@ -1243,6 +1245,7 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
         artifact_state: ctx.artifact_state,
         summary_path: summary_abs.display().to_string(),
         inputs: ctx.inputs.iter().map(|p| p.display().to_string()).collect(),
+        input_path_sort_order: ctx.inputs.iter().map(|p| p.display().to_string()).collect(),
         policy: ctx.policy.as_str().to_string(),
         family_policy: ctx.family_policy.as_str().to_string(),
         mode: ctx.mode.as_str().to_string(),
@@ -1431,6 +1434,9 @@ pub fn run_unique_pst_with_options(
     // ── Phase 0: resolve paths, guards, prepare report-dir ──────────────────
     let mut paths = resolve_pst_paths(&args.paths)?;
     sort_input_paths(&mut paths);
+    if let Some(hint) = multi_input_source_rank_hint(paths.len(), &args.source_rank) {
+        emit_log(stderr, &on_log, &format!("note: {hint}"));
+    }
 
     let out = resolve_cli_path_maybe_missing(&args.out)?.into_std_path_buf();
     if out
@@ -3519,6 +3525,7 @@ pub fn run_unique_pst_with_options(
         artifact_state,
         summary_path: summary_abs.display().to_string(),
         inputs: paths.iter().map(|p| p.display().to_string()).collect(),
+        input_path_sort_order: paths.iter().map(|p| p.display().to_string()).collect(),
         policy: args.policy.as_str().to_string(),
         family_policy: args.family_policy.as_str().to_string(),
         mode: args.mode.as_str().to_string(),

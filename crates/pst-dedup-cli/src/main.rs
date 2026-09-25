@@ -261,6 +261,7 @@ enum Commands {
         #[arg(long = "folder-rank", action = clap::ArgAction::Append)]
         folder_rank: Vec<String>,
         /// Ordered source preference substring (repeatable, best-first; unmatched worst).
+        /// Default first_seen uses lexicographic resolved-path order (ASCII '-' before '.', so -2.pst can crown before .pst); pass --source-rank to override.
         #[arg(long = "source-rank", action = clap::ArgAction::Append)]
         source_rank: Vec<String>,
         /// Swap source_rank and folder_class rungs (folder before source).
@@ -370,6 +371,7 @@ enum Commands {
         #[arg(long = "folder-rank", action = clap::ArgAction::Append)]
         folder_rank: Vec<String>,
         /// Ordered source preference (repeatable, best-first).
+        /// Default first_seen uses lexicographic resolved-path order (ASCII '-' before '.', so -2.pst can crown before .pst); pass --source-rank to override.
         #[arg(long = "source-rank", action = clap::ArgAction::Append)]
         source_rank: Vec<String>,
         /// Swap source_rank and folder_class rungs.

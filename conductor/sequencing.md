@@ -151,6 +151,15 @@
 | 92 | P3 V | **0136** ProcessExceptionActions | ✅ Completed | Real item_errors Retry; vault never; PR **#150** / `a8287b4` |
 | 93 | P3 V | **0137** ProducePreflightActions | ✅ Completed | Pre-flight extras → review/QC; 0119 frozen; PR **#150** / `a8287b4` |
 | 94 | P1 W | **0138** ChromeInvokeCamelCase | ✅ Completed | Top-level `tauri_invoke` camelCase; host stays default; shallow only |
+| 95 | P2 X | **0139** SourceRankDiscoverability | ⬜ Ready | `first_seen` path-sort vs `--source-rank` |
+| 96 | P2 X | **0140** ScanStderrCadence | 📦 Proposed | Scan stderr aggregates; owns I/O tax |
+| 97 | P2 X | **0141** KeepSetJsonEnvelope | 📦 Proposed | `--json` stats vs winners sidecar |
+| 98 | P3 X | **0142** DupsJsonTotals | 📦 Proposed | `dups --limit` still reports totals |
+| 99 | P2 X | **0143** PolyCrcScanCopy | 📦 Proposed | Poly CRC + preflight `ok` copy |
+| 100 | P3 X | **0144** IntegrityCsvHonesty | 📦 Proposed | Empty integrity CSV vs CRC_SUSPECT |
+| 101 | P1 X | **0145** ScanOnceReuse | 📦 Proposed | keep-set/dups from scan JSON |
+| 102 | P1 X | **0146** UniquePstWriteHotspots | 📦 Proposed | unique-pst write wall (HITL) |
+| 103 | P2 X | **0147** DeepAttachCoverage | 📦 Proposed | Truncated 256 MiB probe leftover |
 
 ## Series K spine (clean unique export)
 
@@ -326,3 +335,36 @@ Minted **2026-09-24** from the uncommitted `tauri_invoke` camelCase rewrite (HEA
 | Order | Track | Notes |
 |---|---|---|
 | 1 | **0138** ChromeInvokeCamelCase | **Completed** — `paramsJson` / `jobId` / `filterJson` at `tauri_invoke`; nested findings stay snake_case |
+
+## Series X — INC0102784 CLI friction & scan speed (0139–0147)
+
+Minted **2026-09-24** from read-only inspect/scan/dups/keep-set on the split INC* pair. **0139** Ready after fold-in 2026-09-25; **0140–0147** placeholders until `/plan-track`.
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0139** SourceRankDiscoverability | **Ready** — path-sort `first_seen`; JSON `input_path_sort_order`; one multi-input note |
+| 2 | **0140** ScanStderrCadence | Per-folder / per-probe stderr |
+| 3 | **0141** KeepSetJsonEnvelope | 3.4 MB `--json` winners |
+| 4 | **0142** DupsJsonTotals | `--limit` sample vs totals |
+| 5 | **0143** PolyCrcScanCopy | Scary CRC rates + preflight `ok` |
+| 6 | **0144** IntegrityCsvHonesty | Header-only skip ledger |
+| 7 | **0145** ScanOnceReuse | Re-walk 4099 msgs three times |
+| 8 | **0147** DeepAttachCoverage | 256 MiB probe truncated |
+| 9 | **0146** UniquePstWriteHotspots | 787–1043 s unique-pst wall |
+
+## Series Y — Chrome HITL mockup walk residuals (0148–0157)
+
+Minted **2026-09-24** from Hands + Playwright vs mockup. Placeholders until `/plan-track`. Color/vault/OST/fake volumes declined.
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0148** RecentsOpenHonesty | Missing root / no `matter.db` |
+| 2 | **0149** PickerDialogReset | Leftover search in pickers |
+| 3 | **0150** ProcessPauseOnce | Duplicate Pause |
+| 4 | **0151** ProcessIngestProgress | Ingest percent honesty |
+| 5 | **0152** ProduceShellHonesty | Overflow, error canvas, Finalize style |
+| 6 | **0153** ReviewQueryAndFacets | Chip + Reading as + facets |
+| 7 | **0154** ReviewBulkCheck | Select matching + CHECK |
+| 8 | **0155** ReviewFamilyRows | Attachment indent |
+| 9 | **0156** ReviewNamedQueues | Later rail zeros |
+| 10 | **0157** ReviewGotoBates | Bates in Go-to when indexed |
