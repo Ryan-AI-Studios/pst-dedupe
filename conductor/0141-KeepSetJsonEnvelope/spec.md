@@ -9,7 +9,7 @@
 - **Execution repo:** `C:\dev\Dedupe`
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** keep-set `--json` operator stdout. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-09-25).
-- **Status:** Ready — not started
+- **Status:** Completed
 - **Depends on:** **0066** keep-set `--json` · **0078** self-locating `keep_set_summary.json` · **0139** Completed (`input_path_sort_order`)
 - **Spec authored:** 2026-09-24 placeholder
 - **Ready:** 2026-09-25 (coordinator fold of `agy-review.md` + `opencode-review.md`; placeholder expanded)

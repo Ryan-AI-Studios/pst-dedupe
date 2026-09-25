@@ -1,8 +1,9 @@
 # 0141 — KeepSetJsonEnvelope — review
 
-**Status:** In progress (publish)  
+**Status:** Completed  
 **Date:** 2026-09-25  
-**PR:** pending
+**PR:** [#158](https://github.com/Ryan-AI-Studios/pst-dedupe/pull/158)  
+**Squash:** `766f523`
 
 ## DoD
 
@@ -13,7 +14,7 @@
 | DoD-3 Tests migrated | PASS — four live parsers + 0078 disk omit + envelope tests |
 | DoD-4 Disk contract | PASS — `keep_set_summary.json` omits winners even with `--include-winners` |
 | DoD-5 Isolation | PASS — `KeepSet` unmodified; unique-* / oracle untouched; 0139 `input_path_sort_order` retained |
-| DoD-6 Recorded | In progress — this file; registry after merge |
+| DoD-6 Recorded | PASS — this file; registry Completed |
 
 HITL INC* `keep-set --json`: **skipped** (spec optional).
 

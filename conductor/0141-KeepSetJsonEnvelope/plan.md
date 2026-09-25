@@ -1,6 +1,6 @@
 # 0141 — KeepSetJsonEnvelope — Plan
 
-> Map to `spec.md` §7. Execute in `C:\dev\Dedupe`. Status stays **Ready — not started** until implement.
+> Map to `spec.md` §7. Execute in `C:\dev\Dedupe`. Status: **Completed** (PR **#158** / `766f523`).
 >
 > **Ledger (execute):** `ledgerful ledger start 0141-keepset-json-envelope --category FEATURE --message "keep-set --json agent envelope; winners in sidecar or --include-winners"`
 >
