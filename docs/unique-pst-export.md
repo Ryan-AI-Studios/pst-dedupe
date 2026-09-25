@@ -186,6 +186,8 @@ Additive fields (always present; older tools may ignore):
 
 Soft warning when `prepared_bytes_peak` exceeds **1 GiB** (stability; see D-0079-stream-prepare).
 
+**0146 wall (parked):** operator unique-pst `--also-eml` with default `--qc-level sample` is dominated by `also_eml_ms` and `qc_ms` (historical INC* 1043 s: ~393 s + ~407 s). The remainder (scan/resolve/materialize/prepare/write including `hash_ms`/report/verify) is the minority. 0079 writer cuts stay; `--jobs` stays unshipped; QC default stays `sample`. `hash_ms` is nested inside `write_ms` — do not add it as a thirteenth component of `total_ms`. `unaccounted_ms` is computed, never forced to 0.
+
 **Oracle allowlist:** structural pack compare (`export_oracle`) strips the additive
 measurement fields above (plus paths/hashes/timings) so a **pre-0079 parent** pack
 without them still compares equal to HEAD on **measurement** product semantics.
