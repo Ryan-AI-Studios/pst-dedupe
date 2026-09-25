@@ -34,5 +34,5 @@ Owner release `dedupe-chrome` EXE (ingest start, pause/cancel, filtered queue, p
 
 ## Publish
 
-- PR / SHA: pending (filled after `gh pr create` / squash-merge)
+- PR **#152** (SHA after squash-merge)
 - Closes **D-0138-chrome-invoke-camel**

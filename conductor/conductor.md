@@ -356,7 +356,7 @@ Working tree on `73f1d7f` (2026-09-24): uncommitted `tauri_invoke` camelCase rew
 
 | Track | Status | Summary |
 |---|---|---|
-| [0138-ChromeInvokeCamelCase](0138-ChromeInvokeCamelCase/spec.md) | **Completed** | Top-level `tauri_invoke` snake→camel (pure shallow walker + JS Map). Host stays default camelCase. Nested findings stay snake_case. Closes **D-0138-chrome-invoke-camel**. |
+| [0138-ChromeInvokeCamelCase](0138-ChromeInvokeCamelCase/spec.md) | **Completed** | Top-level `tauri_invoke` snake→camel (pure shallow walker + JS Map). Host stays default camelCase. Nested findings stay snake_case. Closes **D-0138-chrome-invoke-camel**. PR **#152**. |
 
 **Suggested order:** **0138 Completed**. Next free ID **0139**.
 
