@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0150 — Process Pause once)
+
+- Chrome Process shows one Pause per live busy job: the job-row button when that job is in the table, otherwise a footer fallback. The busy kind/state/stage/message readout stays.
+
 ### Fixed (0149 — Picker dialog reset)
 
 - Chrome New matter… / Open… / Add folder / Add ZIP or PST seed an existing `defaultPath` so the Windows folder picker leaves a leftover search view. Defaults come from the last recent matter parent, then Documents/home/cwd. Process ingest pickers prefer the open matter root. Missing paths are not created.

@@ -370,6 +370,18 @@ fn snapshot_busy(snap: &JobProgressSnapshot) -> bool {
         && snap.state != "paused"
 }
 
+fn job_in_table(jobs: &[ProcessJobRow], job_id: &str) -> bool {
+    !job_id.is_empty() && jobs.iter().any(|j| j.id == job_id)
+}
+
+fn job_row_shows_pause(is_busy: bool, snap_id: &str, row_id: &str) -> bool {
+    is_busy && !snap_id.is_empty() && snap_id == row_id
+}
+
+fn footer_shows_pause(is_busy: bool, job_in_table: bool) -> bool {
+    is_busy && !job_in_table
+}
+
 fn spawn_cancel(job_id: String) {
     if job_id.is_empty() {
         return;
@@ -1345,7 +1357,11 @@ pub fn ProcessPage() -> impl IntoView {
                                                 <td class="jobs-actions">
                                                     <Show when=move || {
                                                         let snap = progress.get();
-                                                        snap.job_id == job_id_for_active && snapshot_busy(&snap)
+                                                        job_row_shows_pause(
+                                                            snapshot_busy(&snap),
+                                                            &snap.job_id,
+                                                            &job_id_for_active,
+                                                        )
                                                     }>
                                                         <button on:click=move |_| {
                                                             spawn_cancel(job_id.get_value());
@@ -1387,9 +1403,18 @@ pub fn ProcessPage() -> impl IntoView {
                                 s.message.unwrap_or_default()
                             )
                         }}</p>
-                        <button on:click=move |_| {
-                            spawn_cancel(progress.get_untracked().job_id);
-                        }>"Pause"</button>
+                        <Show when=move || {
+                            let snap = progress.get();
+                            let jobs = page.get().map(|p| p.jobs).unwrap_or_default();
+                            footer_shows_pause(
+                                snapshot_busy(&snap),
+                                job_in_table(&jobs, &snap.job_id),
+                            )
+                        }>
+                            <button on:click=move |_| {
+                                spawn_cancel(progress.get_untracked().job_id);
+                            }>"Pause"</button>
+                        </Show>
                     </Show>
                     <h2>{move || format!(
                         "Exceptions ({})",
@@ -1608,6 +1633,42 @@ mod extract_all_busy_tests {
 
     fn job_row_shows_resume(job: &ProcessJobRow, snap: &JobProgressSnapshot) -> bool {
         is_orphan_running(job, snap) || retry_allowed(&job.state)
+    }
+
+    fn pause_button_count(is_busy: bool, snap_id: &str, job_ids: &[&str]) -> usize {
+        let in_table = job_ids
+            .iter()
+            .any(|id| !snap_id.is_empty() && *id == snap_id);
+        let row = job_ids
+            .iter()
+            .filter(|id| job_row_shows_pause(is_busy, snap_id, id))
+            .count();
+        let footer = usize::from(footer_shows_pause(is_busy, in_table));
+        row + footer
+    }
+
+    #[test]
+    fn pause_button_count_never_two() {
+        assert_eq!(pause_button_count(true, "j1", &["j1"]), 1);
+        assert!(!footer_shows_pause(
+            true,
+            job_in_table(&[job("j1", "running")], "j1")
+        ));
+        assert!(job_row_shows_pause(true, "j1", "j1"));
+
+        assert_eq!(pause_button_count(true, "j1", &[]), 1);
+        assert!(footer_shows_pause(true, job_in_table(&[], "j1")));
+
+        assert_eq!(pause_button_count(true, "j1", &["j2"]), 1);
+        assert!(footer_shows_pause(
+            true,
+            job_in_table(&[job("j2", "succeeded")], "j1")
+        ));
+
+        assert_eq!(pause_button_count(false, "j1", &["j1"]), 0);
+        assert_eq!(pause_button_count(false, "j1", &[]), 0);
+        assert!(!job_in_table(&[job("j1", "running")], ""));
+        assert!(!job_row_shows_pause(true, "", "j1"));
     }
 
     #[test]
@@ -2098,6 +2159,40 @@ mod extract_all_busy_tests {
         assert!(pick.contains("picker_default_dir"));
         assert!(prod.contains("Add folder"));
         assert!(prod.contains("Add ZIP or PST"));
+    }
+
+    #[test]
+    fn pause_shows_wire_helpers() {
+        let src = include_str!("process.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            prod.contains("job_row_shows_pause("),
+            "row Pause Show must call job_row_shows_pause"
+        );
+        assert!(
+            prod.contains("footer_shows_pause("),
+            "footer Pause Show must call footer_shows_pause"
+        );
+        assert!(
+            prod.contains("job_in_table("),
+            "footer Pause must gate on job_in_table"
+        );
+        let footer = prod
+            .split(r#"<Show when=move || snapshot_busy(&progress.get())>"#)
+            .nth(1)
+            .unwrap_or("");
+        assert!(
+            footer.contains("s.stage.unwrap_or_else"),
+            "busy footer must keep the stage/message paragraph"
+        );
+        assert!(
+            footer.contains("s.message.unwrap_or_default()"),
+            "busy footer must keep the message readout"
+        );
+        assert!(
+            footer.contains("footer_shows_pause"),
+            "footer Pause button must sit inside the busy readout Show"
+        );
     }
 
     #[test]
