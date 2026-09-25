@@ -1006,7 +1006,7 @@ Read-only smoke of Desktop `INC0102784.pst` (4.00 GiB) + `INC0102784-2.pst` (537
 | D-0140-scan-stderr-cadence | P3 | `scan -v` ~2506 folder lines; deep-attach ~2800 probe lines | **Closed in 0140** — periodic `-v` folder progress; `--crc-log-limit 0` silences per-attempt probe writeln; unique-pst end-of-probe summary retained. Distinct from 0132. | **closed / 0140** |
 | D-0141-keepset-json-envelope | P3 | `keep-set --json` stdout 3.4 MB (all winners) | **Closed in 0141** — `keep_set_summary_v1` envelope; winners in `--keep-set-json` or `--include-winners`. PR **#158** / `766f523`. | **closed / 0141** |
 | D-0142-dups-json-totals | P3 | `dups --limit N` JSON looks like N dups | **Closed in 0142** — additive `duplicates_total` / shown / limit / truncated; array still capped. PR **#160** / `a4dae1e`. | **closed / 0142** |
-| D-0143-poly-crc-scan-copy | P3 | `block_crc_rate≈30` + preflight `ok` looks like a corrupt PST | **Owned by 0143 Proposed** — JSON/stderr copy. No skip-math or keep-set restrip. | **0143** |
+| D-0143-poly-crc-scan-copy | P3 | `block_crc_rate≈30` + preflight `ok` looks like a corrupt PST | **Closed in 0143** — additive `poly_crc_note` + stderr `note:`; skip math unchanged. PR **#162** / `1617720`. | **closed / 0143** |
 | D-0144-integrity-csv-honesty | P3 | Header-only `--integrity-csv` when CRC_SUSPECT-only | **Owned by 0144 Proposed** — omitted-reason; no fake skip rows. | **0144** |
 | D-0145-scan-once-reuse | P3 | `scan` then `dups` then `keep-set` each re-walk | **Owned by 0145 Proposed** — fail-closed `--from-scan-json`. | **0145** |
 | D-0146-unique-pst-write-hotspots | P3 | unique-pst wall 787–1043 s vs scan ~3 s | **Owned by 0146 Proposed** — measure then at most one writer cut. Not an SLA. | **0146** |

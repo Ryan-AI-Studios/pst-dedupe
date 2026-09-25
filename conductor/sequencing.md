@@ -155,7 +155,7 @@
 | 96 | P2 X | **0140** ScanStderrCadence | ✅ Completed | Scan stderr aggregates; owns I/O tax; PR **#156** / `0839c38` |
 | 97 | P2 X | **0141** KeepSetJsonEnvelope | ✅ Completed | `--json` stats vs winners sidecar; PR **#158** / `766f523` |
 | 98 | P3 X | **0142** DupsJsonTotals | ✅ Completed | Additive `duplicates_total`; `--limit` still caps sample; PR **#160** / `a4dae1e` |
-| 99 | P2 X | **0143** PolyCrcScanCopy | 📦 Proposed | Poly CRC + preflight `ok` copy |
+| 99 | P2 X | **0143** PolyCrcScanCopy | ✅ Completed | Poly CRC + preflight `ok` copy; PR **#162** / `1617720` |
 | 100 | P3 X | **0144** IntegrityCsvHonesty | 📦 Proposed | Empty integrity CSV vs CRC_SUSPECT |
 | 101 | P1 X | **0145** ScanOnceReuse | 📦 Proposed | keep-set/dups from scan JSON |
 | 102 | P1 X | **0146** UniquePstWriteHotspots | 📦 Proposed | unique-pst write wall (HITL) |
@@ -338,7 +338,7 @@ Minted **2026-09-24** from the uncommitted `tauri_invoke` camelCase rewrite (HEA
 
 ## Series X — INC0102784 CLI friction & scan speed (0139–0147)
 
-Minted **2026-09-24** from read-only inspect/scan/dups/keep-set on the split INC* pair. **0139 Completed** (PR **#154** / `234f4fa`). **0140 Completed** (PR **#156** / `0839c38`). **0141 Completed** (PR **#158** / `766f523`). **0142 Completed** (PR **#160** / `a4dae1e`). **0143–0147** placeholders until `/plan-track`.
+Minted **2026-09-24** from read-only inspect/scan/dups/keep-set on the split INC* pair. **0139 Completed** (PR **#154** / `234f4fa`). **0140 Completed** (PR **#156** / `0839c38`). **0141 Completed** (PR **#158** / `766f523`). **0142 Completed** (PR **#160** / `a4dae1e`). **0143 Completed** (PR **#162** / `1617720`). **0144–0147** placeholders until `/plan-track`.
 
 | Order | Track | Notes |
 |---|---|---|
@@ -346,7 +346,7 @@ Minted **2026-09-24** from read-only inspect/scan/dups/keep-set on the split INC
 | 2 | **0140** ScanStderrCadence | **Completed** — PR **#156** / `0839c38` |
 | 3 | **0141** KeepSetJsonEnvelope | **Completed** — PR **#158** / `766f523` |
 | 4 | **0142** DupsJsonTotals | **Completed** — PR **#160** / `a4dae1e` |
-| 5 | **0143** PolyCrcScanCopy | Scary CRC rates + preflight `ok` |
+| 5 | **0143** PolyCrcScanCopy | **Completed** — PR **#162** / `1617720` |
 | 6 | **0144** IntegrityCsvHonesty | Header-only skip ledger |
 | 7 | **0145** ScanOnceReuse | Re-walk 4099 msgs three times |
 | 8 | **0147** DeepAttachCoverage | 256 MiB probe truncated |
