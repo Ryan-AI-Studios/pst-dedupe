@@ -18,7 +18,10 @@ use serde::Serialize;
 use crate::error::{CliError, CliExit, Result};
 use crate::grouping_cli::{format_grouping_stats_human, grouping_context_from_cli};
 use crate::pst_materializer::PstMaterializer;
-use crate::scan::{evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions, ScanSummary};
+use crate::scan::{
+    eprint_poly_crc_note, evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions,
+    ScanSummary,
+};
 
 /// CLI options for `keep-set`.
 pub struct KeepSetCliArgs {
@@ -263,6 +266,7 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
     // Dual-rate poly sources reclassify (clear) false-positive CRC_SUSPECT in
     // run_scan so keep-set sees clean identity without Tier-2 auto-allow.
     let outcome = run_scan(&paths, &opts)?;
+    eprint_poly_crc_note(outcome.summary.poly_class_crc_sources);
 
     let provenance = KeepSetProvenance {
         scan_integrity_schema: SCAN_INTEGRITY_SCHEMA.to_string(),

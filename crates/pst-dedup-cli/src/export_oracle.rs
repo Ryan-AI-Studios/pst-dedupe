@@ -71,6 +71,8 @@ const SUMMARY_ALLOWLIST_KEYS: &[&str] = &[
     "prepared_bytes_peak",
     "messages_materialized",
     "bytes_written_total",
+    // 0143 operator copy; parent packs omit the key.
+    "poly_crc_note",
 ];
 
 /// One volume's structural fingerprint (order-stable).
@@ -1095,5 +1097,36 @@ mod tests {
         );
         assert!(head.get("input_path_sort_order").is_none());
         assert_eq!(head["inputs"], json!([]));
+    }
+
+    #[test]
+    fn poly_crc_note_on_allowlist_parent_equals_head() {
+        assert!(
+            SUMMARY_ALLOWLIST_KEYS.contains(&"poly_crc_note"),
+            "0143 copy must be allowlisted so parent packs without it compare"
+        );
+        let mut parent = json!({
+            "ok": true,
+            "scan": { "poly_class_crc_sources": 1, "schema": "scan_integrity_v1" },
+            "export": { "messages_written_total": 1, "attachments_failed": 0 },
+            "keep_set": { "stats": { "unique": 1 } }
+        });
+        let mut head = json!({
+            "ok": true,
+            "scan": {
+                "poly_class_crc_sources": 1,
+                "schema": "scan_integrity_v1",
+                "poly_crc_note": "1 source(s) classified as poly-class CRC; systematic CRC mismatch on those sources is compatible with preflight 'ok' (not evidence of corrupt data blocks)"
+            },
+            "export": { "messages_written_total": 1, "attachments_failed": 0 },
+            "keep_set": { "stats": { "unique": 1 } }
+        });
+        normalize_summary_for_oracle(&mut parent);
+        normalize_summary_for_oracle(&mut head);
+        assert_eq!(
+            parent, head,
+            "parent without poly_crc_note must equal HEAD after allowlist strip"
+        );
+        assert!(head.pointer("/scan/poly_crc_note").is_none());
     }
 }

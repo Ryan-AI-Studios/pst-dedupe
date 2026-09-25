@@ -211,10 +211,31 @@ pub struct ScanSummary {
     /// Count of sources classified dual-rate poly-class (`poly_class_crc`) (0077).
     #[serde(default)]
     pub poly_class_crc_sources: u64,
+    /// Interpretive copy when `poly_class_crc_sources >= 1` (0143). Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poly_crc_note: Option<String>,
 }
 
 fn grouping_stats_empty(s: &GroupingStats) -> bool {
     s == &GroupingStats::default()
+}
+
+/// Frozen 0143 operator copy. Count + fixed English only.
+pub fn poly_crc_note(poly_class_crc_sources: u64) -> Option<String> {
+    if poly_class_crc_sources == 0 {
+        None
+    } else {
+        Some(format!(
+            "{poly_class_crc_sources} source(s) classified as poly-class CRC; systematic CRC mismatch on those sources is compatible with preflight 'ok' (not evidence of corrupt data blocks)"
+        ))
+    }
+}
+
+/// Stderr one-liner after `run_scan`. Independent of `--crc-log-limit`.
+pub fn eprint_poly_crc_note(poly_class_crc_sources: u64) {
+    if let Some(note) = poly_crc_note(poly_class_crc_sources) {
+        eprintln!("note: {note}");
+    }
 }
 
 /// One duplicate pair for listing.
@@ -1814,6 +1835,7 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         block_crc_rate,
         block_crc_read_rate,
         poly_class_crc_sources,
+        poly_crc_note: poly_crc_note(poly_class_crc_sources),
     };
 
     Ok(ScanOutcome {
@@ -2155,6 +2177,101 @@ mod tests {
         assert!(duplicates_truncated(44, 25, Some(25)));
         assert!(!duplicates_truncated(0, 0, Some(50)));
         assert!(!duplicates_truncated(3, 3, Some(1))); // shown already equals total
+    }
+
+    #[test]
+    fn poly_crc_note_zero_is_none() {
+        assert_eq!(poly_crc_note(0), None);
+    }
+
+    #[test]
+    fn poly_crc_note_count_and_frozen_copy() {
+        let one = poly_crc_note(1).expect("one");
+        assert!(one.starts_with("1 source(s) classified as poly-class CRC"));
+        assert!(one.contains("compatible with preflight 'ok'"));
+        assert!(!one.contains('%'));
+        let two = poly_crc_note(2).expect("two");
+        assert!(two.starts_with("2 source(s) classified as poly-class CRC"));
+    }
+
+    #[test]
+    fn poly_crc_note_omitted_from_json_when_zero() {
+        use dedup_engine::integrity::{compute_preflight, IntegrityThresholds, PreflightInputs};
+        let preflight = compute_preflight(&PreflightInputs::without_attach_probe(
+            ScanMode::BestEffort,
+            1,
+            0,
+            0,
+            0,
+            1,
+            IntegrityThresholds::default(),
+        ));
+        let summary = ScanSummary {
+            schema: SCAN_INTEGRITY_SCHEMA.to_string(),
+            mode: ScanMode::BestEffort,
+            files: vec![],
+            total_messages: 1,
+            unique: 1,
+            duplicates: 0,
+            tier1_hits: 0,
+            tier2_hits: 0,
+            savings_bytes: 0,
+            skipped: 0,
+            skipped_by_reason: BTreeMap::new(),
+            recoverable_messages: 1,
+            degraded_messages: 0,
+            degraded_by_reason: BTreeMap::new(),
+            orphaned_messages: 0,
+            failed_files: 0,
+            partial_files: 0,
+            opened_files: 1,
+            duration_secs: 0.0,
+            preflight,
+            skips: vec![],
+            integrity_csv: None,
+            grouping: Default::default(),
+            page_crc_mismatches: 0,
+            block_crc_mismatches: 0,
+            block_bid_mismatches: 0,
+            distinct_bad_bids: 0,
+            distinct_bad_bids_exact: true,
+            crc_suspect_messages: 0,
+            page_reads: 0,
+            block_reads: 0,
+            block_crc_rate: 0.0,
+            block_crc_read_rate: 0.0,
+            poly_class_crc_sources: 0,
+            poly_crc_note: None,
+        };
+        let v = serde_json::to_value(&summary).expect("ser");
+        assert!(v.get("poly_crc_note").is_none(), "key must be omitted; {v}");
+        let round: ScanSummary = serde_json::from_value(v).expect("de");
+        assert_eq!(round.poly_crc_note, None);
+        let pre = serde_json::json!({
+            "schema": "scan_integrity_v1",
+            "mode": "best-effort",
+            "files": [],
+            "total_messages": 0,
+            "unique": 0,
+            "duplicates": 0,
+            "tier1_hits": 0,
+            "tier2_hits": 0,
+            "savings_bytes": 0,
+            "skipped": 0,
+            "skipped_by_reason": {},
+            "recoverable_messages": 0,
+            "degraded_messages": 0,
+            "degraded_by_reason": {},
+            "orphaned_messages": 0,
+            "failed_files": 0,
+            "partial_files": 0,
+            "opened_files": 0,
+            "duration_secs": 0.0,
+            "preflight": summary.preflight,
+        });
+        let old: ScanSummary = serde_json::from_value(pre).expect("pre-0143 json");
+        assert_eq!(old.poly_crc_note, None);
+        assert_eq!(old.poly_class_crc_sources, 0);
     }
 
     /// Dual-rate poly gate: high block alone keeps taint; both high → poly reclassify.
@@ -2686,6 +2803,7 @@ mod tests {
             block_crc_rate: 0.0,
             block_crc_read_rate: 0.0,
             poly_class_crc_sources: 0,
+            poly_crc_note: None,
         };
         let mut opts = ScanOptions::default();
         assert!(evaluate_exit_policy(&summary, &opts).is_err());
@@ -2740,6 +2858,7 @@ mod tests {
             block_crc_rate: 0.0,
             block_crc_read_rate: 0.0,
             poly_class_crc_sources: 0,
+            poly_crc_note: None,
         };
         let opts = ScanOptions {
             mode: ScanMode::Strict,

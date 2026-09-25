@@ -32,7 +32,10 @@ use crate::paths::{is_same_or_under, paths_equal, resolve_cli_path_maybe_missing
 use crate::pst_materializer::{
     materialize_nested_for_winner, PstAttachStreamSource, PstMaterializer,
 };
-use crate::scan::{evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions, ScanSummary};
+use crate::scan::{
+    eprint_poly_crc_note, evaluate_exit_policy, resolve_pst_paths, run_scan, ScanOptions,
+    ScanSummary,
+};
 use crate::unique_export_report::{
     format_ledger_source_path, resolve_input_source_id, AttachLedgerFinish, AttachLedgerMode,
     AttachLedgerRow, AttachLedgerSink, LedgerPathMode, EXPORT_ATTACHMENTS_CSV_NAME,
@@ -1033,6 +1036,7 @@ pub fn run_unique_eml(args: UniqueEmlCliArgs) -> Result<crate::error::CliExit> {
     // Dual-rate poly sources reclassify (clear) false-positive CRC_SUSPECT in
     // run_scan so keep-set sees clean identity without Tier-2 auto-allow.
     let outcome = run_scan(&paths, &opts)?;
+    eprint_poly_crc_note(outcome.summary.poly_class_crc_sources);
 
     let provenance = KeepSetProvenance {
         scan_integrity_schema: SCAN_INTEGRITY_SCHEMA.to_string(),
@@ -1526,6 +1530,7 @@ mod tests {
             block_crc_rate: 0.0,
             block_crc_read_rate: 0.0,
             poly_class_crc_sources: 0,
+            poly_crc_note: None,
         };
         let keep_set = KeepSet {
             schema: "keep_set_v1".into(),
@@ -1646,6 +1651,7 @@ mod tests {
             block_crc_rate: 0.0,
             block_crc_read_rate: 0.0,
             poly_class_crc_sources: 0,
+            poly_crc_note: None,
         };
         write_eml_hard_fail_summary(
             &out,
