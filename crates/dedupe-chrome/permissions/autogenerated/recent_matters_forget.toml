@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-recent-matters-forget"
+description = "Enables the recent_matters_forget command without any pre-configured scope."
+commands.allow = ["recent_matters_forget"]
+
+[[permission]]
+identifier = "deny-recent-matters-forget"
+description = "Denies the recent_matters_forget command without any pre-configured scope."
+commands.deny = ["recent_matters_forget"]

@@ -2,7 +2,9 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 use wasm_bindgen::prelude::*;
 
-use crate::invoke::{tauri_invoke, CreateArgs, RecentMatter, RememberArgs};
+use crate::invoke::{
+    tauri_invoke, CreateArgs, MatterOverview, RecentMatter, RememberArgs, RootArgs,
+};
 use crate::path_id::encode_matter_id;
 
 #[component]
@@ -31,29 +33,52 @@ pub fn MattersList() -> impl IntoView {
 
     let go_matter = move |root: String, name: String| {
         leptos::task::spawn_local(async move {
-            match tauri_invoke::<Vec<RecentMatter>, _>(
-                "recent_matters_remember",
-                &RememberArgs {
-                    root: root.clone(),
-                    name,
-                },
+            match tauri_invoke::<MatterOverview, _>(
+                "matter_overview",
+                &RootArgs { root: root.clone() },
             )
             .await
             {
-                Ok(list) => {
-                    recents.set(list);
-                    error.set(None);
-                    clear_chrome_status();
+                Ok(ov) => {
+                    let display = if ov.name.is_empty() { name } else { ov.name };
+                    match tauri_invoke::<Vec<RecentMatter>, _>(
+                        "recent_matters_remember",
+                        &RememberArgs {
+                            root: root.clone(),
+                            name: display,
+                        },
+                    )
+                    .await
+                    {
+                        Ok(list) => {
+                            recents.set(list);
+                            error.set(None);
+                            clear_chrome_status();
+                        }
+                        // Best-effort persist: show shell status (survives navigate), still open matter.
+                        Err(e) => {
+                            let msg = format!("Could not update recents: {e}");
+                            error.set(Some(msg.clone()));
+                            set_chrome_status(&msg);
+                        }
+                    }
+                    let id = encode_matter_id(&root);
+                    navigate.with_value(|nav| nav(&format!("/matters/{id}"), Default::default()));
                 }
-                // Best-effort persist: show shell status (survives navigate), still open matter.
                 Err(e) => {
-                    let msg = format!("Could not update recents: {e}");
-                    error.set(Some(msg.clone()));
-                    set_chrome_status(&msg);
+                    if e.starts_with("not_found:") {
+                        if let Ok(list) = tauri_invoke::<Vec<RecentMatter>, _>(
+                            "recent_matters_forget",
+                            &RootArgs { root: root.clone() },
+                        )
+                        .await
+                        {
+                            recents.set(list);
+                        }
+                    }
+                    error.set(Some(e));
                 }
             }
-            let id = encode_matter_id(&root);
-            navigate.with_value(|nav| nav(&format!("/matters/{id}"), Default::default()));
         });
     };
 
@@ -239,4 +264,44 @@ async fn pick_folder() -> Result<Option<String>, String> {
 extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "dialog"], js_name = open, catch)]
     fn dialog_open(options: JsValue) -> Result<js_sys::Promise, JsValue>;
+}
+
+#[cfg(test)]
+mod open_honesty_tests {
+    #[test]
+    fn go_matter_overview_before_remember_and_navigate() {
+        let src = include_str!("list.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let go = prod.split("let go_matter").nth(1).unwrap_or("");
+        let overview = go
+            .find("matter_overview")
+            .expect("go_matter must call matter_overview");
+        let remember = go
+            .find("recent_matters_remember")
+            .expect("go_matter still remembers after overview");
+        let navigate = go
+            .find("navigate.with_value")
+            .expect("go_matter still navigates after a valid overview");
+        assert!(
+            overview < remember,
+            "overview must run before recent_matters_remember"
+        );
+        assert!(
+            remember < navigate,
+            "navigate must stay on the overview-ok path after remember"
+        );
+        assert!(
+            go.contains("recent_matters_forget"),
+            "not_found must forget the dead recent"
+        );
+        assert!(
+            go.contains("not_found:"),
+            "forget only on not_found kind prefix"
+        );
+        let nav_after_forget = go.split("recent_matters_forget").nth(1).unwrap_or("");
+        assert!(
+            !nav_after_forget.contains("navigate.with_value"),
+            "must not navigate after overview failure"
+        );
+    }
 }

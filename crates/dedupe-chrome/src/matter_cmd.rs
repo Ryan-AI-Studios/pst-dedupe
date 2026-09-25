@@ -8,7 +8,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use matter_core::{is_encrypted_matter, load_case_overview_on, Matter, OverviewOptions};
 use serde::Serialize;
 
-use crate::error::CommandError;
+use crate::error::{map_core, CommandError};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct MatterOverviewResponse {
@@ -58,7 +58,7 @@ fn load_overview_at(root: &Utf8Path) -> Result<MatterOverviewResponse, CommandEr
             "Encrypted matters are not opened in this chrome; use Dedupe Desk.",
         ));
     }
-    let matter = Matter::open_for_read(root).map_err(|e| CommandError::failed(e.to_string()))?;
+    let matter = Matter::open_for_read(root).map_err(map_core)?;
     let info = matter
         .info()
         .map_err(|e| CommandError::failed(e.to_string()))?;
@@ -162,6 +162,20 @@ mod tests {
             io::Error::new(io::ErrorKind::NotFound, "gone"),
         );
         assert_eq!(err.kind, "not_found");
+    }
+
+    #[test]
+    fn folder_without_matter_db_is_not_found() {
+        let tmp = tempdir().expect("tempdir");
+        let dump = tmp.path().join("cli-dump");
+        fs::create_dir(&dump).expect("mkdir");
+        let err = matter_overview_blocking(&dump.to_string_lossy()).expect_err("no db");
+        assert_eq!(err.kind, "not_found");
+        assert!(
+            err.message.to_lowercase().contains("matter.db"),
+            "copy must name matter.db: {}",
+            err.message
+        );
     }
 
     #[test]

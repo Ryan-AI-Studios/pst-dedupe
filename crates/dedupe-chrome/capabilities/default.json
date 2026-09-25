@@ -10,6 +10,7 @@
     "allow-create-matter",
     "allow-recent-matters-list",
     "allow-recent-matters-remember",
+    "allow-recent-matters-forget",
     "allow-review-queue-page",
     "allow-review-code-catalog",
     "allow-saved-searches-list",
