@@ -38,4 +38,4 @@ Owner INC* two-file `keep-set --json` **skipped** (spec optional). Never committ
 
 ## PR
 
-Filled after merge.
+**#154** / `234f4fa` (squash-merge).
