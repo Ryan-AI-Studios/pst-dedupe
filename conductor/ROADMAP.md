@@ -481,7 +481,44 @@ Tauri 2 default camelCase command args vs snake_case UI serde (discovered on the
 |---|---|---|---|---|
 | **0138** | ChromeInvokeCamelCase | **Completed** | **P1 W** | Shallow `tauri_invoke` key rewrite. Host stays default camelCase. Nested produce findings stay snake_case. Spec: `0138-ChromeInvokeCamelCase/`. |
 
-**Order:** **0138 Completed**. Next free ID **0139**.
+**Order:** **0138 Completed**. Next free ID **0139** (Series X).
+
+### Wave 15 — INC0102784 CLI friction & scan speed (Series X)
+
+Read-only operator smoke 2026-09-24 (`inspect`/`scan`/`dups`/`keep-set`, no unique-pst write). Metadata ~3 s; unique-pst remains the wall. **0139 Ready** after fold-in 2026-09-25; **0140–0147 Proposed** until `/plan-track`. Nested `Desktop\Desktop` path declined.
+
+| ID | Track | Status | Priority | High-level notes |
+|---|---|---|---|---|
+| **0139** | SourceRankDiscoverability | **Ready** | **P2 X** | `first_seen` path-sort vs `--source-rank`. Spec: `0139-SourceRankDiscoverability/`. |
+| **0140** | ScanStderrCadence | **Proposed** | **P2 X** | Scan stderr cadence; owns I/O tax. Spec: `0140-ScanStderrCadence/`. |
+| **0141** | KeepSetJsonEnvelope | **Proposed** | **P2 X** | `--json` stats envelope. Spec: `0141-KeepSetJsonEnvelope/`. |
+| **0142** | DupsJsonTotals | **Proposed** | **P3 X** | Totals independent of `--limit`. Spec: `0142-DupsJsonTotals/`. |
+| **0143** | PolyCrcScanCopy | **Proposed** | **P2 X** | Poly CRC vs preflight `ok` copy. Spec: `0143-PolyCrcScanCopy/`. |
+| **0144** | IntegrityCsvHonesty | **Proposed** | **P3 X** | Empty integrity CSV honesty. Spec: `0144-IntegrityCsvHonesty/`. |
+| **0145** | ScanOnceReuse | **Proposed** | **P1 X** | keep-set/dups from scan JSON. Spec: `0145-ScanOnceReuse/`. |
+| **0146** | UniquePstWriteHotspots | **Proposed** | **P1 X** | unique-pst write measurement. Spec: `0146-UniquePstWriteHotspots/`. |
+| **0147** | DeepAttachCoverage | **Proposed** | **P2 X** | Truncated attach-probe leftover. Spec: `0147-DeepAttachCoverage/`. |
+
+**Order:** **0139 Ready**, **0140–0147 Proposed**. Next free ID **0148** (Series Y).
+
+### Wave 16 — Chrome HITL mockup walk residuals (Series Y)
+
+Hands + Playwright 2026-09-24 vs `C:\dev\dedupe-frontend` (research only). Color/Archivo, vault, OST/MBOX, fake volumes **declined**. **Proposed** until `/plan-track`.
+
+| ID | Track | Status | Priority | High-level notes |
+|---|---|---|---|---|
+| **0148** | RecentsOpenHonesty | **Proposed** | **P2 Y** | Missing root / no `matter.db`. Spec: `0148-RecentsOpenHonesty/`. |
+| **0149** | PickerDialogReset | **Proposed** | **P3 Y** | Leftover picker search. Spec: `0149-PickerDialogReset/`. |
+| **0150** | ProcessPauseOnce | **Proposed** | **P2 Y** | Duplicate Pause. Spec: `0150-ProcessPauseOnce/`. |
+| **0151** | ProcessIngestProgress | **Proposed** | **P2 Y** | Honest ingest percent. Spec: `0151-ProcessIngestProgress/`. |
+| **0152** | ProduceShellHonesty | **Proposed** | **P2 Y** | Overflow, error canvas, Finalize style. Spec: `0152-ProduceShellHonesty/`. |
+| **0153** | ReviewQueryAndFacets | **Proposed** | **P3 Y** | Query chip / Reading as / facets. Spec: `0153-ReviewQueryAndFacets/`. |
+| **0154** | ReviewBulkCheck | **Proposed** | **P3 Y** | Select matching + CHECK. Spec: `0154-ReviewBulkCheck/`. |
+| **0155** | ReviewFamilyRows | **Proposed** | **P3 Y** | Attachment indent. Spec: `0155-ReviewFamilyRows/`. |
+| **0156** | ReviewNamedQueues | **Proposed** | **P3 Y** | Later rail zeros. Spec: `0156-ReviewNamedQueues/`. |
+| **0157** | ReviewGotoBates | **Proposed** | **P3 Y** | Bates in Go-to if indexed. Spec: `0157-ReviewGotoBates/`. |
+
+**Order:** **0148–0157 Proposed**. Next free ID **0158**.
 
 ### What each step is for
 

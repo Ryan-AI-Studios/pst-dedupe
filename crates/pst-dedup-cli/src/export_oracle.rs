@@ -441,6 +441,9 @@ pub fn normalize_summary_for_oracle(v: &mut Value) {
     if let Some(obj) = v.as_object_mut() {
         // Job-level UniqueExportSummary.inputs (source paths). Not export_risk.inputs.
         obj.insert("inputs".into(), Value::Array(vec![]));
+        // 0139 path-local sort order. Parent packs omit the key — remove rather
+        // than insert []. Do not allowlist the name (D-0099 recursive strip).
+        obj.remove("input_path_sort_order");
     }
 }
 
@@ -1063,5 +1066,34 @@ mod tests {
             v.pointer("/export_risk/inputs/degraded_winners_poly_only"),
             Some(&json!(3931))
         );
+    }
+
+    #[test]
+    fn input_path_sort_order_not_on_allowlist_and_root_removed() {
+        assert!(
+            !SUMMARY_ALLOWLIST_KEYS.contains(&"input_path_sort_order"),
+            "0139 key must not be allowlisted (D-0099 name-based strip)"
+        );
+        let mut parent = json!({
+            "ok": true,
+            "inputs": ["C:/tmp/a-2.pst", "C:/tmp/a.pst"],
+            "export": { "messages_written_total": 1, "attachments_failed": 0 },
+            "keep_set": { "stats": { "unique": 1 } }
+        });
+        let mut head = json!({
+            "ok": true,
+            "inputs": ["C:/other/a-2.pst", "C:/other/a.pst"],
+            "input_path_sort_order": ["C:/other/a-2.pst", "C:/other/a.pst"],
+            "export": { "messages_written_total": 1, "attachments_failed": 0 },
+            "keep_set": { "stats": { "unique": 1 } }
+        });
+        normalize_summary_for_oracle(&mut parent);
+        normalize_summary_for_oracle(&mut head);
+        assert_eq!(
+            parent, head,
+            "parent without input_path_sort_order must equal HEAD after root-remove"
+        );
+        assert!(head.get("input_path_sort_order").is_none());
+        assert_eq!(head["inputs"], json!([]));
     }
 }

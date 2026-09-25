@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 
 use dedup_engine::integrity::{IntegrityThresholds, ScanMode, SCAN_INTEGRITY_SCHEMA};
 use dedup_engine::keepset::{
-    finalize_with_materialize, recoverable_items_hint, resolve_groups_with_grouping,
-    sort_input_paths, write_keep_set_json, DecisionCsvWriter, FamilyPolicy, FidelityMode,
-    FolderRankMode, KeepPolicy, KeepSetProvenance, RankContext,
+    finalize_with_materialize, multi_input_source_rank_hint, recoverable_items_hint,
+    resolve_groups_with_grouping, sort_input_paths, write_keep_set_json, DecisionCsvWriter,
+    FamilyPolicy, FidelityMode, FolderRankMode, KeepPolicy, KeepSetProvenance, RankContext,
 };
 use serde::Serialize;
 
@@ -139,6 +139,8 @@ pub fn rank_context_from_cli(
 #[derive(Debug, Serialize)]
 struct KeepSetSummaryOut {
     schema: String,
+    /// Resolved absolute paths after `sort_input_paths` (0139).
+    input_path_sort_order: Vec<String>,
     policy: String,
     family_policy: String,
     keep_set: dedup_engine::KeepSet,
@@ -167,6 +169,9 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
     // Phase 0: resolve + deterministic sort.
     let mut paths = resolve_pst_paths(&args.paths)?;
     sort_input_paths(&mut paths);
+    if let Some(hint) = multi_input_source_rank_hint(paths.len(), &args.source_rank) {
+        eprintln!("note: {hint}");
+    }
 
     pst_reader::integrity_telemetry::set_log_limit(
         args.crc_log_limit,
@@ -327,6 +332,7 @@ pub fn run_keep_set(args: KeepSetCliArgs) -> Result<()> {
         let ok = classified.fidelity == crate::export_outcome::ExportFidelity::Complete;
         let payload = KeepSetSummaryOut {
             schema: keep_set.schema.clone(),
+            input_path_sort_order: paths.iter().map(|p| p.display().to_string()).collect(),
             policy: args.policy.as_str().to_string(),
             family_policy: args.family_policy.as_str().to_string(),
             keep_set: keep_set.clone(),

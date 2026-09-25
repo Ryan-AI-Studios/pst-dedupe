@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0139 — Source-rank discoverability)
+
+- `keep-set`, `unique-pst`, and `unique-eml` `--help` name lexicographic path sort on `--source-rank` (`-2.pst` can crown before `.pst`). `--json` envelopes include `input_path_sort_order` (resolved absolute paths after sort). Two or more inputs without `--source-rank` emit one stderr `note:` (including under `--json`). Ranking is unchanged.
+
 ### Added (0127 — Embedded-depth operator hint)
 
 - unique-pst and unique-eml emit `--max-embedded-depth=<configured>` on stderr when `ATTACH_DEPTH_LIMIT` fires. Default remains **3** (identity-safe). Clap help notes INC*-class / deep method-5 nests often need **8**. unique-pst `--also-eml` prints the unique-pst line once (the nested unique-eml helper stays silent).

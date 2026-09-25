@@ -635,6 +635,106 @@ fn keep_set_help_lists_0075_flags() {
     ] {
         assert!(text.contains(flag), "help missing {flag}");
     }
+    assert!(
+        text.contains("-2.pst") && text.contains("lexicographic"),
+        "0139 --source-rank help must name path-sort / -2.pst; {text}"
+    );
+    assert!(
+        text.contains("first_seen = sorted input-path order, not chronological send time"),
+        "existing --policy first_seen sentence must remain; {text}"
+    );
+}
+
+fn source_rank_note_count(stderr: &str) -> usize {
+    stderr.matches("without --source-rank").count()
+}
+
+#[test]
+fn multi_input_source_rank_note_and_json_order() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let dir = TempDir::new().expect("tmp");
+    let a = dir.path().join("a.pst");
+    let a2 = dir.path().join("a-2.pst");
+    fs::copy(&sample, &a).expect("copy a");
+    fs::copy(&sample, &a2).expect("copy a2");
+
+    let run = |extra: &[&str]| {
+        let mut args = vec![
+            "keep-set".to_string(),
+            a.to_str().unwrap().to_string(),
+            a2.to_str().unwrap().to_string(),
+            "--json".to_string(),
+        ];
+        for e in extra {
+            args.push((*e).to_string());
+        }
+        Command::new(bin()).args(&args).output().expect("keep-set")
+    };
+
+    let out_default = run(&[]);
+    assert!(
+        out_default.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out_default.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out_default.stdout);
+    let stderr = String::from_utf8_lossy(&out_default.stderr);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    assert_eq!(source_rank_note_count(&stderr), 1, "stderr={stderr}");
+    assert!(stderr.contains("sorted path order"), "{stderr}");
+    let order = v["input_path_sort_order"].as_array().expect("order");
+    assert_eq!(order.len(), 2);
+    let first = order[0].as_str().unwrap_or("");
+    assert!(
+        first.to_ascii_lowercase().ends_with("a-2.pst"),
+        "sorted order should put a-2.pst first; {first}"
+    );
+    assert!(v["keep_set"]["created_from"]["input_files"].is_array());
+    let disk = dir.path().join("keep_set_summary.json");
+    assert!(disk.exists(), "keep_set_summary.json beside inputs");
+    let disk_v: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&disk).expect("read summary")).expect("disk json");
+    assert_eq!(disk_v["input_path_sort_order"], v["input_path_sort_order"]);
+
+    let out_ranked = run(&["--source-rank", "a.pst", "--source-rank", "a-2.pst"]);
+    assert!(out_ranked.status.success());
+    let ranked_err = String::from_utf8_lossy(&out_ranked.stderr);
+    assert_eq!(
+        source_rank_note_count(&ranked_err),
+        0,
+        "stderr={ranked_err}"
+    );
+    let v_ranked: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out_ranked.stdout)).expect("json");
+    assert_eq!(
+        v_ranked["input_path_sort_order"]
+            .as_array()
+            .map(|a| a.len()),
+        Some(2)
+    );
+
+    let out_pref = run(&["--prefer-path-contains", "Inbox"]);
+    assert!(out_pref.status.success());
+    let pref_err = String::from_utf8_lossy(&out_pref.stderr);
+    assert_eq!(
+        source_rank_note_count(&pref_err),
+        1,
+        "prefer-path must not suppress; stderr={pref_err}"
+    );
+
+    let one = Command::new(bin())
+        .args(["keep-set", a.to_str().unwrap(), "--json"])
+        .output()
+        .expect("one input");
+    assert!(one.status.success());
+    assert_eq!(
+        source_rank_note_count(&String::from_utf8_lossy(&one.stderr)),
+        0
+    );
 }
 
 /// Checked-in default winner golden for `fixtures/aspose_outlook.pst` (DoD-10 / §3.9).

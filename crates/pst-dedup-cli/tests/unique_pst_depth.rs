@@ -375,6 +375,10 @@ fn clap_rejects_zero_nine_and_non_integer() {
         help_txt.contains("identity-safe") && help_txt.contains("often need 8"),
         "0127 clap help; {help_txt}"
     );
+    assert!(
+        help_txt.contains("-2.pst") && help_txt.contains("lexicographic"),
+        "0139 unique-pst --source-rank help; {help_txt}"
+    );
 }
 
 #[test]

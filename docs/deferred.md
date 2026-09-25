@@ -996,6 +996,39 @@ Tauri **2.11.5** default command args are camelCase. UI `tauri_invoke` sends sna
 |---|---|---|---|---|
 | D-0138-chrome-invoke-camel | — | Chrome invoke drops underscored command args | **Closed in 0138** — shallow `tauri_invoke` camelCase (plain object + JS Map). Host stays default camelCase. Nested findings stay snake_case. | **closed / 0138** |
 
+## Series X — INC0102784 CLI friction & scan speed (0139–0147, minted 2026-09-24)
+
+Read-only smoke of Desktop `INC0102784.pst` (4.00 GiB) + `INC0102784-2.pst` (537 MiB): 4099 msgs, 4055 unique, 44 MID dups. Nested `Desktop\Desktop` path **not minted** (operator FS).
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0139-source-rank-discoverability | P3 | `first_seen` path-sort crowns `-2.pst` unless `--source-rank` | **Closed in 0139** — clap help + JSON `input_path_sort_order` + one multi-input stderr note. `first_seen` semantics unchanged. Oracle root-removes the new key. | **closed / 0139** |
+| D-0140-scan-stderr-cadence | P3 | `scan -v` ~2506 folder lines; deep-attach ~2800 probe lines | **Owned by 0140 Proposed** — periodic aggregates; `--crc-log-limit 0` also quiets probes. Distinct from 0132. | **0140** |
+| D-0141-keepset-json-envelope | P3 | `keep-set --json` stdout 3.4 MB (all winners) | **Owned by 0141 Proposed** — stats envelope; winners in `--keep-set-json`. | **0141** |
+| D-0142-dups-json-totals | P3 | `dups --limit N` JSON looks like N dups | **Owned by 0142 Proposed** — totals independent of `--limit`. | **0142** |
+| D-0143-poly-crc-scan-copy | P3 | `block_crc_rate≈30` + preflight `ok` looks like a corrupt PST | **Owned by 0143 Proposed** — JSON/stderr copy. No skip-math or keep-set restrip. | **0143** |
+| D-0144-integrity-csv-honesty | P3 | Header-only `--integrity-csv` when CRC_SUSPECT-only | **Owned by 0144 Proposed** — omitted-reason; no fake skip rows. | **0144** |
+| D-0145-scan-once-reuse | P3 | `scan` then `dups` then `keep-set` each re-walk | **Owned by 0145 Proposed** — fail-closed `--from-scan-json`. | **0145** |
+| D-0146-unique-pst-write-hotspots | P3 | unique-pst wall 787–1043 s vs scan ~3 s | **Owned by 0146 Proposed** — measure then at most one writer cut. Not an SLA. | **0146** |
+| D-0147-deep-attach-coverage | P3 | 256 MiB probe `truncated=true` + `fail_rate=0` | **Owned by 0147 Proposed** — leftover coverage in JSON. Default stays opt-in. | **0147** |
+
+## Series Y — Chrome HITL mockup walk residuals (0148–0157, minted 2026-09-24)
+
+Hands + Playwright walk of Dedupe Desk vs `dedupe-frontend` (layout research). Color/Archivo, vault, OST/MBOX, fake volumes, Dupes/NIST fill, Stage snapshot **not minted**.
+
+| ID | Severity | Item | Notes | Owner |
+|---|---|---|---|---|
+| D-0148-recents-open-honesty | P3 | Recents/Open missing root or no `matter.db` still remembered | **Owned by 0148 Proposed** — fail closed; prune; no remember on fail. | **0148** |
+| D-0149-picker-dialog-reset | P3 | Folder/Open dialog keeps last search (“No items match”) | **Owned by 0149 Proposed** — reset or API-blocked. | **0149** |
+| D-0150-process-pause-once | P3 | Two Pause buttons for one ingest job | **Owned by 0150 Proposed** — one control. | **0150** |
+| D-0151-process-ingest-progress | P3 | 4.3 GB ingest: Items 0, no percent | **Owned by 0151 Proposed** — honest ingest snapshot; no fake 68%. | **0151** |
+| D-0152-produce-shell-honesty | P3 | Produce overflow; error hides canvas; Finalize looks primary | **Owned by 0152 Proposed** — 0125/0119 frozen. | **0152** |
+| D-0153-review-query-facets | P3 | No query chip / Reading as / facet buttons | **Owned by 0153 Proposed** — inert-honest if no FilterSpec. | **0153** |
+| D-0154-review-bulk-check | P3 | No select-all-matching; CHECK only after Tag | **Owned by 0154 Proposed** — reuse 0111 preview. | **0154** |
+| D-0155-review-family-rows | P3 | Attachments not indented/marked | **Owned by 0155 Proposed** — no fake QC/redaction columns. | **0155** |
+| D-0156-review-named-queues | P3 | Later rail shows live-looking `0` | **Owned by 0156 Proposed** — wire or omit. | **0156** |
+| D-0157-review-goto-bates | P3 | Go-to placeholder omits Bates; Bates typed as subject | **Owned by 0157 Proposed** — only if Bates index exists. | **0157** |
+
 ## Hygiene
 
 - When closing a deferred row, move it to a short “Fixed” note in the track `review.md` or delete the row.

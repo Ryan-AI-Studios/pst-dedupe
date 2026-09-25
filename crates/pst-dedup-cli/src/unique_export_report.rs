@@ -917,6 +917,8 @@ pub struct UniqueExportSummary {
     #[serde(default)]
     pub summary_path: String,
     pub inputs: Vec<String>,
+    /// Resolved absolute paths after `sort_input_paths` (0139). Same values as `inputs`.
+    pub input_path_sort_order: Vec<String>,
     pub policy: String,
     pub family_policy: String,
     pub mode: String,

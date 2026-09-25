@@ -358,14 +358,51 @@ Working tree on `73f1d7f` (2026-09-24): uncommitted `tauri_invoke` camelCase rew
 |---|---|---|
 | [0138-ChromeInvokeCamelCase](0138-ChromeInvokeCamelCase/spec.md) | **Completed** | Top-level `tauri_invoke` snake→camel (pure shallow walker + JS Map). Host stays default camelCase. Nested findings stay snake_case. Closes **D-0138-chrome-invoke-camel**. PR **#152** / `8bb86bd`. |
 
-**Suggested order:** **0138 Completed**. Next free ID **0139**.
+**Suggested order:** **0138 Completed**. Next free ID **0139** (Series X placeholders).
+
+## Series X — INC0102784 CLI friction & scan speed (0139–0147)
+
+Minted **2026-09-24** from a read-only operator smoke of Desktop `INC0102784.pst` + `INC0102784-2.pst` (4.00 GiB + 537 MiB Permute; 4099 msgs / 4055 unique). Metadata scan ~3 s; unique-pst wall remains ~13–17 min historically. **0139** plan Ready after 2026-09-25 fold-in; **0140–0147** still placeholders until `/plan-track`. Nested `Desktop\Desktop` path **declined** (operator FS; `\\?\` works). No BCC-default. Schema **41**.
+
+| Track | Status | Summary |
+|---|---|---|
+| [0139-SourceRankDiscoverability](0139-SourceRankDiscoverability/spec.md) | **In progress** | `first_seen` path-sort vs `--source-rank`; JSON `input_path_sort_order`; one multi-input stderr note. Fold-in 2026-09-25. Closes **D-0139-source-rank-discoverability**. |
+| [0140-ScanStderrCadence](0140-ScanStderrCadence/spec.md) | **Ready — not started** | Scan/dups/keep-set stderr: periodic aggregates, not per-folder / per-probe. Owns stderr I/O tax. Closes **D-0140-scan-stderr-cadence**. |
+| [0141-KeepSetJsonEnvelope](0141-KeepSetJsonEnvelope/spec.md) | **Ready — not started** | `keep-set --json` stats envelope; winners in `--keep-set-json`. Closes **D-0141-keepset-json-envelope**. |
+| [0142-DupsJsonTotals](0142-DupsJsonTotals/spec.md) | **Ready — not started** | `dups --json` totals independent of `--limit`. Closes **D-0142-dups-json-totals**. |
+| [0143-PolyCrcScanCopy](0143-PolyCrcScanCopy/spec.md) | **Ready — not started** | Preflight `ok` + poly CRC rates: JSON/stderr copy. No skip-math change. Closes **D-0143-poly-crc-scan-copy**. |
+| [0144-IntegrityCsvHonesty](0144-IntegrityCsvHonesty/spec.md) | **Ready — not started** | Header-only integrity CSV vs CRC_SUSPECT taint. Closes **D-0144-integrity-csv-honesty**. |
+| [0145-ScanOnceReuse](0145-ScanOnceReuse/spec.md) | **Ready — not started** | `keep-set`/`dups` consume prior `scan --json`. Closes **D-0145-scan-once-reuse**. |
+| [0146-UniquePstWriteHotspots](0146-UniquePstWriteHotspots/spec.md) | **Ready — not started** | Measure unique-pst write wall (materialize/writer/also-eml). Closes **D-0146-unique-pst-write-hotspots**. |
+| [0147-DeepAttachCoverage](0147-DeepAttachCoverage/spec.md) | **Ready — not started** | Deep-attach truncated budget leftover honesty. Closes **D-0147-deep-attach-coverage**. |
+
+**Suggested order:** **0139–0144** operator copy/JSON (cheap) → **0145** reuse → **0147** attach coverage → **0146** write hotspots (HITL). Next free ID **0148** (Series Y).
+
+## Series Y — Chrome HITL mockup walk residuals (0148–0157)
+
+Minted **2026-09-24** from Hands + Playwright walk of live Dedupe Desk vs `C:\dev\dedupe-frontend` (research only). Color / Archivo **declined** (0123 lock). Keep Matters/Home, two Add buttons, Purview kinds, job-grain Dupes/NIST `—`, 0125 un-wizard, 0119 latch, no OST/MBOX, no password vault, no fake VOL/ACME. **Proposed placeholders** until `/plan-track`. Schema **41**. No BCC-default.
+
+| Track | Status | Summary |
+|---|---|---|
+| [0148-RecentsOpenHonesty](0148-RecentsOpenHonesty/spec.md) | **Ready — not started** | Missing roots / folders without `matter.db` fail closed; do not `remember`. Closes **D-0148-recents-open-honesty**. |
+| [0149-PickerDialogReset](0149-PickerDialogReset/spec.md) | **Ready — not started** | New matter / Open / Add PST dialogs do not inherit leftover search. Closes **D-0149-picker-dialog-reset**. |
+| [0150-ProcessPauseOnce](0150-ProcessPauseOnce/spec.md) | **Ready — not started** | One Pause per live busy job (row vs footer duplicate). Closes **D-0150-process-pause-once**. |
+| [0151-ProcessIngestProgress](0151-ProcessIngestProgress/spec.md) | **Ready — not started** | Honest ingest percent/bar; 0134 extract bar stays. Closes **D-0151-process-ingest-progress**. |
+| [0152-ProduceShellHonesty](0152-ProduceShellHonesty/spec.md) | **Ready — not started** | Locked 3-pane overflow; canvas on error; Finalize not `.primary` when disabled. Closes **D-0152-produce-shell-honesty**. |
+| [0153-ReviewQueryAndFacets](0153-ReviewQueryAndFacets/spec.md) | **Ready — not started** | Query chip + Reading as + inert-honest facets. Closes **D-0153-review-query-facets**. |
+| [0154-ReviewBulkCheck](0154-ReviewBulkCheck/spec.md) | **Ready — not started** | Select all matching (or inert) + CHECK from privilege preview. Closes **D-0154-review-bulk-check**. |
+| [0155-ReviewFamilyRows](0155-ReviewFamilyRows/spec.md) | **Ready — not started** | Attachment indent/marker; no fake QC/redaction columns. Closes **D-0155-review-family-rows**. |
+| [0156-ReviewNamedQueues](0156-ReviewNamedQueues/spec.md) | **Ready — not started** | Later rail: real filters or omit fake zeros. Closes **D-0156-review-named-queues**. |
+| [0157-ReviewGotoBates](0157-ReviewGotoBates/spec.md) | **Ready — not started** | Go-to Bates when an index exists; else keep Control#/subject. Closes **D-0157-review-goto-bates**. |
+
+**Suggested order:** **0148–0150** (bugs) → **0151–0152** (Process/Produce honesty) → **0153–0157** (review skeleton). Next free ID **0158**.
 
 ## Notes
 
 - **Plan-of-record:** `C:\dev\Dedupe-plan.md` owns product architecture; this registry owns track lifecycle.
 - **Roadmap placeholders:** [`ROADMAP.md`](ROADMAP.md) â€” waves, priorities, **evidence policy** (no client PSTs in git).
 - **Template source:** structure aligned with `C:\dev\coordinated\conductor\templates\0000-Description\`.
-- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099–0104 Completed**. **Series Q 0105–0106 Completed** (window-edge + unique-eml nested MIME). **Series R 0107 Completed** (`unique-pst --also-eml` co-export; PR #104 / `339dfa0`). **Series S 0108–0109 Completed** (poly degrade risk + also-eml classify). **Series O 0110–0122 Completed** (Tauri chrome + first-pass queue + review window + DAT produce checklist + zpdf raster/burn + TIFF G4/OPT + Process fold + queue virtualization residuals + review-window async + produce-checklist residuals + pdf-raster UI residuals + image OPT/QC residuals + Process extract-all / orphan residuals; PRs **#111** / **#113** / **#115** / **#117** / **#119** / **#121** / **#123** / **#125** / **#127** / **#129** / **#131** / **#135** / **#137**). **0123 Completed** (shared matter shell; PR **#139** / `fce416e`). **0124 Completed** (queue ellipsis + rail + Go-to/range; PR **#141** / `ff8b0ea`). **0125 Completed** (un-wizard produce canvas; PR **#143** / `1fbc22a`). **0126 Completed** (Process visual). **Series U 0127–0132 Completed** (unique-pst HITL residuals; PR **#147** / `9082761`). **Series V 0133–0137 Completed** (chrome–mockup operational parity; PR **#150** / `a8287b4`). **0138 Completed** (chrome invoke camelCase; PR **#152** / `8bb86bd`; next free **0139**).
+- **MVP slice:** Series A–H Completed; Series I **`0057`–`0061` Completed** (schema through **v39**; platform spine closed). Series K Clean Unique export: **0065–0072 Completed**. Series J consolidation: **0062 Completed** (RC `0.2.0-rc.1`); **0063 Completed** (security red team; D-0063-01..05 residual); **0064 Completed** (Desk Connect + Solo produce profile UX; D-0064-01..08 residual). Series L **0073–0081 Completed**. Series M **0082–0092 Completed** (Unique export fidelity residuals closed through allowlisted NPMAP write). Series N **0093–0097 Completed** (INC0102784 operator fidelity follow-ups). **0098 Completed** (template NID / verify −50). **Series P 0099–0104 Completed**. **Series Q 0105–0106 Completed** (window-edge + unique-eml nested MIME). **Series R 0107 Completed** (`unique-pst --also-eml` co-export; PR #104 / `339dfa0`). **Series S 0108–0109 Completed** (poly degrade risk + also-eml classify). **Series O 0110–0122 Completed** (Tauri chrome + first-pass queue + review window + DAT produce checklist + zpdf raster/burn + TIFF G4/OPT + Process fold + queue virtualization residuals + review-window async + produce-checklist residuals + pdf-raster UI residuals + image OPT/QC residuals + Process extract-all / orphan residuals; PRs **#111** / **#113** / **#115** / **#117** / **#119** / **#121** / **#123** / **#125** / **#127** / **#129** / **#131** / **#135** / **#137**). **0123 Completed** (shared matter shell; PR **#139** / `fce416e`). **0124 Completed** (queue ellipsis + rail + Go-to/range; PR **#141** / `ff8b0ea`). **0125 Completed** (un-wizard produce canvas; PR **#143** / `1fbc22a`). **0126 Completed** (Process visual). **Series U 0127–0132 Completed** (unique-pst HITL residuals; PR **#147** / `9082761`). **Series V 0133–0137 Completed** (chrome–mockup operational parity; PR **#150** / `a8287b4`). **0138 Completed** (chrome invoke camelCase; PR **#152** / `8bb86bd`). **Series X 0139–0147 Proposed** (INC0102784 CLI friction/speed placeholders). **Series Y 0148–0157 Proposed** (chrome HITL mockup-walk residuals; next free **0158**).
 - **Fixtures:** synthetic under `fixtures/` only; real multi-mailbox PSTs are **operator-local** smoke (Desktop/external), never committed.
 - **Deferred memory:** `docs/deferred.md`.
 - **Desk UI iteration (debug / cargo-watch):** [`ui-iteration.md`](ui-iteration.md).
