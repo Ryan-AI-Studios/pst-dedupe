@@ -404,13 +404,18 @@ source_id,source_path,folder_path,msg_nid,attach_nid,attach_index,filename,size,
   "level": "head",
   "attempted": 12000,
   "failed": 80,
-  "truncated": false,
+  "truncated": true,
   "fail_rate": 0.0067,
   "max_attach_fail_rate": 0.05,
-  "coverage_note": "budgeted attach probe level=head; residual export ledger (0073); L2 ≠ full verify",
-  "peer_probe_capped_groups": 0
+  "coverage_note": "budgeted L2/L3 attach probe truncated after 12000 attempts; residual export ledger (0073)",
+  "peer_probe_capped_groups": 0,
+  "budget_exhausted_reason": "probe_bytes",
+  "candidate_attaches_total": 18609,
+  "unprobed_candidate_attaches": 6609
 }
 ```
+
+`fail_rate` is `failed / attempted` (digest skips and message-level list/open failures count in `attempted`; budget-truncation codes do not). `fail_rate=0` with `truncated=true` is not store-wide attach health. `budget_exhausted_reason` is present when coverage is incomplete (`probe_bytes` / `max_attaches` / `per_attach_timeout` / `cancel`). Leftover counts come from the Phase-1 `attach_count` census and are omitted when unknown. `coverage_note` text is unchanged.
 
 Also available on plain `pst-dedup scan --deep-attach-preflight --json` under `summary.preflight.attach_probe` (same budget flags as unique-pst: level, max-attaches, max-probe-bytes, per-attach-max-bytes, max-probe-time-ms, max-open-psts, **max-peer-probes**, max-attach-fail-rate).
 

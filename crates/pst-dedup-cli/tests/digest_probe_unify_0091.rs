@@ -367,6 +367,9 @@ fn digest_probe_keep_set_groups_seed_equivalence() {
         attach_probe_cancelled: sum_seed.cancelled,
         attach_probe_bytes: sum_seed.bytes,
         attach_digest_stream_skips: sum_seed.digest_stream_skips,
+        attach_budget_exhausted_reason: sum_seed.budget_exhausted_reason.clone(),
+        attach_candidate_attaches_total: sum_seed.candidate_attaches_total,
+        attach_unprobed_candidate_attaches: sum_seed.unprobed_candidate_attaches,
     });
     let pre_empty = compute_preflight(&PreflightInputs {
         mode: ScanMode::BestEffort,
@@ -385,6 +388,9 @@ fn digest_probe_keep_set_groups_seed_equivalence() {
         attach_probe_cancelled: sum_empty.cancelled,
         attach_probe_bytes: sum_empty.bytes,
         attach_digest_stream_skips: sum_empty.digest_stream_skips,
+        attach_budget_exhausted_reason: sum_empty.budget_exhausted_reason.clone(),
+        attach_candidate_attaches_total: sum_empty.candidate_attaches_total,
+        attach_unprobed_candidate_attaches: sum_empty.unprobed_candidate_attaches,
     });
     assert_eq!(pre_seed.recommendation, pre_empty.recommendation);
     assert_eq!(pre_seed.recommendation, PreflightRecommendation::Ok);
