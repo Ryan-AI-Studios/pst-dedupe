@@ -1,8 +1,9 @@
 # 0140 — ScanStderrCadence — review
 
-**Status:** engineering complete; publish in progress  
+**Status:** Completed  
 **Date:** 2026-09-25  
-**Branch:** `track/0140-scan-stderr-cadence`
+**PR:** [#156](https://github.com/Ryan-AI-Studios/pst-dedupe/pull/156)  
+**Squash:** `0839c38`
 
 ## DoD
 
@@ -13,7 +14,7 @@
 | DoD-3 Probe cadence | PASS — helper 1/500 when first_n > 0 |
 | DoD-4 `--crc-log-limit 0` | PASS — aspose deep-attach JSON enabled, zero per-attempt lines; unique-pst summary retained; five clap surfaces |
 | DoD-5 Isolation | PASS — `--json` parses; no `--progress-file`; `stage=` unchanged |
-| DoD-6 Recorded | PASS after merge (PR/SHA below) |
+| DoD-6 Recorded | PASS — this file; registry Completed |
 
 HITL INC* `scan -v`: **skipped** (spec optional).
 
@@ -32,5 +33,4 @@ HITL INC* `scan -v`: **skipped** (spec optional).
 
 ## Publish
 
-- PR: (filled after open)
-- Squash SHA: (filled after merge)
+- PR **#156** / `0839c38`

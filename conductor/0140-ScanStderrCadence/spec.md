@@ -9,7 +9,7 @@
 - **Execution repo:** `C:\dev\Dedupe`
 - **Governance:** this directory in `C:\dev\Dedupe\conductor\` (track registry: `../conductor.md`)
 - **Plan-of-record reference:** unique-pst / scan operator stderr. `C:\dev\Dedupe-plan.md` is **absent** (re-verified 2026-09-25).
-- **Status:** Ready — not started
+- **Status:** Completed
 - **Depends on:** **0065** scan progress · **0074** deep-attach writeln · **0077** CRC first-N · **0132** Completed (unique-pst PowerShell capture)
 - **Spec authored:** 2026-09-24 placeholder
 - **Ready:** 2026-09-25 (`/plan-track 0140` via coordinator advance after **0139**)
