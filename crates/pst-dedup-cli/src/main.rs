@@ -17,8 +17,8 @@ use dedup_engine::keepset::{FamilyPolicy, KeepPolicy};
 use pst_dedup_cli::error::{CliError, CliExit, Result};
 use pst_dedup_cli::json_io::emit_error;
 use pst_dedup_cli::scan::{
-    collect_dups, dups_sample_limit, evaluate_exit_policy, resolve_pst_paths, run_scan,
-    write_report, DupRow, DupsJsonPayload, ScanOptions, ScanSummary,
+    collect_dups, dups_sample_limit, eprint_poly_crc_note, evaluate_exit_policy, resolve_pst_paths,
+    run_scan, write_report, DupRow, DupsJsonPayload, ScanOptions, ScanSummary,
 };
 use pst_dedup_cli::{
     convenience, inspect, job_cmd, keep_set_cmd, matter_cmd, platform_cmd, production_profile_cmd,
@@ -1778,6 +1778,7 @@ fn cmd_scan(args: ScanCliArgs) -> Result<()> {
     };
     // Artifacts (CSV/integrity) are streamed and flushed inside run_scan before return.
     let outcome = run_scan(&paths, &opts)?;
+    eprint_poly_crc_note(outcome.summary.poly_class_crc_sources);
 
     if let Some(csv_path) = &args.csv {
         // Append summary footer (rows already streamed when csv was set).
@@ -1940,6 +1941,7 @@ fn cmd_dups(args: ScanCliArgs) -> Result<()> {
         strong_hash_attach_per_attach_max_bytes: args.strong_hash_attach_per_attach_max_bytes,
     };
     let outcome = run_scan(&paths, &opts)?;
+    eprint_poly_crc_note(outcome.summary.poly_class_crc_sources);
     let dup_limit = dups_sample_limit(args.limit);
     let dups = collect_dups(&outcome, dup_limit);
     let exit_err = evaluate_exit_policy(&outcome.summary, &opts).err();
@@ -2014,14 +2016,15 @@ fn print_summary_text(s: &ScanSummary) {
     }
     // 0077: numbers only — no subjects/paths on new lines.
     println!(
-        "  crc: page={} block={} bid={} distinct_bids={} exact={} suspect_msgs={} read_rate={:.4}",
+        "  crc: page={} block={} bid={} distinct_bids={} exact={} suspect_msgs={} read_rate={:.4} poly_sources={}",
         s.page_crc_mismatches,
         s.block_crc_mismatches,
         s.block_bid_mismatches,
         s.distinct_bad_bids,
         s.distinct_bad_bids_exact,
         s.crc_suspect_messages,
-        s.block_crc_read_rate
+        s.block_crc_read_rate,
+        s.poly_class_crc_sources
     );
     println!("  orphaned:      {}", s.orphaned_messages);
     println!(
@@ -2033,6 +2036,9 @@ fn print_summary_text(s: &ScanSummary) {
         s.preflight.recommendation.as_str(),
         s.preflight.reasons
     );
+    if let Some(note) = &s.poly_crc_note {
+        println!("  poly_crc:     {note}");
+    }
     println!(
         "  savings:       {} ({})",
         s.savings_bytes,

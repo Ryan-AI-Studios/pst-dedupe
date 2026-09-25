@@ -101,6 +101,10 @@ reason codes (`CRC_MISMATCH`, `BODY_TRUNCATED`, `ATTACH_META_FAILED`, …). Defa
 `--mode best-effort` keeps degraded attach/body/orphan messages with reasons; `--mode strict`
 skips them and exits non-zero. Preflight recommendation (`ok` / `re_export_recommended` /
 `not_export_ready`) is **guidance only** — this tool never repairs source PSTs.
+Poly-class CRC (`files[].poly_class_crc`, `poly_class_crc_sources`) can keep preflight `ok`
+next to a high `block_crc_read_rate` (the ∈[0,1] read fraction). JSON then includes
+`poly_crc_note` and stderr prints one `note:` (not silenced by `--crc-log-limit 0`).
+`block_crc_rate` is CRC hits per recoverable message, not a percent.
 **Non-zero exit still flushes** CSV/integrity/JSON artifacts first (safe for automation
 and 0066 force-consume of partial recoverable sets). Empty `folder_path` alone is not
 orphan; use `is_orphaned`. Intentional Tier-2 4KB body preview is **not** `BODY_TRUNCATED`.

@@ -46,9 +46,10 @@ use crate::pst_materializer::{
     DEFAULT_MAX_OPEN_PSTS,
 };
 use crate::scan::{
-    apply_strict_probe_skips_to_file_stats, evaluate_exit_policy, rebuild_dedup_results_with_ctx,
-    recompute_file_status_counts, recompute_per_file_degraded_from_candidates,
-    recompute_per_file_dup_from_results, resolve_pst_paths, run_scan, ScanOptions,
+    apply_strict_probe_skips_to_file_stats, eprint_poly_crc_note, evaluate_exit_policy,
+    rebuild_dedup_results_with_ctx, recompute_file_status_counts,
+    recompute_per_file_degraded_from_candidates, recompute_per_file_dup_from_results,
+    resolve_pst_paths, run_scan, ScanOptions,
 };
 use crate::scan_progress::should_emit_probe_progress_line;
 use crate::unique_export_report::{
@@ -1210,6 +1211,7 @@ fn write_cancelled_summary_json(ctx: &CancelledSummaryCtx<'_>) {
         block_crc_rate: 0.0,
         block_crc_read_rate: 0.0,
         poly_class_crc_sources: 0,
+        poly_crc_note: None,
     };
     let keep_set = KeepSet {
         schema: KEEP_SET_SCHEMA.to_string(),
@@ -1620,6 +1622,7 @@ pub fn run_unique_pst_with_options(
     let t_scan = Instant::now();
     let mut outcome = run_scan(&paths, &opts)?;
     phase_timings.scan_ms = t_scan.elapsed().as_millis() as u64;
+    eprint_poly_crc_note(outcome.summary.poly_class_crc_sources);
 
     // Scan-level integrity warnings must reach on_log (GUI Log panel), not only tracing.
     {
