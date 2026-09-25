@@ -641,6 +641,10 @@ fn dups_json_failed_pst_single_document() {
     let v: Value = serde_json::from_str(stdout.trim()).expect("single JSON document on dups fail");
     assert_eq!(v["ok"], false);
     assert!(v.get("summary").is_some() || v.get("error").is_some());
+    assert!(v.get("duplicates_total").is_some(), "0142 totals on fail");
+    assert!(v.get("duplicates_shown").is_some());
+    assert!(v.get("duplicates_limit").is_some());
+    assert!(v.get("duplicates_truncated").is_some());
 }
 
 #[test]

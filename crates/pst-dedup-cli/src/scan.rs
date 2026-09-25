@@ -2015,6 +2015,62 @@ pub fn write_report(path: &Path, outcome: &ScanOutcome) -> Result<()> {
     Ok(())
 }
 
+/// CLI `--limit` for duplicate listing: `0` means unlimited.
+pub fn dups_sample_limit(cli_limit: usize) -> Option<usize> {
+    if cli_limit == 0 {
+        None
+    } else {
+        Some(cli_limit)
+    }
+}
+
+/// True when a sample cap is in effect and the listed array is shorter than the corpus total.
+pub fn duplicates_truncated(total: u64, shown: usize, limit: Option<usize>) -> bool {
+    limit.is_some() && (shown as u64) < total
+}
+
+/// Additive listing envelope for `dups --json` and `scan --json --dups` (0142).
+#[derive(Debug, Serialize)]
+pub struct DupsJsonPayload {
+    ok: bool,
+    summary: ScanSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    csv: Option<String>,
+    duplicates: Vec<DupRow>,
+    duplicates_total: u64,
+    duplicates_shown: usize,
+    duplicates_limit: Option<usize>,
+    duplicates_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<serde_json::Value>,
+}
+
+impl DupsJsonPayload {
+    pub fn listing(
+        ok: bool,
+        summary: ScanSummary,
+        csv: Option<String>,
+        duplicates: Vec<DupRow>,
+        limit: Option<usize>,
+        error: Option<serde_json::Value>,
+    ) -> Self {
+        let duplicates_total = summary.duplicates;
+        let duplicates_shown = duplicates.len();
+        let duplicates_truncated = duplicates_truncated(duplicates_total, duplicates_shown, limit);
+        Self {
+            ok,
+            summary,
+            csv,
+            duplicates,
+            duplicates_total,
+            duplicates_shown,
+            duplicates_limit: limit,
+            duplicates_truncated,
+            error,
+        }
+    }
+}
+
 /// Collect duplicate rows (optionally capped).
 pub fn collect_dups(outcome: &ScanOutcome, limit: Option<usize>) -> Vec<DupRow> {
     let mut out = Vec::new();
@@ -2084,6 +2140,22 @@ mod tests {
         MessageClassification, ScanMode,
     };
     use dedup_engine::keepset::MessageLocus;
+
+    #[test]
+    fn dups_sample_limit_zero_is_unlimited() {
+        assert_eq!(dups_sample_limit(0), None);
+        assert_eq!(dups_sample_limit(1), Some(1));
+        assert_eq!(dups_sample_limit(50), Some(50));
+    }
+
+    #[test]
+    fn duplicates_truncated_boundaries() {
+        assert!(!duplicates_truncated(44, 44, None));
+        assert!(!duplicates_truncated(44, 44, Some(50)));
+        assert!(duplicates_truncated(44, 25, Some(25)));
+        assert!(!duplicates_truncated(0, 0, Some(50)));
+        assert!(!duplicates_truncated(3, 3, Some(1))); // shown already equals total
+    }
 
     /// Dual-rate poly gate: high block alone keeps taint; both high → poly reclassify.
     #[test]

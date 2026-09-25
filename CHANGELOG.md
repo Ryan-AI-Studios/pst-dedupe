@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Changed (0142 — Dups JSON totals)
+
+- `dups --json` and `scan --json --dups` keep `duplicates` as a `--limit`-capped array and add `duplicates_total`, `duplicates_shown`, `duplicates_limit` (`null` when `--limit 0`), and `duplicates_truncated`. Human list prints `N of M shown`.
+
 ### Changed (0141 — Keep-set JSON envelope)
 
 - `keep-set --json` prints a `keep_set_summary_v1` stats envelope (no nested `winners`). Winners stay in `--keep-set-json` (`keep_set_v1`). `--include-winners` restores the list on stdout only. `keep_set_summary.json` is always the envelope.
