@@ -362,21 +362,21 @@ Working tree on `73f1d7f` (2026-09-24): uncommitted `tauri_invoke` camelCase rew
 
 ## Series X — INC0102784 CLI friction & scan speed (0139–0147)
 
-Minted **2026-09-24** from a read-only operator smoke of Desktop `INC0102784.pst` + `INC0102784-2.pst` (4.00 GiB + 537 MiB Permute; 4099 msgs / 4055 unique). Metadata scan ~3 s; unique-pst wall remains ~13–17 min historically. **0139 Completed** (PR **#154** / `234f4fa`). **0140 Completed** (PR **#156** / `0839c38`). **0141 Completed** (PR **#158** / `766f523`). **0142–0147** still placeholders until `/plan-track`. Nested `Desktop\Desktop` path **declined** (operator FS; `\\?\` works). No BCC-default. Schema **41**.
+Minted **2026-09-24** from a read-only operator smoke of Desktop `INC0102784.pst` + `INC0102784-2.pst` (4.00 GiB + 537 MiB Permute; 4099 msgs / 4055 unique). Metadata scan ~3 s; unique-pst wall remains ~13–17 min historically. **0139 Completed** (PR **#154** / `234f4fa`). **0140 Completed** (PR **#156** / `0839c38`). **0141 Completed** (PR **#158** / `766f523`). **0142 Completed** (PR **#160** / `a4dae1e`). **0143–0147** still placeholders until `/plan-track`. Nested `Desktop\Desktop` path **declined** (operator FS; `\\?\` works). No BCC-default. Schema **41**.
 
 | Track | Status | Summary |
 |---|---|---|
 | [0139-SourceRankDiscoverability](0139-SourceRankDiscoverability/spec.md) | **Completed** | `first_seen` path-sort vs `--source-rank`; JSON `input_path_sort_order`; one multi-input stderr note. Closes **D-0139-source-rank-discoverability**. PR **#154** / `234f4fa`. |
 | [0140-ScanStderrCadence](0140-ScanStderrCadence/spec.md) | **Completed** | Scan/dups/keep-set stderr: periodic `-v` aggregates, not per-folder; `--crc-log-limit 0` silences probe writeln. Owns stderr I/O tax. Closes **D-0140-scan-stderr-cadence**. PR **#156** / `0839c38`. |
 | [0141-KeepSetJsonEnvelope](0141-KeepSetJsonEnvelope/spec.md) | **Completed** | `keep-set --json` stats envelope (`keep_set_summary_v1`); winners in `--keep-set-json` or `--include-winners`. Closes **D-0141-keepset-json-envelope**. PR **#158** / `766f523`. |
-| [0142-DupsJsonTotals](0142-DupsJsonTotals/spec.md) | **Proposed — placeholder** | `dups --json` totals independent of `--limit`. Closes **D-0142-dups-json-totals**. |
+| [0142-DupsJsonTotals](0142-DupsJsonTotals/spec.md) | **Completed** | `dups --json` additive `duplicates_total` / shown / limit / truncated; `--limit` still caps the array. Closes **D-0142-dups-json-totals**. PR **#160** / `a4dae1e`. |
 | [0143-PolyCrcScanCopy](0143-PolyCrcScanCopy/spec.md) | **Proposed — placeholder** | Preflight `ok` + poly CRC rates: JSON/stderr copy. No skip-math change. Closes **D-0143-poly-crc-scan-copy**. |
 | [0144-IntegrityCsvHonesty](0144-IntegrityCsvHonesty/spec.md) | **Proposed — placeholder** | Header-only integrity CSV vs CRC_SUSPECT taint. Closes **D-0144-integrity-csv-honesty**. |
 | [0145-ScanOnceReuse](0145-ScanOnceReuse/spec.md) | **Proposed — placeholder** | `keep-set`/`dups` consume prior `scan --json`. Closes **D-0145-scan-once-reuse**. |
 | [0146-UniquePstWriteHotspots](0146-UniquePstWriteHotspots/spec.md) | **Proposed — placeholder** | Measure unique-pst write wall (materialize/writer/also-eml). Closes **D-0146-unique-pst-write-hotspots**. |
 | [0147-DeepAttachCoverage](0147-DeepAttachCoverage/spec.md) | **Proposed — placeholder** | Deep-attach truncated budget leftover honesty. Closes **D-0147-deep-attach-coverage**. |
 
-**Suggested order:** **0141 Completed**. **0142–0144** operator copy/JSON (still Proposed) → **0145** reuse → **0147** attach coverage → **0146** write hotspots (HITL). Next free ID **0148** (Series Y).
+**Suggested order:** **0142 Completed**. **0143–0144** operator copy/JSON (still Proposed) → **0145** reuse → **0147** attach coverage → **0146** write hotspots (HITL). Next free ID **0148** (Series Y).
 
 ## Series Y — Chrome HITL mockup walk residuals (0148–0157)
 
