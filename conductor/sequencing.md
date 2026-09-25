@@ -152,7 +152,7 @@
 | 93 | P3 V | **0137** ProducePreflightActions | ✅ Completed | Pre-flight extras → review/QC; 0119 frozen; PR **#150** / `a8287b4` |
 | 94 | P1 W | **0138** ChromeInvokeCamelCase | ✅ Completed | Top-level `tauri_invoke` camelCase; host stays default; shallow only |
 | 95 | P2 X | **0139** SourceRankDiscoverability | ✅ Completed | `first_seen` path-sort vs `--source-rank`; PR **#154** / `234f4fa` |
-| 96 | P2 X | **0140** ScanStderrCadence | ⬜ Ready | Scan stderr aggregates; owns I/O tax |
+| 96 | P2 X | **0140** ScanStderrCadence | ✅ Completed | Scan stderr aggregates; owns I/O tax; PR **#156** / `0839c38` |
 | 97 | P2 X | **0141** KeepSetJsonEnvelope | 📦 Proposed | `--json` stats vs winners sidecar |
 | 98 | P3 X | **0142** DupsJsonTotals | 📦 Proposed | `dups --limit` still reports totals |
 | 99 | P2 X | **0143** PolyCrcScanCopy | 📦 Proposed | Poly CRC + preflight `ok` copy |
@@ -338,12 +338,12 @@ Minted **2026-09-24** from the uncommitted `tauri_invoke` camelCase rewrite (HEA
 
 ## Series X — INC0102784 CLI friction & scan speed (0139–0147)
 
-Minted **2026-09-24** from read-only inspect/scan/dups/keep-set on the split INC* pair. **0139 Completed** (PR **#154** / `234f4fa`). **0140** Ready 2026-09-25; **0141–0147** placeholders until `/plan-track`.
+Minted **2026-09-24** from read-only inspect/scan/dups/keep-set on the split INC* pair. **0139 Completed** (PR **#154** / `234f4fa`). **0140 Completed** (PR **#156** / `0839c38`); **0141–0147** placeholders until `/plan-track`.
 
 | Order | Track | Notes |
 |---|---|---|
 | 1 | **0139** SourceRankDiscoverability | **Completed** — PR **#154** / `234f4fa` |
-| 2 | **0140** ScanStderrCadence | **Ready** — periodic `-v` folder progress; `--crc-log-limit 0` silences probe writeln |
+| 2 | **0140** ScanStderrCadence | **Completed** — PR **#156** / `0839c38` |
 | 3 | **0141** KeepSetJsonEnvelope | 3.4 MB `--json` winners |
 | 4 | **0142** DupsJsonTotals | `--limit` sample vs totals |
 | 5 | **0143** PolyCrcScanCopy | Scary CRC rates + preflight `ok` |
