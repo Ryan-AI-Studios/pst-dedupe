@@ -150,6 +150,7 @@
 | 91 | P2 V | **0135** ProcessJobsSourceColumn | ✅ Completed | Job Source basename; Dupes/NIST stay —; PR **#150** / `a8287b4` |
 | 92 | P3 V | **0136** ProcessExceptionActions | ✅ Completed | Real item_errors Retry; vault never; PR **#150** / `a8287b4` |
 | 93 | P3 V | **0137** ProducePreflightActions | ✅ Completed | Pre-flight extras → review/QC; 0119 frozen; PR **#150** / `a8287b4` |
+| 94 | P1 W | **0138** ChromeInvokeCamelCase | ✅ Completed | Top-level `tauri_invoke` camelCase; host stays default; shallow only |
 
 ## Series K spine (clean unique export)
 
@@ -317,3 +318,11 @@ Minted **2026-09-03** after chrome INC* ingest HITL (`unaccounted_for=2` with no
 | 3 | **0135** ProcessJobsSourceColumn | **Completed** — job basename from checkpoints; grain stays jobs; PR **#150** / `a8287b4` |
 | 4 | **0136** ProcessExceptionActions | **Completed** — real item_errors Retry; vault never; PR **#150** / `a8287b4` |
 | 5 | **0137** ProducePreflightActions | **Completed** — extras without item_id → Set/QC/protocol; PR **#150** / `a8287b4` |
+
+## Series W — Chrome IPC argument case (0138)
+
+Minted **2026-09-24** from the uncommitted `tauri_invoke` camelCase rewrite (HEAD `73f1d7f`). Shallow top-level keys only. Do not `rename_all` host commands in the same change.
+
+| Order | Track | Notes |
+|---|---|---|
+| 1 | **0138** ChromeInvokeCamelCase | **Completed** — `paramsJson` / `jobId` / `filterJson` at `tauri_invoke`; nested findings stay snake_case |

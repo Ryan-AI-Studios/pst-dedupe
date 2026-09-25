@@ -675,3 +675,46 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|e| e.to_string())?;
+            if file_type.is_dir() {
+                collect_rs_files(&path, out)?;
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn chrome_host_src_keeps_default_arg_case() {
+        let needle = ["rename", "all"].join("_");
+        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src_dir, &mut files).expect("walk crates/dedupe-chrome/src");
+        assert!(
+            !files.is_empty(),
+            "expected rust sources under crates/dedupe-chrome/src"
+        );
+        for path in files {
+            let text = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => panic!("read {}: {e}", path.display()),
+            };
+            assert!(
+                !text.contains(&needle),
+                "{} must not contain the host serde rename attribute (default camelCase stays)",
+                path.display()
+            );
+        }
+    }
+}

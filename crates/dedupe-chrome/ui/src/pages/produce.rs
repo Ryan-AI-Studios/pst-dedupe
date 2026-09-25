@@ -109,11 +109,11 @@ fn patch_qc_burn_counts(
 #[cfg(test)]
 mod process_job_succeeded_tests {
     use super::{
-        bates_start_from_next_seq_hint, finalize_blocked_by_volume_latch, patch_qc_burn_counts,
+        bates_start_from_next_seq_hint, export_path_list, extra_in_page_href,
+        finalize_blocked_by_volume_latch, layout_seg, patch_qc_burn_counts,
         privilege_log_post_step_banner, process_job_succeeded, projected_last_doc_bates,
-        protocol_note_display, protocol_log_format_radio, volume_latch_after_produce_terminal, wait_root_is_current,
-        extra_in_page_href, ChromeQcFinding, JobProgressSnapshot, ProduceQcRun, DAT_ONLY_PROFILE, export_path_list,
-        layout_seg,
+        protocol_log_format_radio, protocol_note_display, volume_latch_after_produce_terminal,
+        wait_root_is_current, ChromeQcFinding, JobProgressSnapshot, ProduceQcRun, DAT_ONLY_PROFILE,
     };
 
     #[test]
@@ -252,7 +252,10 @@ mod process_job_succeeded_tests {
         assert_eq!(protocol_note_display(None), "none on file");
         assert_eq!(protocol_note_display(Some("")), "none on file");
         assert_eq!(protocol_note_display(Some("   ")), "none on file");
-        assert_eq!(protocol_note_display(Some("Order Dkt. 42")), "Order Dkt. 42");
+        assert_eq!(
+            protocol_note_display(Some("Order Dkt. 42")),
+            "Order Dkt. 42"
+        );
         assert_eq!(
             protocol_log_format_radio("automated_metadata"),
             "automated_metadata"
@@ -454,7 +457,9 @@ fn export_path_list(page: &Option<ProducePageResponse>, slug: &str) -> String {
         .unwrap_or_else(|| "IMAGES".into());
     let include_images = p.map(|x| x.include_images).unwrap_or(false);
     if include_images {
-        format!("{natives}/ · {text}/ · {data}/load.dat · privilege-log.csv · {images}/ · IMAGE.opt")
+        format!(
+            "{natives}/ · {text}/ · {data}/load.dat · privilege-log.csv · {images}/ · IMAGE.opt"
+        )
     } else {
         format!("{natives}/ · {text}/ · {data}/load.dat · privilege-log.csv")
     }
