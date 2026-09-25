@@ -86,6 +86,13 @@ cargo build --release -p pst-dedup-gui
 .\target\release\pst-dedup.exe keep-set --input a.pst --input b.pst `
   --policy first_seen --decision-csv output\decisions.csv --json
 .\target\release\pst-dedup.exe keep-set a.pst b.pst --policy keep_largest --materialize --json
+
+# Scan once, reuse candidates in keep-set (skips the second folder walk)
+.\target\release\pst-dedup.exe scan a.pst b.pst --emit-candidates output\scan_candidates.json --json
+.\target\release\pst-dedup.exe keep-set --from-scan-json output\scan_candidates.json `
+  --keep-set-json output\keepset.json --json
+# `dups` has no --from-scan-json (listing needs subject/sender; RecoverableScanItem does not store them).
+# The sidecar is operator-sensitive (paths, Message-IDs, hashes) — keep it out of git.
 .\target\release\pst-dedup.exe keep-set archive.pst primary.pst `
   --policy prefer_path --prefer-path-contains Primary `
   --family-policy parents_only --decision-csv output\dec.csv

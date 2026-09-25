@@ -251,7 +251,7 @@ fidelity → bcc_completeness → source_rank → folder_class → policy → pa
 | `prefer_path` | Prefer paths matching `--prefer-path-contains` (unordered boolean) |
 | `earliest_date` | Prefer earliest **submit** FILETIME; **delivery** only if submit missing on that item; missing/≤0 sorts **last** |
 
-**Honesty — `first_seen`:** if `INC0102784-2.pst` sorts before `INC0102784.pst` by absolute path, the `-2` file can crown winners even when the primary file is preferred operationally. Remedy: `--source-rank INC0102784.pst --source-rank INC0102784-2.pst`. `keep-set` / `unique-pst` / `unique-eml` emit one run-level stderr note when ≥2 inputs are given without `--source-rank`, and `--json` includes `input_path_sort_order`.
+**Honesty — `first_seen`:** if `INC0102784-2.pst` sorts before `INC0102784.pst` by absolute path, the `-2` file can crown winners even when the primary file is preferred operationally. Remedy: `--source-rank INC0102784.pst --source-rank INC0102784-2.pst`. `keep-set` / `unique-pst` / `unique-eml` emit one run-level stderr note when ≥2 inputs are given without `--source-rank`, and `--json` includes `input_path_sort_order`. `keep-set --from-scan-json` may skip Phase 1 by loading a `scan_candidates_v1` sidecar from `scan --emit-candidates`; unique-pst still scans.
 
 **Honesty — `earliest_date`:** duplicate copies usually share the same sent time, so this policy often ties and falls through to path order. Real effects: demoting undated dumpster/Versions copies, and Tier-1 groups whose members genuinely differ. **Tier-2 groups cannot differ on submit time** (submit is already in the content hash) — `earliest_date` is a no-op inside a pure Tier-2 group. Never invent dates from mtime / LastModificationTime / wall clock.
 
