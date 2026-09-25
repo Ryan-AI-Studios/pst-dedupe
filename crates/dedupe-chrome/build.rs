@@ -6,6 +6,7 @@ fn main() {
             "recent_matters_list",
             "recent_matters_remember",
             "recent_matters_forget",
+            "picker_default_dir",
             "review_queue_page",
             "review_code_catalog",
             "saved_searches_list",

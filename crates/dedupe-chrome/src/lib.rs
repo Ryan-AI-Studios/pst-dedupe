@@ -49,8 +49,8 @@ use raster::{
     ReviewGeomFromHitsArgs, ReviewGeomListArgs, ReviewGeomUpsertArgs, ReviewRasterPageArgs,
 };
 use recents::{
-    production_recents_dir, recent_matters_forget_in, recent_matters_list_in,
-    recent_matters_remember_in, RecentMatter,
+    picker_default_dir_in, production_recents_dir, recent_matters_forget_in,
+    recent_matters_list_in, recent_matters_remember_in, RecentMatter,
 };
 use saved::{
     saved_search_upsert_blocking, saved_searches_list_blocking, SavedSearchUpsertArgs,
@@ -104,6 +104,17 @@ fn recent_matters_remember(root: String, name: String) -> Result<Vec<RecentMatte
 fn recent_matters_forget(root: String) -> Result<Vec<RecentMatter>, CommandError> {
     let dir = production_recents_dir()?;
     recent_matters_forget_in(&dir, &root)
+}
+
+#[tauri::command]
+fn picker_default_dir(preferred: Option<String>) -> Result<Option<String>, CommandError> {
+    match production_recents_dir() {
+        Ok(dir) => picker_default_dir_in(&dir, preferred.as_deref()),
+        Err(_) => {
+            let missing = std::env::temp_dir().join("dedupe-chrome-picker-no-recents");
+            picker_default_dir_in(&missing, preferred.as_deref())
+        }
+    }
 }
 
 #[tauri::command]
@@ -643,6 +654,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             recent_matters_list,
             recent_matters_remember,
             recent_matters_forget,
+            picker_default_dir,
             review_queue_page,
             review_code_catalog,
             saved_searches_list,

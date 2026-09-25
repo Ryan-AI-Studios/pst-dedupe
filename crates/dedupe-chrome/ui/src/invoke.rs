@@ -139,6 +139,11 @@ pub struct RememberArgs {
     pub name: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PickerDefaultDirArgs {
+    pub preferred: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
 pub struct RecentMatter {
     pub root: String,

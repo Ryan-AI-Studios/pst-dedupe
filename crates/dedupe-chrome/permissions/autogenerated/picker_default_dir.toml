@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-picker-default-dir"
+description = "Enables the picker_default_dir command without any pre-configured scope."
+commands.allow = ["picker_default_dir"]
+
+[[permission]]
+identifier = "deny-picker-default-dir"
+description = "Denies the picker_default_dir command without any pre-configured scope."
+commands.deny = ["picker_default_dir"]

@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Fixed (0149 — Picker dialog reset)
+
+- Chrome New matter… / Open… / Add folder / Add ZIP or PST seed an existing `defaultPath` so the Windows folder picker leaves a leftover search view. Defaults come from the last recent matter parent, then Documents/home/cwd. Process ingest pickers prefer the open matter root. Missing paths are not created.
+
 ### Fixed (0148 — Recents / Open honesty)
 
 - Matters Open… / recents click validates with `matter_overview` before `recent_matters_remember` and only navigates on success. Missing roots and folders without `matter.db` return `not_found`, show a list error that names the path, and `recent_matters_forget` drops the dead card. Encrypted and permission/busy failures stay listed. Process no longer paints `.process-layout` when the store did not load.

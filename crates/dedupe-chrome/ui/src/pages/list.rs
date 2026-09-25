@@ -3,7 +3,8 @@ use leptos_router::hooks::use_navigate;
 use wasm_bindgen::prelude::*;
 
 use crate::invoke::{
-    tauri_invoke, CreateArgs, MatterOverview, RecentMatter, RememberArgs, RootArgs,
+    tauri_invoke, CreateArgs, MatterOverview, PickerDefaultDirArgs, RecentMatter, RememberArgs,
+    RootArgs,
 };
 use crate::path_id::encode_matter_id;
 
@@ -97,7 +98,7 @@ pub fn MattersList() -> impl IntoView {
                     class="primary"
                     on:click=move |_| {
                         leptos::task::spawn_local(async move {
-                            match pick_folder().await {
+                            match pick_folder("Choose parent folder for new matter").await {
                                 Ok(Some(path)) => {
                                     new_parent.set(path);
                                     show_create.set(true);
@@ -112,7 +113,7 @@ pub fn MattersList() -> impl IntoView {
                 </button>
                 <button on:click=move |_| {
                     leptos::task::spawn_local(async move {
-                        match pick_folder().await {
+                        match pick_folder("Open existing matter folder").await {
                             Ok(Some(path)) => {
                                 let name = path
                                     .rsplit(['\\', '/'])
@@ -237,12 +238,23 @@ fn clear_chrome_status() {
     }
 }
 
-async fn pick_folder() -> Result<Option<String>, String> {
+async fn pick_folder(title: &str) -> Result<Option<String>, String> {
     let opts = js_sys::Object::new();
     js_sys::Reflect::set(&opts, &"directory".into(), &JsValue::TRUE)
         .map_err(|e| format!("{e:?}"))?;
     js_sys::Reflect::set(&opts, &"multiple".into(), &JsValue::FALSE)
         .map_err(|e| format!("{e:?}"))?;
+    js_sys::Reflect::set(&opts, &"title".into(), &JsValue::from_str(title))
+        .map_err(|e| format!("{e:?}"))?;
+    if let Ok(Some(path)) = tauri_invoke::<Option<String>, _>(
+        "picker_default_dir",
+        &PickerDefaultDirArgs { preferred: None },
+    )
+    .await
+    {
+        js_sys::Reflect::set(&opts, &"defaultPath".into(), &JsValue::from_str(&path))
+            .map_err(|e| format!("{e:?}"))?;
+    }
     let promise = dialog_open(opts.into()).map_err(|e| format!("{e:?}"))?;
     let value = wasm_bindgen_futures::JsFuture::from(promise)
         .await
@@ -303,5 +315,19 @@ mod open_honesty_tests {
             !nav_after_forget.contains("navigate.with_value"),
             "must not navigate after overview failure"
         );
+    }
+
+    #[test]
+    fn pick_folder_sets_default_path_and_titles() {
+        let src = include_str!("list.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let pick = prod.split("async fn pick_folder").nth(1).unwrap_or("");
+        assert!(
+            pick.contains("\"defaultPath\""),
+            "pick_folder must set dialog defaultPath"
+        );
+        assert!(pick.contains("picker_default_dir"));
+        assert!(prod.contains("Choose parent folder for new matter"));
+        assert!(prod.contains("Open existing matter folder"));
     }
 }
