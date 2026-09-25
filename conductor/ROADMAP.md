@@ -485,7 +485,7 @@ Tauri 2 default camelCase command args vs snake_case UI serde (discovered on the
 
 ### Wave 15 — INC0102784 CLI friction & scan speed (Series X)
 
-Read-only operator smoke 2026-09-24 (`inspect`/`scan`/`dups`/`keep-set`, no unique-pst write). Metadata ~3 s; unique-pst remains the wall. **0139 Completed** (PR **#154** / `234f4fa`). **0140 Completed** (PR **#156** / `0839c38`). **0141 Completed** (PR **#158** / `766f523`). **0142 Completed** (PR **#160** / `a4dae1e`). **0143–0147 Proposed** until `/plan-track`. Nested `Desktop\Desktop` path declined.
+Read-only operator smoke 2026-09-24 (`inspect`/`scan`/`dups`/`keep-set`, no unique-pst write). Metadata ~3 s; unique-pst remains the wall. **0139 Completed** (PR **#154** / `234f4fa`). **0140 Completed** (PR **#156** / `0839c38`). **0141 Completed** (PR **#158** / `766f523`). **0142 Completed** (PR **#160** / `a4dae1e`). **0143 Completed** (PR **#162** / `1617720`). **0144–0147 Proposed** until `/plan-track`. Nested `Desktop\Desktop` path declined.
 
 | ID | Track | Status | Priority | High-level notes |
 |---|---|---|---|---|
@@ -493,13 +493,13 @@ Read-only operator smoke 2026-09-24 (`inspect`/`scan`/`dups`/`keep-set`, no uniq
 | **0140** | ScanStderrCadence | **Completed** | **P2 X** | Scan stderr cadence; owns I/O tax. Spec: `0140-ScanStderrCadence/`. PR **#156** / `0839c38`. |
 | **0141** | KeepSetJsonEnvelope | **Completed** | **P2 X** | `--json` stats envelope. Spec: `0141-KeepSetJsonEnvelope/`. PR **#158** / `766f523`. |
 | **0142** | DupsJsonTotals | **Completed** | **P3 X** | Additive `duplicates_total` vs `--limit` sample. Spec: `0142-DupsJsonTotals/`. PR **#160** / `a4dae1e`. |
-| **0143** | PolyCrcScanCopy | **Proposed** | **P2 X** | Poly CRC vs preflight `ok` copy. Spec: `0143-PolyCrcScanCopy/`. |
+| **0143** | PolyCrcScanCopy | **Completed** | **P2 X** | Additive `poly_crc_note` + stderr `note:`. Spec: `0143-PolyCrcScanCopy/`. PR **#162** / `1617720`. |
 | **0144** | IntegrityCsvHonesty | **Proposed** | **P3 X** | Empty integrity CSV honesty. Spec: `0144-IntegrityCsvHonesty/`. |
 | **0145** | ScanOnceReuse | **Proposed** | **P1 X** | keep-set/dups from scan JSON. Spec: `0145-ScanOnceReuse/`. |
 | **0146** | UniquePstWriteHotspots | **Proposed** | **P1 X** | unique-pst write measurement. Spec: `0146-UniquePstWriteHotspots/`. |
 | **0147** | DeepAttachCoverage | **Proposed** | **P2 X** | Truncated attach-probe leftover. Spec: `0147-DeepAttachCoverage/`. |
 
-**Order:** **0139 Completed**, **0140 Completed**, **0141 Completed**, **0142 Completed**, **0143–0147 Proposed**. Next free ID **0148** (Series Y).
+**Order:** **0139 Completed**, **0140 Completed**, **0141 Completed**, **0142 Completed**, **0143 Completed**, **0144–0147 Proposed**. Next free ID **0148** (Series Y).
 
 ### Wave 16 — Chrome HITL mockup walk residuals (Series Y)
 
