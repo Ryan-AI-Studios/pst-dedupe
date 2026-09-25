@@ -1514,6 +1514,9 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
     let mut peer_probe_capped_groups = 0u64;
     let mut attach_probe_bytes = 0u64;
     let mut attach_digest_stream_skips = 0u64;
+    let mut attach_budget_exhausted_reason: Option<String> = None;
+    let mut attach_candidate_attaches_total: Option<u64> = None;
+    let mut attach_unprobed_candidate_attaches: Option<u64> = None;
     let mut unique_count = index.unique_count;
     let mut duplicate_count = index.duplicate_count;
     let mut tier1_hits = index.tier1_hits;
@@ -1584,6 +1587,9 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         peer_probe_capped_groups = probe_summary.peer_probe_capped_groups;
         attach_probe_bytes = probe_summary.bytes;
         attach_digest_stream_skips = probe_summary.digest_stream_skips;
+        attach_budget_exhausted_reason = probe_summary.budget_exhausted_reason.clone();
+        attach_candidate_attaches_total = probe_summary.candidate_attaches_total;
+        attach_unprobed_candidate_attaches = probe_summary.unprobed_candidate_attaches;
 
         if attach_cancelled {
             // Cancel during probe is not attach corruption; leave tallies as pre-cancel.
@@ -1843,6 +1849,9 @@ pub fn run_scan(paths: &[PathBuf], opts: &ScanOptions) -> Result<ScanOutcome> {
         attach_probe_cancelled: attach_cancelled,
         attach_probe_bytes,
         attach_digest_stream_skips,
+        attach_budget_exhausted_reason,
+        attach_candidate_attaches_total,
+        attach_unprobed_candidate_attaches,
     });
 
     let page_crc_total: u64 = file_stats.iter().map(|f| f.page_crc_mismatches).sum();

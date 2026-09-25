@@ -383,6 +383,10 @@ fn clap_rejects_zero_nine_and_non_integer() {
         help_txt.contains("per-attempt") && help_txt.contains("end-of-probe"),
         "0140 unique-pst --crc-log-limit help; {help_txt}"
     );
+    assert!(
+        help_txt.contains("256 MiB") && help_txt.contains("mid-store"),
+        "0147 unique-pst --deep-attach-max-probe-bytes help; {help_txt}"
+    );
 }
 
 #[test]

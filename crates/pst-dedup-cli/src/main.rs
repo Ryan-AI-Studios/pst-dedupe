@@ -105,6 +105,7 @@ enum Commands {
         deep_attach_level: String,
         #[arg(long = "deep-attach-max-attaches", default_value_t = 50_000)]
         deep_attach_max_attaches: u64,
+        /// Global attachment-stream probe I/O cap in bytes (default 256 MiB). Default budget can stop mid-store on large multi-GB corpora.
         #[arg(long = "deep-attach-max-probe-bytes", default_value_t = 268_435_456)]
         deep_attach_max_probe_bytes: u64,
         #[arg(long = "deep-attach-per-attach-max-bytes", default_value_t = 1_048_576)]

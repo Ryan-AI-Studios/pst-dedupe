@@ -496,6 +496,48 @@ fn scan_deep_attach_crc_log_limit_zero_silences_probe_lines() {
 }
 
 #[test]
+fn scan_deep_attach_tiny_byte_budget_exposes_0147_coverage() {
+    let sample = fixture_sample();
+    if !sample.exists() {
+        eprintln!("skip: fixtures/aspose_outlook.pst missing");
+        return;
+    }
+    let path = sample.to_str().expect("utf8");
+    let out = scan_cmd(&[
+        "scan",
+        path,
+        "--json",
+        "--deep-attach-preflight",
+        "--deep-attach-level",
+        "head",
+        "--deep-attach-max-probe-bytes",
+        "1024",
+    ]);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let probe = &v["summary"]["preflight"]["attach_probe"];
+    assert_eq!(probe["enabled"], true, "probe must run; {probe}");
+    if probe["truncated"] == true {
+        let reason = probe["budget_exhausted_reason"].as_str();
+        assert!(
+            matches!(
+                reason,
+                Some("probe_bytes")
+                    | Some("max_attaches")
+                    | Some("per_attach_timeout")
+                    | Some("cancel")
+            ),
+            "truncated probe needs a 0147 reason; {probe}"
+        );
+        assert!(probe.get("candidate_attaches_total").is_some(), "{probe}");
+    }
+}
+
+#[test]
 fn scan_and_global_help_name_cadence() {
     let global = Command::new(bin())
         .env_remove("RUST_LOG")
@@ -525,6 +567,10 @@ fn scan_and_global_help_name_cadence() {
     assert!(
         s.contains("per-attempt") && s.contains("crc-log-limit"),
         "scan --crc-log-limit help; {s}"
+    );
+    assert!(
+        s.contains("256 MiB") && s.contains("mid-store"),
+        "0147 scan --deep-attach-max-probe-bytes help; {s}"
     );
 
     let dups = Command::new(bin())

@@ -114,6 +114,66 @@ pub struct AttachProbeSummary {
     /// Pass-2 attaches skipped because Pass-1 digest already proved Full readability (0091).
     /// Logical `attempted`/`bytes` still charged once via `charge_pending`; no second stream I/O.
     pub digest_stream_skips: u64,
+    /// Binding stop reason when `truncated` (0147).
+    pub budget_exhausted_reason: Option<String>,
+    /// Sum of Phase-1 `attach_count` on the probed item slice (0147).
+    pub candidate_attaches_total: Option<u64>,
+    /// Budget-unreached leftover from that census (0147).
+    pub unprobed_candidate_attaches: Option<u64>,
+}
+
+const REASON_CANCEL: &str = "cancel";
+const REASON_PROBE_BYTES: &str = "probe_bytes";
+const REASON_MAX_ATTACHES: &str = "max_attaches";
+const REASON_TIMEOUT: &str = "per_attach_timeout";
+
+fn reason_rank(reason: &str) -> u8 {
+    match reason {
+        REASON_CANCEL => 4,
+        REASON_PROBE_BYTES => 3,
+        REASON_MAX_ATTACHES => 2,
+        REASON_TIMEOUT => 1,
+        _ => 0,
+    }
+}
+
+impl AttachProbeSummary {
+    fn raise_reason(&mut self, reason: &'static str) {
+        let next = reason_rank(reason);
+        let cur = self
+            .budget_exhausted_reason
+            .as_deref()
+            .map(reason_rank)
+            .unwrap_or(0);
+        if next > cur {
+            self.budget_exhausted_reason = Some(reason.to_string());
+        }
+    }
+}
+
+fn candidate_attaches_total(items: &[RecoverableScanItem]) -> u64 {
+    items.iter().map(|i| i.attach_count as u64).sum()
+}
+
+fn in_scope_attach_count(items: &[RecoverableScanItem], ranked: &[usize], peer_cap: u64) -> u64 {
+    ranked
+        .iter()
+        .take(peer_cap as usize)
+        .map(|&i| items.get(i).map(|it| it.attach_count as u64).unwrap_or(0))
+        .sum()
+}
+
+fn keep_set_later_in_scope(
+    items: &[RecoverableScanItem],
+    ranked_groups: &[Vec<usize>],
+    from_group: usize,
+    peer_cap: u64,
+) -> u64 {
+    ranked_groups
+        .iter()
+        .skip(from_group)
+        .map(|ranked| in_scope_attach_count(items, ranked, peer_cap))
+        .sum()
 }
 
 /// Cache key identity for level-aware result cache.
@@ -598,12 +658,41 @@ impl AttachProbeEngine {
     /// Non-fail outcome for cooperative cancel (must not look like attach corruption).
     fn cancel_outcome(&mut self, bytes_read: u64) -> ProbeOutcome {
         self.summary.cancelled = true;
+        self.summary.truncated = true;
+        self.summary.raise_reason(REASON_CANCEL);
         ProbeOutcome {
             ok: true,
             reason: None,
             bytes_read,
             timed_out: false,
             level: self.level,
+        }
+    }
+
+    fn note_global_stop(&mut self) {
+        self.summary.truncated = true;
+        if self.summary.cancelled || self.cancelled() {
+            self.summary.raise_reason(REASON_CANCEL);
+        }
+        if self.bytes_left == 0 {
+            self.summary.raise_reason(REASON_PROBE_BYTES);
+        }
+        if self.attaches_left == 0 {
+            self.summary.raise_reason(REASON_MAX_ATTACHES);
+        }
+    }
+
+    fn finalize_coverage(&mut self) {
+        if self.summary.cancelled || self.cancelled() {
+            self.summary.cancelled = true;
+            self.summary.truncated = true;
+            self.summary.raise_reason(REASON_CANCEL);
+        }
+        if self.summary.truncated
+            && self.summary.budget_exhausted_reason.is_none()
+            && (self.bytes_left == 0 || self.attaches_left == 0)
+        {
+            self.note_global_stop();
         }
     }
 
@@ -622,7 +711,7 @@ impl AttachProbeEngine {
         }
 
         if self.budget_exhausted() {
-            self.summary.truncated = true;
+            self.note_global_stop();
             return ProbeOutcome {
                 ok: false,
                 reason: Some(IntegrityReason::AttachProbeTruncated),
@@ -779,7 +868,7 @@ impl AttachProbeEngine {
         // Truncation (budget) is not an attach fail; timeout is a fail.
         // Cancel never reaches here (handled before record).
         if outcome.reason == Some(IntegrityReason::AttachProbeTruncated) {
-            self.summary.truncated = true;
+            self.note_global_stop();
             return;
         }
         self.summary.attempted += 1;
@@ -822,9 +911,10 @@ impl AttachProbeEngine {
         // Timeout implies incomplete coverage for remaining attaches.
         if outcome.timed_out || outcome.reason == Some(IntegrityReason::AttachProbeTimeout) {
             self.summary.truncated = true;
+            self.summary.raise_reason(REASON_TIMEOUT);
         }
         if self.attaches_left == 0 || self.bytes_left == 0 {
-            self.summary.truncated = true;
+            self.note_global_stop();
         }
     }
 
@@ -1222,18 +1312,30 @@ pub fn probe_scan_items(
         None => AttachProbeEngine::new(budgets, level, cancel, progress),
     };
 
-    for item in items.iter_mut() {
+    let total = candidate_attaches_total(items);
+    engine.summary.candidate_attaches_total = Some(total);
+    let mut unprobed = 0u64;
+    let mut stopped_early = false;
+
+    let mut idx = 0usize;
+    while idx < items.len() {
         if engine.cancelled() {
             engine.summary.cancelled = true;
+            engine.note_global_stop();
+            unprobed = candidate_attaches_total(&items[idx..]);
+            stopped_early = true;
             break;
         }
         if engine.budget_exhausted() {
-            engine.summary.truncated = true;
+            engine.note_global_stop();
+            unprobed = candidate_attaches_total(&items[idx..]);
+            stopped_early = true;
             break;
         }
 
-        let path = item.locus.source_path.clone();
-        let msg_nid = item.locus.nid;
+        let path = items[idx].locus.source_path.clone();
+        let msg_nid = items[idx].locus.nid;
+        let item_census = items[idx].attach_count as u64;
 
         let list = {
             let pst = match engine.handles.get_mut(&path) {
@@ -1248,7 +1350,8 @@ pub fn probe_scan_items(
                         level,
                     };
                     engine.record_attempt(&outcome);
-                    let _ = apply_probe_fail(item, reason, mode);
+                    let _ = apply_probe_fail(&mut items[idx], reason, mode);
+                    idx += 1;
                     continue;
                 }
             };
@@ -1264,39 +1367,75 @@ pub fn probe_scan_items(
                         level,
                     };
                     engine.record_attempt(&outcome);
-                    let _ = apply_probe_fail(item, reason, mode);
+                    let _ = apply_probe_fail(&mut items[idx], reason, mode);
+                    idx += 1;
                     continue;
                 }
             }
         };
 
+        let listed_len = list.len() as u64;
+        let mut probed_on_item = 0u64;
+        let mut broke_item = false;
         for att in list {
             if engine.cancelled() {
                 engine.summary.cancelled = true;
+                engine.note_global_stop();
+                unprobed = listed_len.saturating_sub(probed_on_item)
+                    + candidate_attaches_total(&items[idx + 1..]);
+                stopped_early = true;
+                broke_item = true;
                 break;
             }
             if engine.budget_exhausted() {
-                engine.summary.truncated = true;
+                engine.note_global_stop();
+                unprobed = listed_len.saturating_sub(probed_on_item)
+                    + candidate_attaches_total(&items[idx + 1..]);
+                stopped_early = true;
+                broke_item = true;
                 break;
             }
             let outcome =
                 engine.probe_attach(&path, msg_nid, att.nid.0, att.size, att.attach_method);
             if engine.summary.cancelled {
+                unprobed = listed_len.saturating_sub(probed_on_item)
+                    + candidate_attaches_total(&items[idx + 1..]);
+                stopped_early = true;
+                broke_item = true;
                 break;
             }
+            if outcome.reason == Some(IntegrityReason::AttachProbeTruncated) {
+                unprobed = listed_len.saturating_sub(probed_on_item)
+                    + candidate_attaches_total(&items[idx + 1..]);
+                stopped_early = true;
+                broke_item = true;
+                break;
+            }
+            probed_on_item = probed_on_item.saturating_add(1);
             if let Some(r) = outcome.reason {
                 if r.is_attach_probe_fail() {
-                    let _ = apply_probe_fail(item, r, mode);
+                    let _ = apply_probe_fail(&mut items[idx], r, mode);
                 } else if r == IntegrityReason::CrcSuspect {
                     // Warning-only attach-stream CRC → message CRC_SUSPECT (DoD-19 / D7).
-                    push_degraded(item, IntegrityReason::CrcSuspect);
+                    push_degraded(&mut items[idx], IntegrityReason::CrcSuspect);
                 }
             }
         }
-        if engine.summary.cancelled {
+        if broke_item {
+            if unprobed == 0 && item_census > listed_len {
+                unprobed = item_census.saturating_sub(probed_on_item)
+                    + candidate_attaches_total(&items[idx + 1..]);
+            }
             break;
         }
+        idx += 1;
     }
+
+    engine.finalize_coverage();
+    if !stopped_early {
+        unprobed = 0;
+    }
+    engine.summary.unprobed_candidate_attaches = Some(unprobed);
 
     let summary = engine.summary.clone();
     let cache = engine.take_cache();
@@ -1363,39 +1502,69 @@ pub fn probe_keep_set_groups(
     };
     let groups = group_candidates_ctx(items, &grouping).groups;
     let peer_cap = budgets.max_peer_probes_per_group.max(1);
+    engine.summary.candidate_attaches_total = Some(candidate_attaches_total(items));
 
-    for group in &groups {
+    let rank_ctx = RankContext::from_policy_and_prefer(policy, prefer_path);
+    let ranked_groups: Vec<Vec<usize>> = groups
+        .iter()
+        .map(|group| {
+            let mut ranked: Vec<usize> = group.clone();
+            ranked.sort_by(|&a, &b| {
+                rank_key(&items[a], &rank_ctx).cmp(&rank_key(&items[b], &rank_ctx))
+            });
+            ranked
+        })
+        .collect();
+
+    let mut unprobed = 0u64;
+    let mut stopped_early = false;
+
+    'groups: for gi in 0..ranked_groups.len() {
         if engine.cancelled() {
             engine.summary.cancelled = true;
+            engine.note_global_stop();
+            unprobed = keep_set_later_in_scope(items, &ranked_groups, gi, peer_cap);
+            stopped_early = true;
             break;
         }
         if engine.budget_exhausted() {
-            engine.summary.truncated = true;
+            engine.note_global_stop();
+            unprobed = keep_set_later_in_scope(items, &ranked_groups, gi, peer_cap);
+            stopped_early = true;
             break;
         }
 
-        // Rank members within group (lower key = better).
-        let rank_ctx = RankContext::from_policy_and_prefer(policy, prefer_path);
-        let mut ranked: Vec<usize> = group.clone();
-        ranked
-            .sort_by(|&a, &b| rank_key(&items[a], &rank_ctx).cmp(&rank_key(&items[b], &rank_ctx)));
+        let ranked = ranked_groups[gi].clone();
 
         let mut probed_peers = 0u64;
         let mut found_clean = false;
         let mut probed_idxs: Vec<usize> = Vec::new();
 
-        for &idx in &ranked {
+        for (pi, &idx) in ranked.iter().enumerate() {
             // Cap: stop after N peers probed (even if more remain).
             if probed_peers >= peer_cap {
                 break;
             }
             if engine.cancelled() {
                 engine.summary.cancelled = true;
-                break;
+                engine.note_global_stop();
+                unprobed = in_scope_attach_count(
+                    items,
+                    &ranked[pi..],
+                    peer_cap.saturating_sub(probed_peers),
+                ) + keep_set_later_in_scope(items, &ranked_groups, gi + 1, peer_cap);
+                stopped_early = true;
+                break 'groups;
             }
             if engine.budget_exhausted() {
-                engine.summary.truncated = true;
-                break;
+                engine.note_global_stop();
+                unprobed = in_scope_attach_count(
+                    items,
+                    &ranked[pi..],
+                    peer_cap.saturating_sub(probed_peers),
+                ) + keep_set_later_in_scope(items, &ranked_groups, gi + 1, peer_cap);
+                stopped_early = true;
+                break 'groups;
             }
 
             probed_idxs.push(idx);
@@ -1444,21 +1613,55 @@ pub fn probe_keep_set_groups(
                 continue;
             }
 
+            let listed_len = list.len() as u64;
+            let mut probed_on_peer = 0u64;
             let mut any_fail = false;
+            let mut broke_peer = false;
             for att in list {
                 if engine.cancelled() {
                     engine.summary.cancelled = true;
+                    engine.note_global_stop();
+                    unprobed = listed_len.saturating_sub(probed_on_peer)
+                        + in_scope_attach_count(
+                            items,
+                            &ranked[pi + 1..],
+                            peer_cap.saturating_sub(probed_peers + 1),
+                        )
+                        + keep_set_later_in_scope(items, &ranked_groups, gi + 1, peer_cap);
+                    stopped_early = true;
+                    broke_peer = true;
                     break;
                 }
                 if engine.budget_exhausted() {
-                    engine.summary.truncated = true;
+                    engine.note_global_stop();
+                    unprobed = listed_len.saturating_sub(probed_on_peer)
+                        + in_scope_attach_count(
+                            items,
+                            &ranked[pi + 1..],
+                            peer_cap.saturating_sub(probed_peers + 1),
+                        )
+                        + keep_set_later_in_scope(items, &ranked_groups, gi + 1, peer_cap);
+                    stopped_early = true;
+                    broke_peer = true;
                     break;
                 }
                 let outcome =
                     engine.probe_attach(&path, msg_nid, att.nid.0, att.size, att.attach_method);
-                if engine.summary.cancelled {
+                if engine.summary.cancelled
+                    || outcome.reason == Some(IntegrityReason::AttachProbeTruncated)
+                {
+                    unprobed = listed_len.saturating_sub(probed_on_peer)
+                        + in_scope_attach_count(
+                            items,
+                            &ranked[pi + 1..],
+                            peer_cap.saturating_sub(probed_peers + 1),
+                        )
+                        + keep_set_later_in_scope(items, &ranked_groups, gi + 1, peer_cap);
+                    stopped_early = true;
+                    broke_peer = true;
                     break;
                 }
+                probed_on_peer = probed_on_peer.saturating_add(1);
                 // any_fail only for real attach probe fails — not truncation / peer-cap info.
                 // CRC_SUSPECT degrades fidelity but is not an attach-fail rate signal.
                 if let Some(r) = outcome.reason {
@@ -1472,8 +1675,8 @@ pub fn probe_keep_set_groups(
                     any_fail = true;
                 }
             }
-            if engine.summary.cancelled {
-                break;
+            if broke_peer {
+                break 'groups;
             }
             probed_peers += 1;
             if !any_fail && !items[idx].integrity.degraded {
@@ -1501,6 +1704,12 @@ pub fn probe_keep_set_groups(
             }
         }
     }
+
+    engine.finalize_coverage();
+    if !stopped_early {
+        unprobed = 0;
+    }
+    engine.summary.unprobed_candidate_attaches = Some(unprobed);
 
     let summary = engine.summary.clone();
     let cache = engine.take_cache();
@@ -2109,11 +2318,171 @@ mod tests {
         // max_attaches=2 → after 2 attempts truncated
         assert!(summary.attempted <= 2);
         assert!(summary.truncated || summary.attempted == 2);
+        if summary.truncated {
+            assert_eq!(
+                summary.budget_exhausted_reason.as_deref(),
+                Some("max_attaches")
+            );
+        }
+        assert_eq!(summary.candidate_attaches_total, Some(0));
         // Rates from attempted only
         if summary.attempted > 0 {
             let rate = summary.failed as f64 / summary.attempted as f64;
             assert!((0.0..=1.0).contains(&rate));
         }
+    }
+
+    #[test]
+    fn zero_byte_budget_is_probe_bytes_with_census_leftover() {
+        let mut items: Vec<RecoverableScanItem> = (0..3)
+            .map(|i| RecoverableScanItem {
+                locus: MessageLocus {
+                    source_path: format!("C:\\missing\\z{i}.pst"),
+                    source_pst: format!("z{i}.pst"),
+                    folder_path: "Inbox".into(),
+                    nid: 0x40 + i as u64,
+                    is_orphaned: false,
+                },
+                message_id_norm: Some(format!("midz{i}")),
+                content_hash: [i as u8; 32],
+                size: 10,
+                integrity: RecoverableIntegrity::clean(),
+                scan_order: i as u64,
+                submit_time: None,
+                delivery_time: None,
+                has_bcc: false,
+                has_body_preview: true,
+                subject_nonempty: true,
+                sender_nonempty: true,
+                attach_count: 4,
+                body_sha256: None,
+                body_char_len: None,
+                display_to: None,
+                display_cc: None,
+                display_bcc: None,
+                strong_content_hash: None,
+                fp_header: 0,
+                fp_body: 0,
+                fp_recipients: 0,
+                fp_attachments: 0,
+                preview_bytes_over_budget: false,
+            })
+            .collect();
+        let budgets = ProbeBudgets {
+            max_probe_bytes: 0,
+            max_attaches: 50_000,
+            ..ProbeBudgets::default()
+        };
+        let (summary, _cache) = probe_scan_items(
+            &mut items,
+            budgets,
+            ProbeLevel::Open,
+            ScanMode::BestEffort,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(summary.attempted, 0);
+        assert!(summary.truncated);
+        assert_eq!(
+            summary.budget_exhausted_reason.as_deref(),
+            Some("probe_bytes")
+        );
+        assert_eq!(summary.candidate_attaches_total, Some(12));
+        assert_eq!(summary.unprobed_candidate_attaches, Some(12));
+    }
+
+    #[test]
+    fn timeout_only_sets_per_attach_timeout_reason() {
+        let budgets = ProbeBudgets::default();
+        let mut engine = AttachProbeEngine::new(budgets, ProbeLevel::Head, None, None);
+        engine.record_attempt(&ProbeOutcome {
+            ok: false,
+            reason: Some(IntegrityReason::AttachProbeTimeout),
+            bytes_read: 0,
+            timed_out: true,
+            level: ProbeLevel::Head,
+        });
+        engine.finalize_coverage();
+        assert!(engine.summary.truncated);
+        assert_eq!(
+            engine.summary.budget_exhausted_reason.as_deref(),
+            Some("per_attach_timeout")
+        );
+    }
+
+    #[test]
+    fn keep_set_leftover_is_peer_cap_scoped() {
+        let mut items: Vec<RecoverableScanItem> = (0..4)
+            .map(|i| RecoverableScanItem {
+                locus: MessageLocus {
+                    source_path: format!("C:\\missing\\k{i}.pst"),
+                    source_pst: format!("k{i}.pst"),
+                    folder_path: "Inbox".into(),
+                    nid: 0x50 + i as u64,
+                    is_orphaned: false,
+                },
+                message_id_norm: Some(format!("midk{i}")),
+                content_hash: [i as u8; 32],
+                size: 10,
+                integrity: RecoverableIntegrity::clean(),
+                scan_order: i as u64,
+                submit_time: None,
+                delivery_time: None,
+                has_bcc: false,
+                has_body_preview: true,
+                subject_nonempty: true,
+                sender_nonempty: true,
+                attach_count: 5,
+                body_sha256: None,
+                body_char_len: None,
+                display_to: None,
+                display_cc: None,
+                display_bcc: None,
+                strong_content_hash: None,
+                fp_header: 0,
+                fp_body: 0,
+                fp_recipients: 0,
+                fp_attachments: 0,
+                preview_bytes_over_budget: false,
+            })
+            .collect();
+        let budgets = ProbeBudgets {
+            max_attaches: 1,
+            max_peer_probes_per_group: 3,
+            ..ProbeBudgets::default()
+        };
+        let (summary, _cache) = probe_keep_set_groups(
+            &mut items,
+            KeepSetProbeOpts {
+                budgets,
+                level: ProbeLevel::Open,
+                policy: KeepPolicy::FirstSeen,
+                family: FamilyPolicy::KeepAttachmentsWithParent,
+                prefer_path: &[],
+                grouping: GroupingContext::default(),
+                mode: ScanMode::BestEffort,
+                cancel: None,
+                progress: None,
+                seed_cache: None,
+            },
+        );
+        assert_eq!(summary.candidate_attaches_total, Some(20));
+        assert!(summary.truncated);
+        assert_eq!(
+            summary.budget_exhausted_reason.as_deref(),
+            Some("max_attaches")
+        );
+        let leftover = summary.unprobed_candidate_attaches.expect("leftover");
+        assert!(
+            leftover <= 20,
+            "leftover must stay within census; leftover={leftover}"
+        );
+        assert!(
+            leftover < 20 || summary.attempted == 0,
+            "peer-cap leftover must not invent max_attaches-attempted; leftover={leftover} attempted={}",
+            summary.attempted
+        );
     }
 
     /// Cancel mid-pass must not look like attach corruption (§3.11 / review P0).
@@ -2194,6 +2563,9 @@ mod tests {
             summary.cancelled,
             summary.bytes,
             summary.digest_stream_skips,
+            summary.budget_exhausted_reason.clone(),
+            summary.candidate_attaches_total,
+            summary.unprobed_candidate_attaches,
         );
         assert!(pre.cancelled);
         assert!(pre.truncated);
@@ -2568,6 +2940,9 @@ mod tests {
             attach_probe_cancelled: cancelled,
             attach_probe_bytes: 0,
             attach_digest_stream_skips: 0,
+            attach_budget_exhausted_reason: None,
+            attach_candidate_attaches_total: None,
+            attach_unprobed_candidate_attaches: None,
         })
     }
 
@@ -2750,6 +3125,9 @@ mod tests {
             attach_probe_cancelled: true,
             attach_probe_bytes: 0,
             attach_digest_stream_skips: 0,
+            attach_budget_exhausted_reason: Some("cancel".into()),
+            attach_candidate_attaches_total: None,
+            attach_unprobed_candidate_attaches: None,
         });
         assert!(report.attach_probe.enabled);
         assert!(report.attach_probe.cancelled);

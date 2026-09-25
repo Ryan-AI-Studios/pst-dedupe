@@ -192,6 +192,7 @@ pub struct UniquePstClapArgs {
     pub deep_attach_level: String,
     #[arg(long = "deep-attach-max-attaches", default_value_t = 50_000)]
     pub deep_attach_max_attaches: u64,
+    /// Global attachment-stream probe I/O cap in bytes (default 256 MiB). Default budget can stop mid-store on large multi-GB corpora.
     #[arg(long = "deep-attach-max-probe-bytes", default_value_t = 268_435_456)]
     pub deep_attach_max_probe_bytes: u64,
     #[arg(long = "deep-attach-per-attach-max-bytes", default_value_t = 1_048_576)]
@@ -1726,6 +1727,9 @@ pub fn run_unique_pst_with_options(
                 attach_probe_cancelled: true,
                 attach_probe_bytes: 0,
                 attach_digest_stream_skips: 0,
+                attach_budget_exhausted_reason: Some("cancel".into()),
+                attach_candidate_attaches_total: None,
+                attach_unprobed_candidate_attaches: None,
             });
             let artifact_state = crate::export_outcome::ArtifactState::Absent;
             let total_ms = started.elapsed().as_millis() as u64;
@@ -1979,6 +1983,9 @@ pub fn run_unique_pst_with_options(
             attach_probe_cancelled: probe_summary.cancelled,
             attach_probe_bytes: probe_summary.bytes,
             attach_digest_stream_skips: probe_summary.digest_stream_skips,
+            attach_budget_exhausted_reason: probe_summary.budget_exhausted_reason.clone(),
+            attach_candidate_attaches_total: probe_summary.candidate_attaches_total,
+            attach_unprobed_candidate_attaches: probe_summary.unprobed_candidate_attaches,
         });
         if probe_summary.attempted > 0 || probe_summary.truncated || probe_summary.cancelled {
             emit_log(

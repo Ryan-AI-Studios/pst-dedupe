@@ -412,6 +412,15 @@ pub struct AttachProbePreflight {
     /// Pass-2 attaches that skipped stream I/O because Pass-1 digest already proved Full (0091).
     #[serde(default)]
     pub digest_stream_skips: u64,
+    /// Why the probe pass stopped when `truncated` (0147). Absent when coverage is complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_exhausted_reason: Option<String>,
+    /// Sum of Phase-1 `attach_count` on the in-memory item slice (0147).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_attaches_total: Option<u64>,
+    /// Budget-unreached candidate attaches from that census (0147). Absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unprobed_candidate_attaches: Option<u64>,
 }
 
 impl AttachProbePreflight {
@@ -430,6 +439,9 @@ impl AttachProbePreflight {
             cancelled: false,
             bytes_probed: 0,
             digest_stream_skips: 0,
+            budget_exhausted_reason: None,
+            candidate_attaches_total: None,
+            unprobed_candidate_attaches: None,
         }
     }
 
@@ -445,6 +457,9 @@ impl AttachProbePreflight {
         cancelled: bool,
         bytes_probed: u64,
         digest_stream_skips: u64,
+        budget_exhausted_reason: Option<String>,
+        candidate_attaches_total: Option<u64>,
+        unprobed_candidate_attaches: Option<u64>,
     ) -> Self {
         let fail_rate = if attempted == 0 {
             0.0
@@ -466,6 +481,19 @@ impl AttachProbePreflight {
                 "budgeted attach probe level={level}; residual export ledger (0073); L2 ≠ full verify"
             )
         };
+        let budget_exhausted_reason = if coverage_incomplete {
+            if cancelled {
+                Some(
+                    budget_exhausted_reason
+                        .filter(|r| r == "cancel")
+                        .unwrap_or_else(|| "cancel".into()),
+                )
+            } else {
+                budget_exhausted_reason
+            }
+        } else {
+            None
+        };
         Self {
             enabled: true,
             level: level.to_string(),
@@ -480,6 +508,9 @@ impl AttachProbePreflight {
             cancelled,
             bytes_probed,
             digest_stream_skips,
+            budget_exhausted_reason,
+            candidate_attaches_total,
+            unprobed_candidate_attaches,
         }
     }
 }
@@ -567,6 +598,12 @@ pub struct PreflightInputs {
     pub attach_probe_bytes: u64,
     /// Digest-seeded stream skips (0091).
     pub attach_digest_stream_skips: u64,
+    /// Binding stop reason when truncated (0147).
+    pub attach_budget_exhausted_reason: Option<String>,
+    /// Phase-1 attach census (0147).
+    pub attach_candidate_attaches_total: Option<u64>,
+    /// Budget-unreached census leftover (0147).
+    pub attach_unprobed_candidate_attaches: Option<u64>,
 }
 
 impl PreflightInputs {
@@ -597,6 +634,9 @@ impl PreflightInputs {
             attach_probe_cancelled: false,
             attach_probe_bytes: 0,
             attach_digest_stream_skips: 0,
+            attach_budget_exhausted_reason: None,
+            attach_candidate_attaches_total: None,
+            attach_unprobed_candidate_attaches: None,
         }
     }
 }
@@ -629,6 +669,9 @@ pub fn compute_preflight(input: &PreflightInputs) -> PreflightReport {
             input.attach_probe_cancelled,
             input.attach_probe_bytes,
             input.attach_digest_stream_skips,
+            input.attach_budget_exhausted_reason.clone(),
+            input.attach_candidate_attaches_total,
+            input.attach_unprobed_candidate_attaches,
         )
     } else {
         AttachProbePreflight::disabled()
@@ -1175,7 +1218,9 @@ mod tests {
 
     #[test]
     fn attach_probe_cancelled_sets_coverage_incomplete() {
-        let report = AttachProbePreflight::from_tallies("head", 10, 1, false, 0.05, 0, true, 0, 0);
+        let report = AttachProbePreflight::from_tallies(
+            "head", 10, 1, false, 0.05, 0, true, 0, 0, None, None, None,
+        );
         assert!(report.cancelled);
         assert!(report.truncated, "cancel implies incomplete coverage");
         assert!(
@@ -1371,6 +1416,82 @@ mod tests {
         assert_eq!(
             report.recommendation,
             PreflightRecommendation::ReExportRecommended
+        );
+    }
+
+    #[test]
+    fn attach_probe_fail_rate_is_failed_over_attempted() {
+        let report = AttachProbePreflight::from_tallies(
+            "head",
+            10,
+            2,
+            false,
+            0.05,
+            0,
+            false,
+            0,
+            1,
+            None,
+            Some(40),
+            Some(0),
+        );
+        assert!((report.fail_rate - 0.2).abs() < 1e-12);
+        assert!(report.budget_exhausted_reason.is_none());
+        assert_eq!(report.digest_stream_skips, 1);
+        assert_eq!(
+            report.coverage_note,
+            "budgeted attach probe level=head; residual export ledger (0073); L2 ≠ full verify"
+        );
+    }
+
+    #[test]
+    fn attach_probe_preflight_old_json_deserializes_without_0147_keys() {
+        let json = r#"{
+            "enabled": true,
+            "level": "head",
+            "attempted": 2798,
+            "failed": 0,
+            "truncated": true,
+            "fail_rate": 0.0,
+            "max_attach_fail_rate": 0.05,
+            "coverage_note": "budgeted L2/L3 attach probe truncated after 2798 attempts; residual export ledger (0073)"
+        }"#;
+        let parsed: AttachProbePreflight =
+            serde_json::from_str(json).expect("old attach_probe JSON");
+        assert!(parsed.truncated);
+        assert_eq!(parsed.attempted, 2798);
+        assert!(parsed.budget_exhausted_reason.is_none());
+        assert!(parsed.candidate_attaches_total.is_none());
+        assert!(parsed.unprobed_candidate_attaches.is_none());
+    }
+
+    #[test]
+    fn attach_probe_preflight_omits_none_coverage_fields() {
+        let disabled = AttachProbePreflight::disabled();
+        let value = serde_json::to_value(&disabled).expect("serde");
+        assert!(value.get("budget_exhausted_reason").is_none());
+        assert!(value.get("candidate_attaches_total").is_none());
+        assert!(value.get("unprobed_candidate_attaches").is_none());
+        let truncated = AttachProbePreflight::from_tallies(
+            "head",
+            2798,
+            0,
+            true,
+            0.05,
+            0,
+            false,
+            268435456,
+            0,
+            Some("probe_bytes".into()),
+            Some(50_000),
+            Some(12_000),
+        );
+        let round = serde_json::to_value(&truncated).expect("serde");
+        assert_eq!(round["budget_exhausted_reason"], "probe_bytes");
+        assert_eq!(round["unprobed_candidate_attaches"], 12_000);
+        assert_eq!(
+            round["coverage_note"],
+            "budgeted L2/L3 attach probe truncated after 2798 attempts; residual export ledger (0073)"
         );
     }
 

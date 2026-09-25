@@ -76,6 +76,10 @@ const SUMMARY_ALLOWLIST_KEYS: &[&str] = &[
     // 0144 integrity CSV honesty; parent packs omit the keys.
     "integrity_csv_rows",
     "integrity_csv_omitted_reason",
+    // 0147 attach-probe leftover/reason; parent packs omit the keys.
+    "budget_exhausted_reason",
+    "candidate_attaches_total",
+    "unprobed_candidate_attaches",
 ];
 
 /// One volume's structural fingerprint (order-stable).
@@ -1168,5 +1172,61 @@ mod tests {
         );
         assert!(head.pointer("/scan/integrity_csv_rows").is_none());
         assert!(head.pointer("/scan/integrity_csv_omitted_reason").is_none());
+    }
+
+    #[test]
+    fn attach_probe_coverage_keys_on_allowlist_parent_equals_head() {
+        assert!(
+            SUMMARY_ALLOWLIST_KEYS.contains(&"budget_exhausted_reason"),
+            "0147 reason must be allowlisted so parent packs without it compare"
+        );
+        assert!(
+            SUMMARY_ALLOWLIST_KEYS.contains(&"candidate_attaches_total"),
+            "0147 census total must be allowlisted"
+        );
+        assert!(
+            SUMMARY_ALLOWLIST_KEYS.contains(&"unprobed_candidate_attaches"),
+            "0147 leftover must be allowlisted"
+        );
+        let mut parent = json!({
+            "ok": true,
+            "preflight": {
+                "attach_probe": {
+                    "enabled": true,
+                    "level": "head",
+                    "attempted": 2798,
+                    "failed": 0,
+                    "truncated": true
+                }
+            },
+            "export": { "messages_written_total": 1, "attachments_failed": 0 },
+            "keep_set": { "stats": { "unique": 1 } }
+        });
+        let mut head = json!({
+            "ok": true,
+            "preflight": {
+                "attach_probe": {
+                    "enabled": true,
+                    "level": "head",
+                    "attempted": 2798,
+                    "failed": 0,
+                    "truncated": true,
+                    "budget_exhausted_reason": "probe_bytes",
+                    "candidate_attaches_total": 18609,
+                    "unprobed_candidate_attaches": 12000
+                }
+            },
+            "export": { "messages_written_total": 1, "attachments_failed": 0 },
+            "keep_set": { "stats": { "unique": 1 } }
+        });
+        normalize_summary_for_oracle(&mut parent);
+        normalize_summary_for_oracle(&mut head);
+        assert_eq!(
+            parent, head,
+            "parent without 0147 attach_probe coverage keys must equal HEAD after allowlist strip"
+        );
+        assert!(head
+            .pointer("/preflight/attach_probe/budget_exhausted_reason")
+            .is_none());
     }
 }
