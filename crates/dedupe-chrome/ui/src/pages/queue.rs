@@ -74,6 +74,22 @@ struct FamilyCells {
 
 /// If the row is a child with empty date/from/subject, copy the parent when that
 /// parent is on this SQL page; otherwise the subject cell is `"— attachment"`.
+fn is_attachment_child(parent_item_id: Option<&str>, role: Option<&str>) -> bool {
+    parent_item_id.is_some() && role == Some("attachment")
+}
+
+fn from_copied_from_parent(
+    parent_item_id: Option<&str>,
+    date: Option<&str>,
+    from_addr: Option<&str>,
+    subject: Option<&str>,
+) -> bool {
+    parent_item_id.is_some()
+        && blank_field(date)
+        && blank_field(from_addr)
+        && blank_field(subject)
+}
+
 fn family_cell_text(
     parent_item_id: Option<&str>,
     date: Option<&str>,
@@ -1472,6 +1488,16 @@ pub fn ReviewQueue() -> impl IntoView {
                                                 let checked = sel.contains(&id);
                                                 let is_current = idx == cur;
                                                 let indent = row.parent_item_id.is_some();
+                                                let attach = is_attachment_child(
+                                                    row.parent_item_id.as_deref(),
+                                                    row.role.as_deref(),
+                                                );
+                                                let from_copied = from_copied_from_parent(
+                                                    row.parent_item_id.as_deref(),
+                                                    row.date.as_deref(),
+                                                    row.from_addr.as_deref(),
+                                                    row.subject.as_deref(),
+                                                );
                                                 let priv_coded = row.privilege_coded;
                                                 let withhold = row.withhold;
                                                 let conf = row.confidential.unwrap_or(false);
@@ -1545,7 +1571,11 @@ pub fn ReviewQueue() -> impl IntoView {
                                                         </span>
                                                         <span role="gridcell" title=tip>{ctrl}</span>
                                                         <span role="gridcell">{date}</span>
-                                                        <span role="gridcell" title=from_title>
+                                                        <span
+                                                            role="gridcell"
+                                                            class=if from_copied { "from muted" } else { "from" }
+                                                            title=from_title
+                                                        >
                                                             {from}
                                                         </span>
                                                         <span
@@ -1553,7 +1583,17 @@ pub fn ReviewQueue() -> impl IntoView {
                                                             class=if indent { "subject indented" } else { "subject" }
                                                             title=subject_title
                                                         >
-                                                            {subject}
+                                                            {if attach {
+                                                                view! {
+                                                                    <span class="attach-marker" aria-hidden="true">
+                                                                        "└"
+                                                                    </span>
+                                                                    <span class="subject-text">{subject.clone()}</span>
+                                                                }
+                                                                .into_any()
+                                                            } else {
+                                                                view! { {subject.clone()} }.into_any()
+                                                            }}
                                                         </span>
                                                         <span role="gridcell">{fam}</span>
                                                         <span role="gridcell">{resp}</span>
@@ -1653,6 +1693,45 @@ mod tests {
             Some((Some("2020-01-01"), Some("ada@ex.com"), Some("Parent subj"))),
         );
         assert_eq!(not_blank.subject, "Child subject");
+        assert!(!not_blank.subject.contains('└'));
+        assert!(!not_blank.from.contains('└'));
+        assert!(!copied.subject.contains('└'));
+        assert!(!missing_parent.subject.contains('└'));
+    }
+
+    #[test]
+    fn is_attachment_child_requires_parent_and_attachment_role() {
+        assert!(is_attachment_child(Some("parent"), Some("attachment")));
+        assert!(!is_attachment_child(None, Some("attachment")));
+        assert!(!is_attachment_child(Some("parent"), Some("parent")));
+        assert!(!is_attachment_child(Some("parent"), Some("standalone")));
+        assert!(!is_attachment_child(Some("parent"), None));
+        assert!(!is_attachment_child(Some("parent"), Some("")));
+        assert!(!is_attachment_child(None, None));
+    }
+
+    #[test]
+    fn from_copied_from_parent_only_when_child_fields_blank() {
+        assert!(from_copied_from_parent(Some("parent"), None, None, None));
+        assert!(from_copied_from_parent(
+            Some("parent"),
+            Some("  "),
+            Some(""),
+            None
+        ));
+        assert!(!from_copied_from_parent(
+            Some("parent"),
+            None,
+            Some("ada@ex.com"),
+            None
+        ));
+        assert!(!from_copied_from_parent(
+            Some("parent"),
+            None,
+            None,
+            Some("Child subject")
+        ));
+        assert!(!from_copied_from_parent(None, None, None, None));
     }
 
     #[test]
@@ -1883,5 +1962,36 @@ mod tests {
         assert!(build.contains("\"review_codes_preview\""));
         assert!(build.contains("\"review_apply_codes\""));
         assert!(!build.contains("review_queue_ids"));
+    }
+
+    #[test]
+    fn queue_family_rows_source_locks() {
+        let src = include_str!("queue.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(prod.contains("fn is_attachment_child("));
+        assert!(prod.contains("fn from_copied_from_parent("));
+        assert!(prod.contains("class=\"attach-marker\""));
+        assert!(prod.contains("aria-hidden=\"true\""));
+        assert!(prod.contains("\"└\""));
+        assert!(prod.contains("\"subject indented\""));
+        assert!(prod.contains("subject-text"));
+        assert!(prod.contains("from muted"));
+        assert!(prod.contains("family_size.to_string()"));
+        assert!(prod.contains("let indent = row.parent_item_id.is_some();"));
+        assert!(!prod.contains("3⚠"));
+        assert!(!prod.contains("REDACT"));
+        assert!(!prod.contains("review_queue_ids"));
+        assert!(!prod.contains("└ attachment"));
+
+        let css = include_str!("../../styles/app.css").replace('\r', "");
+        assert!(css.contains(".queue-row .subject.indented"));
+        assert!(css.contains("padding-left: 16px"));
+        assert!(css.contains(".queue-row .attach-marker"));
+        assert!(css.contains("flex: 0 0 auto"));
+        assert!(css.contains(".queue-row .subject-text"));
+        assert!(css.contains(".queue-row .from.muted"));
+        assert_eq!(ROW_HEIGHT, 32.0);
+        assert!(src.contains("visible_range"));
+        assert!(src.contains("OVERSCAN"));
     }
 }

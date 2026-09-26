@@ -903,6 +903,25 @@ fieldset {
 
 .queue-row .subject.indented {
   padding-left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.queue-row .attach-marker {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.queue-row .subject-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-row .from.muted {
+  color: var(--muted);
 }
 
 .priv-pill {
