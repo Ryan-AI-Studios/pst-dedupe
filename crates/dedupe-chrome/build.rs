@@ -14,6 +14,7 @@ fn main() {
             "review_codes_preview",
             "review_apply_codes",
             "review_document",
+            "review_find_bates",
             "review_document_body",
             "review_window_apply",
             "review_upsert_note",

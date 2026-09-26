@@ -10,12 +10,12 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::{Event, HtmlElement, HtmlInputElement, KeyboardEvent, MouseEvent};
 
-use crate::shell::{QueueChromeCtx, QueueRange};
+use crate::shell::{MatterShellCtx, QueueChromeCtx, QueueRange};
 
 use crate::invoke::{
     tauri_invoke, CodeCatalogEntry, QueueRow, ReviewApplyCodesArgs, ReviewCodesPreview,
-    ReviewCodesPreviewArgs, ReviewQueuePage, ReviewQueuePageArgs, RootArgs, SavedSearchDto,
-    SavedSearchUpsertArgs,
+    ReviewCodesPreviewArgs, ReviewFindBatesArgs, ReviewFindBatesResponse, ReviewQueuePage,
+    ReviewQueuePageArgs, RootArgs, SavedSearchDto, SavedSearchUpsertArgs,
 };
 use crate::path_id::review_doc_href;
 use crate::queue_window::{
@@ -390,6 +390,51 @@ fn focus_queue_keyword() {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GotoDispatch {
+    Control(i64),
+    BatesThenSubject(String),
+    Subject(String),
+}
+
+fn classify_goto(q: &str, produced: u64) -> Option<GotoDispatch> {
+    let q = q.trim();
+    if q.is_empty() {
+        return None;
+    }
+    if let Ok(n) = q.parse::<i64>() {
+        return Some(GotoDispatch::Control(n));
+    }
+    if produced > 0 {
+        Some(GotoDispatch::BatesThenSubject(q.to_string()))
+    } else {
+        Some(GotoDispatch::Subject(q.to_string()))
+    }
+}
+
+fn apply_goto_subject(
+    q: &str,
+    active_chip: RwSignal<String>,
+    filter_json: RwSignal<String>,
+    include_family: RwSignal<bool>,
+    keyword: RwSignal<String>,
+    keyword_draft: RwSignal<String>,
+    offset: RwSignal<u64>,
+    selected: RwSignal<HashSet<String>>,
+    current_idx: RwSignal<usize>,
+    scroll_top: RwSignal<f64>,
+) {
+    active_chip.set("goto-subject".into());
+    filter_json.set(subject_contains_json(q, include_family.get_untracked()));
+    keyword.set(String::new());
+    keyword_draft.set(String::new());
+    offset.set(0);
+    selected.set(HashSet::new());
+    current_idx.set(0);
+    scroll_top.set(0.0);
+    set_queue_dom_scroll_top(0.0);
+}
+
 fn control_not_on_page(n: i64, meta: Option<(u64, u64, usize)>) -> String {
     let span = match meta {
         Some((offset, _total, fetched)) if fetched > 0 => {
@@ -748,6 +793,9 @@ pub fn ReviewQueue() -> impl IntoView {
         );
     });
 
+    let shell_ctx = use_context::<MatterShellCtx>();
+    let goto_seq = RwSignal::new(0u32);
+
     Effect::new(move |_| {
         let Some(ctx) = chrome else {
             return;
@@ -761,41 +809,112 @@ pub fn ReviewQueue() -> impl IntoView {
             return;
         }
         ctx.goto_miss.set(None);
-        if let Ok(n) = q.parse::<i64>() {
-            if let Some(p) = page.get() {
-                if let Some((idx, row)) = p
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .find(|(_, r)| r.review_order == Some(n))
-                {
-                    current_idx.set(idx);
-                    reveal_row(idx, scroll_top, viewport_h);
-                    let root = root_sig.get();
-                    let fj = filter_json.get();
-                    let fam = include_family.get();
-                    let kw = keyword.get();
-                    let fam_filter = with_include_family(&fj, fam).unwrap_or(fj);
-                    let href = review_doc_href(&root, &row.id, Some(&fam_filter), Some(&kw));
-                    navigate.with_value(|nav| {
-                        nav(&href, Default::default());
-                    });
-                    return;
+        let produced = shell_ctx
+            .and_then(|s| s.overview.get().map(|o| o.produced))
+            .unwrap_or(0);
+        match classify_goto(&q, produced) {
+            None => {}
+            Some(GotoDispatch::Control(n)) => {
+                if let Some(p) = page.get() {
+                    if let Some((idx, row)) = p
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .find(|(_, r)| r.review_order == Some(n))
+                    {
+                        current_idx.set(idx);
+                        reveal_row(idx, scroll_top, viewport_h);
+                        let root = root_sig.get();
+                        let fj = filter_json.get();
+                        let fam = include_family.get();
+                        let kw = keyword.get();
+                        let fam_filter = with_include_family(&fj, fam).unwrap_or(fj);
+                        let href = review_doc_href(&root, &row.id, Some(&fam_filter), Some(&kw));
+                        navigate.with_value(|nav| {
+                            nav(&href, Default::default());
+                        });
+                        return;
+                    }
                 }
+                ctx.goto_miss
+                    .set(Some(control_not_on_page(n, last_fetch_meta.get())));
             }
-            ctx.goto_miss
-                .set(Some(control_not_on_page(n, last_fetch_meta.get())));
-            return;
+            Some(GotoDispatch::Subject(s)) => {
+                apply_goto_subject(
+                    &s,
+                    active_chip,
+                    filter_json,
+                    include_family,
+                    keyword,
+                    keyword_draft,
+                    offset,
+                    selected,
+                    current_idx,
+                    scroll_top,
+                );
+            }
+            Some(GotoDispatch::BatesThenSubject(s)) => {
+                let seq = {
+                    let next = goto_seq.get_untracked().wrapping_add(1);
+                    goto_seq.set(next);
+                    next
+                };
+                let root = root_sig.get();
+                leptos::task::spawn_local(async move {
+                    match tauri_invoke::<ReviewFindBatesResponse, _>(
+                        "review_find_bates",
+                        &ReviewFindBatesArgs {
+                            root: root.clone(),
+                            bates: s.clone(),
+                        },
+                    )
+                    .await
+                    {
+                        Ok(res) => {
+                            if goto_seq.get_untracked() != seq {
+                                return;
+                            }
+                            match res.item_id.filter(|id| !id.is_empty()) {
+                                Some(id) => {
+                                    let fj = filter_json.get_untracked();
+                                    let fam = include_family.get_untracked();
+                                    let kw = keyword.get_untracked();
+                                    let fam_filter =
+                                        with_include_family(&fj, fam).unwrap_or(fj);
+                                    let href = review_doc_href(
+                                        &root,
+                                        &id,
+                                        Some(&fam_filter),
+                                        Some(&kw),
+                                    );
+                                    navigate.with_value(|nav| {
+                                        nav(&href, Default::default());
+                                    });
+                                }
+                                None => apply_goto_subject(
+                                    &s,
+                                    active_chip,
+                                    filter_json,
+                                    include_family,
+                                    keyword,
+                                    keyword_draft,
+                                    offset,
+                                    selected,
+                                    current_idx,
+                                    scroll_top,
+                                ),
+                            }
+                        }
+                        Err(_) => {
+                            if goto_seq.get_untracked() != seq {
+                                return;
+                            }
+                            ctx.goto_miss.set(Some("Bates lookup failed".into()));
+                        }
+                    }
+                });
+            }
         }
-        active_chip.set("goto-subject".into());
-        filter_json.set(subject_contains_json(&q, include_family.get()));
-        keyword.set(String::new());
-        keyword_draft.set(String::new());
-        offset.set(0);
-        selected.set(HashSet::new());
-        current_idx.set(0);
-        scroll_top.set(0.0);
-        set_queue_dom_scroll_top(0.0);
     });
 
     on_cleanup(move || {
@@ -2123,5 +2242,51 @@ mod tests {
         assert!(build.contains("\"review_queue_page\""));
         assert!(!build.contains("review_queue_ids"));
         assert!(!build.contains("review_facet"));
+    }
+
+    #[test]
+    fn classify_goto_integer_wins_and_bates_needs_produced() {
+        assert_eq!(classify_goto("  ", 9), None);
+        assert_eq!(classify_goto("850", 99), Some(GotoDispatch::Control(850)));
+        assert_eq!(
+            classify_goto("PROD0001", 0),
+            Some(GotoDispatch::Subject("PROD0001".into()))
+        );
+        assert_eq!(
+            classify_goto("PROD0001", 3),
+            Some(GotoDispatch::BatesThenSubject("PROD0001".into()))
+        );
+        assert_eq!(
+            classify_goto("  invoice  ", 0),
+            Some(GotoDispatch::Subject("invoice".into()))
+        );
+    }
+
+    #[test]
+    fn queue_goto_bates_source_locks() {
+        let src = include_str!("queue.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(prod.contains("fn classify_goto("));
+        assert!(prod.contains("review_find_bates"));
+        assert!(prod.contains("BatesThenSubject"));
+        assert!(prod.contains("Bates lookup failed"));
+        assert!(prod.contains("goto_seq"));
+        assert!(!prod.contains("ACME0001"));
+        assert!(!prod.contains("find_item_id_by_control_number"));
+        assert_eq!(ROW_HEIGHT, 32.0);
+        assert_eq!(
+            control_not_on_page(850, Some((0, 1200, 500))),
+            "Control# 850 not found in current page (Rows 1–500)"
+        );
+
+        let shell = include_str!("../shell.rs");
+        let shell_prod = shell.split("#[cfg(test)]").next().unwrap_or(shell);
+        assert!(shell_prod.contains("fn goto_placeholder("));
+        assert!(shell_prod.contains("id=\"queue-goto\""));
+
+        let build = include_str!("../../../build.rs");
+        assert!(build.contains("\"review_find_bates\""));
+        let caps = include_str!("../../../capabilities/default.json");
+        assert!(caps.contains("allow-review-find-bates"));
     }
 }

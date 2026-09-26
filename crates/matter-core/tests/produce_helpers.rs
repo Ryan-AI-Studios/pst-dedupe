@@ -447,6 +447,116 @@ fn latest_control_number_skips_skip_prefix_and_failed() {
 }
 
 #[test]
+fn find_item_id_by_produced_bates_skips_skip_prefix_and_failed() {
+    let tmp = tempdir().expect("tempdir");
+    let root = utf8_tmp(&tmp).join("bates-rev");
+    let matter = Matter::create(&root, "BatesRev").expect("create");
+    let older = insert_review_item(
+        &matter,
+        ItemInput {
+            id: Some("itm_old".into()),
+            ..Default::default()
+        },
+    );
+    let newer = insert_review_item(
+        &matter,
+        ItemInput {
+            id: Some("itm_new".into()),
+            ..Default::default()
+        },
+    );
+    insert_production_set(
+        &matter,
+        "ps_old",
+        "complete",
+        "2026-01-01T00:00:00Z",
+        "PROD",
+        2,
+    );
+    insert_production_set(
+        &matter,
+        "ps_skip",
+        "complete",
+        "2026-01-02T00:00:00Z",
+        "PROD",
+        3,
+    );
+    insert_production_set(
+        &matter,
+        "ps_fail",
+        "failed",
+        "2026-01-03T00:00:00Z",
+        "PROD",
+        4,
+    );
+    insert_production_set(
+        &matter,
+        "ps_new",
+        "complete_with_errors",
+        "2026-01-04T00:00:00Z",
+        "PROD",
+        5,
+    );
+    insert_production_item(
+        &matter,
+        "ps_old",
+        &older,
+        "PROD000001",
+        "ok",
+        "2026-01-01T01:00:00Z",
+    );
+    insert_production_item(
+        &matter,
+        "ps_skip",
+        &newer,
+        "SKIP_NATIVE",
+        "ok",
+        "2026-01-02T01:00:00Z",
+    );
+    insert_production_item(
+        &matter,
+        "ps_fail",
+        &newer,
+        "PROD000088",
+        "ok",
+        "2026-01-03T01:00:00Z",
+    );
+    insert_production_item(
+        &matter,
+        "ps_new",
+        &newer,
+        "PROD000001",
+        "ok",
+        "2026-01-04T01:00:00Z",
+    );
+
+    assert_eq!(
+        matter
+            .find_item_id_by_produced_bates("PROD000001")
+            .expect("lookup")
+            .as_deref(),
+        Some(newer.as_str()),
+        "latest complete_with_errors wins over older complete"
+    );
+    assert!(matter
+        .find_item_id_by_produced_bates("SKIP_NATIVE")
+        .expect("skip")
+        .is_none());
+    assert!(matter
+        .find_item_id_by_produced_bates("PROD000088")
+        .expect("failed set")
+        .is_none());
+    assert!(matter
+        .find_item_id_by_produced_bates("   ")
+        .expect("blank")
+        .is_none());
+    assert!(matter
+        .find_item_id_by_produced_bates("NOPE")
+        .expect("missing")
+        .is_none());
+}
+
+#[test]
 fn count_privilege_log_blank_descriptions_is_read_only() {
     let tmp = tempdir().expect("tempdir");
     let root = utf8_tmp(&tmp).join("blank");

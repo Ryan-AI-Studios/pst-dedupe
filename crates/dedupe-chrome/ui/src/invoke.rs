@@ -169,6 +169,17 @@ pub struct MatterOverview {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewFindBatesArgs {
+    pub root: String,
+    pub bates: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+pub struct ReviewFindBatesResponse {
+    pub item_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ReviewQueuePageArgs {
     pub root: String,
     pub filter_json: Option<String>,
