@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0157 — Review Go-to Bates)
+
+- Chrome Review Go-to accepts a produced Bates when the matter has completed production items (`overview.produced > 0`) and opens that document. The placeholder stays “Go to Control# or subject” when nothing has been produced.
+
 ### Added (0156 — Review named queues)
 
 - Chrome Review rail Privilege QC and Redaction QC chips use live FilterSpec presets and show `page.total` only while selected. The Later fake-zero rows (Needs decision / Consistency) are gone.

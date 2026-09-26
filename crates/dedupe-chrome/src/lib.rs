@@ -31,7 +31,9 @@ use codes::{
     ReviewWindowApplyArgs, RootOnlyArgs,
 };
 use create::create_matter_under;
-use document::{review_document_blocking, ReviewDocumentArgs};
+use document::{
+    review_document_blocking, review_find_bates_blocking, ReviewDocumentArgs, ReviewFindBatesArgs,
+};
 use error::CommandError;
 use matter_cmd::{matter_overview_blocking, MatterOverviewResponse};
 use notes::{review_upsert_note_blocking, ReviewUpsertNoteArgs};
@@ -240,6 +242,17 @@ fn review_document(
                 keyword,
             })
         }),
+    )
+}
+
+#[tauri::command]
+fn review_find_bates(
+    root: String,
+    bates: String,
+) -> Result<document::ReviewFindBatesResponse, CommandError> {
+    join_worker(
+        "review_find_bates",
+        std::thread::spawn(move || review_find_bates_blocking(ReviewFindBatesArgs { root, bates })),
     )
 }
 
@@ -662,6 +675,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             review_codes_preview,
             review_apply_codes,
             review_document,
+            review_find_bates,
             review_document_body,
             review_window_apply,
             review_upsert_note,

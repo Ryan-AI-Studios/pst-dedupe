@@ -155,6 +155,27 @@ pub fn review_document_blocking(
     })
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReviewFindBatesArgs {
+    pub root: String,
+    pub bates: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ReviewFindBatesResponse {
+    pub item_id: Option<String>,
+}
+
+pub fn review_find_bates_blocking(
+    args: ReviewFindBatesArgs,
+) -> Result<ReviewFindBatesResponse, CommandError> {
+    let matter = open_matter_read(&args.root)?;
+    let item_id = matter
+        .find_item_id_by_produced_bates(&args.bates)
+        .map_err(map_core)?;
+    Ok(ReviewFindBatesResponse { item_id })
+}
+
 fn parse_filter(filter_json: Option<&str>) -> Result<FilterSpec, CommandError> {
     match filter_json.map(str::trim).filter(|s| !s.is_empty()) {
         None => Ok(FilterSpec::review_corpus()),
@@ -371,5 +392,105 @@ mod tests {
         })
         .expect_err("encrypted");
         assert_eq!(err.kind, "encrypted");
+    }
+
+    fn insert_production_set(
+        matter: &Matter,
+        id: &str,
+        status: &str,
+        created_at: &str,
+        prefix: &str,
+        next_seq: i64,
+    ) {
+        matter
+            .connection()
+            .execute(
+                "INSERT INTO production_sets \
+                 (id, matter_id, name, created_at, updated_at, bates_prefix, next_seq, status) \
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7)",
+                rusqlite::params![id, matter.id(), id, created_at, prefix, next_seq, status],
+            )
+            .expect("insert set");
+    }
+
+    fn insert_production_item(
+        matter: &Matter,
+        set_id: &str,
+        item_id: &str,
+        control: &str,
+        status: &str,
+        produced_at: &str,
+    ) {
+        matter
+            .connection()
+            .execute(
+                "INSERT INTO production_items \
+                 (production_set_id, item_id, control_number, status, produced_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![set_id, item_id, control, status, produced_at],
+            )
+            .expect("insert pi");
+    }
+
+    #[test]
+    fn review_find_bates_returns_ok_complete_and_skips_skip_prefix() {
+        let tmp = tempdir().expect("tempdir");
+        let parent = utf8_tmp(&tmp);
+        let root = create_matter_under(&parent, "FindBates").expect("create");
+        seed_family_three(&root);
+        let matter = Matter::open(&root).expect("open");
+        insert_production_set(
+            &matter,
+            "ps_ok",
+            "complete",
+            "2026-01-01T00:00:00Z",
+            "PROD",
+            2,
+        );
+        insert_production_set(
+            &matter,
+            "ps_skip",
+            "complete",
+            "2026-01-02T00:00:00Z",
+            "PROD",
+            3,
+        );
+        insert_production_item(
+            &matter,
+            "ps_ok",
+            "itm_0000",
+            "PROD000001",
+            "ok",
+            "2026-01-01T01:00:00Z",
+        );
+        insert_production_item(
+            &matter,
+            "ps_skip",
+            "itm_0001",
+            "SKIP_NATIVE",
+            "ok",
+            "2026-01-02T01:00:00Z",
+        );
+
+        let hit = review_find_bates_blocking(ReviewFindBatesArgs {
+            root: root.to_string(),
+            bates: "PROD000001".into(),
+        })
+        .expect("hit");
+        assert_eq!(hit.item_id.as_deref(), Some("itm_0000"));
+
+        let skip = review_find_bates_blocking(ReviewFindBatesArgs {
+            root: root.to_string(),
+            bates: "SKIP_NATIVE".into(),
+        })
+        .expect("skip");
+        assert!(skip.item_id.is_none());
+
+        let blank = review_find_bates_blocking(ReviewFindBatesArgs {
+            root: root.to_string(),
+            bates: "  ".into(),
+        })
+        .expect("blank");
+        assert!(blank.item_id.is_none());
     }
 }

@@ -4268,6 +4268,34 @@ impl Matter {
             .map_err(Error::from)
     }
 
+    /// Reverse of [`Self::latest_control_number`]: item id for a produced Bates.
+    ///
+    /// Same honesty filters (ok + complete / complete_with_errors, skip empty /
+    /// `SKIP_%`). Tie-break `produced_at DESC`, then `ps.id DESC`.
+    pub fn find_item_id_by_produced_bates(&self, bates: &str) -> Result<Option<String>> {
+        let cn = bates.trim();
+        if cn.is_empty() {
+            return Ok(None);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT pi.item_id \
+             FROM production_items pi \
+             INNER JOIN production_sets ps ON ps.id = pi.production_set_id \
+             WHERE ps.matter_id = ?1 \
+               AND pi.control_number = ?2 \
+               AND pi.status = 'ok' \
+               AND ps.status IN ('complete', 'complete_with_errors') \
+               AND pi.control_number IS NOT NULL \
+               AND TRIM(pi.control_number) != '' \
+               AND pi.control_number NOT LIKE 'SKIP_%' \
+             ORDER BY pi.produced_at DESC, ps.id DESC \
+             LIMIT 1",
+        )?;
+        stmt.query_row(params![self.matter_id, cn], |row| row.get(0))
+            .optional()
+            .map_err(Error::from)
+    }
+
     /// Count items matching [`FilterSpec`] restricted to `item_ids` (FTS ∩ filter).
     ///
     /// When `include_family` is true: intersect first (filter on FTS hits only),

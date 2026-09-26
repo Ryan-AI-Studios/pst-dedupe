@@ -89,6 +89,14 @@ impl QueueRange {
     }
 }
 
+pub(crate) fn goto_placeholder(produced: u64) -> &'static str {
+    if produced > 0 {
+        "Go to Control#, Bates, or subject"
+    } else {
+        "Go to Control# or subject"
+    }
+}
+
 pub fn fallback_matter_name(root: &str) -> String {
     let trimmed = root.trim_end_matches(['\\', '/']);
     trimmed
@@ -232,8 +240,16 @@ fn TopBar(
                             <input
                                 id="queue-goto"
                                 type="search"
-                                placeholder="Go to Control# or subject"
-                                aria-label="Go to Control# or subject"
+                                placeholder=move || {
+                                    goto_placeholder(
+                                        overview.get().map(|o| o.produced).unwrap_or(0),
+                                    )
+                                }
+                                aria-label=move || {
+                                    goto_placeholder(
+                                        overview.get().map(|o| o.produced).unwrap_or(0),
+                                    )
+                                }
                                 prop:value=move || goto_draft.get()
                                 on:input=move |ev| {
                                     goto_draft.set(event_target_value(&ev));
@@ -334,6 +350,10 @@ mod tests {
         );
         assert!(prod.contains("<span class=\"workspace-tab-inert\""));
         assert!(prod.contains("id=\"queue-goto\""));
+        assert!(prod.contains("fn goto_placeholder("));
+        assert!(prod.contains("\"Go to Control# or subject\""));
+        assert!(prod.contains("\"Go to Control#, Bates, or subject\""));
+        assert!(!prod.contains("ACME0001"));
         assert!(prod.contains("class=\"right-slot\""));
         assert!(prod.contains("class=\"status-left\""));
         assert!(prod.contains(REVIEW_FLAG));
@@ -389,5 +409,17 @@ mod tests {
             .status_label(),
             "0 in queue"
         );
+    }
+
+    #[test]
+    fn goto_placeholder_names_bates_only_when_produced() {
+        assert_eq!(goto_placeholder(0), "Go to Control# or subject");
+        assert_eq!(
+            goto_placeholder(1),
+            "Go to Control#, Bates, or subject"
+        );
+        assert!(goto_placeholder(12).contains("Bates"));
+        assert!(goto_placeholder(12).contains("Control#"));
+        assert!(goto_placeholder(12).contains("subject"));
     }
 }

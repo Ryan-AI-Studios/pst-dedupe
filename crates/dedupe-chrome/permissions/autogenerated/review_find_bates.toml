@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-review-find-bates"
+description = "Enables the review_find_bates command without any pre-configured scope."
+commands.allow = ["review_find_bates"]
+
+[[permission]]
+identifier = "deny-review-find-bates"
+description = "Denies the review_find_bates command without any pre-configured scope."
+commands.deny = ["review_find_bates"]
