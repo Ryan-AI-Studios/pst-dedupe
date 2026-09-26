@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0155 — Review family attachment rows)
+
+- Chrome Review queue marks attachment children with a decorative Subject `└` (title stays the display subject). Copied or off-page-fallback From is muted. Existing indent and Fam size stay.
+
 ### Added (0154 — Review bulk matching honesty)
 
 - Chrome Review bulk bar shows an inert Select all matching control beside live Select page. Privilege CHECK stays the Tag confirm bar (`privilege_would_change`). No matching-id host command and no invented matching count.
