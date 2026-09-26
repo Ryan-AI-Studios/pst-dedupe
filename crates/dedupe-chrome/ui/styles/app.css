@@ -806,7 +806,9 @@ fieldset {
 }
 
 .facet-btn.inert,
-.facet-btn:disabled {
+.facet-btn:disabled,
+.matching-btn.inert,
+.matching-btn:disabled {
   color: var(--muted);
   cursor: default;
   opacity: 0.75;

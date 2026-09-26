@@ -1233,6 +1233,16 @@ pub fn ReviewQueue() -> impl IntoView {
                         )
                     }}
                 </button>
+                <button
+                    type="button"
+                    id="queue-select-matching"
+                    class="matching-btn inert"
+                    disabled
+                    aria-disabled="true"
+                    title="Select all matching · no batch id API yet"
+                >
+                    "Select all matching"
+                </button>
                 <Show when=move || !selected.get().is_empty()>
                     <span>{move || format!("{} selected", selected.get().len())}</span>
                     <button on:click=move |_| tag_open.update(|v| *v = !*v)>"Tag…"</button>
@@ -1843,5 +1853,35 @@ mod tests {
         assert_eq!(ROW_HEIGHT, 32.0);
         assert!(src.contains("visible_range"));
         assert!(src.contains("OVERSCAN"));
+    }
+
+    #[test]
+    fn queue_bulk_matching_source_locks() {
+        let src = include_str!("queue.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(prod.contains("id=\"queue-select-matching\""));
+        assert!(prod.contains("class=\"matching-btn inert\""));
+        assert!(prod.contains("title=\"Select all matching · no batch id API yet\""));
+        assert!(prod.contains("aria-disabled=\"true\""));
+        assert!(prod.contains("\"Select all matching\""));
+        assert!(prod.contains("Select page ("));
+        assert!(prod.contains("review_codes_preview"));
+        assert!(prod.contains("privilege_would_change"));
+        assert!(prod.contains("This changes Privilege coding on"));
+        assert!(prod.contains("class=\"confirm-bar\""));
+        assert!(!prod.contains("review_queue_ids"));
+        assert!(!prod.contains("61,004"));
+        assert!(!prod.contains("Select all matching ("));
+        assert!(!prod.contains("Add to production staging"));
+        assert!(!prod.contains("Assign to batch"));
+
+        let css = include_str!("../../styles/app.css").replace('\r', "");
+        assert!(css.contains(".matching-btn.inert"));
+        assert!(css.contains(".matching-btn:disabled"));
+
+        let build = include_str!("../../../build.rs");
+        assert!(build.contains("\"review_codes_preview\""));
+        assert!(build.contains("\"review_apply_codes\""));
+        assert!(!build.contains("review_queue_ids"));
     }
 }
