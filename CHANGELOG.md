@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0154 — Review bulk matching honesty)
+
+- Chrome Review bulk bar shows an inert Select all matching control beside live Select page. Privilege CHECK stays the Tag confirm bar (`privilege_would_change`). No matching-id host command and no invented matching count.
+
 ### Added (0153 — Review query chip and facets)
 
 - Chrome Review queue toolbar shows a keyword chip beside the always-mounted Tantivy box, a Reading as restatement of the live filter ∩ keyword ∩ family, and four count-free inert facets (Custodian / Date / Type / Coding). Lead/QC columns stay. Facet counts and a filter builder are not this track.
