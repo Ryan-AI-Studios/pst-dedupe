@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0153 — Review query chip and facets)
+
+- Chrome Review queue toolbar shows a keyword chip beside the always-mounted Tantivy box, a Reading as restatement of the live filter ∩ keyword ∩ family, and four count-free inert facets (Custodian / Date / Type / Coding). Lead/QC columns stay. Facet counts and a filter builder are not this track.
+
 ### Fixed (0152 — Produce shell honesty)
 
 - Chrome Produce keeps the 3-pane shell when `produce_page` errors (counts paint `—`), contains overflow inside the 0123 matter body so steps scroll beside Stage, and Finalize uses `secondary` rather than `.primary` whenever it is disabled. Produce panes stretch to the grid row (`align-items: stretch`) so `overflow-y: auto` actually scrolls Pre-flight instead of clipping it.
