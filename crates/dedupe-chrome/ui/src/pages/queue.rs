@@ -135,6 +135,190 @@ fn queue_title_text(chip: &str, total: u64, saved: &[SavedSearchDto]) -> String 
     format!("{name} {total} docs")
 }
 
+fn keyword_chip_text(keyword: &str) -> Option<String> {
+    let trimmed = keyword.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn cond_field(c: &serde_json::Value) -> &str {
+    c.get("field").and_then(|v| v.as_str()).unwrap_or("")
+}
+
+fn cond_op(c: &serde_json::Value) -> &str {
+    c.get("op").and_then(|v| v.as_str()).unwrap_or("")
+}
+
+fn cond_scalar_text(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn cond_value_text(c: &serde_json::Value) -> Option<String> {
+    if let Some(vals) = c.get("values").and_then(|v| v.as_array()) {
+        let parts: Vec<&str> = vals.iter().filter_map(|x| x.as_str()).collect();
+        if !parts.is_empty() {
+            return Some(parts.join(", "));
+        }
+    }
+    if let Some(v) = c.get("value").and_then(cond_scalar_text) {
+        return Some(v);
+    }
+    let start = c.get("start").and_then(|s| s.as_str());
+    let end = c.get("end").and_then(|s| s.as_str());
+    match (start, end) {
+        (Some(a), Some(b)) => Some(format!("{a}..{b}")),
+        (Some(a), None) => Some(format!("{a}..")),
+        (None, Some(b)) => Some(format!("..{b}")),
+        (None, None) => None,
+    }
+}
+
+fn cond_is_code_missing_true(c: &serde_json::Value) -> bool {
+    cond_field(c) == "code_missing"
+        && cond_op(c) == "eq"
+        && c.get("value").and_then(|v| v.as_bool()) == Some(true)
+}
+
+fn cond_is_code_any_of(c: &serde_json::Value, code: &str) -> bool {
+    if cond_field(c) != "code" || cond_op(c) != "any_of" {
+        return false;
+    }
+    c.get("values")
+        .and_then(|v| v.as_array())
+        .is_some_and(|vals| vals.iter().any(|x| x.as_str() == Some(code)))
+}
+
+fn cond_subject_contains_needle(c: &serde_json::Value) -> Option<String> {
+    if cond_field(c) == "subject" && cond_op(c) == "contains" {
+        c.get("value").and_then(cond_scalar_text)
+    } else {
+        None
+    }
+}
+
+fn extra_condition_label(c: &serde_json::Value) -> Option<String> {
+    let text = cond_value_text(c)?;
+    match cond_field(c) {
+        "custodian" => Some(format!("Custodian: {text}")),
+        "sent_at" | "received_at" | "best_effort_date" => Some(format!("Date: {text}")),
+        "file_category" => Some(format!("Type: {text}")),
+        "code" | "code_missing" => Some(format!("Code: {text}")),
+        _ => None,
+    }
+}
+
+fn format_reading_as(
+    filter_json: &str,
+    keyword: &str,
+    include_family: bool,
+    active_chip: &str,
+    saved: &[SavedSearchDto],
+) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(filter_json) else {
+        return "Reading as: (filter unreadable)".into();
+    };
+    let conditions = v
+        .get("conditions")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut used = vec![false; conditions.len()];
+
+    let noun = match active_chip {
+        "unreviewed" => {
+            if let Some(i) = conditions.iter().position(cond_is_code_missing_true) {
+                used[i] = true;
+            }
+            "Unreviewed".to_string()
+        }
+        "privileged" => {
+            if let Some(i) = conditions
+                .iter()
+                .position(|c| cond_is_code_any_of(c, "privilege"))
+            {
+                used[i] = true;
+            }
+            "Privileged".to_string()
+        }
+        "responsive" => {
+            if let Some(i) = conditions
+                .iter()
+                .position(|c| cond_is_code_any_of(c, "responsive"))
+            {
+                used[i] = true;
+            }
+            "Responsive".to_string()
+        }
+        "goto-subject" => {
+            let needle = conditions.iter().enumerate().find_map(|(i, c)| {
+                cond_subject_contains_needle(c).map(|n| {
+                    used[i] = true;
+                    n
+                })
+            });
+            match needle {
+                Some(n) => format!("Subject contains “{n}”"),
+                None => "Subject".into(),
+            }
+        }
+        other => saved
+            .iter()
+            .find(|s| s.id == other)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "Queue".into()),
+    };
+
+    let mut out = format!("Reading as: {noun}");
+    if let Some(kw) = keyword_chip_text(keyword) {
+        out.push_str(" ∩ keyword “");
+        out.push_str(&kw);
+        out.push('”');
+    }
+    if include_family {
+        out.push_str(" ∩ family");
+    }
+
+    let mut leftover = 0usize;
+    for (i, c) in conditions.iter().enumerate() {
+        if used[i] {
+            continue;
+        }
+        match extra_condition_label(c) {
+            Some(label) => {
+                out.push_str(" ∩ ");
+                out.push_str(&label);
+            }
+            None => leftover += 1,
+        }
+    }
+    if leftover > 0 {
+        out.push_str(" + ");
+        out.push_str(&leftover.to_string());
+        out.push_str(" filter(s)");
+    }
+    out
+}
+
+fn focus_queue_keyword() {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let Some(el) = doc.get_element_by_id("queue-keyword") else {
+        return;
+    };
+    if let Ok(input) = el.dyn_into::<HtmlInputElement>() {
+        let _ = input.focus();
+    }
+}
+
 fn control_not_on_page(n: i64, meta: Option<(u64, u64, usize)>) -> String {
     let span = match meta {
         Some((offset, _total, fetched)) if fetched > 0 => {
@@ -609,13 +793,7 @@ pub fn ReviewQueue() -> impl IntoView {
                     }
                     "/" => {
                         ev.prevent_default();
-                        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-                            if let Some(el) = doc.get_element_by_id("queue-keyword") {
-                                if let Ok(input) = el.dyn_into::<HtmlInputElement>() {
-                                    let _ = input.focus();
-                                }
-                            }
-                        }
+                        focus_queue_keyword();
                     }
                     "ArrowDown" if ev.shift_key() => {
                         ev.prevent_default();
@@ -838,6 +1016,7 @@ pub fn ReviewQueue() -> impl IntoView {
                 </nav>
                 <div class="queue-main">
             <div class="queue-toolbar">
+                <div class="queue-toolbar-top">
                 <h1>
                     {move || {
                         queue_title_text(
@@ -944,6 +1123,88 @@ pub fn ReviewQueue() -> impl IntoView {
                             }
                         });
                     }>"Save search"</button>
+                </div>
+                </div>
+                <Show when=move || keyword_chip_text(&keyword.get()).is_some()>
+                    <div class="queue-chip-row">
+                        <div id="queue-keyword-chip" class="queue-keyword-chip">
+                            <button
+                                type="button"
+                                class="queue-keyword-chip-label"
+                                on:click=move |_| focus_queue_keyword()
+                            >
+                                {move || keyword_chip_text(&keyword.get()).unwrap_or_default()}
+                            </button>
+                            <button
+                                type="button"
+                                class="queue-keyword-chip-clear"
+                                aria-label="Clear keyword"
+                                on:click=move |_| {
+                                    keyword.set(String::new());
+                                    keyword_draft.set(String::new());
+                                    offset.set(0);
+                                    reset_queue_navigation();
+                                }
+                            >
+                                "×"
+                            </button>
+                        </div>
+                    </div>
+                </Show>
+                <div class="queue-toolbar-sub">
+                    <p id="queue-reading-as" class="queue-reading-as">
+                        {move || {
+                            format_reading_as(
+                                &filter_json.get(),
+                                &keyword.get(),
+                                include_family.get(),
+                                &active_chip.get(),
+                                &saved.get(),
+                            )
+                        }}
+                    </p>
+                    <div id="queue-facets" class="queue-facets">
+                        <button
+                            type="button"
+                            class="facet-btn inert"
+                            disabled
+                            aria-disabled="true"
+                            data-facet="custodian"
+                            title="Custodian · no filter yet"
+                        >
+                            "Custodian"
+                        </button>
+                        <button
+                            type="button"
+                            class="facet-btn inert"
+                            disabled
+                            aria-disabled="true"
+                            data-facet="date"
+                            title="Date · no filter yet"
+                        >
+                            "Date"
+                        </button>
+                        <button
+                            type="button"
+                            class="facet-btn inert"
+                            disabled
+                            aria-disabled="true"
+                            data-facet="type"
+                            title="Type · no filter yet"
+                        >
+                            "Type"
+                        </button>
+                        <button
+                            type="button"
+                            class="facet-btn inert"
+                            disabled
+                            aria-disabled="true"
+                            data-facet="coding"
+                            title="Coding · no filter yet"
+                        >
+                            "Coding"
+                        </button>
+                    </div>
                 </div>
                 <Show when=move || save_error.get().is_some()>
                     <p class="error">{move || save_error.get().unwrap_or_default()}</p>
@@ -1457,5 +1718,130 @@ mod tests {
         assert!(prod.contains("id=\"queue-keyword\""));
         assert!(prod.contains("Save search"));
         assert!(!prod.contains("ACME0001"));
+    }
+
+    fn sample_saved(id: &str, name: &str, filter_json: &str) -> SavedSearchDto {
+        SavedSearchDto {
+            id: id.into(),
+            name: name.into(),
+            description: None,
+            scope: "review_corpus".into(),
+            filter_json: filter_json.into(),
+            keyword: None,
+        }
+    }
+
+    #[test]
+    fn keyword_chip_text_trims_and_skips_blank() {
+        assert_eq!(keyword_chip_text(""), None);
+        assert_eq!(keyword_chip_text("   "), None);
+        assert_eq!(keyword_chip_text(" foo "), Some("foo".into()));
+    }
+
+    #[test]
+    fn format_reading_as_presets_keyword_family_saved_goto() {
+        let unreviewed = preset_uncoded_json();
+        assert_eq!(
+            format_reading_as(&unreviewed, "", false, "unreviewed", &[]),
+            "Reading as: Unreviewed"
+        );
+        assert_eq!(
+            format_reading_as(&preset_privilege_json(), "", false, "privileged", &[]),
+            "Reading as: Privileged"
+        );
+        assert_eq!(
+            format_reading_as(&preset_responsive_json(), "", false, "responsive", &[]),
+            "Reading as: Responsive"
+        );
+        assert_eq!(
+            format_reading_as(&unreviewed, "  foo  ", true, "unreviewed", &[]),
+            "Reading as: Unreviewed ∩ keyword “foo” ∩ family"
+        );
+
+        let saved_filter = r#"{"version":1,"scope":"review_corpus","include_family":false,"conditions":[{"field":"custodian","op":"eq","value":"Smith"}]}"#;
+        let saved = [sample_saved("s-smith", "Smith custodian", saved_filter)];
+        let as_saved = format_reading_as(saved_filter, "", false, "s-smith", &saved);
+        assert!(
+            as_saved.starts_with("Reading as: Smith custodian"),
+            "{as_saved}"
+        );
+        assert!(as_saved.contains("Custodian: Smith"), "{as_saved}");
+        assert!(
+            !as_saved.contains("Unreviewed"),
+            "saved search must not claim Unreviewed: {as_saved}"
+        );
+
+        let subject = subject_contains_json("invoice Q1", false);
+        assert_eq!(
+            format_reading_as(&subject, "", false, "goto-subject", &[]),
+            "Reading as: Subject contains “invoice Q1”"
+        );
+
+        let extra = r#"{"version":1,"scope":"review_corpus","include_family":false,"conditions":[{"field":"code_missing","op":"eq","value":true},{"field":"custodian","op":"eq","value":"Smith"}]}"#;
+        assert_eq!(
+            format_reading_as(extra, "", false, "unreviewed", &[]),
+            "Reading as: Unreviewed ∩ Custodian: Smith"
+        );
+
+        assert_eq!(
+            format_reading_as("{not json", "", false, "unreviewed", &[]),
+            "Reading as: (filter unreadable)"
+        );
+
+        let leftover = r#"{"version":1,"scope":"review_corpus","include_family":false,"conditions":[{"field":"code_missing","op":"eq","value":true},{"field":"mime_type","op":"eq","value":"message/rfc822"}]}"#;
+        assert_eq!(
+            format_reading_as(leftover, "", false, "unreviewed", &[]),
+            "Reading as: Unreviewed + 1 filter(s)"
+        );
+    }
+
+    #[test]
+    fn queue_query_and_facets_source_locks() {
+        let src = include_str!("queue.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(prod.contains("fn format_reading_as("));
+        assert!(prod.contains("fn keyword_chip_text("));
+        assert!(prod.contains("id=\"queue-keyword\""));
+        assert!(prod.contains("id=\"queue-keyword-chip\""));
+        assert!(prod.contains("id=\"queue-reading-as\""));
+        assert!(prod.contains("id=\"queue-facets\""));
+        assert!(prod.contains("data-facet=\"custodian\""));
+        assert!(prod.contains("data-facet=\"date\""));
+        assert!(prod.contains("data-facet=\"type\""));
+        assert!(prod.contains("data-facet=\"coding\""));
+        assert!(prod.contains("title=\"Custodian · no filter yet\""));
+        assert!(prod.contains("title=\"Date · no filter yet\""));
+        assert!(prod.contains("title=\"Type · no filter yet\""));
+        assert!(prod.contains("title=\"Coding · no filter yet\""));
+        assert!(prod.contains("aria-disabled=\"true\""));
+        assert!(prod.contains("Lead/QC columns"));
+        assert!(!prod.contains("data-facet=\"columns\""));
+        assert!(!prod.contains("facet_count"));
+        assert!(!prod.contains("review_facet"));
+        assert!(prod.contains("focus_queue_keyword()"));
+        assert!(prod.contains("keyword.set(String::new())"));
+        assert!(prod.contains("keyword_draft.set(String::new())"));
+
+        let css = include_str!("../../styles/app.css").replace('\r', "");
+        let toolbar = css
+            .split(".queue-toolbar {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or("");
+        assert!(
+            toolbar.contains("flex-direction: column"),
+            "queue-toolbar must be a column: {toolbar}"
+        );
+        assert!(
+            toolbar.contains("flex-wrap: nowrap"),
+            "queue-toolbar must not wrap the stack: {toolbar}"
+        );
+        assert!(
+            toolbar.contains("flex: 0 0 auto"),
+            "queue-toolbar must be sized to content: {toolbar}"
+        );
+        assert_eq!(ROW_HEIGHT, 32.0);
+        assert!(src.contains("visible_range"));
+        assert!(src.contains("OVERSCAN"));
     }
 }
