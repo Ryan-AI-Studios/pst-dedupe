@@ -37,6 +37,14 @@ fn preset_responsive_json() -> String {
     r#"{"version":1,"scope":"review_corpus","include_family":false,"conditions":[{"field":"code","op":"any_of","values":["responsive"]}]}"#.into()
 }
 
+fn preset_privilege_qc_json() -> String {
+    r#"{"version":1,"scope":"review_corpus","include_family":false,"conditions":[{"field":"privilege_status","op":"any_of","values":["asserted"]},{"field":"privilege_log_ready","op":"eq","value":false}]}"#.into()
+}
+
+fn preset_redaction_qc_json() -> String {
+    r#"{"version":1,"scope":"review_corpus","include_family":false,"conditions":[{"field":"has_redactions","op":"eq","value":true}]}"#.into()
+}
+
 fn control_number(order: Option<i64>) -> String {
     match order {
         Some(n) => n.to_string(),
@@ -141,6 +149,8 @@ fn queue_title_text(chip: &str, total: u64, saved: &[SavedSearchDto]) -> String 
         "unreviewed" => "Unreviewed",
         "privileged" => "Privileged",
         "responsive" => "Responsive",
+        "privilege-qc" => "Privilege QC",
+        "redaction-qc" => "Redaction QC",
         "goto-subject" => "Subject",
         other => saved
             .iter()
@@ -212,6 +222,27 @@ fn cond_is_code_any_of(c: &serde_json::Value, code: &str) -> bool {
         .is_some_and(|vals| vals.iter().any(|x| x.as_str() == Some(code)))
 }
 
+fn cond_is_privilege_status_asserted(c: &serde_json::Value) -> bool {
+    if cond_field(c) != "privilege_status" || cond_op(c) != "any_of" {
+        return false;
+    }
+    c.get("values")
+        .and_then(|v| v.as_array())
+        .is_some_and(|vals| vals.iter().any(|x| x.as_str() == Some("asserted")))
+}
+
+fn cond_is_privilege_log_ready_false(c: &serde_json::Value) -> bool {
+    cond_field(c) == "privilege_log_ready"
+        && cond_op(c) == "eq"
+        && c.get("value").and_then(|v| v.as_bool()) == Some(false)
+}
+
+fn cond_is_has_redactions_true(c: &serde_json::Value) -> bool {
+    cond_field(c) == "has_redactions"
+        && cond_op(c) == "eq"
+        && c.get("value").and_then(|v| v.as_bool()) == Some(true)
+}
+
 fn cond_subject_contains_needle(c: &serde_json::Value) -> Option<String> {
     if cond_field(c) == "subject" && cond_op(c) == "contains" {
         c.get("value").and_then(cond_scalar_text)
@@ -272,6 +303,30 @@ fn format_reading_as(
                 used[i] = true;
             }
             "Responsive".to_string()
+        }
+        "privilege-qc" => {
+            if let Some(i) = conditions
+                .iter()
+                .position(cond_is_privilege_status_asserted)
+            {
+                used[i] = true;
+            }
+            if let Some(i) = conditions
+                .iter()
+                .position(cond_is_privilege_log_ready_false)
+            {
+                used[i] = true;
+            }
+            "Privilege QC".to_string()
+        }
+        "redaction-qc" => {
+            if let Some(i) = conditions
+                .iter()
+                .position(cond_is_has_redactions_true)
+            {
+                used[i] = true;
+            }
+            "Redaction QC".to_string()
         }
         "goto-subject" => {
             let needle = conditions.iter().enumerate().find_map(|(i, c)| {
@@ -1004,30 +1059,52 @@ pub fn ReviewQueue() -> impl IntoView {
                             }
                         />
                     </div>
-                    <div class="queue-rail-heading">"Later · no filter yet"</div>
-                    <div
-                        class="queue-rail-inert"
-                        title="no filter yet"
-                        aria-disabled="true"
-                    >
-                        <span>"Needs decision"</span>
-                        <span>"0"</span>
-                    </div>
-                    <div
-                        class="queue-rail-inert"
-                        title="no filter yet"
-                        aria-disabled="true"
-                    >
-                        <span>"Redaction QC"</span>
-                        <span>"0"</span>
-                    </div>
-                    <div
-                        class="queue-rail-inert"
-                        title="no filter yet"
-                        aria-disabled="true"
-                    >
-                        <span>"Consistency"</span>
-                        <span>"0"</span>
+                    <div class="queue-rail-heading">"QC"</div>
+                    <div class="queue-rail-list" role="toolbar" aria-label="QC queues">
+                        <button
+                            class=move || if active_chip.get() == "privilege-qc" { "chip-btn active" } else { "chip-btn" }
+                            on:click=move |_| {
+                                active_chip.set("privilege-qc".into());
+                                filter_json.set(preset_privilege_qc_json());
+                                include_family.set(false);
+                                offset.set(0);
+                                selected.set(HashSet::new());
+                                reset_queue_navigation();
+                            }
+                        >
+                            <span>"Privilege QC"</span>
+                            <span>
+                                {move || {
+                                    if active_chip.get() == "privilege-qc" {
+                                        page.get().map(|p| p.total.to_string()).unwrap_or_default()
+                                    } else {
+                                        String::new()
+                                    }
+                                }}
+                            </span>
+                        </button>
+                        <button
+                            class=move || if active_chip.get() == "redaction-qc" { "chip-btn active" } else { "chip-btn" }
+                            on:click=move |_| {
+                                active_chip.set("redaction-qc".into());
+                                filter_json.set(preset_redaction_qc_json());
+                                include_family.set(false);
+                                offset.set(0);
+                                selected.set(HashSet::new());
+                                reset_queue_navigation();
+                            }
+                        >
+                            <span>"Redaction QC"</span>
+                            <span>
+                                {move || {
+                                    if active_chip.get() == "redaction-qc" {
+                                        page.get().map(|p| p.total.to_string()).unwrap_or_default()
+                                    } else {
+                                        String::new()
+                                    }
+                                }}
+                            </span>
+                        </button>
                     </div>
                 </nav>
                 <div class="queue-main">
@@ -1843,6 +1920,26 @@ mod tests {
             "Reading as: Responsive"
         );
         assert_eq!(
+            format_reading_as(
+                &preset_privilege_qc_json(),
+                "",
+                false,
+                "privilege-qc",
+                &[]
+            ),
+            "Reading as: Privilege QC"
+        );
+        assert_eq!(
+            format_reading_as(
+                &preset_redaction_qc_json(),
+                "",
+                false,
+                "redaction-qc",
+                &[]
+            ),
+            "Reading as: Redaction QC"
+        );
+        assert_eq!(
             format_reading_as(&unreviewed, "  foo  ", true, "unreviewed", &[]),
             "Reading as: Unreviewed ∩ keyword “foo” ∩ family"
         );
@@ -1993,5 +2090,38 @@ mod tests {
         assert_eq!(ROW_HEIGHT, 32.0);
         assert!(src.contains("visible_range"));
         assert!(src.contains("OVERSCAN"));
+    }
+
+    #[test]
+    fn queue_named_queues_source_locks() {
+        let src = include_str!("queue.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(prod.contains("fn preset_privilege_qc_json("));
+        assert!(prod.contains("fn preset_redaction_qc_json("));
+        assert!(prod.contains("\"privilege-qc\""));
+        assert!(prod.contains("\"redaction-qc\""));
+        assert!(prod.contains("\"Privilege QC\""));
+        assert!(prod.contains("\"Redaction QC\""));
+        assert!(prod.contains("class=\"queue-rail-heading\">\"QC\""));
+        assert!(prod.contains("aria-label=\"QC queues\""));
+        assert!(prod.contains("privilege_status"));
+        assert!(prod.contains("privilege_log_ready"));
+        assert!(prod.contains("has_redactions"));
+        assert!(!prod.contains("Later · no filter yet"));
+        assert!(!prod.contains("Needs decision"));
+        assert!(!prod.contains("\"Consistency\""));
+        assert!(!prod.contains("class=\"queue-rail-inert\""));
+        assert!(!prod.contains("review_queue_ids"));
+        assert!(!prod.contains("facet_count"));
+        assert!(!prod.contains("review_facet"));
+        assert!(!prod.contains("redacted_text_stale"));
+        assert_eq!(queue_title_text("privilege-qc", 3, &[]), "Privilege QC 3 docs");
+        assert_eq!(queue_title_text("redaction-qc", 1, &[]), "Redaction QC 1 docs");
+        assert_eq!(ROW_HEIGHT, 32.0);
+
+        let build = include_str!("../../../build.rs");
+        assert!(build.contains("\"review_queue_page\""));
+        assert!(!build.contains("review_queue_ids"));
+        assert!(!build.contains("review_facet"));
     }
 }

@@ -7,6 +7,10 @@ Versioning uses release candidates after Series I + Series K consolidation (`0.2
 
 ## [Unreleased]
 
+### Added (0156 — Review named queues)
+
+- Chrome Review rail Privilege QC and Redaction QC chips use live FilterSpec presets and show `page.total` only while selected. The Later fake-zero rows (Needs decision / Consistency) are gone.
+
 ### Added (0155 — Review family attachment rows)
 
 - Chrome Review queue marks attachment children with a decorative Subject `└` (title stays the display subject). Copied or off-page-fallback From is muted. Existing indent and Fam size stay.
